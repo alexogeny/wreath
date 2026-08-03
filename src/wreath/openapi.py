@@ -21,8 +21,15 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .negotiation import PROTOBUF as _PROTOBUF
+from .protobuf import is_message as _is_message
 from .typegen.inspect import _Builder, _return_annotation, resolve_operation_ids
 from .typegen.model import Model, TypeRef
+
+#: The protobuf media type wreath emits and documents. Spelled from
+#: `negotiation.PROTOBUF` rather than beside it, so the document and the
+#: wire cannot name different types.
+_PROTOBUF_MEDIA = _PROTOBUF.media_type
 
 _TYPE_KEYS: dict[str, dict[str, Any]] = {
     "null": {"type": "null"},
@@ -348,11 +355,19 @@ def generate_openapi(
                                 parameter["schema"]["maximum"] = maximum
                         parameters.append(parameter)
                 if spec.body is not None:
+                    body_schema = schema(spec.body[1])
+                    body_content: dict[str, Any] = {
+                        "application/json": {"schema": body_schema}
+                    }
+                    # `wreath.binding` reads a protobuf body for any `@message`
+                    # annotation, and has since `_decode_protobuf_body` landed.
+                    # A document that advertises only JSON understates what the
+                    # endpoint accepts, and a generated client believes it.
+                    if _is_message(spec.body[1]):
+                        body_content[_PROTOBUF_MEDIA] = {"schema": body_schema}
                     operation["requestBody"] = {
                         "required": True,
-                        "content": {
-                            "application/json": {"schema": schema(spec.body[1])}
-                        },
+                        "content": body_content,
                     }
                 elif spec.form_params or spec.file_params:
                     properties = {
@@ -416,6 +431,15 @@ def generate_openapi(
                 response["content"] = {
                     definition.response_media_type: {"schema": response_schema}
                 }
+                # The same fact on the way out: a route whose return annotation
+                # is a `@message` negotiates protobuf, so the document says so.
+                # Only when the route has not overridden its media type -- an
+                # explicit `response_media_type` is a decision, not a default.
+                if (
+                    _is_message(returns)
+                    and definition.response_media_type == "application/json"
+                ):
+                    response["content"][_PROTOBUF_MEDIA] = {"schema": response_schema}
             operation_responses = {str(definition.status_code): response}
             for status, declared in definition.responses:
                 response_spec = (
