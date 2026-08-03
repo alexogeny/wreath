@@ -557,17 +557,31 @@ class MessageBus:
         registry is an optimisation over local registrations, and a missing
         table must not stop a bus from starting and consuming its own work.
         """
-        pairs = sorted(
-            {(sub.channel, sub.group) for sub in self._subs if sub.durable and sub.group}
-        )
-        if not pairs:
-            return
-        sql = (
+        await self._apply_to_groups(
             f'INSERT INTO {self._groups_table} (channel, "group", bus) '
             "VALUES ($1, $2, $3) "
             'ON CONFLICT (channel, "group") DO UPDATE SET '
             "bus = excluded.bus, seen_at = now()"
         )
+
+    async def _apply_to_groups(self, sql: str) -> None:
+        """Run `sql` once per durable `(channel, group)` this bus declares.
+
+        Registration and deregistration differ only in the statement: both
+        gather the same pairs, take one connection for the batch rather than one
+        per pair, and must *count* a failure rather than raise it -- start and
+        shutdown both have to survive a database that is gone, and the registry
+        is an optimisation over local registrations either way. Written twice,
+        the two copies had already grown two spellings of that broad catch.
+
+        Args:
+            sql: takes `(channel, group, bus)` as `$1`, `$2`, `$3`.
+        """
+        pairs = sorted(
+            {(sub.channel, sub.group) for sub in self._subs if sub.durable and sub.group}
+        )
+        if not pairs:
+            return
         try:
             connection = await self._db.acquire(self._workload)
             try:
@@ -575,7 +589,7 @@ class MessageBus:
                     await connection.execute(sql, channel, group, self._name)
             finally:
                 await self._db.release(self._workload, connection)
-        except Exception:  # noqa: BLE001 - see above; the bus must still start
+        except Exception:  # noqa: BLE001 - counted, not raised: see the docstring
             self.group_registry_errors += 1
 
     async def _deregister_groups(self) -> None:
@@ -587,21 +601,9 @@ class MessageBus:
         the table does. Counted rather than raised, like the rest of the
         registry: a bus must still shut down against a database that is gone.
         """
-        pairs = sorted(
-            {(sub.channel, sub.group) for sub in self._subs if sub.durable and sub.group}
+        await self._apply_to_groups(
+            f'DELETE FROM {self._groups_table} WHERE channel=$1 AND "group"=$2 AND bus=$3'
         )
-        if not pairs:
-            return
-        sql = f'DELETE FROM {self._groups_table} WHERE channel=$1 AND "group"=$2 AND bus=$3'
-        try:
-            connection = await self._db.acquire(self._workload)
-            try:
-                for channel, group in pairs:
-                    await connection.execute(sql, channel, group, self._name)
-            finally:
-                await self._db.release(self._workload, connection)
-        except Exception:  # noqa: BLE001 - see above; shutdown must not fail
-            self.group_registry_errors += 1
 
     async def prune_groups(self, *, unseen_for: float) -> None:
         """Drop registry rows nobody has re-registered in `unseen_for` seconds.
