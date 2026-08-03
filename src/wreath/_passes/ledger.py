@@ -36,6 +36,7 @@ from typing import Any
 
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
+from .._pgcatalog import column_exists
 from .progress import WINDOW_SECONDS
 
 #: The pass state machine.
@@ -222,19 +223,8 @@ async def has_trace_column(executor: Any, *, schema: str) -> bool:
     to survive, and the seed runs inside the shift, where poisoning the
     connection would take the walk with it.
     """
-    return bool(
-        await executor.fetchval(
-            "SELECT true FROM pg_attribute a "
-            "JOIN pg_class k ON k.oid = a.attrelid "
-            "JOIN pg_namespace n ON n.oid = k.relnamespace "
-            # `::text` because `nspname` is `name`: without the cast PostgreSQL
-            # infers the parameter as `name` too, which the driver cannot
-            # encode. `wreath-sql-lint` SQL002.
-            "WHERE n.nspname = $1::text AND k.relname = 'passes' "
-            "AND a.attname = 'trace_context' "
-            "AND a.attnum > 0 AND NOT a.attisdropped",
-            schema,
-        )
+    return await column_exists(
+        executor, schema=schema, table="passes", column="trace_context"
     )
 
 

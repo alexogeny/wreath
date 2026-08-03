@@ -99,7 +99,7 @@ class NoRowsMatch:
     def signature(self) -> str:
         return _normalise(self.where)
 
-    def describe(self, walk: Any) -> str:
+    def explain(self, walk: Any) -> str:
         return f"no rows in {walk.table} match ({self.where})"
 
     async def check(self, executor: Any, *, walk: Any, scope: str | None = None) -> Verification:
@@ -114,7 +114,7 @@ class NoRowsMatch:
             # "could not run" -- that is a wrong answer wearing a retry.
             return Verification(False, f"verification could not run: {error!r}", transient=True)
         if found is None:
-            return Verification(True, self.describe(walk))
+            return Verification(True, self.explain(walk))
         return Verification(False, f"rows still match ({where}) in {walk.table}")
 
 
@@ -144,7 +144,7 @@ class Reconcile:
     def signature(self) -> str:
         return _normalise(f"{self.source}||{self.against}")
 
-    def describe(self, walk: Any) -> str:
+    def explain(self, walk: Any) -> str:
         return f"({self.source}) reconciles with ({self.against})"
 
     async def check(self, executor: Any, *, walk: Any, scope: str | None = None) -> Verification:
@@ -155,7 +155,7 @@ class Reconcile:
             # See NoRowsMatch.check: only a database failure is a could-not-run.
             return Verification(False, f"verification could not run: {error!r}", transient=True)
         if left == right:
-            return Verification(True, f"{self.describe(walk)}: both {left!r}")
+            return Verification(True, f"{self.explain(walk)}: both {left!r}")
         return Verification(False, f"{self.source} = {left!r} but {self.against} = {right!r}")
 
 
@@ -195,7 +195,7 @@ class Constraint:
     def signature(self) -> str:
         return _normalise(self.check_)
 
-    def describe(self, walk: Any) -> str:
+    def explain(self, walk: Any) -> str:
         return f"{walk.table} satisfies CHECK ({self.check_}) as {self.name}"
 
     async def check(self, executor: Any, *, walk: Any, scope: str | None = None) -> Verification:
@@ -225,7 +225,7 @@ class Constraint:
             if _violation(error):
                 return Verification(False, f"{self.name} does not hold: {error}")
             return Verification(False, f"could not validate: {error!r}", transient=True)
-        return Verification(True, self.describe(walk))
+        return Verification(True, self.explain(walk))
 
 
 def _normalise(text: str) -> str:
