@@ -315,6 +315,26 @@ def _resolve_entitlements(
     return limits.bound("entitlements", resolved)
 
 
+def _resolve_quota(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None
+) -> frozenset[str]:
+    """The degraded states declared for this caller.
+
+    **Never bounded by `Limits`**, and that is the one thing this resolver must
+    get right. Every other set fact here is a grant -- an entitlement, a
+    membership, a role -- so intersecting it with a delegation's limits can only
+    subtract, which is the composition law. These are the opposite shape: a
+    policy reads them to *forbid*, so subtracting one grants. A delegated agent
+    that could narrow `read_only` out of its own context would have used
+    composition to gain a permission its delegator does not have, which is
+    exactly what `Limits` exists to make impossible.
+    """
+    identity = request.identity
+    if identity is None:
+        return EMPTY
+    return provider.for_identity(identity)
+
+
 def _default_context(request: Request) -> Mapping[str, object]:
     context: dict[str, object] = {"method": request.method, "path": request.path}
     # Step-up, expressed where a policy can read it:
@@ -446,6 +466,7 @@ class CedarAuthorizer:
         location: Callable[[Request], object] = _default_location,
         organizations: Any = None,
         entitlements: Any = None,
+        quota: Any = None,
     ) -> None:
         self._engine = engine
         self._principal = principal
@@ -515,6 +536,23 @@ class CedarAuthorizer:
                 ),
                 noun="entitlements",
                 singular="entitlement",
+            ),
+            SetFact(
+                "quota",
+                engine=engine,
+                provider=quota,
+                resolve=lambda request, vocabulary: _resolve_quota(
+                    request, quota, vocabulary
+                ),
+                noun="quota states",
+                singular="quota state",
+                # The one refusal-shaped fact. A policy reads it to *forbid*, so
+                # the empty set an absent provider supplies skips the forbid and
+                # allows -- the exact inverse of every grant above, where the
+                # empty set denies. `_resolve_quota` already carries this
+                # polarity argument for `Limits`; the absent-provider path needs
+                # it too, or switching quota off silently stops enforcing it.
+                refusal=True,
             ),
         )
         # Kept for `flags_for`/`regions_for`, which the permission manifest

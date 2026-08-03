@@ -1050,6 +1050,10 @@ class CedarPolicies:
         """Every entitlement this policy set tests, or None for "all"."""
         return _referenced_members(self._policies, "entitlements")
 
+    def referenced_quota(self) -> frozenset[str] | None:
+        """Every quota state this policy set tests, or None for "all"."""
+        return _referenced_members(self._policies, "quota")
+
     def reads_context(self, attribute: str) -> bool:
         """Whether any policy reads `context.<attribute>`, in any shape.
 

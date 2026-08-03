@@ -90,6 +90,12 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
         "organizations": frozenset(),
         "org_roles": frozenset(),
         "entitlements": frozenset(),
+        # Present and empty with no provider, like every other set fact -- and
+        # the direction it fails matters more here than for the others.
+        # `quota` members are read to *forbid* ("past due means read-only"), so
+        # an absent key would skip that forbid and hand a degraded caller full
+        # access. Empty leaves the forbid standing and inert.
+        "quota": frozenset(),
         "delegated": False,
     }
 
