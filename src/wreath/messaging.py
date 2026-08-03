@@ -53,6 +53,7 @@ from ._jobcore import (
     dedup_key,
     validate_identifier,
 )
+from .temporal import Duration
 
 MessageHandler = Callable[["Message"], Awaitable[None]]
 
@@ -139,10 +140,15 @@ class MessageBus:
         name: str,
         workload: str = "write",
         schema: str = "wreath",
-        poll_interval: float = 5.0,
-        lease: float = 30.0,
-        group_refresh: float = DEFAULT_GROUP_REFRESH,
+        poll_interval: Any = 5.0,
+        lease: Any = 30.0,
+        group_refresh: Any = DEFAULT_GROUP_REFRESH,
     ) -> None:
+        # A bare number is seconds, which is what these have always meant;
+        # `Duration` is the spelling that says so.
+        poll_interval = Duration.of(poll_interval).total_seconds()
+        lease = Duration.of(lease).total_seconds()
+        group_refresh = Duration.of(group_refresh).total_seconds()
         if poll_interval <= 0 or lease <= 0:
             raise ValueError("poll_interval and lease must be positive")
         if group_refresh <= 0:
@@ -295,6 +301,12 @@ class MessageBus:
             "delivery_errors": self.delivery_errors,
             "sweep_errors": self.sweep_errors,
         }
+
+    def counters(self) -> Any:
+        """This bus's counters, for `wreath.metrics.collect`."""
+        from .metrics import Counters
+
+        return Counters(subsystem="messaging", instance=self._name, values=self.stats())
 
     def known_groups(self, channel: str) -> frozenset[str]:
         """Every durable group a publish to `channel` will reach.
