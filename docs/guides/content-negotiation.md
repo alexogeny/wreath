@@ -112,6 +112,29 @@ That refusal reaches the caller. `Serializer.encode` never falls back to another
 format, because a client that asked for protobuf and silently received JSON
 would parse the bytes as a message and get garbage.
 
+### The return annotation makes the offer for you
+
+Everything above is about `serialize()`, where the offers are named at the call
+site. A route that *declares* what it returns has already said, at startup, that
+its body is encodable — so it needs no call site at all:
+
+```python
+@app.post("/echo")
+async def echo(request, body: Reading) -> Reading:   # both halves are protobuf-capable
+    return body
+```
+
+`Accept: application/x-protobuf` on that route gets protobuf and a
+`Vary: Accept`; no `Accept`, or `*/*`, still gets JSON, because adding an offer
+must not change what an existing client already receives. The generated OpenAPI
+lists **both** media types on the request body and the response, since a
+document that names only JSON understates the endpoint and a generated client
+believes the document.
+
+This is per route, decided from the annotation at compile time, and it is not a
+change to `DEFAULT_SERIALIZERS` — the reasoning above is exactly why. A route
+annotated `-> dict` is untouched and pays nothing, not even a branch.
+
 ### The request half
 
 Reading a protobuf **request body** is a separate question from negotiating a
