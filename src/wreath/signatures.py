@@ -88,10 +88,11 @@ import base64
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, cast
+from typing import Any, Final
 from urllib.parse import parse_qsl, quote
 
 from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
+from ._reqcache import resolve_once
 from .exceptions import HTTPException
 from .kv import KV
 
@@ -787,13 +788,7 @@ class Signatures:
         and for the same reason: several policies asking one question inside one
         decision must get one answer.
         """
-        state = request.state
-        cached = state.get(_FACTS_SLOT)
-        if cached is not None:
-            return cast(SignatureFacts, cached)
-        facts = self._verify(request)
-        state.__setattr__(_FACTS_SLOT, facts)
-        return facts
+        return resolve_once(request, _FACTS_SLOT, lambda: self._verify(request))
 
     def cedar_context(self, request: Any) -> dict[str, object]:
         """The facts, shaped for a Cedar `context`.
