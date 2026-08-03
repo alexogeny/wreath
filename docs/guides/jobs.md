@@ -286,7 +286,25 @@ Two counters make the quiet states countable:
 jobs.schedule("nightly_rollup", cron="0 3 * * *")
 ```
 
-Every instance runs the scheduler, but each minute's enqueue carries a deterministic key, so the unique index elects exactly one winner — **cron without leader election** or a separate beat process.
+Every instance runs the scheduler, but each firing's enqueue carries a deterministic key, so the unique index elects exactly one winner — **cron without leader election** or a separate beat process.
+
+`cron=` is read **in UTC**, which is what it has always meant and what it still
+means. That is right for "every fifteen minutes" and quietly wrong for "03:00":
+an operator who writes 03:00 means 03:00 where the depot is, and for half the
+year UTC is not that. Pass a [`Recurrence`](../guides/dates-and-times.md#recurrence-a-schedule-that-knows-its-zone)
+to say so:
+
+```python
+from wreath.temporal import Recurrence
+
+jobs.schedule("rebalance", recurrence=Recurrence.cron("0 3 * * *", tz="Australia/Sydney"))
+jobs.schedule("digest", recurrence=Recurrence.calendar("FREQ=WEEKLY;BYDAY=MO;BYHOUR=9", tz=tz))
+```
+
+The dedup key becomes the recurrence's *local* minute, so the hour that repeats
+on a fall-back day enqueues once rather than twice, and a local time inside a
+spring-forward gap never fires at all. Pass one of `cron=` or `recurrence=`;
+giving both, or neither, is refused at declaration.
 
 ## Publish / subscribe
 

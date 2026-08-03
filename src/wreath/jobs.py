@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import inspect
 import json
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -39,10 +41,11 @@ from ._doorbell import BACKOFF_CAP as DOORBELL_BACKOFF_CAP  # noqa: F401
 from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
-from ._jobcore import CronSchedule, compute_backoff, dedup_key, validate_identifier
+from ._jobcore import compute_backoff, dedup_key, validate_identifier
 from ._nplusone import NPlusOneDetected as _NPlusOneDetected
 from ._pgcatalog import column_exists
 from .postgres import PostgresError
+from .temporal import Duration, Instant, Recurrence
 
 JobHandler = Callable[..., Awaitable[None]]
 
@@ -163,7 +166,7 @@ class _Task:
 @dataclass(frozen=True, slots=True)
 class _Schedule:
     task: str
-    cron: CronSchedule
+    recurrence: Recurrence
     args: tuple[Any, ...]
     tenant: str
     misfire: str  # "skip" only, for this cut
@@ -200,8 +203,8 @@ class JobRunner:
         name: str,
         workload: str = "write",
         concurrency: int = 8,
-        lease: float = 30.0,
-        poll_interval: float = 5.0,
+        lease: Any = 30.0,
+        poll_interval: Any = 5.0,
         schema: str = "wreath",
         batch: int = 1,
         progress: Any = None,
@@ -209,6 +212,10 @@ class JobRunner:
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        # A bare number is seconds, which is what these parameters have always
+        # meant; `Duration` is the spelling that says so.
+        lease = Duration.of(lease).total_seconds()
+        poll_interval = Duration.of(poll_interval).total_seconds()
         if lease <= 0 or poll_interval <= 0:
             raise ValueError("lease and poll_interval must be positive")
         if batch < 1:
@@ -260,7 +267,20 @@ class JobRunner:
         #: deploy parked `batch - 1` jobs for `lease` seconds per restart, which
         #: reads as a queue that stalls whenever you deploy.
         self._claimed_not_started: list[_Claimed] = []
-        self._worker_id = f"{self._name}"
+        #: This process's identity on a claimed row. It was the *queue* name,
+        #: so every worker on a queue shared one and `owner` answered "which
+        #: queue" -- a question the `queue` column already answers. Nothing read
+        #: it back, which is why that went unnoticed.
+        #:
+        #: Correctness never depended on it and still does not: the fence is
+        #: what stops a superseded worker's bookkeeping landing. What this buys
+        #: is the diagnosis -- during an incident, `SELECT owner FROM ... WHERE
+        #: state = 'leased'` now names the process holding each job.
+        #:
+        #: Generated rather than derived from a host name or pid, both of which
+        #: repeat across containers and restarts. Prefixed with the queue so a
+        #: human reading a row still sees which queue it belongs to.
+        self._worker_id = f"{self._name}:{uuid.uuid4().hex[:12]}"
         #: Sweeps that raised. The sweeper suppresses everything so a transient
         #: error cannot end the loop, which also meant a sweeper that had never
         #: once succeeded -- a missing table, a revoked grant -- was
@@ -338,6 +358,12 @@ class JobRunner:
             "dead_lettered": self.dead_lettered,
             "cancelled": self.cancelled,
         }
+
+    def counters(self) -> Any:
+        """This runner's counters, for `wreath.metrics.collect`."""
+        from .metrics import Counters
+
+        return Counters(subsystem="jobs", instance=self._name, values=self.stats())
 
     @property
     def progress(self) -> Any:
@@ -423,21 +449,46 @@ class JobRunner:
         self,
         task: str,
         *,
-        cron: str,
+        cron: str | None = None,
+        recurrence: Recurrence | None = None,
         args: tuple[Any, ...] = (),
         tenant: str = "",
         misfire: str = "skip",
     ) -> None:
-        """Enqueue `task` on a cron schedule (UTC). Idempotent across instances.
+        """Enqueue `task` on a repeating schedule. Idempotent across instances.
 
-        Every app instance runs the scheduler, but each minute's enqueue carries a
-        deterministic `key` so the unique index makes exactly one row win — no
+        Every app instance runs the scheduler, but each firing's enqueue carries
+        a deterministic `key` so the unique index makes exactly one row win — no
         leader election needed.
+
+        `cron=` is a five-field expression **read in UTC**, which is what it has
+        always meant. `recurrence=` takes a `wreath.temporal.Recurrence`, which
+        carries its own zone:
+
+        ```python
+        runner.schedule("rebalance", recurrence=Recurrence.cron("0 3 * * *", tz=depot_tz))
+        ```
+
+        Pass one or the other. A zone is the difference between "03:00" and
+        "03:00 for half the year and 04:00 for the other half", and a depot
+        operator reading a schedule means the former.
         """
         if misfire != "skip":
             raise ValueError("only misfire='skip' is supported in this cut")
+        _both = "schedule() takes exactly one of cron= (UTC) or recurrence= (which "
+        if cron is not None:
+            if recurrence is not None:
+                raise ValueError(_both + "carries its own zone); both were given")
+            # `cron=` predates zones and is documented as UTC, so it stays UTC.
+            # Silently reading it on the process's local zone would move every
+            # existing schedule on the first deploy after this landed.
+            resolved = Recurrence.cron(cron)
+        elif recurrence is not None:
+            resolved = recurrence
+        else:
+            raise ValueError(_both + "carries its own zone); neither was given")
         self._schedules.append(
-            _Schedule(task=task, cron=CronSchedule(cron), args=tuple(args), tenant=tenant,
+            _Schedule(task=task, recurrence=resolved, args=tuple(args), tenant=tenant,
                       misfire=misfire)
         )
 
@@ -627,6 +678,8 @@ class JobRunner:
         key: str | None = None,
         tenant: str = "",
         max_attempts: int | None = None,
+        priority: int = 0,
+        coalesce: bool = False,
     ) -> int | None:
         """Insert a job. Returns its id, or `None` if a `key` deduplicated it.
 
@@ -635,6 +688,20 @@ class JobRunner:
         transaction commits (exactly-once *enqueue*). `key` sets an idempotency
         key: a second enqueue with the same `(queue, key)` is dropped.
 
+        `priority` orders the claim: ready jobs are taken `priority DESC,
+        run_at`, so a higher number goes first. It is a lane, not a promise —
+        a strict priority queue starves its low lane by definition, and sizing
+        for that stays the caller's.
+
+        `coalesce` changes what a repeated `key` does. By default the second
+        enqueue is **dropped**, which is right for "run this once" and wrong
+        when the second call carries something the first did not: the arguments
+        are replaced, the run time becomes the *earlier* of the two, and the
+        priority the *higher*. Only while the row is still `ready` — a leased
+        job is being worked, and rewriting its arguments underneath the worker
+        would hand it inputs it never read. Returns the existing id rather than
+        `None`, because the work is still pending and the caller asked for it.
+
         The calling request's trace context rides the row when the schema has
         somewhere to put it, so the job names the request that caused it. It
         rides the *row* and never the `NOTIFY`: that payload is a doorbell, is
@@ -642,6 +709,11 @@ class JobRunner:
         """
         if task not in self._tasks:
             raise KeyError(f"unknown task: {task!r} (register with @runner.task)")
+        if coalesce and key is None:
+            raise ValueError(
+                "coalesce= needs a key: there is nothing to coalesce onto without "
+                "one, and a silent no-op would read as a merge that happened"
+            )
         payload = json.dumps(list(args))
         dk = dedup_key(self._name, key) if key is not None else None
         max_att = max_attempts if max_attempts is not None else self._tasks[task].max_attempts
@@ -650,26 +722,42 @@ class JobRunner:
         # hop of a live call; a job resumes the trace rather than continuing a
         # conversation, and storing it would age in the queue.
         parent = bound[0] if bound else None
+        # `LEAST`/`GREATEST` rather than a read-then-write: the merge has to be
+        # part of the same statement, or two callers interleave and one of the
+        # two updates is lost -- which is the whole reason the drop-on-conflict
+        # form was safe and a hand-rolled merge is not.
+        conflict = (
+            "DO UPDATE SET args = excluded.args, "
+            "run_at = LEAST(j.run_at, excluded.run_at), "
+            "priority = GREATEST(j.priority, excluded.priority), "
+            "updated_at = now() "
+            "WHERE j.state = 'ready'"
+            if coalesce
+            else "DO NOTHING"
+        )
         if parent is not None and await self._carries_trace():
             sql = (
-                f"INSERT INTO {self._table} "
+                f"INSERT INTO {self._table} AS j "
                 "(queue, task, args, tenant, state, run_at, max_attempts, "
-                "dedup_key, trace_context) "
+                "dedup_key, priority, trace_context) "
                 "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), "
-                "$6, $7, $8) "
+                "$6, $7, $9, $8) "
                 "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
-                "DO NOTHING RETURNING id"
+                f"{conflict} RETURNING id"
             )
-            params = (self._name, task, payload, tenant, run_at, max_att, dk, parent)
+            params = (
+                self._name, task, payload, tenant, run_at, max_att, dk, parent, priority,
+            )
             return await self._insert(sql, params, tx)
         sql = (
-            f"INSERT INTO {self._table} "
-            "(queue, task, args, tenant, state, run_at, max_attempts, dedup_key) "
-            "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), $6, $7) "
-            "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING "
-            "RETURNING id"
+            f"INSERT INTO {self._table} AS j "
+            "(queue, task, args, tenant, state, run_at, max_attempts, dedup_key, "
+            "priority) "
+            "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), $6, $7, $8) "
+            "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
+            f"{conflict} RETURNING id"
         )
-        params = (self._name, task, payload, tenant, run_at, max_att, dk)
+        params = (self._name, task, payload, tenant, run_at, max_att, dk, priority)
         return await self._insert(sql, params, tx)
 
     async def _insert(self, sql: str, params: tuple[Any, ...], tx: Any) -> int | None:
@@ -833,6 +921,29 @@ class JobRunner:
                         # at every read for no gain.
                         f"ALTER TABLE {t} "
                         "ADD COLUMN IF NOT EXISTS trace_context text",
+                    ),
+                ),
+                Step(
+                    version=3,
+                    statements=(
+                        # A lane, not a promise. Claim order becomes
+                        # `priority DESC, run_at`, so a higher number is taken
+                        # first among ready jobs -- and a starved low-priority
+                        # job stays the caller's problem to size for, because a
+                        # strict priority queue starves by definition.
+                        #
+                        # Defaulted rather than nullable: `ORDER BY ... DESC`
+                        # sorts NULL first, so an older build's rows would
+                        # outrank everything the moment this landed.
+                        f"ALTER TABLE {t} "
+                        "ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 0",
+                        # Replaced rather than added to: a scan ordered by
+                        # (priority DESC, run_at) cannot use an index keyed on
+                        # (queue, run_at), so leaving the old one would keep the
+                        # old plan and pay to maintain two indexes.
+                        f"DROP INDEX IF EXISTS {self._schema}.jobs_claim_idx",
+                        f"CREATE INDEX IF NOT EXISTS jobs_claim_idx ON {t} "
+                        "(queue, priority DESC, run_at) WHERE state = 'ready'",
                     ),
                 ),
             ),
@@ -1411,7 +1522,7 @@ class JobRunner:
         sql = (
             f"WITH claimable AS ( SELECT id FROM {self._table} "
             "WHERE queue=$1 AND state='ready' AND run_at <= now() "
-            "ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT $2 ) "
+            "ORDER BY priority DESC, run_at FOR UPDATE SKIP LOCKED LIMIT $2 ) "
             f"UPDATE {self._table} j SET state='leased', owner=$3, "
             "lease_expiry = now() + ($4 || ' seconds')::interval, "
             "fence = j.fence + 1, updated_at=now() FROM claimable c WHERE j.id=c.id "
@@ -1514,16 +1625,19 @@ class JobRunner:
             await _sleep_or_stop(stopping, 30.0)
 
     async def _tick_schedules(self) -> None:
-        now = await self._now()
-        minute_bucket = now.strftime("%Y%m%d%H%M")
+        # `_now` reads the database clock as a naive UTC value, which is the one
+        # clock every worker agrees on. Placing it on the timeline here is what
+        # lets a zoned recurrence be read on its own wall clock below.
+        now = Instant.of(await self._now(), assume=datetime.UTC)
         for sched in self._schedules:
-            if sched.cron.matches(
-                minute=now.minute, hour=now.hour, day=now.day, month=now.month,
-                weekday=now.weekday(),
-            ):
+            if sched.recurrence.matches_at(now):
                 await self.enqueue(
                     sched.task, *sched.args, tenant=sched.tenant,
-                    key=f"cron:{sched.task}:{minute_bucket}",
+                    # The bucket is the recurrence's *local* minute, so the hour
+                    # that repeats on a fall-back day enqueues once rather than
+                    # twice. For a UTC recurrence this is the same string it has
+                    # always been.
+                    key=f"cron:{sched.task}:{sched.recurrence.bucket_key(now)}",
                 )
 
     async def _now(self) -> Any:

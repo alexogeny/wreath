@@ -112,8 +112,10 @@ async def test_enqueue_key_passes_hashed_dedup_key():
 
     await runner.enqueue("send", key="user-7")
     insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
-    # Params: (queue, task, payload, tenant, run_at, max_attempts, dedup_key)
-    assert insert[-1] == dedup_key("work", "user-7")
+    # Params: (queue, task, payload, tenant, run_at, max_attempts, dedup_key, ...).
+    # Indexed from the front deliberately: a new parameter is appended, and
+    # indexing from the end made adding one look like a behaviour change.
+    assert insert[6] == dedup_key("work", "user-7")
 
 
 async def test_enqueue_on_transaction_uses_tx_not_pool():
@@ -654,7 +656,8 @@ async def test_an_explicit_max_attempts_overrides_the_tasks_own():
     await runner.enqueue("send")
     await runner.enqueue("send", max_attempts=1)
     inserts = [args for sql, args in db.connection.calls if "INSERT INTO" in sql]
-    assert [args[-2] for args in inserts] == [5, 1]  # retries + 1, then the override
+    # Index 5 is max_attempts; see the note on front-indexing above.
+    assert [args[5] for args in inserts] == [5, 1]  # retries + 1, then the override
 
 
 async def test_a_failed_verdict_without_an_error_is_not_a_failure():
@@ -995,3 +998,145 @@ async def test_draining_gives_up_at_its_deadline_rather_than_waiting_out_a_hung_
         await _asyncio.wait_for(runner.drain(loop.time() - 1.0), timeout=1.0)
     finally:
         forever.cancel()
+
+
+# --- priority and coalescing ----------------------------------------------------------
+
+
+async def test_priority_rides_the_row_and_orders_the_claim():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send", priority=7)
+    insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
+    assert insert[7] == 7
+
+
+async def test_the_claim_is_ordered_by_priority_then_run_at():
+    db = FakeDatabase()
+    runner = _runner(db)
+    await runner._claim(1)
+    claim = next(sql for sql, _ in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql)
+    assert "ORDER BY priority DESC, run_at" in claim
+
+
+async def test_the_default_priority_is_zero_so_nothing_reorders_itself():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send")
+    insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
+    assert insert[7] == 0
+
+
+async def test_a_repeated_key_drops_by_default():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send", key="k")
+    sql = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    assert "DO NOTHING" in sql
+
+
+async def test_coalesce_merges_instead_of_dropping():
+    # The second call carries something the first did not: newest arguments,
+    # earliest run time, highest priority -- all in the one statement, because
+    # a read-then-write lets two callers interleave and lose an update.
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send", key="k", coalesce=True)
+    sql = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    assert "DO UPDATE SET args = excluded.args" in sql
+    assert "run_at = LEAST(j.run_at, excluded.run_at)" in sql
+    assert "priority = GREATEST(j.priority, excluded.priority)" in sql
+
+
+async def test_coalesce_only_touches_a_row_still_waiting():
+    # A leased job is being worked; rewriting its arguments underneath the
+    # worker would hand it inputs it never read.
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send", key="k", coalesce=True)
+    sql = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    assert "WHERE j.state = 'ready'" in sql
+
+
+async def test_coalesce_without_a_key_is_refused():
+    # There is nothing to coalesce onto, and a silent no-op would read as a
+    # merge that happened.
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    with pytest.raises(ValueError, match="coalesce= needs a key"):
+        await runner.enqueue("send", coalesce=True)
+
+
+def test_the_claim_index_leads_with_priority():
+    # An index on (queue, run_at) cannot serve an ORDER BY that leads with
+    # priority, so the step replaces it rather than adding beside it.
+    db = FakeDatabase()
+    statements = " ".join(
+        statement for step in _runner(db).component().steps for statement in step.statements
+    )
+    assert "(queue, priority DESC, run_at) WHERE state = 'ready'" in statements
+    assert "DROP INDEX IF EXISTS" in statements
+
+
+# --- worker identity ------------------------------------------------------------------
+
+
+def test_two_runners_on_one_queue_have_distinct_owners():
+    """`owner` used to be the queue name, so every worker on a queue shared it.
+
+    Correctness never depended on it -- the fence is what stops a superseded
+    worker's bookkeeping landing -- but it meant `owner` answered "which queue",
+    a question the `queue` column already answers, and an incident could not ask
+    which *process* held a job. Nothing read it back, which is why that went
+    unnoticed for as long as it did.
+    """
+    first = _runner(FakeDatabase())
+    second = _runner(FakeDatabase())
+    assert first._worker_id != second._worker_id
+
+
+def test_a_worker_id_still_names_its_queue():
+    # A human reading a leased row should see which queue it belongs to without
+    # a join, which is why the identity is prefixed rather than opaque.
+    runner = _runner(FakeDatabase())
+    assert runner._worker_id.startswith("work:")
+
+
+async def test_the_claim_records_the_worker_that_took_it():
+    db = FakeDatabase()
+    runner = _runner(db)
+    await runner._claim(1)
+    claim = next(
+        (sql, args) for sql, args in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql
+    )
+    assert runner._worker_id in claim[1]
