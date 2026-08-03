@@ -342,17 +342,13 @@ read_ssize(PyObject *config, const char *name, Py_ssize_t *out)
 static void
 put_u32(uint8_t *p, uint32_t v)
 {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
+    wreath_store_u32_be(p, v);
 }
 
 static uint32_t
 get_u32(const uint8_t *p)
 {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
-         | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    return wreath_load_u32_be(p);
 }
 
 /* Append raw bytes to the connection's outbound bytearray. */
@@ -2106,7 +2102,7 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
     int saw_initial_window = 0;
     int64_t initial_window = self->peer_initial_window;
     for (Py_ssize_t i = 0; i < len; i += 6) {
-        uint16_t ident = (uint16_t)((payload[i] << 8) | payload[i + 1]);
+        uint16_t ident = wreath_load_u16_be(payload + i);
         uint32_t value = get_u32(payload + i + 2);
         switch (ident) {
         case SET_ENABLE_PUSH:
@@ -2629,7 +2625,7 @@ send_initial_settings(Http2Protocol *self)
     uint8_t payload[6 * 4];
     Py_ssize_t n = 0;
     #define PUT_SETTING(id, val) do { \
-        payload[n] = (uint8_t)((id) >> 8); payload[n+1] = (uint8_t)(id); \
+        wreath_store_u16_be(payload + n, (uint16_t)(id)); \
         put_u32(payload + n + 2, (uint32_t)(val)); n += 6; } while (0)
     PUT_SETTING(SET_ENABLE_PUSH, 0);
     PUT_SETTING(SET_MAX_CONCURRENT_STREAMS, self->max_concurrent);

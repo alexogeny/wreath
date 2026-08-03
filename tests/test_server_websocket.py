@@ -904,7 +904,7 @@ async def test_a_message_at_the_exact_fragment_limit_is_delivered(
         feed(protocol, build_frame(0, b"b", False, MASK))
     feed(protocol, build_frame(0, b"c", True, MASK))
     await _settle()
-    await asyncio.wait_for(done.wait(), timeout=10)
+    assert done.is_set()
     assert received[0]["text"] == "a" + "b" * 6 + "c"
 
 

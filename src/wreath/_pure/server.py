@@ -26,6 +26,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, cast
 
 from .._codecs import percent_decode
+from .._conditional import STATUS_WITHOUT_BODY as _STATUS_NO_BODY
 from .._http import parse_request
 from .._websocket import build_frame as ws_build_frame
 from .._websocket import parse_frame as ws_parse_frame
@@ -60,7 +61,6 @@ _WS_CLOSE = 0x8
 _WS_PING = 0x9
 _WS_PONG = 0xA
 
-_STATUS_NO_BODY = frozenset({204, 304})
 _HOP_BODY_METHODS = frozenset({"HEAD"})
 
 # RFC 9110's safe methods: defined as having no intended effect on the server,

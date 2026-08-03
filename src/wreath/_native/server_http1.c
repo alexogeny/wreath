@@ -2697,16 +2697,12 @@ ws_write_frame(WreathHttpProtocol *self, int opcode, const char *payload, Py_ssi
     }
     else if (size < 65536) {
         header[1] = 126;
-        header[2] = (uint8_t)(size >> 8);
-        header[3] = (uint8_t)size;
+        wreath_store_u16_be(header + 2, (uint16_t)size);
         header_len = 4;
     }
     else {
-        uint64_t length = (uint64_t)size;
         header[1] = 127;
-        for (int i = 0; i < 8; i++) {
-            header[2 + i] = (uint8_t)(length >> (56 - 8 * i));
-        }
+        wreath_store_u64_be(header + 2, (uint64_t)size);
         header_len = 10;
     }
     if (payload_obj != NULL && size > 16384 && self->transport_writelines_fn != NULL &&
@@ -2745,8 +2741,7 @@ ws_send_close_frame(WreathHttpProtocol *self, int code, const char *reason, Py_s
     char payload[125];
     Py_ssize_t size = 0;
     if (code != 0) {
-        payload[0] = (char)(code >> 8);
-        payload[1] = (char)code;
+        wreath_store_u16_be((uint8_t *)payload, (uint16_t)code);
         size = 2;
         if (reason_size > 123) {
             reason_size = 123;
@@ -2977,7 +2972,7 @@ drive_ws_frame(WreathHttpProtocol *self)
             int code = 1005;
             const char *data = PyBytes_AS_STRING(payload);
             if (size >= 2) {
-                code = ((uint8_t)data[0] << 8) | (uint8_t)data[1];
+                code = wreath_load_u16_be((const uint8_t *)data);
                 if (code < 1000 || code == 1004 || code == 1005 || code == 1006 ||
                     (code >= 1015 && code < 3000)) {
                     Py_DECREF(payload);
