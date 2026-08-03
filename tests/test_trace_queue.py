@@ -41,29 +41,48 @@ _TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 # --- the declaration, no database needed -------------------------------------
 
 
-def test_the_jobs_component_targets_version_two_with_a_trace_column() -> None:
+def test_the_trace_column_arrives_as_an_additive_step() -> None:
     """The context needs a column, and the column arrives as an additive step.
 
     Version 1 is left exactly as it was: rewriting it would change what an
     already-bootstrapped database was told it had, and the marker would then
     overstate history. Appending is the only honest direction.
+
+    The assertions are about *where* the column arrives and about the
+    append-only shape, not about which version happens to be last -- a later
+    step is the expected way this component grows, and a test that pinned the
+    final number would fail for the one change it should welcome.
     """
     runner = JobRunner(_FakeDatabase(), name="work", schema="wtq_decl")
     component = runner.component()
 
-    assert component.target_version == 2
     versions = [step.version for step in component.steps]
-    assert versions == [1, 2]
+    assert versions == sorted(versions), "steps apply in order"
+    assert versions == list(range(1, len(versions) + 1)), "versions are dense from 1"
+    assert component.target_version == versions[-1]
 
     first = " ".join(component.steps[0].statements)
     assert "trace_context" not in first, "version 1 must stay as it shipped"
 
-    second = " ".join(component.steps[1].statements)
-    assert "trace_context" in second
-    assert "IF NOT EXISTS" in second, (
-        "a step re-applies after a crash between its DDL and its marker, so "
-        "every statement in it has to be idempotent"
-    )
+    carrying = [
+        step for step in component.steps
+        if any("trace_context" in statement for statement in step.statements)
+    ]
+    assert [step.version for step in carrying] == [2]
+
+
+def test_every_schema_step_is_idempotent() -> None:
+    """A step re-applies after a crash between its DDL and its marker.
+
+    So every statement in every step has to survive running twice -- which is
+    the property, rather than any particular spelling of it.
+    """
+    component = JobRunner(_FakeDatabase(), name="work", schema="wtq_decl").component()
+    for step in component.steps:
+        for statement in step.statements:
+            assert "IF NOT EXISTS" in statement or "IF EXISTS" in statement, (
+                f"version {step.version} statement is not re-appliable: {statement}"
+            )
 
 
 def test_every_notify_in_the_queue_carries_an_empty_payload() -> None:

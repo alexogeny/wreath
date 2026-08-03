@@ -122,7 +122,11 @@ class _DedupConnection(FakeConnection):
         self.calls.append((sql, args))
         database: DedupingDatabase = self.database  # type: ignore[assignment]
         if "INSERT INTO" in sql:
-            key = args[-1]                     # dedup_key is the last parameter
+            # Index 6 in both statement forms the runner builds -- the one that
+            # carries a trace context and the one that does not. Indexed from
+            # the front deliberately: a new parameter is appended, and reading
+            # from the end made adding one look like a dedup failure.
+            key = args[6]
             if key in database.rows:
                 return None                    # the unique index dropped it
             database.inserts += 1
