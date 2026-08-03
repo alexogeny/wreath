@@ -158,6 +158,104 @@ That matters more than it looks. A formatter is only useful if its own parser
 can read what it wrote, and anything that reaches for scientific notation on a
 small number — or rounds a large one — quietly breaks that.
 
+### A length is a type, not a bare float
+
+A moment has been refused without an offset since this module existed. A
+*length* had no type at all, so every span in the framework was a naked number
+of seconds — a job lease, a quota period, a notification digest, a store window,
+a rate-limit span — and "how long" was documented five times in five places:
+
+```python
+from wreath.temporal import Duration, days, hours, minutes, seconds
+
+runner  = JobRunner(db, name="work", lease=minutes(2))
+quotas.declare("api_calls", limit=10_000, period=days(30))
+
+@notify.kind("photo_shared", digest=hours(1))
+class PhotoShared: ...
+```
+
+`Duration` is a `timedelta` subclass, so it compares, sorts and moves an
+`Instant` exactly like one, and `total_seconds()` is inherited. Every parameter
+above still takes a plain number and still reads it as seconds — `Duration.of`
+accepts a `Duration`, a `timedelta`, a number, or an ISO-8601 string, so nothing
+that worked before stops working.
+
+Two edges are worth knowing rather than discovering:
+
+- **`.seconds` is not the total.** It is `timedelta`'s own seconds *component*,
+  0 to 86399, and shadowing it would silently break every reader that means it.
+  `total_seconds()` is the whole span.
+- **Arithmetic returns a plain `timedelta`.** CPython preserves the subclass for
+  `datetime` but not for `timedelta`. That is not worked around: `Duration` is a
+  type for the declaration boundary, and `Duration.of` takes a value back when a
+  boundary needs one.
+
+`days(1)` is a fixed 24 hours, because that is what a `timedelta` can hold
+honestly. The two days a year that are 23 or 25 hours long are a *calendar*
+question, and the answer to those is `Bucket` and `Recurrence` — both of which
+read a zone.
+
+## Recurrence: a schedule that knows its zone
+
+A cron expression read in UTC is correct for "every fifteen minutes" and quietly
+wrong for "03:00". An operator who writes 03:00 means 03:00 where the depot is,
+and for half the year UTC is not that:
+
+```python
+from wreath.temporal import Recurrence
+
+Recurrence.cron("0 3 * * *", tz="Australia/Sydney")
+Recurrence.calendar("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=3", tz="Europe/London")
+```
+
+Both spellings compile to the same five field sets, which is why the calendar
+form lives here rather than in a translator beside it: the calendar UIs people
+actually mount emit that syntax, and every application with one grows a lossy
+converter to cron that is wrong across a DST boundary. `wreath.jobs` takes one
+directly:
+
+```python
+runner.schedule("rebalance", recurrence=Recurrence.cron("0 3 * * *", tz=depot_tz))
+```
+
+`schedule(cron=...)` is unchanged and still UTC — moving every existing schedule
+on the first deploy after this landed would be the worst possible way to ship a
+correctness fix.
+
+### The two DST days, stated rather than discovered
+
+| The local time | What happens | Why |
+| --- | --- | --- |
+| does not exist (spring forward) | does not fire | it never occurs as a wall-clock reading, which is the answer cron gives too |
+| happens twice (fall back) | fires once | `bucket_key` names the *local* minute, so both passes share a dedup key and the unique index lands one row |
+
+Both are pinned by tests against real zones and real transition dates, not a
+fabricated fixed offset — `tests/test_temporal_recurrence.py` and
+`tests/jobs/test_scheduler_zone.py`, the latter driving 180 consecutive ticks
+across a spring-forward gap and asserting that nothing is enqueued.
+
+`next_after` searches at most four years and then raises, so `0 0 31 2 *` —
+February 31st — reports itself rather than looping. It also normalises through
+UTC before reading a candidate back, which is load-bearing: `astimezone` onto
+the zone a value *already carries* is a no-op that preserves the displayed
+fields, so without that step a nonexistent 02:30 reads back as 02:30 and passes
+its own check.
+
+### What the calendar form refuses
+
+Everything outside the supported subset is refused by name rather than
+approximated, because approximating puts a job on the wrong day quietly:
+
+- `COUNT` and `UNTIL` — a recurrence that stops is a different contract from one
+  that repeats, and there is nowhere here to record exhaustion.
+- `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, and an ordinal `BYDAY` such as `2MO` —
+  these select from a generated set rather than constrain a field. `2MO` read as
+  "Monday" fires four times a month instead of once.
+- An `INTERVAL` that does not divide its parent unit. `FREQ=HOURLY;INTERVAL=6`
+  is four times a day forever, because 6 divides 24; `INTERVAL=7` drifts by an
+  hour a day and there is no set of hours that means it.
+
 ## What round-trips, and the one thing that does not
 
 Every conversion here is checked as a *property* rather than by example, because
