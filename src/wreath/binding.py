@@ -1017,6 +1017,73 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
     return checked
 
 
+def compile_message_negotiation(handler: Handler, annotation: Any) -> Handler:
+    """Offer protobuf on a route whose return annotation is a `@message`.
+
+    Wreath has read protobuf request bodies since `_decode_protobuf_body`
+    landed, and could not write one: a handler returning a declared message
+    served JSON whatever the client asked for. That asymmetry was not a
+    decision, it was the half that had not been done.
+
+    `wreath.negotiation` keeps `PROTOBUF` out of `DEFAULT_SERIALIZERS` for a
+    reason that stands: JSON and MessagePack encode whatever a handler returns,
+    protobuf can only encode a *declared* message, and a handler returning a
+    dict is the common case — so a global offer would turn every existing route
+    into a runtime error for any client sending `Accept: application/x-protobuf`.
+
+    **The return annotation is the fact that was missing.** A route annotated
+    `-> Ping` has said at startup that its body is encodable, so the offer is
+    made for that route and nowhere else. A route without one is returned
+    unchanged and pays nothing at all — not even a branch.
+
+    This is compiled *before* `compile_response_validator`, because that
+    validator projects a value onto JSON primitives and the encoder needs the
+    message itself. A `Response` already passes through the validator untouched,
+    which is how the negotiated result reaches the wire without a second path.
+    """
+    if not (isinstance(annotation, type) and _is_message(annotation)):
+        return handler
+    from .negotiation import JSON, MSGPACK, PROTOBUF, negotiate
+    from .response import FileResponse, PreparedResponse, Response, StreamingResponse
+
+    passthrough = (Response, StreamingResponse, FileResponse, PreparedResponse)
+    # JSON first, so a missing `Accept` and `*/*` both still resolve to it --
+    # adding an offer must not change what an existing client already gets.
+    offers = (JSON, MSGPACK, PROTOBUF)
+    media = PROTOBUF.media_type.encode("ascii")
+
+    def _negotiated(request: Request, value: Any) -> Any:
+        # Only an explicit protobuf win is intercepted. An unsatisfiable
+        # `Accept` is left to the ordinary path rather than turned into a 406
+        # here: this wrapper exists to add a format, not to start refusing
+        # requests that worked yesterday.
+        if isinstance(value, passthrough) or not isinstance(value, annotation):
+            return value
+        chosen = negotiate(request.header("accept"), offers)
+        if chosen is None or chosen.media_type != PROTOBUF.media_type:
+            return value
+        response = Response(chosen.encode(value), media_type=media)
+        # As `serialize` does: a shared cache must key on the format, or one
+        # client's protobuf is served to another client's JSON request.
+        response.headers.append((b"vary", b"Accept"))
+        return response
+
+    negotiated: Handler
+    if inspect.iscoroutinefunction(handler):
+
+        async def negotiated(request: Request) -> Any:  # type: ignore[no-redef]
+            return _negotiated(request, await handler(request))
+
+    else:
+
+        def negotiated(request: Request) -> Any:  # type: ignore[no-redef]
+            return _negotiated(request, handler(request))
+
+    negotiated.__name__ = getattr(handler, "__name__", "negotiated")
+    negotiated.__qualname__ = getattr(handler, "__qualname__", "negotiated")
+    return negotiated
+
+
 # Resolved field specs per dataclass: (name, annotation, required). Type-hint
 # evaluation is expensive; it must happen once per class, never per request.
 _DATACLASS_SPECS: dict[type, tuple[tuple[str, Any, bool], ...]] = {}
@@ -2765,6 +2832,7 @@ __all__ = [
     "ResponseValidationError",
     "ValidationError",
     "compile_binder",
+    "compile_message_negotiation",
     "compile_response_validator",
     "inspect_handler",
     "validate",
