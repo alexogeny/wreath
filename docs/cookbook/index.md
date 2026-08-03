@@ -28,6 +28,7 @@ There are two circles of readers here, and each gets its own set.
 - [Authenticate with an API key](recipes/api-key-auth.md)
 - [Turn on an authenticator app (TOTP)](recipes/enable-totp.md)
 - [Authorize with Cedar policies (RBAC)](recipes/cedar-rbac.md)
+- [Connect an identity provider over SCIM](recipes/scim-provisioning.md)
 - [Make a POST safe to retry](recipes/idempotent-writes.md)
 
 ### Working with data
@@ -39,12 +40,15 @@ There are two circles of readers here, and each gets its own set.
 - [Combine keyword and semantic search](recipes/hybrid-search.md)
 - [Run a transaction (unit of work)](recipes/unit-of-work.md)
 - [Generate CRUD without leaking secrets](recipes/safe-crud.md)
+- [Give support a read-only admin](recipes/read-only-admin.md)
 - [Manage a database pool with the lifespan](recipes/database-lifespan.md)
 
 ### Realtime and background work
 
 - [Show a live progress bar for a long task](recipes/stream-job-progress.md)
 - [Stream a model's answer so a reconnect resumes it](recipes/resumable-llm-stream.md)
+- [Read a value out of a signed XML assertion](recipes/verify-a-signed-assertion.md)
+- [Keep a client's list live](recipes/live-list.md)
 - [Broadcast to many WebSocket clients](recipes/websocket-broadcast.md)
 - [Enqueue a durable job with retries](recipes/durable-job.md)
 - [Run work after the response](recipes/background-jobs.md)
@@ -60,6 +64,7 @@ There are two circles of readers here, and each gets its own set.
 ### Speed and delivery
 
 - [Cache an expensive endpoint](recipes/cache-an-endpoint.md)
+- [Purge a CDN when the data changes](recipes/purge-a-cdn.md)
 
 ### Your API's surface
 
