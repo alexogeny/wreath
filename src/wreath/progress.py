@@ -52,6 +52,7 @@ from ._busbridge import BusBridge
 from ._json import dumps as _json_dumps
 from .cache import BoundedCache
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse
+from .temporal import Duration
 
 __all__ = [
     "MAX_MESSAGE_CHARS",
@@ -153,10 +154,12 @@ class ProgressRegistry:
         bus: Any = None,
         *,
         max_tasks: int = 4096,
-        ttl: float | None = 24 * 3600,
+        ttl: Any = 24 * 3600,
         channel: str = PROGRESS_CHANNEL,
     ) -> None:
-        self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=ttl)
+        # `None` means never expire by time and must survive the coercion.
+        window = None if ttl is None else Duration.of(ttl).total_seconds()
+        self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=window)
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
     def report(
