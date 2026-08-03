@@ -68,7 +68,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, NamedTuple
 
-from .store import Column, sql_identifier
+from .store import Column, rows_affected, sql_identifier
 
 __all__ = [
     "ALIAS",
@@ -1105,10 +1105,15 @@ def _rows_in(tag: Any) -> int:
         raise RuntimeError(
             f"expected a PostgreSQL command tag from a batched append, got {tag!r}"
         )
-    _, _, count = tag.rpartition(" ")
-    if not count.isdigit():
+    # Parsed by `wreath.store.rows_affected` and *raised on* here rather than
+    # defaulted: everywhere else an unreadable tag means "this backend does not
+    # say", which is survivable. On this path it would mean reporting a batch
+    # landed without the server having said so, which is the assumption this
+    # function exists to remove.
+    count = rows_affected(tag)
+    if count is None:
         raise RuntimeError(f"malformed command tag from a batched append: {tag!r}")
-    return int(count)
+    return count
 
 
 def _weigh(values: Mapping[str, Any]) -> int:
