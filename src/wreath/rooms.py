@@ -39,23 +39,17 @@ durable delivery.
 
 from __future__ import annotations
 
-from base64 import b64decode, b64encode
-
-from ._native import _core
-
-if _core is not None and hasattr(_core, "b64encode"):
-    # A broadcast encodes the whole payload once per room, so this is the one
-    # base64 call in the tree that meets large inputs; the native encoder is
-    # about ten times `base64.b64encode` there and returns the `str` this needs
-    # rather than bytes to decode.
-    _b64encode_str = _core.b64encode
-else:
-    def _b64encode_str(payload: bytes) -> str:
-        return b64encode(payload).decode("ascii")
+from base64 import b64decode
 from collections.abc import Awaitable, Callable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
+#: A broadcast encodes the whole payload once per room, so this is the one
+#: base64 call in the tree that reliably meets large inputs, where the native
+#: encoder's AVX2 arm is about ten times `base64.b64encode`. The dispatch and
+#: the twin live in `wreath._b64`; this module used to carry its own copy of
+#: both, as did `binding`.
+from ._b64 import b64_encode as _b64encode_str
 from ._busbridge import BusBridge
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
 from ._flight_markers import PH_WS_FANOUT as _PH_WS_FANOUT
