@@ -10,7 +10,6 @@ principal into the session for the `SessionIdentityBackend` to read.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import secrets
@@ -18,6 +17,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode
 
+from .._b64 import b64url_encode
 from ..middleware.sessions import rotate_session
 from ..response import JSONResponse, RedirectResponse
 from .oidc import OidcProvider, _same_origin_path
@@ -203,9 +203,7 @@ class ClientCredentials:
 
 def _pkce_pair() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
+    challenge = b64url_encode(hashlib.sha256(verifier.encode("ascii")).digest())
     return verifier, challenge
 
 
