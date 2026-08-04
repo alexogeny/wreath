@@ -15,6 +15,12 @@ dependencies = []
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Framework :: AsyncIO",
+  # Linux is the platform wreath is built and tested on, and the only one that
+  # gets a wheel. macOS and Windows are no longer *refused* -- `setup.py` gates
+  # the two platform-bound extensions, so an sdist install there builds the rest
+  # -- but neither has been run, and a classifier is a claim. They go in when a
+  # suite run on each says they can.
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
@@ -273,3 +279,52 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 "benchmarks/lifecycle_apps.py" = ["E402"]
 "benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]
 "benchmarks/run.py" = ["ASYNC220", "ASYNC240"]
+
+# --- binary wheels ----------------------------------------------------------
+# Users should not need a C toolchain to `pip install wreath`. Before this the
+# only artifact on PyPI was an sdist, so every install compiled four extensions
+# locally -- and failed outright on a machine without a compiler.
+[tool.cibuildwheel]
+# CPython 3.14 only: `requires-python = ">=3.14"`. The free-threaded build is
+# excluded by the selector rather than by a skip -- its identifiers start
+# `cp314t-`, so the literal `-` here does not match them. It is left unbuilt
+# rather than built untested: `AGENTS.md` treats free-threading as a separately
+# *tested* execution mode, and nothing here tests one yet.
+build = "cp314-*"
+# Linux wheels only, for now. The *code* is no longer Linux-only: `setup.py`
+# gates `_reactor` (io_uring, eventfd, raw `syscall()`) on Linux and `_flight`
+# (mmap) on POSIX, so macOS and Windows compile `_core`, `_server`, `_postgres`
+# and `_client` -- none of which carries a platform header or a POSIX-only call
+# -- instead of failing at the first `#include`. What is missing is not a port
+# but *evidence*: nobody has built or run the suite on either, and a wheel is a
+# claim that it works. An sdist install on those platforms should now succeed,
+# which is the change; adding them here is the follow-up, once a run on each
+# says so.
+skip = ["*-musllinux_*", "*_i686", "pp*"]
+# **Delete `build/` first.** setuptools reuses object files it finds there, and
+# cibuildwheel mounts the project into the container -- so a `build/` left by a
+# host `setup.py build_ext --inplace` is silently linked into the wheel. The
+# symptom is not a compile error: the wheel builds, and `auditwheel` then
+# refuses it for "too-recent versioned symbols", naming a glibc the container
+# never had. CI checks out fresh and never sees this; a maintainer running
+# cibuildwheel locally sees it every time, which is the worse way round.
+before-build = "rm -rf build"
+
+# Every wheel is imported before it ships. A wheel that builds and cannot load
+# its own extensions is the failure this catches, and it is invisible to the
+# build step.
+test-command = "python -c \"from wreath._native import _core, _server, _reactor, _postgres; assert all(m is not None for m in (_core, _server, _reactor, _postgres)); import wreath; wreath.Wreath()\""
+
+# **`manylinux_2_34`, not the `manylinux_2_28` default.** Measured, not guessed:
+# 2_28 (AlmaLinux 8) *has* `linux/io_uring.h`, but its 4.18 kernel headers
+# predate the ring-mapped provided buffers the reactor uses, so the build dies
+# on `IORING_REGISTER_PBUF_RING`, `struct io_uring_buf_ring` and
+# `IORING_CQE_F_MORE`. The header being present is what makes this worth
+# writing down -- the obvious check passes and the compile still fails.
+#
+# It costs less reach than it looks. `auditwheel` tags by the glibc symbols
+# actually *linked*, not by the image, and a wheel built here comes out
+# `manylinux_2_28_x86_64.manylinux_2_34_x86_64` -- so it still installs on
+# glibc 2.28 (RHEL 8, Ubuntu 20.04) despite being built on 2.34.
+manylinux-x86_64-image = "manylinux_2_34"
+manylinux-aarch64-image = "manylinux_2_34"

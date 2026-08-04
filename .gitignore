@@ -101,3 +101,6 @@ benchmarks/rust_arms/target
 
 # Agent analysis scratch, not part of the repository.
 .analysis/
+
+# Red-team CTF range. Local-only target app, planted flags, runtime state.
+/.ctf/

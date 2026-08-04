@@ -193,24 +193,6 @@ ext_modules = [
             extra_compile_args=extra_compile_args,
         ),
         Extension(
-            "wreath._native._reactor",
-            sources=[
-                "src/wreath/_native/_reactormodule.c",
-                "src/wreath/_native/reactor_wheel.c",
-            ],
-            depends=[
-                "src/wreath/_native/server.h",
-                "src/wreath/_native/wreath_stream.h",
-                "src/wreath/_native/reactor_internal.h",
-                "src/wreath/_native/reactor_ring.c",
-                "src/wreath/_native/reactor_buffers.c",
-                "src/wreath/_native/reactor_transport.c",
-                "src/wreath/_native/reactor_poller.c",
-            ],
-            extra_compile_args=hot_compile_args,
-            extra_link_args=hot_link_args,
-        ),
-        Extension(
             "wreath._native._server",
             sources=[
                 "src/wreath/_native/_servermodule.c",
@@ -230,18 +212,6 @@ ext_modules = [
             ],
             extra_compile_args=hot_compile_args,
             extra_link_args=hot_link_args,
-        ),
-        Extension(
-            "wreath._native._flight",
-            sources=[
-                "src/wreath/_native/_flightmodule.c",
-                "src/wreath/_native/flight.c",
-            ],
-            depends=[
-                "src/wreath/_native/flight.h",
-                "src/wreath/_native/flight_schema.h",
-            ],
-            extra_compile_args=extra_compile_args,
         ),
         Extension(
             "wreath._native._postgres",
@@ -293,6 +263,63 @@ ext_modules = [
 
 # HTTP/3 is explicit: a default build remains compiler-and-CPython-headers only,
 # while a requested build fails loudly if its linked libraries are unavailable.
+# --- platform-gated extensions ----------------------------------------------
+# Everything above compiles anywhere: no platform headers, no POSIX-only calls.
+# These two do not, and gating them is what lets macOS and Windows have the rest
+# of the accelerators instead of failing the install at the first `#include`.
+#
+# The Python side was already built for their absence, which is why this is a
+# packaging change and not a port: `wreath._native.__init__` resolves each
+# through `try: import ... except ImportError: None`, `wreath.reactor` raises a
+# named error only when `timers="wheel"` is explicitly asked for, and
+# `wreath.server._create_recorder` returns None on a missing `_flight`, leaving
+# every recorder hook a not-taken branch.
+
+# io_uring, eventfd and raw `syscall()`: Linux and nowhere else. Without it the
+# metal tier is unavailable and asyncio's own loop serves, which is the
+# documented default anyway.
+if sys.platform.startswith("linux"):
+    ext_modules.append(
+        Extension(
+            "wreath._native._reactor",
+            sources=[
+                "src/wreath/_native/_reactormodule.c",
+                "src/wreath/_native/reactor_wheel.c",
+            ],
+            depends=[
+                "src/wreath/_native/server.h",
+                "src/wreath/_native/wreath_stream.h",
+                "src/wreath/_native/reactor_internal.h",
+                "src/wreath/_native/reactor_ring.c",
+                "src/wreath/_native/reactor_buffers.c",
+                "src/wreath/_native/reactor_transport.c",
+                "src/wreath/_native/reactor_poller.c",
+            ],
+            extra_compile_args=hot_compile_args,
+            extra_link_args=hot_link_args,
+        )
+    )
+
+# `mmap` and `unistd.h`: every POSIX platform, so macOS builds it and Windows
+# does not. A Windows build therefore has no Flight Recorder, and telemetry,
+# `wreath.logging` and the Inspector are unavailable there rather than wrong --
+# `Mode.OFF` is the default, so nothing else changes.
+if sys.platform != "win32":
+    ext_modules.append(
+        Extension(
+            "wreath._native._flight",
+            sources=[
+                "src/wreath/_native/_flightmodule.c",
+                "src/wreath/_native/flight.c",
+            ],
+            depends=[
+                "src/wreath/_native/flight.h",
+                "src/wreath/_native/flight_schema.h",
+            ],
+            extra_compile_args=extra_compile_args,
+        )
+    )
+
 if os.environ.get("WREATH_BUILD_HTTP3") == "1":
     ext_modules.append(_http3_extension())
 
