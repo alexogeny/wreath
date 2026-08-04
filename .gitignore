@@ -98,3 +98,6 @@ flamegraph*.svg
 .DS_Store
 Thumbs.db
 benchmarks/rust_arms/target
+
+# Agent analysis scratch, not part of the repository.
+.analysis/
