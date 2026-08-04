@@ -302,6 +302,71 @@ There are four fields and no way to add a fifth. A hero is the one place a docs
 page is allowed to be loud, and the way to stop that spreading is to give it a
 shape it cannot outgrow.
 
+## The dependency plate
+
+A `plate` block is a hero whose evidence comes from the subsystem manifest
+rather than from the block. It renders a caption, a headline, a lede, actions —
+and between them every package name any subsystem lists in `replaces`, struck
+through:
+
+````markdown
+```plate
+caption: One package · no runtime dependencies · Python 3.14
+title: Everything here is something you no longer install.
+lede: Wreath gathers the parts a web application is always assembled from.
+action: What you don't have to install -> capabilities.md
+```
+````
+
+The names are not written anywhere in the block, and that is the point. They
+come from `docs/agents/manifest.json` — the file `AGENTS.md` already requires a
+new module to update in the same change — so the list cannot claim a capability
+Wreath does not ship, and the printed count is `len()` of what was rendered, so
+the number and the list cannot disagree. A hand-typed list of this length is
+wrong within a month, and a marketing list that is wrong is worse than none.
+
+Two details worth knowing if you reuse it:
+
+- **The names are shown but not indexed.** They are the capability map's
+  vocabulary, and `wreath._docs.capabilities` deliberately scores them as a
+  low-weight alias so the page that *maps* `celery` to a module outranks any
+  page that merely mentions it. A page carrying all of them as prose would beat
+  the map at its own job, with a snippet that is a run of package names and no
+  sentence, so `site.py` strips the list before building the search index.
+- **The strike is drawn, not marked up.** A hundred and fifty-five `<s>`
+  elements are a hundred and fifty-five announcements of "strikethrough" before
+  a screen-reader user reaches the prose. The list carries one label saying what
+  the names mean; the line through them is CSS.
+
+## Previewing, and seeing the requests
+
+`wreath docs serve` builds, then serves the output with **Wreath's own server
+and `wreath.staticfiles`** — not `http.server`. You get the response behaviour
+the deployed site has: `ETag` and `If-None-Match` (so a reload of an unchanged
+page transfers nothing), `index.html` for a directory path, no directory
+listings, and files opened beneath a trusted root descriptor.
+
+It also runs a recorder, so requests appear in the console through
+`wreath.logging` rather than through a `print` beside it:
+
+```text
+INFO   200 /guides/routing.html  trace=db564287… span=fa9d65e7…  status=200 path='/guides/routing.html'
+INFO   404 /nope.html            trace=e5fed654… span=39097cf3…  status=404 path='/nope.html'
+```
+
+Text on a terminal, JSON lines when the output is redirected — the writer picks
+by `isatty`, and the trace and span ids are the same ones the Inspector would
+join on.
+
+The access record is worth reading as an example of the ring's shape. A log cell
+gives **32 bytes to all of its arguments together**: an int costs 9 and a string
+costs its UTF-8 length plus 2. So this site logs a status and a path and nothing
+else — an earlier version logged the method and the duration too, and because
+the encoder packs in declaration order and stops at the first argument that will
+not fit, every request to a real page arrived with its status and duration
+silently dropped. Long paths are clipped *here* rather than by the encoder, and
+clipped from the left, because a URL identifies itself at the tail.
+
 ## Charts from your data
 
 Point a ```` ```chart ```` block at a JSON file — a benchmark's `latest.json`,

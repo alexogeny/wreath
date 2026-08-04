@@ -490,16 +490,49 @@ def test_the_nav_thread_traces_only_the_branch_you_are_in(tmp_path) -> None:
     assert "on-path" not in other
 
 
-def test_tabs_lift_the_top_level_into_the_header(tmp_path) -> None:
-    """A 129-page tree in one scroller is a list; split at the top it is a shape."""
+def test_the_switcher_lifts_the_top_level_into_the_header(tmp_path) -> None:
+    """A 237-page tree in one scroller is a list; split at the top it is a shape.
+
+    The top level used to be a row of tabs under the bar. Twelve of them
+    overflowed every viewport into a scroller whose scrollbar was hidden, so on
+    a phone there were sections a reader had no way to discover. It is one
+    disclosure now, which costs a slot in the bar rather than a second row.
+    """
     _threaded_nav_site(tmp_path)              # tabs="auto", three top-level entries
     html = (tmp_path / "out" / "guides" / "a.html").read_text()
-    tabs = html.split('<nav class="tabs"')[1].split("</nav>")[0]
-    assert tabs.count("<a ") == 3 and 'class="active"' in tabs
+    menu = html.split('<div class="sections-menu">')[1].split("</div>")[0]
+    assert menu.count("<a ") == 3 and 'class="active"' in menu
     # ... and the sidebar then shows only the section you are inside.
     nav = html.split('<nav class="side"')[1].split("</nav>")[0]
     assert "Deep" in nav and "Other" not in nav
-    assert "has-tabs" in html                 # the sticky offset grows with the row
+
+
+def test_the_switcher_names_the_section_it_is_closed_on(tmp_path) -> None:
+    """Closed, the control has to say where you are.
+
+    This is the whole reason it can replace a row of tabs. A tab row answers
+    "which section am I in" by underlining one of twelve, which only works when
+    all twelve are on screen — and with twelve they never were. The switcher
+    answers it in a word, at every width, whether or not it is open.
+    """
+    _threaded_nav_site(tmp_path)
+    html = (tmp_path / "out" / "guides" / "a.html").read_text()
+    here = html.split('<span class="sections-here">')[1].split("</span>")[0]
+    assert here == "Guides"
+
+
+def test_the_header_carries_no_second_row(tmp_path) -> None:
+    """One bar, one sticky offset.
+
+    `--header-h` is what every sticky element and every `scroll-margin-top` is
+    positioned against, and it used to be computed per page from whether a tab
+    row existed. A heading anchor landing under the header is the bug that
+    keeps coming back from that, so the row is gone and the offset is constant.
+    """
+    _threaded_nav_site(tmp_path)
+    html = (tmp_path / "out" / "guides" / "a.html").read_text()
+    assert '<nav class="tabs"' not in html
+    assert "has-tabs" not in html
 
 
 def test_a_page_outside_any_section_drops_the_sidebar(tmp_path) -> None:
@@ -1778,7 +1811,11 @@ def test_header_links_draw_only_built_in_marks(tmp_path) -> None:
     build(site, root=tmp_path)
     index = (tmp_path / "site" / "index.html").read_text()
     assert 'href="https://pypi.test/p/w"' in index
-    assert 'aria-label="Wreath on PyPI"' in index
+    # The name is *visible*, not an `aria-label` on a bare glyph. The links used
+    # to be unlabelled icons in the bar whose only name was for a screen reader,
+    # which left every sighted reader guessing at a wireframe cube; in the menu
+    # the label is on screen and is the accessible name for everyone.
+    assert ">Wreath on PyPI<" in index
     assert "<img" not in index          # a mark, not a badge fetched from a service
 
 
@@ -2004,3 +2041,339 @@ def test_capability_map_without_a_manifest_fails_strictly(tmp_path) -> None:
     assert any("capability-map" in error for error in report.errors)
     # ... and the page still renders, so a local preview shows what is wrong.
     assert "Capability map unavailable" in (tmp_path / "site" / "index.html").read_text()
+
+
+# --- the dependency plate ---------------------------------------------------
+
+
+def _plate_site(tmp_path, manifest: dict, block: str = ""):
+    """A site whose home page opens with a ```plate block."""
+    src = tmp_path / "docs"
+    (src / "guides").mkdir(parents=True)
+    (src / "agents").mkdir(parents=True)
+    (src / "agents" / "manifest.json").write_text(json.dumps(manifest))
+    (src / "index.md").write_text(block or (
+        "```plate\n"
+        "caption: One package.\n"
+        "title: Everything here is something you no longer install.\n"
+        "action: The map -> guides/widgets.md\n"
+        "```\n\nProse after the plate.\n"))
+    (src / "guides" / "widgets.md").write_text("# Holding a widget\n\ntext\n")
+    return Site(
+        name="Demo", source="docs", output="site",
+        nav=Nav(Page("Home", "index.md"),
+                Section("Guides", Page("Widgets", "guides/widgets.md"))),
+        exclude=("agents/",),
+    )
+
+
+def _plate_manifest(*names: str) -> dict:
+    return {"subsystems": [
+        {"name": "widgets", "capability": "Widgets", "replaces": list(names),
+         "guides": ["docs/guides/widgets.md"], "sources": ["src/wreath/widgets.py"]},
+    ]}
+
+
+def test_the_plate_prints_every_name_the_manifest_lists(tmp_path) -> None:
+    """The count and the list are the same fact, so they are read from one place.
+
+    A marketing block that says "155 packages" over a list of 120 is the exact
+    shape of claim this repository refuses elsewhere. The count is `len` of what
+    was rendered, so the two cannot disagree.
+    """
+    site = _plate_site(tmp_path, _plate_manifest("celery", "redis", "sqlalchemy"))
+    report = build(site, root=tmp_path)
+    assert report.ok, report.errors
+    html = (tmp_path / "site" / "index.html").read_text()
+    names = re.findall(r"<li>([^<]+)</li>", html.split('class="plate-names"')[1])
+    assert names == ["celery", "redis", "sqlalchemy"]        # and sorted
+    assert "<strong>3</strong> packages" in html
+
+
+def test_the_plate_sorts_rather_than_following_the_manifest(tmp_path) -> None:
+    """A reader comes to this block to find the packages *they* run.
+
+    Manifest order groups by subsystem, which is the right order for the
+    capability map's table and the wrong one for a flat list of a hundred and
+    fifty names: there, the only order anyone can use is the alphabet.
+    """
+    site = _plate_site(tmp_path, _plate_manifest("uvicorn", "alembic", "celery"))
+    assert build(site, root=tmp_path).ok
+    html = (tmp_path / "site" / "index.html").read_text()
+    names = re.findall(r"<li>([^<]+)</li>", html.split('class="plate-names"')[1])
+    assert names == ["alembic", "celery", "uvicorn"]
+
+
+def test_the_plate_carries_no_strikethrough_element(tmp_path) -> None:
+    """The strike is drawn, not marked up.
+
+    A hundred and fifty-five `<s>` elements are a hundred and fifty-five
+    announcements of "strikethrough" to a screen reader before the reader
+    reaches the prose. The list's label says what the names mean, once, and the
+    line through them is CSS.
+    """
+    site = _plate_site(tmp_path, _plate_manifest("celery", "redis"))
+    assert build(site, root=tmp_path).ok
+    html = (tmp_path / "site" / "index.html").read_text()
+    block = html.split('class="plate-names"')[1].split("</ul>")[0]
+    assert "<s>" not in block
+    assert "does not install" in html          # the label carries the meaning
+
+
+def test_the_plate_title_becomes_the_page_title(tmp_path) -> None:
+    """A page that opens with a plate has no `# heading` to take a title from."""
+    site = _plate_site(tmp_path, _plate_manifest("celery"))
+    assert build(site, root=tmp_path).ok
+    html = (tmp_path / "site" / "index.html").read_text()
+    assert "<title>Everything here is something you no longer install. · Demo" in html
+
+
+def test_a_plate_whose_manifest_is_missing_fails_a_strict_build(tmp_path) -> None:
+    """The block's whole claim is the length of the list.
+
+    A plate that quietly rendered no names would still look deliberate, which is
+    why an unreadable manifest is an error rather than a shorter block.
+    """
+    site = _plate_site(tmp_path, _plate_manifest("celery"))
+    (tmp_path / "docs" / "agents" / "manifest.json").write_text("{not json")
+    report = build(site, root=tmp_path)
+    assert not report.ok
+    assert any("plate" in error for error in report.errors)
+
+
+def test_a_plate_action_is_link_checked_like_any_other_link(tmp_path) -> None:
+    """A generated block does not get to skip the dead-link gate."""
+    site = _plate_site(tmp_path, _plate_manifest("celery"), block=(
+        "```plate\n"
+        "title: Gone\n"
+        "action: Nowhere -> guides/deleted.md\n"
+        "```\n"))
+    report = build(site, root=tmp_path)
+    assert not report.ok
+    assert any("deleted" in error for error in report.errors)
+
+
+def test_the_plate_names_are_shown_but_not_indexed(tmp_path) -> None:
+    """The plate must not outrank the capability map on the map's own words.
+
+    `capabilities.py` scores those package names as a low-weight alias field
+    precisely so the page that *maps* `celery` to a Wreath module beats any page
+    that merely says it. A home page carrying all hundred and fifty-five as
+    ordinary prose would win that contest, and its snippet would be a run of
+    package names with no sentence in it — a worse answer than the one the
+    reader asked for, delivered first.
+    """
+    site = _plate_site(tmp_path, _plate_manifest("celery", "redis"))
+    assert build(site, root=tmp_path).ok
+    html = (tmp_path / "site" / "index.html").read_text()
+    index = json.loads(
+        (tmp_path / "site" / "assets" / "search-index.json").read_text())
+
+    assert "celery" in html                              # shown to a reader
+    home = [page for page in index["p"] if page["u"] == "index.html"]
+    assert home, "the home page should be in the index"
+    position = index["p"].index(home[0])
+    carried = [
+        section for section in index["s"]
+        if section.get("p") == position and "celery" in json.dumps(section).lower()
+    ]
+    assert carried == [], "plate names must not reach the search index"
+
+
+# --- the preview server -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_preview_serves_through_wreaths_own_static_files(tmp_path) -> None:
+    """`wreath docs serve` runs Wreath, not `http.server`.
+
+    It used to run a `SimpleHTTPRequestHandler`, which is a strange thing for a
+    site whose config module opens by calling itself the hero dogfood — and
+    `_docs/site.py` has always described its own output as something to serve
+    with wreath's hardened `StaticFiles`. Asserting the *behaviours* rather than
+    the class: an `ETag` and a 304 are things the stdlib handler cannot produce,
+    so this fails if anyone swaps the server back.
+    """
+    from wreath._docs_cli import preview_app
+    from wreath.testing import TestClient
+
+    assert build(_site(tmp_path), root=tmp_path).ok
+    async with TestClient(preview_app(tmp_path / "site")) as client:
+        home = await client.get("/")
+        assert home.status == 200
+        assert b"<title>" in home.body
+        etag = home.header("etag")
+        assert etag
+
+        # The half the stdlib handler had no answer for: a reload of an
+        # unchanged page transfers nothing.
+        again = await client.get("/", headers={"if-none-match": etag})
+        assert again.status == 304
+
+        nested = await client.get("/guides/routing.html")
+        assert nested.status == 200
+
+
+@pytest.mark.asyncio
+async def test_the_preview_resolves_a_directory_to_its_index(tmp_path) -> None:
+    """`/guides/` must reach `guides/index.html`, which every docs tree needs.
+
+    A directory *without* an index is a 404 rather than a listing. The stdlib
+    handler listed the tree, which neither the deployed site nor `StaticFiles`
+    will ever do, so a preview that offered it was teaching a behaviour that
+    does not exist in production.
+    """
+    from wreath._docs_cli import preview_app
+    from wreath.testing import TestClient
+
+    src = tmp_path / "docs"
+    (src / "guides").mkdir(parents=True)
+    (src / "index.md").write_text("# Home\n\n[guides](guides/index.md)\n")
+    (src / "guides" / "index.md").write_text("# Guides\n\ntext\n")
+    site = Site(
+        name="Demo", source="docs", output="site",
+        nav=Nav(Page("Home", "index.md"),
+                Section("Guides", Page("Index", "guides/index.md"))),
+    )
+    assert build(site, root=tmp_path).ok
+
+    async with TestClient(preview_app(tmp_path / "site")) as client:
+        assert (await client.get("/guides/")).status == 200
+        assert (await client.get("/nowhere/")).status == 404
+
+
+def test_the_sidebar_heads_itself_with_a_link_to_the_section_index(tmp_path) -> None:
+    """A page deep in a section must have a visible way back to its landing page.
+
+    A cookbook recipe had one only by accident: the section's own landing page
+    happened to be its first nav entry, labelled "Overview", with nothing on the
+    page saying what it was the overview *of*. The route existed and did not
+    read as one. The sidebar now names the section it is showing, and the name
+    is the link.
+    """
+    _threaded_nav_site(tmp_path)
+    html = (tmp_path / "out" / "guides" / "a.html").read_text()
+    head = re.search(r'<a class="side-head" href="([^"]+)">([^<]+)</a>', html)
+    assert head, "the sidebar should be headed by its section"
+    href, label = head.groups()
+    assert label == "Guides"
+    # ... and it points at where that section starts, not at the current page.
+    assert href.endswith(".html") and not href.endswith("/a.html")
+
+
+def test_the_section_head_is_absent_where_there_is_no_section(tmp_path) -> None:
+    """A top-level page is not inside anything, so there is nothing to head."""
+    _threaded_nav_site(tmp_path)
+    html = (tmp_path / "out" / "index.html").read_text()
+    assert 'class="side-head"' not in html
+
+
+def test_the_header_links_are_named_rather_than_guessed_at(tmp_path) -> None:
+    """Bare glyphs in the bar asked the reader to guess; a menu gives them names.
+
+    Three icons drawn three different ways — a wireframe cube for PyPI, a filled
+    mark for GitHub, a half-filled circle for the theme — is what made the right
+    of the bar read as strange. An icon that needs a tooltip is not carrying its
+    meaning, so the links moved into a labelled disclosure. Only the theme
+    control stays outside it: it changes what is on screen and is used often.
+    """
+    from wreath._docs import Link, Repo
+
+    site = dataclasses.replace(
+        _site(tmp_path),
+        repo=Repo("https://github.com/you/proj"),
+        links=(Link("Demo on PyPI", "https://pypi.org/project/demo/", icon="package"),))
+    assert build(site, root=tmp_path).ok
+    html = (tmp_path / "site" / "index.html").read_text()
+
+    menu = html.split('<div class="more-menu">')[1].split("</details>")[0]
+    assert ">you/proj<" in menu                    # the repo, named
+    assert ">Demo on PyPI<" in menu                # the link, named
+    # The bar keeps search and the theme control, and nothing else loose.
+    bar = html.split('<div class="bar">')[1].split("</header>")[0]
+    assert 'id="theme-toggle"' in bar
+    assert 'class="bar-links"' not in bar          # the old loose glyph row
+
+
+# --- the preview access log -------------------------------------------------
+
+
+def _access_flags(status: int, path: str) -> int:
+    """Encode the access record exactly as the ring would, and return its flags."""
+    from wreath._docs_cli import _short
+    from wreath._flight_schema import (
+        LOG_FLAG_TRUNCATED,
+        LogArg,
+        LogArgType,
+        LogCell,
+        Severity,
+    )
+
+    cell = LogCell(
+        request_id=1, site_id=1, severity=Severity.INFO,
+        args=(LogArg(LogArgType.INT, number=status),
+              LogArg(LogArgType.STR, payload=_short(path).encode("utf-8"))),
+    )
+    return LogCell.decode(cell.encode()).flags & LOG_FLAG_TRUNCATED
+
+
+def test_every_preview_access_record_fits_one_log_cell(tmp_path) -> None:
+    """No access line may be truncated by the encoder.
+
+    A log cell gives 32 bytes to all of its arguments together. The first cut of
+    this logged method, path, status and duration; the encoder packs in
+    declaration order and stops at the first argument that does not fit, so real
+    pages logged with their status and duration silently dropped. The second cut
+    budgeted the path in *characters*, and the `…` marking a clip is three bytes
+    in UTF-8, so the very records the clipping existed to keep whole were the
+    ones that overflowed.
+
+    Both are the same defect — arithmetic on the wrong unit — and both are
+    invisible in the rendered line, which still looks like a log entry. So the
+    assertion is on the encoder's own flag, over this site's real output paths.
+    """
+    site = _site(tmp_path)
+    assert build(site, root=tmp_path).ok
+    paths = ["/" + str(p.relative_to(tmp_path / "site")).replace("\\", "/")
+             for p in (tmp_path / "site").rglob("*")
+             if p.is_file()]
+    paths += ["/", "/cookbook/recipes/serve-a-grpc-method.html", "/" + "x" * 400]
+    for path in paths:
+        assert _access_flags(200, path) == 0, f"{path!r} truncated its record"
+        assert _access_flags(404, path) == 0, f"{path!r} truncated its record"
+
+
+def test_a_clipped_path_keeps_the_end_that_identifies_it(tmp_path) -> None:
+    """A URL identifies itself at the tail, so the clip takes from the left.
+
+    Clipping the other end yields a screen of `/cookbook/recipes/` lines nobody
+    can tell apart, which is the same as not logging the path at all.
+    """
+    from wreath._docs_cli import _short
+
+    assert _short("/guides/routing.html") == "/guides/routing.html"   # fits whole
+    clipped = _short("/cookbook/recipes/serve-a-grpc-method.html")
+    assert clipped.startswith("…")
+    assert clipped.endswith("method.html")
+    assert len(clipped.encode("utf-8")) <= 21
+
+
+def test_the_preview_logs_one_line_per_request() -> None:
+    """The preview asks for a recorder, because logging rides its ring.
+
+    Without telemetry every `log.*` call stays the no-op it is before a server
+    boots, and the console shows nothing — which is exactly the state this
+    replaced.
+    """
+    import inspect
+    from pathlib import Path
+
+    from wreath import _docs_cli
+
+    source = inspect.getsource(_docs_cli._serve)
+    assert "TelemetryConfig" in source and "Mode.PULSE" in source
+    app = _docs_cli.preview_app(Path("site"))
+    assert any(
+        getattr(item[2], "after_inplace", None) is _docs_cli._log_access
+        for item in app._global_middleware
+    ), "the access hook should be registered globally"
