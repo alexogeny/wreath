@@ -141,8 +141,12 @@ def test_a_claim_of_absence_that_resolves_is_reported(tmp_path: Path) -> None:
 def test_a_claim_of_absence_that_does_not_resolve_is_clean(tmp_path: Path) -> None:
     root = _roadmap(
         tmp_path,
+        # Names a genuinely absent symbol. It used to name `apply_fleet`, which
+        # then shipped -- and the lint reported this fixture, which is the lint
+        # working: a page claiming absence for something that resolves
+        # understates what the tree does.
         "| Tenant-fleet DDL execution | Not shipped."
-        " <!-- absent: wreath.migrations.apply_fleet --> |\n",
+        " <!-- absent: wreath.infra.Stack --> |\n",
     )
     assert roadmap_lint.scan(root) == []
 
@@ -259,7 +263,7 @@ def test_prose_beneath_the_table_is_not_a_row(tmp_path: Path) -> None:
     root = _roadmap(
         tmp_path,
         "| Tenant-fleet DDL execution | Not shipped."
-        " <!-- absent: wreath.migrations.apply_fleet --> |\n"
+        " <!-- absent: wreath.infra.Stack --> |\n"
         "The Native Flight Recorder is not shipped on this list, prose says.\n",
     )
     assert roadmap_lint.scan(root) == []

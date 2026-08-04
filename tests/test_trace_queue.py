@@ -186,11 +186,20 @@ async def _drop(db: Database, schema: str) -> None:
     await db.stop()
 
 
-async def _bootstrap(db: Database, runner: JobRunner, schema: str, *, upto: int) -> None:
+async def _bootstrap(
+    db: Database, runner: JobRunner, schema: str, *, upto: int | None = None
+) -> None:
     """Apply the component's steps, stopping after `upto`.
 
+    `upto=None` applies **all** of them, which is what a test wanting a working
+    table means. Writing the current head as a literal there pinned these tests
+    to whatever the last version happened to be, so adding a step broke five
+    tests that were not about versioning at all -- the same brittleness the
+    declaration test above had, one layer down.
+
     Stopping short is how the "new build meets an older schema" case is built:
-    a deployment whose DBA has applied version 1 by hand and not yet version 2.
+    a deployment whose DBA has applied version 1 by hand and not yet the rest.
+    Pass a number only where *that* is the subject.
     """
     from wreath.schema import Component, bootstrap
 
@@ -199,7 +208,9 @@ async def _bootstrap(db: Database, runner: JobRunner, schema: str, *, upto: int)
         name=full.name,
         schema=full.schema,
         relations=full.relations,
-        steps=tuple(s for s in full.steps if s.version <= upto),
+        steps=full.steps if upto is None else tuple(
+            s for s in full.steps if s.version <= upto
+        ),
     )
     await bootstrap(db, [partial], schema=schema)
 
@@ -237,7 +248,9 @@ async def test_a_database_down_at_boot_does_not_stop_the_runner_starting() -> No
     await runner.start(supervisor)
 
     assert runner.trace_probe_errors == 1
-    assert runner._trace_column is None, "unresolved, so a later enqueue retries"
+    assert "trace_context" not in runner._columns, (
+        "unresolved, so a later enqueue retries"
+    )
     assert any("worker" in name for name in supervisor.spawned), (
         "the runner must still come up: the probe is not a precondition of work"
     )
@@ -284,8 +297,12 @@ async def test_an_older_build_runs_against_the_upgraded_jobs_schema() -> None:
     """The rolling-deploy direction, on the real component rather than a fake.
 
     `test_wreath_schema.py` proves the machinery with a synthetic component.
-    This proves the actual `jobs` component -- the first in the tree to reach
-    version 2 -- behaves the same way.
+    This proves the actual `jobs` component -- the first in the tree to grow a
+    second step -- behaves the same way.
+
+    Asserted against `target_version` rather than a literal: the subject is that
+    an older build does not *downgrade* what it meets, and which version happens
+    to be current is not part of it.
     """
     from wreath.schema import Component, bootstrap
 
@@ -294,13 +311,14 @@ async def test_an_older_build_runs_against_the_upgraded_jobs_schema() -> None:
     try:
         runner = JobRunner(db, name="work", schema=schema, concurrency=1, lease=1.0)
         full = runner.component()
-        assert await bootstrap(db, [full], schema=schema) == {"jobs": 2}
+        head = full.target_version
+        assert await bootstrap(db, [full], schema=schema) == {"jobs": head}
 
         older = Component(
             name=full.name, schema=full.schema, relations=full.relations,
             steps=(full.steps[0],),
         )
-        assert await bootstrap(db, [older], schema=schema) == {"jobs": 2}
+        assert await bootstrap(db, [older], schema=schema) == {"jobs": head}
     finally:
         await _drop(db, schema)
 
@@ -323,7 +341,7 @@ async def test_enqueue_persists_the_context_and_the_runner_restores_it() -> None
             seen["context"] = ctx.trace_context
             seen["bound"] = telemetry.outbound_context.get()
 
-        await _bootstrap(db, runner, schema, upto=2)
+        await _bootstrap(db, runner, schema)
 
         token = telemetry.outbound_context.set((_TRACEPARENT, "vendor=x"))
         try:
@@ -362,7 +380,7 @@ async def test_the_doorbell_delivers_an_empty_payload() -> None:
         async def noop(ctx):
             pass
 
-        await _bootstrap(db, runner, schema, upto=2)
+        await _bootstrap(db, runner, schema)
 
         listener = await db.acquire("write")
         try:
@@ -434,7 +452,7 @@ async def test_an_untraced_job_binds_none_not_a_hollow_pair() -> None:
         async def peek(ctx):
             seen["bound"] = telemetry.outbound_context.get()
 
-        await _bootstrap(db, runner, schema, upto=2)
+        await _bootstrap(db, runner, schema)
         await runner.enqueue("peek")
 
         claimed = await runner._claim(1)
@@ -467,10 +485,10 @@ async def test_an_enqueue_with_no_context_asks_the_database_nothing_extra() -> N
         async def noop(ctx):
             pass
 
-        await _bootstrap(db, runner, schema, upto=2)
+        await _bootstrap(db, runner, schema)
 
         await runner.enqueue("noop")
-        assert runner._trace_column is None, (
+        assert "trace_context" not in runner._columns, (
             "an untraced enqueue resolved the schema shape it had no use for"
         )
 
@@ -479,7 +497,9 @@ async def test_an_enqueue_with_no_context_asks_the_database_nothing_extra() -> N
             await runner.enqueue("noop")
         finally:
             telemetry.outbound_context.reset(token)
-        assert runner._trace_column is True, "a traced enqueue must resolve it"
+        assert runner._columns.get("trace_context") is True, (
+            "a traced enqueue must resolve it"
+        )
     finally:
         await _drop(db, schema)
 
@@ -502,7 +522,7 @@ async def test_an_unpropagated_enqueue_writes_null_not_an_empty_string() -> None
         async def noop(ctx):
             pass
 
-        await _bootstrap(db, runner, schema, upto=2)
+        await _bootstrap(db, runner, schema)
 
         job_id = await runner.enqueue("noop")
 

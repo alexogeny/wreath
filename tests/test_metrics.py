@@ -330,3 +330,40 @@ def test_a_snapshot_reporting_routes_as_none_renders() -> None:
 
     bridge = StatsDBridge(FakeProjector())
     assert bridge._lines(NullRoutes(), None) is not None
+
+
+# --- the egress subsystems that were counting into a void -----------------------------
+
+
+def test_a_cdn_purger_reports_its_counters() -> None:
+    """`dropped` is the reason `CDNPurge` counts at all.
+
+    Its failure mode is silence: the edge keeps serving stale content and
+    nothing in the application looks wrong. A counter nobody scrapes cannot do
+    the one job it was added for.
+    """
+    from wreath.response_cache import CDNPurge, Tags
+
+    purge = CDNPurge(object(), tags=Tags(secret=b"k" * 32), task="purge_tags")
+    reading = purge.counters()
+    assert reading.subsystem == "cdn_purge"
+    assert set(reading.values) == {"enqueued", "dropped"}
+
+
+def test_a_stream_registry_reports_started_against_attached() -> None:
+    # A divergence between the two means paying a model for output nobody
+    # asked for, and it is only visible if both are scraped.
+    from wreath.streams import Streams
+
+    class FakeDeclaration:
+        retain = 3600.0
+
+    class FakeLog:
+        table = "wreath_stream_chunks"
+        dropped = 0
+        declaration = FakeDeclaration()
+
+    registry = Streams(jobs=object(), log=FakeLog())  # type: ignore[arg-type]
+    reading = registry.counters()
+    assert reading.subsystem == "streams"
+    assert {"started", "attached"} <= set(reading.values)
