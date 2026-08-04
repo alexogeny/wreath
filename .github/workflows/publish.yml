@@ -16,12 +16,27 @@ name: publish
 #                When no release is cut, the reason is written to the run
 #                summary. A skipped `release` job otherwise looks identical to
 #                a broken one.
-#   2. release - (environment: publish) Guard against a duplicate tag, require a
+#   2. verify  - Lint, types, the test suite, and a strict docs build, against
+#                the exact commit being released. `release` and `pypi` both need
+#                it, so a red suite cannot cut a tag or reach the index.
+#
+#                Run *here* rather than depended on from `ci`. `ci` and
+#                `publish` are separate workflows triggered by the same push, so
+#                a `workflow_run` link would publish on whatever `ci` last
+#                reported -- including a run of a different commit, or none at
+#                all when `ci`'s own filters skipped it. A job in this workflow
+#                is unambiguously this commit.
+#   3. release - (environment: publish) Guard against a duplicate tag, require a
 #                docs/release_notes/<version>.md file, then cut the
 #                `release/vX.Y.Z` branch from the release commit, push the
 #                `vX.Y.Z` tag, and create the GitHub Release from the notes.
-#   3. pypi    - (environment: publish) Build the sdist and publish to PyPI via
-#                Trusted Publishing (OIDC, no stored token).
+#   4. wheels  - Build the manylinux wheels (x86_64 and aarch64) with
+#                cibuildwheel, so `pip install wreath` needs no C toolchain.
+#                `release` needs it too: a wheel that will not build should stop
+#                the tag, not leave one pointing at a release nobody can install.
+#   5. pypi    - (environment: publish) Build the sdist, collect the wheels, and
+#                publish both to PyPI via Trusted Publishing (OIDC, no stored
+#                token).
 #
 # The `publish` environment gates steps 2 and 3: configure it in the repo
 # settings with whatever reviewers/branch restrictions you want, and register a
@@ -187,8 +202,65 @@ jobs:
           echo "bumped=true" >> "$GITHUB_OUTPUT"
           note "Version bump: **${prev:-<none>} -> $version**. Cutting a release."
 
-  release:
+  verify:
+    # The gate that was missing. `publish` triggers on a push to main touching
+    # pyproject.toml and used to depend on nothing, so a red suite still cut a
+    # tag and pushed to PyPI -- and PyPI does not accept a re-upload of a
+    # version, so a bad release is permanent.
     needs: detect
+    if: needs.detect.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync (default 'dev' group; builds the native extension)
+        run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Ty
+        run: uv run ty check
+      - name: Tests
+        run: uv run pytest
+      - name: Build site (strict)
+        run: uv run --no-sync wreath docs check
+
+  wheels:
+    # Binary wheels, so an install does not compile four C extensions -- and, on
+    # a machine with no compiler, does not simply fail. Linux only: the reactor
+    # extension includes `<linux/io_uring.h>` unguarded, so there is no macOS or
+    # Windows wheel to build and an sdist install there fails identically.
+    needs: [detect, verify]
+    if: needs.detect.outputs.bumped == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          # GitHub's own arm64 runner, so aarch64 is built natively rather than
+          # under QEMU -- emulated builds of this much C take tens of minutes and
+          # time out more often than they finish.
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # Everything else -- interpreter, image, skips, and the import smoke test
+      # each wheel must pass -- is `[tool.cibuildwheel]` in pyproject.toml, so it
+      # is the same locally as it is here.
+      - uses: pypa/cibuildwheel@v3.2.0
+        env:
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  release:
+    needs: [detect, verify, wheels]
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
@@ -293,9 +365,10 @@ jobs:
           gh release create "$tag" "${args[@]}"
 
   pypi:
-    needs: [detect, release]
+    needs: [detect, verify, wheels, release]
     # Explicit, though a skipped `release` would skip this anyway: without it,
     # adding any future `if:` to `release` silently changes what publishes.
+    # `verify` is named here as well as on `release` for the same reason.
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
@@ -310,9 +383,16 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build --sdist
-          # Binary wheels for the native extension are a follow-up: they need
-          # cibuildwheel plus the vendored nghttp3/ngtcp2 toolchain. Until then
-          # PyPI ships the sdist and installers compile the C extension locally.
+      - name: Collect the wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Show what will be published
+        # The upload is irreversible -- PyPI does not accept a re-upload of a
+        # version -- so the manifest goes in the log before it happens.
+        run: ls -l dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
