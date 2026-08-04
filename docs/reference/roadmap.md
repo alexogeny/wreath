@@ -10,7 +10,6 @@ more than exists:
 
 | Surface | Status |
 |---|---|
-| Tenant-fleet DDL execution | Not shipped. Single-schema `apply` is available and the managed fleet *readiness* runner (`resolve_fleet`) classifies a whole directory in one metal call, but applying one artifact across many tenant schemas under fleet locking is still to land. <!-- absent: wreath.migrations.apply_fleet --> |
 | Declaring infrastructure, and applying any of it | Not shipped. [`wreath.infra`](infra.md) *reads* an application and reports what it requires — databases, object stores, egress, the listener, the wreath tables each subsystem owns, and the environment keys a settings model needs supplied — and that is deliberately the whole of it. There is no typed resource declaration surface, no Terraform-JSON emission, no live-state introspection or diff, and no `apply`; `wreath infra infer` never opens a socket and never imports a cloud SDK, and two tests assert exactly that. An inference that is subtly wrong is worse than none, because it looks authoritative, so this stage emits a plan for a person to read rather than a stack to run. <!-- absent: wreath.infra.Stack --> |
 | The rest of the MCP surface | [`wreath.mcp`](mcp.md) serves tools, resources and prompts, and the boundary in front of them: `initialize`, `ping`, `tools/*`, `resources/*` (including `subscribe`), `prompts/*` and cancellation over streamable HTTP; idle-bounded in-memory sessions; the `GET` server-to-client notification stream, one per session, carrying subscribed-resource changes and progress relayed from `wreath.progress` rather than from a second mechanism; `expose_routes` for turning selected existing routes into tools, through an explicit selector with no `all=True`, refusing a route with no docstring and carrying the route's own `AuthRequirement` through; `MCPAuth` for OAuth 2.1 protected-resource metadata, the RFC 6750 challenge naming it, and audience-bound verification that refuses a token minted for another resource; `@mcp.tool(action=...)` for per-tool Cedar authorization; `ToolRateLimit` and `MCPLimits` for the bounds; and one Flight Recorder marker per call with the arguments recorded under the existing redaction rules. **Sampling, elicitation, roots, completions and the stdio wrapper now ship too**: `sampling/createMessage` declared per tool with `@mcp.tool(sampling=...)` so it is Cedar-gated, throttled through the tool's own rate-limit bucket and recorded at the same Flight Recorder site as the call; `elicitation/create` whose requested schema is `derive_input_schema` over a dataclass's fields, whose answer is validated by the same binding layer and recorded under the same redaction, and which is declared per tool with `@mcp.tool(elicitation=...)` and gated, throttled and recorded exactly as sampling is -- a form renders inside a client UI the person already trusts, so a tool that asks for an API key is a phishing surface wearing that chrome, and being able to decline is the control social engineering is built to walk through; `roots/list` **enforced** rather than listed, confining `ToolContext.read_file` through `wreath._fsguard` beneath both `MCP(file_root=...)` and the client's declared roots; `completion/complete` answered from the values a prompt argument's `Literal`/`Enum` annotation already declared, with no second registry; and `wreath mcp stdio`, a byte relay driving the same ASGI app through the in-process transport rather than a second dispatch path. The correlation those need is bounded by `MCPLimits(max_pending_requests=..., client_request_seconds=...)`, a capability the client never advertised is refused rather than sent, cancelling a call cancels the question it asked, and ending a session fails every outstanding one. What is **not** built is `logging/setLevel`, stream resumption by `Last-Event-ID`, templated resources, and `listChanged` notifications for the three listings. Every method this revision defines but Wreath does not serve answers JSON-RPC `method not found` naming the stage it waits for, rather than failing obscurely. Dynamic client registration is not planned: it is an authorization-server endpoint, and the deployment's identity provider owns it. |
 | Passkeys as a first factor | The authenticator-app factor ships, and so does step-up: two-phase enrolment, replay-proof verification, single-use recovery codes, a pending login that is not an identity, `second_factor_at` on the session, `wreath.auth.second_factor(max_age=...)`, `context.second_factor_age` for a Cedar policy, and `DELETE /auth/2fa/{id}` guarded by a fresh factor. **WebAuthn as a second factor ships too**: registration and assertion over `second_factor_router(rp_id=...)`, `none` attestation, ES256 and Ed25519 (an RS256 authenticator is refused by name), single-use challenges bound to the user who began the ceremony, cloned-authenticator detection from the signature counter, and the user-verification outcome recorded on the session as `second_factor_uv` — see [Second factors](../guides/second-factors.md). What is **not** built is passkeys as a *first* factor: discoverable credentials and usernameless login, where a failed ceremony has no password to fall back to. Two properties are stronger than they were: replay protection now survives concurrency, because `SecondFactorStore.touch` is a conditional advance that reports whether it won and a lost advance is refused as a replay, so two requests carrying one observed code cannot both complete; and mounting `second_factor_router` while forgetting `user_router(second_factors=...)` no longer signs a user in with a password alone, since the login refuses when the account has a factor it cannot check. One known gap in what does ship: the permission manifest does not model freshness, so a route behind `@second_factor` can read as permitted there and then answer 403 — the same optimistic-chrome property the manifest already documents. **A WebAuthn challenge is now single-use unconditionally**, which used to be the second gap here: ceremony state no longer rides in the session at all, but goes to a `ChallengeStore` whose default is real, and the consuming statement is one `DELETE ... RETURNING` whose `WHERE` carries the user binding — so a mismatched attempt matches no row and costs the rightful user nothing. The `UserWarning` that stood in for this is gone with it; it could only ever name half its condition, since whether `SessionMiddleware` has a `store=` is not knowable from inside the router, and a warning nobody can act on with certainty is one people learn to ignore. `challenges=PostgresChallengeStore(db)` is what a multi-worker deployment passes; the in-process default confines a ceremony to the worker that began it, which fails closed. |
@@ -99,6 +98,49 @@ one account per member of the organisation, because `wreath.users` has no batch
 read; the ceiling (`scim_router(max_filter_scan=...)`) bounds that fan-out rather
 than removing it, and removing it means a `get_many` on the user store, again in
 that subsystem.
+
+## Tenant-fleet DDL
+
+This row has left the table: `wreath.migrations.apply_fleet` applies one
+artifact across a fleet of tenant schemas, and `generate_single_plan(fleet=True)`
+produces an artifact that can cross one.
+
+Three things embedded the schema name and all three are gone. The **catalog
+fingerprint** read `nspname` as the first column of every branch, so two
+byte-identical tenants fingerprinted differently; `_FLEET_CATALOG_SQL` blanks
+tenant-local names while keeping a foreign key into a *shared* schema named,
+since that is a fact every tenant has in common rather than a difference between
+them. The **desired image** came from a descriptor that wrote each spec's
+schema; `_registry_descriptor(fleet=True)` writes it empty. The **DDL** was
+schema-qualified; a zero-length schema now renders unqualified, and
+`apply_fleet` binds `SET LOCAL search_path` per tenant so the statements land in
+the right place — transaction-local, so nothing leaks onto a pooled connection's
+next borrower.
+
+A zero-length schema therefore *means* tenant template rather than being
+malformed, and the three native parsers that refused it say so. The table name
+is still required: an operation naming no relation is a corrupt tape however it
+was produced.
+
+The runner itself: a session advisory lock, so two deploys cannot interleave
+per-tenant transactions and leave a fleet in a state neither artifact describes;
+**one transaction per tenant**, because one spanning a thousand schemas holds
+every lock for the length of the slowest; a tenant already at the target
+**skipped rather than refused**, so a run that stopped at tenant 400 of 1000 is
+finished by re-running instead of producing 399 errors that all mean "this one
+is fine"; serial application, because concurrent DDL contends on shared catalog
+rows and the failure it produces is a deadlock partway through a fleet; and a
+per-tenant result rather than a pass rate, because a fleet run has no atomic
+answer and the shape should not pretend otherwise.
+
+Every tenant goes through the *same* guarded apply as a single-schema run — the
+five refusals are the whole safety argument of a migration, and a fleet-only copy
+would be exactly where a drift went unnoticed.
+
+`tests/migrations/test_fleet_apply.py` proves it against a live server: one
+artifact migrating three tenants into their own schemas, a re-run skipping them
+all, a stopped run finished by re-running, the lock excluding a second runner,
+and the rendered DDL naming no tenant at all.
 
 ## Cross-site request forgery for HTML form posts
 
