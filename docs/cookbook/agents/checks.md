@@ -12,9 +12,9 @@ Run them individually while you work:
 
 | Command | What it protects |
 |---|---|
-| `uv run pytest` | Behaviour — the default suite. Serial for debugging; add `-n 6` for normal checks. |
-| `uv run wreath test` | The same pytest semantics with a live per-file heat map, duration outliers, slowest tests, bounded timing history, and a default three-control mutation sample that reuses the ordinary baseline. Use `--mutant off` when debugging the runner itself. |
-| `uv run pytest -m '' -n 6` | Everything, including network, fuzz, and performance. |
+| **`uv run wreath test`** | **Behaviour — reach for this one.** Full pytest semantics, plus a live per-file heat map, duration outliers, slowest tests, bounded timing history, and a bounded mutation sample that reuses the ordinary baseline. It picks `min(8, cpu_count)` workers for you. Use `--mutant off` when debugging the runner itself. |
+| `uv run wreath test -m ''` | Everything, including network, fuzz, thesis, and performance. |
+| `uv run pytest` | The **serial** process you attach a debugger to, and nothing else. It is not the routine check: it takes no `-n` of its own, so a bare invocation runs one worker and is several times slower than the line above. |
 | `uv run ruff check .` | Lint and import hygiene. |
 | `uv run ty check` | Types. |
 | `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |

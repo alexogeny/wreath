@@ -23,6 +23,9 @@ from the repository, so it is safe to trust.
   [replay and fault injection](../recipes/fuzz-your-routes.md).
 - **[Documenting a module](documenting-a-module.md)** — the docs a new public
   module or feature must ship with, and the voice they must be in.
+- **[One name, one meaning](naming.md)** — the verbs that appear in more than
+  one subsystem, what each means, and which to reach for. Read it before adding
+  a `component()`, a storage port, a `stats()`, or a native fallback.
 
 ## Invariants to preserve
 
