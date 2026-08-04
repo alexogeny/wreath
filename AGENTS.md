@@ -264,10 +264,16 @@ uv run wreath-check --docs       # ... and a strict docs build
 uv run wreath-docs               # build the docs strictly (--serve to watch)
 uv run wreath-bench --framework wreath starlette fastapi   # installs competitors first
 
-# The individual gates, when you want one of them
-uv run wreath test             # preferred routine suite: grid, timings, auto confidence
+# The individual gates, when you want one of them.
+# ** Run the suite with `wreath test`, not with `pytest`. ** It is the routine
+# check: it picks min(8, cpu_count) workers itself, keeps pytest's semantics
+# exactly, and adds the heat map, timing history and bounded mutation
+# confidence. A bare `uv run pytest` takes no `-n` of its own, so it runs one
+# worker and is several times slower for no extra evidence.
+uv run wreath test             # THE routine suite: grid, timings, auto confidence
 uv run wreath test -m ''       # everything, including network/fuzz/performance
-uv run pytest                  # serial process for a debugger, not the routine check
+uv run wreath test -k pattern  # a subset, same runner
+uv run pytest                  # ONLY to attach a debugger to a serial process
 uv run ruff check .
 uv run ty check
 uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
@@ -535,6 +541,15 @@ say how a written test still manages to assert nothing.
 - When you add or change a public module, follow
   `docs/cookbook/agents/documenting-a-module.md`: it lists the reference page,
   guide, and recipes a change must ship with, and the voice they must be in.
+- **Before adding a verb that already exists elsewhere, read
+  `docs/cookbook/agents/naming.md`.** It is the index of the names wreath reuses
+  across subsystems -- `component()` versus `schema_claim()`, `as_dict()` versus
+  `to_json()` versus `stats()` versus `snapshot()`, the twenty storage ports, the
+  two native-dispatch idioms, and the backoff parameter translation. Every entry
+  in it is a name that had grown a second incompatible spelling, and the reason
+  the page exists is that a call site could not tell you which one you were
+  looking at. One of those spellings would have raised `TypeError` the first time
+  the collection walk reached it.
 - **The brand may be poetic; the API must stay literal.** Warm, explanatory
   prose in the framing; plain, conventional names in the code. Never theme a
   technical term (no threads/roots/kindling/leaves). Match `docs/index.md`.

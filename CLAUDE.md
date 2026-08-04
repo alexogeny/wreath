@@ -20,6 +20,7 @@ caught one accepted-then-worthless optimization.
 | The smallest correct change, end to end | [`docs/cookbook/agents/add-an-endpoint.md`](docs/cookbook/agents/add-an-endpoint.md) |
 | Proving behaviour rather than green tests | [`docs/cookbook/agents/verify-a-change.md`](docs/cookbook/agents/verify-a-change.md) |
 | The docs a new public module must ship with | [`docs/cookbook/agents/documenting-a-module.md`](docs/cookbook/agents/documenting-a-module.md) |
+| Which verb to use when one already exists elsewhere | [`docs/cookbook/agents/naming.md`](docs/cookbook/agents/naming.md) |
 | What is deliberately not shipped yet | `docs/reference/roadmap.md` |
 | Traps where the tool says "clean" and nothing ran | [`AGENTS.md`](AGENTS.md#traps-that-have-already-cost-someone-a-day) — read before a native, mutant, or worktree session |
 
@@ -31,9 +32,21 @@ underscore means implementation — use the facade that exports it.
 ## Before you say a change is done
 
 ```bash
+uv run wreath test           # the suite on its own — NOT `uv run pytest`, see below
 uv run wreath-check          # ruff, ty, pytest, native lints, map lint, trace baseline
 uv run wreath-check --docs   # ... and a strict docs build
 ```
+
+**Run the suite with `uv run wreath test`.** It keeps pytest's semantics, picks
+`min(8, cpu_count)` workers itself, and adds the heat map, timing history and
+bounded mutation confidence. A bare `uv run pytest` passes no `-n`, so it runs a
+single worker and is several times slower for strictly less evidence — reach for
+it only to attach a debugger. `wreath test -k <pattern>` and `-m ''` work as you
+would expect, so there is no reason to drop to `pytest` for a subset.
+
+`wreath-check` is the whole gate set — thirteen of them, including a full docs
+build and timed complexity probes. It is not a test runner; do not re-run it to
+read a single failure.
 
 Prefer these task entry points over a bare `uv sync --group X`: `uv sync`
 reconciles the venv to exactly the groups named and **removes everything else**,

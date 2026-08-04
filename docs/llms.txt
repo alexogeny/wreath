@@ -111,3 +111,4 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 
 - [Cookbook for agents](cookbook/agents/index.md): invariants, gates, verification discipline.
 - [The gates](cookbook/agents/checks.md): wreath-check, pytest, ruff, ty, native lints, request-trace.
+- [One name, one meaning](cookbook/agents/naming.md): the verbs wreath reuses across subsystems — `component()`/`schema_claim()`, `as_dict()`/`to_json()`/`stats()`/`snapshot()`, the twenty storage ports, the two native-dispatch idioms, and the backoff parameter translation.
