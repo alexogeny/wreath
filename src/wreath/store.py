@@ -223,13 +223,18 @@ class Keyed:
             )
         return tuple(parts)
 
-    def component(self, *, name: str) -> Any:
+    def schema_claim(self, name: str) -> Any:
         """This declaration's claim on the wreath schema, under `name`.
 
         `name` is the caller's because one `Keyed` shape backs three different
         subsystems -- sessions, rate limits, idempotency -- and each needs its own
         version marker and its own advisory lock. Sharing one would make an
         upgrade to sessions block a worker that only uses rate limits.
+
+        Not `component()`. That name belongs to the zero-argument protocol
+        `Wreath.schema_components` calls, and this needs an argument, so an
+        object that reached the walk holding *this* method would have raised
+        `TypeError` rather than contributing a claim. Two layers, two names.
         """
         from .schema import Component, Step
 
@@ -530,9 +535,9 @@ class PostgresStore:
             raise ValueError(f"no SQL named {name!r} on this store")
         return entry
 
-    def component(self, *, name: str) -> Any:
+    def schema_claim(self, name: str) -> Any:
         """This store's claim on the wreath schema, under `name`."""
-        return self._declaration.component(name=name)
+        return self._declaration.schema_claim(name)
 
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined."""
