@@ -16,7 +16,7 @@ import threading
 # Imported by name, like `monotonic_ns` below: one global lookup, and it is only
 # reached by a response that carries background tasks.
 from asyncio import timeout as _asyncio_timeout
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from inspect import isawaitable
 from inspect import iscoroutinefunction as _iscoroutinefunction
 from time import monotonic_ns as _monotonic_ns
@@ -240,6 +240,35 @@ def _first_session_publisher(middleware: Iterable[Any]) -> Any | None:
         if getattr(item, "publishes_session", False):
             return item
     return None
+
+
+def walk_claims(holders: Iterable[Any]) -> Iterator[tuple[Any, Any, Any]]:
+    """`(holder, candidate, claim)` for everything in `holders` that owns tables.
+
+    The one walk. Collected by *asking*: anything offering `component()`
+    contributes, and a holder that delegates its tables answers `schema_owners`
+    with whatever it delegated them to.
+
+    Holder and candidate are both carried because they are not always the same
+    object -- a middleware delegates to a store, so the *claim* comes from the
+    store while the *declaration* that named a database was made about the
+    middleware. `Wreath._schema_database` consults each in turn.
+
+    This used to be written out three times: twice in this module and once in
+    `wreath.infra.inference`. They drifted, which is the whole argument for one
+    copy -- the middleware limb of the holder list reached one walk before the
+    others, so `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
+    were emitted by `wreath schema sql` and applied by nothing. Nothing
+    deduplicates here; each caller wants a different key.
+    """
+    for holder in holders:
+        for candidate in (holder, *getattr(holder, "schema_owners", ())):
+            claim = getattr(candidate, "component", None)
+            # `callable(None)` is already False, so a separate `is None` check
+            # would be the same test written twice.
+            if not callable(claim):
+                continue
+            yield holder, candidate, claim()
 
 
 #: Most distinct access clauses one route may compile to. See
@@ -806,7 +835,21 @@ class Wreath:
             One `wreath.schema.Component` per registered subsystem that owns
             tables, in registration order, deduplicated by name.
         """
-        holders: list[Any] = [
+        seen: dict[str, Any] = {}
+        for _, _, found in walk_claims(self.schema_holders()):
+            seen.setdefault(found.name, found)
+        return tuple(seen.values())
+
+    def schema_holders(self) -> tuple[Any, ...]:
+        """Everything registered that might own tables, in registration order.
+
+        The one list. `schema_components`, `_schema_owners` and
+        `wreath.infra.inference` all walk it, and while there were three copies
+        the middleware limb was present in some and missing from others -- which
+        is how `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
+        came to be emitted by `wreath schema sql` and applied by nothing.
+        """
+        return (
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
@@ -817,16 +860,7 @@ class Wreath:
             # middleware-owned table was silently never collected.
             *(item[2] for item in self._global_middleware),
             *(item[2] for item in self._middleware),
-        ]
-        seen: dict[str, Any] = {}
-        for holder in holders:
-            for candidate in (holder, *getattr(holder, "schema_owners", ())):
-                claim = getattr(candidate, "component", None)
-                if claim is None or not callable(claim):
-                    continue
-                found = claim()
-                seen.setdefault(found.name, found)
-        return tuple(seen.values())
+        )
 
     def manage_schema(self, manage: bool) -> None:
         """Whether wreath creates and upgrades its own tables. Default True.
@@ -942,27 +976,11 @@ class Wreath:
         the middleware's holder. `_schema_database` consults each in turn.
         """
         wanted = {claim.name: claim for claim in components}
-        triples: list[tuple[Any, Any, Any]] = []
-        holders: list[Any] = [
-            *self._job_runners.values(),
-            *self._message_buses.values(),
-            *self._webhook_hubs.values(),
-            *self._series_stores.values(),
-            *self._entity_registries.values(),
-            # See `schema_components`: these registries hold tuples, and the
-            # middleware is the third element.
-            *(item[2] for item in self._global_middleware),
-            *(item[2] for item in self._middleware),
+        return [
+            (holder, candidate, found)
+            for holder, candidate, found in walk_claims(self.schema_holders())
+            if wanted.pop(found.name, None) is not None
         ]
-        for holder in holders:
-            for candidate in (holder, *getattr(holder, "schema_owners", ())):
-                claim = getattr(candidate, "component", None)
-                if claim is None or not callable(claim):
-                    continue
-                found = claim()
-                if wanted.pop(found.name, None) is not None:
-                    triples.append((holder, candidate, found))
-        return triples
 
     def webhooks(self, name: str) -> Any:
         """Register one named inbound/outbound webhook hub."""
