@@ -758,3 +758,48 @@ def test_inference_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> Non
     plan = plan_for(app, settings=[(Settings, "trek.config:Settings", "TREK")])
     assert render_text(plan)
     assert json.loads(render_json(plan))
+
+
+def test_inference_reports_the_series_and_entity_tables_it_used_to_miss() -> None:
+    """Every registry `Wreath.schema_holders` walks reaches the plan.
+
+    Inference used to keep its own copy of the holder list, and that copy was
+    missing the `_series_stores` and `_entity_registries` limbs, so a settled
+    series' tables were absent from the plan for an application that really did
+    create them. The plan under-reported what a DBA had to provision, which is
+    the one direction that matters.
+
+    The expected set is written out rather than compared against
+    `app.schema_components()`. Both sides read `schema_holders` now, so
+    comparing them is a tautology that passes however wrong the list gets --
+    a literal is the only spelling that can still go red.
+    """
+    app = build()
+    app.jobs("ingest", database="main")
+    app.messaging("events", database="main")
+    app.series(database="main")
+    app.entities("things", database="main", bus="events")
+
+    plan = plan_for(app)
+    (database,) = plan.databases
+    inferred = {component.name for component in database.components}
+    assert inferred == {"jobs", "messaging", "series", "entity"}
+
+
+def test_a_series_store_is_attributed_to_the_database_it_settles_on() -> None:
+    """Two databases, and the series tables land in the declared one.
+
+    The attribution used to guess among `_db`, `_database` and `database` on
+    whatever object held the claim. It now reads the declaration the application
+    recorded, so an app with more than one database gets the right answer rather
+    than the single-database fallback -- which does not exist here.
+    """
+    app = build(main=DSN, analytics=REPLICA)
+    app.series(database="analytics")
+
+    plan = plan_for(app)
+    by_name = {database.name: database for database in plan.databases}
+    assert [c.name for c in by_name["analytics"].components] == ["series"]
+    assert by_name["main"].components == ()
+    (component,) = by_name["analytics"].components
+    assert component.declared_by == "app.series(database='analytics')"

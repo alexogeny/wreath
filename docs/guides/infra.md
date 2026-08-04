@@ -70,10 +70,11 @@ PostgreSQL (1)
     pool read           1..10
     pool write          0..10
     held write          1 of 10 for the life of the process (jobs runner 'ingest' LISTEN doorbell); 9 left for requests
-    schemas             camera_trap
+    schemas             camera_trap, wreath
     extensions          none
     application tables  9 ORM model(s); their DDL comes from wreath migrations
     wreath tables       camera_trap.jobs  (jobs, from app.jobs('ingest'))
+                        wreath.series_buckets, wreath.series_corrections  (series, from app.series(database='main'))
 
 Object storage (1)
 ------------------

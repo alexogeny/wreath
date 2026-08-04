@@ -19,6 +19,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..app import walk_claims
 from .model import (
     ConnectionBudget,
     DatabaseRequirement,
@@ -134,68 +135,44 @@ def _doorbell_holders(app: Any, database: Any) -> list[tuple[str, str]]:
     return holders
 
 
-def _schema_holders(app: Any) -> list[tuple[Any, str]]:
-    """`(holder, declared_by)` for everything the application holds.
+def _declared_by(app: Any, holder: Any) -> str:
+    """How the application came to hold `holder`, for the plan to quote.
 
-    The same set `Wreath.schema_components` walks, in the same order, including
-    the middleware tuples whose third element is the middleware itself. Each
-    carries the declaration that produced it, so the plan can say where a table
-    came from instead of only that it exists.
+    A label, not a lookup key: the plan says where a table came from instead of
+    only that it exists. Middleware is named by its class, because it was handed
+    to `add_middleware` rather than produced by a named declaration.
     """
-    holders: list[tuple[Any, str]] = []
-    for name, runner in app._job_runners.items():
-        holders.append((runner, f"app.jobs({name!r})"))
-    for name, bus in app._message_buses.items():
-        holders.append((bus, f"app.messaging({name!r})"))
-    for name, hub in app._webhook_hubs.items():
-        holders.append((hub, f"app.webhooks({name!r})"))
-    for item in (*app._global_middleware, *app._middleware):
-        holders.append((item[2], type(item[2]).__name__))
-    return holders
-
-
-def _candidates(holder: Any) -> list[Any]:
-    """The holder and anything it delegates its tables to.
-
-    `_store` is in the list because the shipped middleware do not forward a
-    `component()` of their own: `RateLimitMiddleware`, `IdempotencyMiddleware`
-    and `SessionMiddleware` each hold a store that has one, and neither exposes
-    it. `Wreath.schema_components` therefore collects none of the three, so
-    those tables are emitted and never applied -- which is the exact defect that
-    mechanism exists to prevent. Inference reads the store directly rather than
-    reproducing the omission; see `docs/guides/infra.md`.
-    """
-    return [holder, *getattr(holder, "schema_owners", ()), getattr(holder, "_store", None)]
-
-
-def _held_database(candidate: Any) -> Any:
-    """The `Database` a table-owning object holds, under any of its three names.
-
-    `JobRunner` and `MessageBus` call it `_db`, `wreath.store.PostgresStore`
-    calls it `_database`, and the webhook stores expose `database`. None of them
-    is wrong; they were simply never made to agree.
-    """
-    for attribute in ("_db", "_database", "database"):
-        held = getattr(candidate, attribute, None)
-        if held is not None and hasattr(held, "_dsn"):
-            return held
-    return None
+    for registry, call, keyword in (
+        (app._job_runners, "app.jobs", ""),
+        (app._message_buses, "app.messaging", ""),
+        (app._webhook_hubs, "app.webhooks", ""),
+        (app._entity_registries, "app.entities", ""),
+        # Keyed by the database it settles on rather than by a name of its own,
+        # because one pair of tables serves every sealed view on a database.
+        (app._series_stores, "app.series", "database="),
+    ):
+        for name, held in registry.items():
+            if held is holder:
+                return f"{call}({keyword}{name!r})"
+    return type(holder).__name__
 
 
 def _component_owners(app: Any) -> list[tuple[Any, Any, str]]:
     """`(database, component, declared_by)` for every subsystem that owns tables.
 
-    Deliberately *not* `Wreath._components_by_database`. That method looks for a
-    `_database` or `database` attribute on the holder, and a `JobRunner` calls
-    its database `_db`, so it falls through to the "exactly one database" case
-    and **raises** on an application with two -- even though `app.jobs(database=)`
-    named one explicitly. Inference must not inherit a refusal that the
-    declaration it is reading already answers, so each holder is asked what it
-    holds and the single-database fallback is kept only for the ones that
-    genuinely have no database, such as a webhook hub handed a session per call.
+    The holder walk is `wreath.app.walk_claims`, shared with
+    `Wreath.schema_components`, and the attribution is `Wreath._schema_database`.
+    Inference used to own a third copy of the walk plus a `_held_database` that
+    guessed among `_db`, `_database` and `database`, because the subsystems had
+    never been made to agree on a name. Both are gone: an owner now *says* which
+    database it belongs to, either because the application recorded the
+    declaration that built it or because it answers `schema_database`, so there
+    is nothing left to guess at and no fourth name to miss when one is added.
 
-    A claim that cannot be attributed comes back with `None` rather than being
-    dropped: those tables still have to exist somewhere, and an application with
+    The single-database fallback is kept only for owners that genuinely hold no
+    database -- a webhook hub is handed a session per call and never sees one.
+    A claim that still cannot be attributed comes back with `None` rather than
+    being dropped: those tables have to exist somewhere, and an application with
     two databases and a webhook inbox is a real, unresolved question rather than
     an empty answer. `_database_requirements` turns it into a gap.
     """
@@ -203,18 +180,12 @@ def _component_owners(app: Any) -> list[tuple[Any, Any, str]]:
     only = databases[0] if len(databases) == 1 else None
     found: list[tuple[Any, Any, str]] = []
     seen: set[str] = set()
-    for holder, declared in _schema_holders(app):
-        for candidate in _candidates(holder):
-            # `callable(None)` is already False, so a separate `is None`
-            # check would be the same test written twice.
-            claim = getattr(candidate, "component", None)
-            if not callable(claim):
-                continue
-            component = claim()
-            if component.name in seen:
-                continue
-            seen.add(component.name)
-            found.append((_held_database(candidate) or only, component, declared))
+    for holder, candidate, component in walk_claims(app.schema_holders()):
+        if component.name in seen:
+            continue
+        seen.add(component.name)
+        database = app._schema_database(holder, candidate) or only
+        found.append((database, component, _declared_by(app, holder)))
     return found
 
 
