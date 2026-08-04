@@ -21,6 +21,7 @@ import time
 import pytest
 
 import wreath._auth.jwt as jwt_module
+import wreath._b64 as b64_module
 from wreath.auth import (
     JwtVerifier,
     RsaPublicKey,
@@ -73,8 +74,14 @@ def _verifier(**overrides) -> JwtVerifier:
 def test_the_pure_base64url_fallback_rejects_discarded_characters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stdlib silently discards ``!`` unless Wreath checks first."""
-    monkeypatch.setattr(jwt_module, "_native_b64", None)
+    """The stdlib silently discards ``!`` unless Wreath checks first.
+
+    Patched on `wreath._b64` rather than on this module: the decoder lives
+    there now, and `wreath._auth.jwt` imports it. It used to be a second copy
+    here with its own native binding, and the two were identical -- same cap,
+    same alphabet, same message.
+    """
+    monkeypatch.setattr(b64_module, "_native_b64url", None)
 
     with pytest.raises(ValueError, match="invalid base64url"):
         jwt_module._b64url_decode("YWJj!")

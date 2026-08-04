@@ -24,7 +24,6 @@ is still deferred per the C-first directive.
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import hmac
 import json
@@ -32,6 +31,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._b64 import B64URL_ALPHABET
+from .._b64 import b64url_decode as _b64url_decode
 from .._native import _core
 from ._ecverify import on_p256_curve, verify_ed25519, verify_es256
 from .models import Identity
@@ -39,7 +40,6 @@ from .models import Identity
 # Resolve the native accelerators once, tolerating a _core built before jose.c
 # existed (each falls back to a stdlib implementation below). Mirrors the Cedar
 # engine's getattr-with-None-fallback selection.
-_native_b64 = getattr(_core, "jose_b64url_decode", None) if _core is not None else None
 _native_parse = getattr(_core, "jose_parse", None) if _core is not None else None
 _native_hs = getattr(_core, "jose_verify_hs", None) if _core is not None else None
 _native_claims = getattr(_core, "jose_validate_claims", None) if _core is not None else None
@@ -84,9 +84,14 @@ _MAX_TOKEN_BYTES = 1 << 20
 #: strings authenticating as one token under `WREATH_PURE=1` and refused by the
 #: native build, which is exactly the sort of divergence a deployment that
 #: blocklists a leaked token by its value discovers the hard way.
-_B64URL_SEGMENT = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-)
+#:
+#: `_parse_compact` is the only reader: `_b64url_decode` applies the same set
+#: itself. Both now come from `wreath._b64`, which is where this module's own
+#: strict decoder was lifted to so the session cookie and the WebAuthn payloads
+#: could share it. For a while the lift-out happened and this module was not
+#: switched over, so one decoder shipped as two -- the exact drift the shared
+#: copy exists to prevent.
+_B64URL_SEGMENT = B64URL_ALPHABET
 
 
 class JwtError(Exception):
@@ -290,36 +295,6 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 # Primitive helpers: native when available, stdlib fallback otherwise.
 # ---------------------------------------------------------------------------
-
-
-def _b64url_decode(data: str) -> bytes:
-    """Decode one unpadded base64url string, as strictly as native `jose.c`.
-
-    Native `jose_b64url_decode` documents itself "strict, unpadded, URL-safe" and
-    raises `ValueError` on anything else. The stdlib is none of those three:
-    `urlsafe_b64decode` re-pads, translates `-`/`_` to `+`/`/` and then accepts
-    `+`/`/` as input too, and discards characters outside the alphabet entirely.
-
-    So the fallback used to accept key material the shipped build refuses -- and
-    because `-` and `+` decode to the same six bits, two different spellings of one
-    JWK produced the *same* key. `_B64URL_SEGMENT`'s comment describes this hazard
-    for token segments, where `_parse_compact` guards against it; this is the
-    general case, reached by `key_from_jwk` and `peek_header`, which do no
-    segment-level charset check of their own. Found by differentially testing the
-    two twins over generated input rather than by a failing test.
-    """
-    if _native_b64 is not None:
-        return _native_b64(data)
-    if len(data) > _MAX_TOKEN_BYTES:
-        raise ValueError("base64url input too large")
-    if not _B64URL_SEGMENT.issuperset(data):
-        raise ValueError("invalid base64url")
-    try:
-        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-    except binascii.Error:
-        # A length one more than a multiple of four: in the alphabet, still not a
-        # base64 string. Native reports it the same way.
-        raise ValueError("invalid base64url") from None
 
 
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
