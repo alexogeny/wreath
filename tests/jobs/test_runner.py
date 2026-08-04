@@ -1011,6 +1011,7 @@ async def test_priority_rides_the_row_and_orders_the_claim():
     async def send(ctx):
         pass
 
+    runner._columns["priority"] = True
     await runner.enqueue("send", priority=7)
     insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
     assert insert[7] == 7
@@ -1019,9 +1020,59 @@ async def test_priority_rides_the_row_and_orders_the_claim():
 async def test_the_claim_is_ordered_by_priority_then_run_at():
     db = FakeDatabase()
     runner = _runner(db)
+    runner._columns["priority"] = True  # as `start` resolves it
     await runner._claim(1)
     claim = next(sql for sql, _ in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql)
     assert "ORDER BY priority DESC, run_at" in claim
+
+
+async def test_the_claim_degrades_when_the_column_is_absent():
+    """A schema without the version-3 column must not stop the queue.
+
+    Naming a missing column in the claim would fail every poll, which turns a
+    schema step nobody has applied yet into an outage rather than a feature
+    that is not there.
+    """
+    db = FakeDatabase()
+    runner = _runner(db)
+    runner._columns["priority"] = False
+    await runner._claim(1)
+    claim = next(sql for sql, _ in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql)
+    assert "ORDER BY run_at" in claim
+    assert "priority" not in claim
+
+
+async def test_a_priority_against_a_schema_without_the_column_is_refused():
+    # Silently unprioritising would let a caller believe a job was ordered.
+    db = FakeDatabase()
+    runner = _runner(db)
+    runner._columns["priority"] = False
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    with pytest.raises(RuntimeError, match="has no priority column"):
+        await runner.enqueue("send", priority=5)
+
+
+async def test_a_default_enqueue_never_names_priority_and_never_probes():
+    """The common path pays nothing for a column it does not use.
+
+    The column has a server-side DEFAULT, so omitting it writes the same row --
+    and probing would put a catalog read on every first enqueue.
+    """
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    await runner.enqueue("send")
+    insert = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    assert "priority" not in insert
+    assert "priority" not in runner._columns
 
 
 async def test_the_default_priority_is_zero_so_nothing_reorders_itself():
@@ -1032,9 +1083,11 @@ async def test_the_default_priority_is_zero_so_nothing_reorders_itself():
     async def send(ctx):
         pass
 
-    await runner.enqueue("send")
-    insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
-    assert insert[7] == 0
+    runner._columns["priority"] = True
+    await runner.enqueue("send", priority=0)
+    insert = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    # priority=0 is the default, so it is omitted rather than written.
+    assert "priority" not in insert
 
 
 async def test_a_repeated_key_drops_by_default():

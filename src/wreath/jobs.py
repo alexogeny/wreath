@@ -246,7 +246,9 @@ class JobRunner:
         _telemetry.propagates()
         #: Whether this database's `jobs` table has the version-2 column. `None`
         #: until the first enqueue asks; see `_carries_trace`.
-        self._trace_column: bool | None = None
+        #: Column-presence answers, resolved once and shared by the enqueue
+        #: and claim paths.
+        self._columns: dict[str, bool] = {}
         # Runtime (set at start()):
         self._supervisor: Any = None
         # One waiter per worker, not one shared Event. A shared Event is
@@ -632,42 +634,49 @@ class JobRunner:
 
     # -- enqueue -------------------------------------------------------------
 
-    async def _carries_trace(self) -> bool:
-        """Whether this database's `jobs` table has the version-2 column.
+    async def _carries(self, column: str) -> bool:
+        """Whether this database's `jobs` table has `column`. Cached per runner.
 
-        Asked once per runner and cached. A deployment whose role cannot
-        `CREATE SCHEMA` applies the DDL by hand, so there is always a window
-        where this build is newer than what the DBA has applied -- and an
-        `INSERT` naming a column that is not there fails the *enqueue*. Turning
-        an observability feature into a queue outage is the wrong trade, so the
-        shape of the table is a precondition this checks rather than an error it
-        catches: a broad `except` here would swallow a revoked grant and a
-        genuine driver fault alongside the one case it means to survive, and
-        inside a caller's `tx` it would poison their transaction as well.
+        A deployment whose role cannot `CREATE SCHEMA` applies the DDL by hand,
+        so there is always a window where this build is newer than what the DBA
+        has applied -- and a statement naming a column that is not there fails
+        the *enqueue*. Turning a schema step into a queue outage is the wrong
+        trade, so the shape of the table is a precondition this checks rather
+        than an error it catches: a broad `except` here would swallow a revoked
+        grant and a genuine driver fault alongside the one case it means to
+        survive, and inside a caller's `tx` it would poison their transaction.
 
         Cheap enough to leave unlocked. Two concurrent first-enqueues may both
         ask; the read is idempotent and they agree.
+
+        Parameterised by column rather than written once per column: the
+        catalog query underneath is `_pgcatalog.column_exists`, which this used
+        to restate inline -- a fifth spelling of a query the tree already had.
         """
-        if self._trace_column is None:
+        known = self._columns.get(column)
+        if known is None:
             connection = await self._db.acquire(self._workload)
             try:
-                self._trace_column = bool(
-                    await connection.fetchval(
-                        "SELECT true FROM pg_attribute a "
-                        "JOIN pg_class k ON k.oid = a.attrelid "
-                        "JOIN pg_namespace n ON n.oid = k.relnamespace "
-                        # `::text` because `nspname` is `name`: without the cast
-                        # PostgreSQL infers the parameter as `name` too, which
-                        # the driver cannot encode. `wreath-sql-lint` SQL002.
-                        "WHERE n.nspname = $1::text AND k.relname = 'jobs' "
-                        "AND a.attname = 'trace_context' "
-                        "AND a.attnum > 0 AND NOT a.attisdropped",
-                        self._schema,
-                    )
+                known = await column_exists(
+                    connection, schema=self._schema, table="jobs", column=column
                 )
             finally:
                 await self._db.release(self._workload, connection)
-        return self._trace_column
+            self._columns[column] = known
+        return known
+
+    async def _carries_trace(self) -> bool:
+        """Whether the version-2 trace column is present."""
+        return await self._carries("trace_context")
+
+    async def _carries_priority(self) -> bool:
+        """Whether the version-3 priority column is present.
+
+        Read on the enqueue path *and* resolved at `start` for the claim loop,
+        because the claim orders by it and a claim that named a missing column
+        would stop the queue rather than degrade it.
+        """
+        return await self._carries("priority")
 
     async def enqueue(
         self,
@@ -735,29 +744,49 @@ class JobRunner:
             if coalesce
             else "DO NOTHING"
         )
+        # The default enqueue never names `priority` and therefore never probes
+        # for it: the column has a server-side DEFAULT, so omitting it writes
+        # the same row, and a probe on the common path would put a catalog read
+        # on an enqueue that has no use for the answer. Only a caller that
+        # actually asks for an ordering pays for one, once.
+        has_priority = bool(priority) and await self._carries_priority()
+        if priority and not has_priority:
+            # Dropping a requested ordering silently would let a caller believe
+            # a job was prioritised when the column to hold it does not exist.
+            raise RuntimeError(
+                f"priority={priority} was requested but this database's jobs table "
+                "has no priority column; apply the schema step (wreath schema sql "
+                "--component jobs) or drop the argument"
+            )
+        columns = "priority, " if has_priority else ""
         if parent is not None and await self._carries_trace():
             sql = (
                 f"INSERT INTO {self._table} AS j "
                 "(queue, task, args, tenant, state, run_at, max_attempts, "
-                "dedup_key, priority, trace_context) "
+                f"dedup_key, {columns}trace_context) "
                 "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), "
-                "$6, $7, $9, $8) "
+                f"$6, $7, {'$9, ' if has_priority else ''}$8) "
                 "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
                 f"{conflict} RETURNING id"
             )
             params = (
-                self._name, task, payload, tenant, run_at, max_att, dk, parent, priority,
+                self._name, task, payload, tenant, run_at, max_att, dk, parent,
+                *((priority,) if has_priority else ()),
             )
             return await self._insert(sql, params, tx)
         sql = (
             f"INSERT INTO {self._table} AS j "
-            "(queue, task, args, tenant, state, run_at, max_attempts, dedup_key, "
-            "priority) "
-            "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), $6, $7, $8) "
+            "(queue, task, args, tenant, state, run_at, max_attempts, dedup_key"
+            f"{', priority' if has_priority else ''}) "
+            "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), $6, $7"
+            f"{', $8' if has_priority else ''}) "
             "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
             f"{conflict} RETURNING id"
         )
-        params = (self._name, task, payload, tenant, run_at, max_att, dk, priority)
+        params = (
+            self._name, task, payload, tenant, run_at, max_att, dk,
+            *((priority,) if has_priority else ()),
+        )
         return await self._insert(sql, params, tx)
 
     async def _insert(self, sql: str, params: tuple[Any, ...], tx: Any) -> int | None:
@@ -979,6 +1008,7 @@ class JobRunner:
         # a silent degradation is the shape this repository treats as a defect.
         try:
             await self._carries_trace()
+            await self._carries_priority()
         except (PostgresError, OSError):
             self.trace_probe_errors += 1
         # A dedicated held connection for the NOTIFY doorbell (never leased back
@@ -1518,11 +1548,16 @@ class JobRunner:
         # `enqueue` on a producer, which between them cover every process that
         # can reach this line. Unknown means "do not select it": a runner that
         # never started and never enqueued has no context to carry anyway.
-        trace = ", j.trace_context" if self._trace_column else ""
+        trace = ", j.trace_context" if self._columns.get("trace_context") else ""
+        # A schema without the version-3 column cannot be ordered by it, and
+        # a claim that named it would stop the queue rather than degrade it.
+        order = (
+            "priority DESC, run_at" if self._columns.get("priority") else "run_at"
+        )
         sql = (
             f"WITH claimable AS ( SELECT id FROM {self._table} "
             "WHERE queue=$1 AND state='ready' AND run_at <= now() "
-            "ORDER BY priority DESC, run_at FOR UPDATE SKIP LOCKED LIMIT $2 ) "
+            f"ORDER BY {order} FOR UPDATE SKIP LOCKED LIMIT $2 ) "
             f"UPDATE {self._table} j SET state='leased', owner=$3, "
             "lease_expiry = now() + ($4 || ' seconds')::interval, "
             "fence = j.fence + 1, updated_at=now() FROM claimable c WHERE j.id=c.id "
