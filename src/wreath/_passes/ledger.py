@@ -180,13 +180,18 @@ def statements(schema: str) -> tuple[str, ...]:
     )
 
 
-def component(schema: str) -> Any:
+def schema_claim(schema: str) -> Any:
     """The pass ledger's claim on the wreath schema.
 
     The ledger, its dead-letter table, and the append-only rewrite record are
     fleet machinery -- they record what a *deployment* did, not what a tenant's
     data is -- so they live in the `wreath` schema and never appear in the
     application's migration artifact.
+
+    A module-level factory rather than a `component()` method, because the
+    ledger has no holder object for the collection walk to ask; `schema_claim`
+    is the name every "build a claim, given a name or a schema" callable in the
+    tree carries, leaving `component()` to mean only the zero-argument protocol.
     """
     from ..schema import Component, Step
 
@@ -230,7 +235,7 @@ async def has_trace_column(executor: Any, *, schema: str) -> bool:
 
 def schema_sql(schema: str) -> str:
     """The ledger DDL, semicolon-joined. A derivation of `statements`."""
-    return component(schema).sql()
+    return schema_claim(schema).sql()
 
 
 _COLUMNS = (

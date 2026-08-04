@@ -283,7 +283,7 @@ class TestTheSchemaMayBeOlderThanTheBuild:
         Rewriting it would change what an already-bootstrapped database was told
         it had, and `wreath.schema` records the version rather than the DDL.
         """
-        component = _ledger.component("wreath")
+        component = _ledger.schema_claim("wreath")
         first = next(step for step in component.steps if step.version == 1)
         assert not any("trace_context" in s for s in first.statements)
         assert component.target_version == 2
@@ -324,7 +324,7 @@ async def test_a_pass_carries_its_trace_across_shifts_against_a_live_server() ->
         try:
             await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
             await connection.execute(f'CREATE SCHEMA "{schema}"')
-            for statement in _ledger.component(schema).statements():
+            for statement in _ledger.schema_claim(schema).statements():
                 await connection.execute(statement)
             await connection.execute(
                 f'CREATE TABLE "{schema}"."replays" '
