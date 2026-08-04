@@ -21,13 +21,12 @@ around routing.
 
 from __future__ import annotations
 
-import base64
 import hmac
 import time
 from secrets import token_urlsafe
 from typing import Any
 
-from .._b64 import b64url_decode
+from .._b64 import b64url_decode, b64url_encode
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from ..request import Request
@@ -211,10 +210,17 @@ class SessionMiddleware:
         )
 
     def _sign(self, payload: bytes, issued_at: int) -> str:
-        body = base64.urlsafe_b64encode(payload).rstrip(b"=")
+        # `b64url_encode` answers in `str` and the HMAC needs `bytes`, so this
+        # trades the stdlib encode/rstrip/decode chain for a native call plus
+        # one ascii encode of a short string. That is not obviously a win, so it
+        # was measured over the whole `_sign` rather than over the encode:
+        # against an A/A floor of 0.15-1.29%, three runs gave 3.6-4.9% on a
+        # 94-byte payload, 5.9-7.1% on 142, 16.6-17.1% on 302 and 31.9-32.6% on
+        # 1070. The extra encode is real and the chain it replaces is bigger.
+        body = b64url_encode(payload)
         stamp = str(issued_at).encode("ascii")
-        mac = hmac.new(self._secret, body + b"." + stamp, "sha256").hexdigest()
-        return f"{body.decode('ascii')}.{issued_at}.{mac}"
+        mac = hmac.new(self._secret, body.encode("ascii") + b"." + stamp, "sha256").hexdigest()
+        return f"{body}.{issued_at}.{mac}"
 
     def _secrets(self) -> tuple[bytes, ...]:
         """Every secret a cookie may verify under, current one first."""

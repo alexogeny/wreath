@@ -129,7 +129,7 @@ class PostgresSessionStore:
         what the additive rule exists to prevent. So the component is registered
         where the rows actually are, and a move is a later, staged concern.
         """
-        return self._store.component(name="session")
+        return self._store.schema_claim("session")
 
     @property
     def schema_database(self) -> Any:
