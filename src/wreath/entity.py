@@ -239,9 +239,9 @@ class Ownership:
         """How long a claim survives without renewal."""
         return self._lease
 
-    def component(self, *, name: str = "entity") -> Any:
+    def component(self) -> Any:
         """This registry's claim on the wreath schema."""
-        return self._store.component(name=name)
+        return self._store.schema_claim("entity")
 
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined."""
