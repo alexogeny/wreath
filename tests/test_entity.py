@@ -62,6 +62,19 @@ class FakeOwnershipDB:
     async def acquire(self, workload: str) -> FakeOwnershipDB:
         return self
 
+    async def execute(self, sql: str, *args: Any) -> str:
+        """The ad-hoc `release_many` statement, which is not a prepared one.
+
+        It cannot be: the predicate is `IN ($2, $3, ...)` with one placeholder
+        per name, because the driver refuses to bind a sequence.
+        """
+        assert "DELETE FROM" in sql and " IN (" in sql, sql
+        owner, *names = args
+        gone = [k for k in names if k in self.rows and self.rows[k]["owner"] == owner]
+        for key in gone:
+            del self.rows[key]
+        return f"DELETE {len(gone)}"
+
     async def release(self, workload: str, connection: Any) -> None:
         return None
 
@@ -108,15 +121,6 @@ class FakeStatement:
         if self.name == "release_all":
             owner = args[0]
             gone = [k for k, r in self.db.rows.items() if r["owner"] == owner]
-            for key in gone:
-                del self.db.rows[key]
-            return f"DELETE {len(gone)}"
-        if self.name == "release_many":
-            owner, names = args
-            gone = [
-                k for k in names
-                if k in self.db.rows and self.db.rows[k]["owner"] == owner
-            ]
             for key in gone:
                 del self.db.rows[key]
             return f"DELETE {len(gone)}"

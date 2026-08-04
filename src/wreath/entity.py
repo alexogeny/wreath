@@ -144,7 +144,7 @@ class Ownership:
     made that argument for keyed state; this is the same argument for names.
     """
 
-    __slots__ = ("_database", "_lease", "_owner", "_store")
+    __slots__ = ("_database", "_lease", "_owner", "_store", "_table")
 
     def __init__(
         self,
@@ -163,6 +163,7 @@ class Ownership:
         #: Kept so `wreath infra infer` can name the database this table
         #: lands in; it reads `database` off a table-owning object.
         self._database = database
+        self._table = table
         self._store = PostgresStore(
             database,
             Keyed(
@@ -215,10 +216,6 @@ class Ownership:
         self._store.define(
             "release_all",
             f"DELETE FROM {table} WHERE owner = $1",
-        )
-        self._store.define(
-            "release_many",
-            f"DELETE FROM {table} WHERE owner = $1 AND name = ANY($2::text[])",
         )
         self._store.define(
             "holder",
@@ -304,12 +301,28 @@ class Ownership:
         return rows_affected(status) or 0
 
     async def release_many(self, names: Sequence[str]) -> int:
-        """Give up the named leases this process holds, in one statement."""
-        if not names:
+        """Give up the named leases this process holds, in one statement.
+
+        The predicate is `IN ($2, $3, ...)` with one placeholder per name, not
+        `= ANY($1)` with an array: the driver refuses to bind a sequence, on
+        purpose -- `[1, 2]` is equally `int4[]`, `int8[]` or `numeric[]`, and
+        `[]` names no element type at all. So this is built per call rather than
+        prepared. That costs a plan, and the alternative costs a round trip per
+        name; this path runs only when a grace period expires, where the list is
+        short and the calls are rare.
+        """
+        keys = list(names)
+        if not keys:
             return 0
-        status = await self._store.statement("release_many").execute(
-            self._owner, list(names)
-        )
+        placeholders = ", ".join(f"${index + 2}" for index in range(len(keys)))
+        connection = await self._database.acquire("write")
+        try:
+            status = await connection.execute(
+                f"DELETE FROM {self._table} WHERE owner = $1 AND name IN ({placeholders})",
+                self._owner, *keys,
+            )
+        finally:
+            await self._database.release("write", connection)
         return rows_affected(status) or 0
 
     async def purge(self) -> str:
