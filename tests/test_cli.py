@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _metal import requires_metal
 
 from wreath import cli
 from wreath._cli import (
@@ -327,7 +328,11 @@ def _read_line(stream: Any, timeout: float) -> str:
     return box[0] if box else ""
 
 
-@pytest.mark.parametrize("loop", ["asyncio", "metal"])
+# Only the `metal` case needs the reactor; the `asyncio` case is the one that
+# proves the console script works at all, and it runs everywhere.
+@pytest.mark.parametrize(
+    "loop", ["asyncio", pytest.param("metal", marks=requires_metal)]
+)
 def test_the_console_script_serves_an_app_from_the_working_directory(
     tmp_path: Path, loop: str
 ) -> None:
