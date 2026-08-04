@@ -177,3 +177,71 @@ def test_a_password_record_round_trips() -> None:
     record = hash_password("correct horse battery staple")
     assert verify_password("correct horse battery staple", record)
     assert not verify_password("wrong", record)
+
+
+# --- the encode half ---------------------------------------------------------
+
+#: Both arms by name. Not a `monkeypatch` of the selection: the arm is chosen at
+#: import, so a test that nulls `_native_encode` afterwards is asserting that the
+#: patch ran rather than that the twin is correct.
+ENCODE_ARMS = [
+    pytest.param(_b64._b64url_encode_pure, _b64._b64_encode_pure, id="pure"),
+    pytest.param(
+        _b64._b64url_encode_native,
+        _b64._native_encode,
+        id="native",
+        marks=pytest.mark.skipif(
+            _b64._native_encode is None, reason="no native _core"
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
+def test_both_encode_arms_agree_at_every_length(url_arm, std_arm) -> None:
+    """The differential test for the direction added second.
+
+    Lengths 0..256 cover every residue mod 3 many times over, which is where an
+    encoder's tail -- the one and two leftover bytes that decide how much
+    padding there would have been -- goes wrong. The native arm switches from
+    its AVX2 body to a scalar tail inside this range, so the boundary is
+    covered rather than assumed.
+    """
+    for n in range(257):
+        raw = bytes((i * 37 + 11) % 256 for i in range(n))
+        expected = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        assert url_arm(raw) == expected, f"unpadded base64url wrong at {n}"
+        assert std_arm(raw) == base64.b64encode(raw).decode("ascii"), f"padded wrong at {n}"
+
+
+@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
+def test_the_encoders_round_trip_through_the_strict_decoder(url_arm, std_arm) -> None:
+    """`b64url_encode` must produce something `b64url_decode` accepts.
+
+    Not a tautology: the decoder refuses padding, so an encoder that left the
+    `=` on would produce values its own module could not read back. That is
+    exactly the shape of the bug the two halves living apart used to invite.
+    """
+    for n in range(130):
+        raw = bytes((i * 53 + 7) % 256 for i in range(n))
+        assert b64url_decode(url_arm(raw)) == raw
+
+
+@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
+def test_b64url_encode_never_emits_padding_or_the_standard_alphabet(
+    url_arm, std_arm
+) -> None:
+    """The two properties every caller depends on, asserted against both arms."""
+    for n in range(1, 130):
+        raw = bytes((i * 91 + 3) % 256 for i in range(n))
+        text = url_arm(raw)
+        assert "=" not in text
+        assert "+" not in text and "/" not in text
+
+
+def test_the_selected_encoders_are_one_of_the_two_arms() -> None:
+    """What the module actually exported, so the selection itself is covered."""
+    assert _b64.b64url_encode in (_b64._b64url_encode_pure, _b64._b64url_encode_native)
+    assert _b64.b64_encode in (_b64._b64_encode_pure, _b64._native_encode)
+    if HAS_NATIVE:
+        assert _b64.b64_encode is _b64._native_encode, "native build must bind native"
