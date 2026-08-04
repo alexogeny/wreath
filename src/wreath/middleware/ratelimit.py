@@ -241,7 +241,7 @@ class PostgresRateLimitStore:
         `wreath` schema is not additive, so a worker on the previous version
         would look for a name that had gone. Registered where the rows are.
         """
-        return self._store.component(name="ratelimit")
+        return self._store.schema_claim("ratelimit")
 
     @property
     def schema_database(self) -> Any:
