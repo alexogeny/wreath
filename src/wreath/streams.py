@@ -1017,6 +1017,23 @@ class Streams:
 
     # -- counters ------------------------------------------------------------
 
+    def counters(self) -> Any:
+        """This registry's counters, for `wreath.metrics.collect`.
+
+        `started` against `attached` is the pair worth watching, and a
+        divergence between them is only visible if both are scraped.
+        """
+        from .metrics import Counters
+
+        return Counters(
+            subsystem="streams",
+            # Labelled by the log it writes to: one registry per
+            # application is the common case, and two over different logs
+            # must not collapse into one series.
+            instance=str(getattr(self._log, "table", "") or "streams"),
+            values=self.stats(),
+        )
+
     def stats(self) -> dict[str, int]:
         """Every counter this registry keeps, by name.
 
