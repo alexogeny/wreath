@@ -113,7 +113,7 @@ import time
 from dataclasses import dataclass
 from typing import Final
 
-from ._b64 import b64url_decode
+from ._b64 import b64url_decode, b64url_encode
 from ._curves import P256_G, P256_N, p256_on_curve, p256_scalarmult_secret
 from ._native import _core
 
@@ -477,10 +477,9 @@ def _ecdsa_sign(private: int, digest: bytes) -> bytes:
 # --- VAPID ------------------------------------------------------------------
 
 
-def _b64(raw: bytes) -> str:
-    import base64
-
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+#: The shared encoder. This was a local copy of the stdlib chain, with the
+#: `import base64` deferred into the body to keep it off the import path.
+_b64 = b64url_encode
 
 
 @dataclass(frozen=True, slots=True)
