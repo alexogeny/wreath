@@ -653,6 +653,131 @@ class ClientSnapshot:
     reused: int
 
 
+class _StreamContext:
+    """`HttpClient.stream`'s context manager, written out rather than generated.
+
+    Written out rather than `@asynccontextmanager` because the entry and exit
+    are genuinely two operations on a held connection, and a generator that
+    suspends between them obscures that the connection is checked out for the
+    whole block.
+    """
+
+    __slots__ = ("_body", "_client", "_connection", "_headers", "_method",
+                 "_minor", "_response_headers", "_target")
+
+    def __init__(
+        self,
+        client: HTTPClient,
+        method: str,
+        target: str,
+        headers: tuple[tuple[bytes, bytes], ...],
+        body: bytes,
+    ) -> None:
+        self._client = client
+        self._method = method.upper()
+        self._target = target
+        self._headers = headers
+        self._body = body
+        self._connection: Any = None
+        self._minor = 1
+        self._response_headers: list[tuple[bytes, bytes]] = []
+
+    async def __aenter__(self) -> StreamingClientResponse:
+        # The same guard `_send_with_retries` carries, and for the same reason:
+        # the native HTTP/1 driver eagerly steps a Wreath request before it owns
+        # an asyncio Task, and `asyncio.timeout` -- which every read below is
+        # wrapped in -- requires a current task. Without this, the first
+        # streaming call *from inside a handler* dies on "Timeout should be used
+        # inside a task" while the buffered path beside it works, because that
+        # path already does this.
+        if asyncio.current_task() is None:
+            await asyncio.sleep(0)
+        client = self._client
+        if not client._started:
+            raise ClientClosed(f"HTTP client {client._name!r} is not started")
+        request = _client_codec.serialize_request(
+            self._method,
+            client._request_target(self._target),
+            client._authority().encode("ascii"),
+            headers=client._propagated(self._headers),
+            body=self._body,
+        )
+        if len(request) - len(self._body) > client._limits.max_request_header_bytes:
+            raise ClientError("request headers exceed configured limit")
+        connection = await client._acquire()
+        self._connection = connection
+        client._framed_cleanly = False
+        try:
+            connection.writer.write(request)
+            await connection.writer.drain()
+            client._requests += 1
+            minor, status, reason, headers = await client._read_head(connection.reader)
+        except (ConnectionError, OSError, asyncio.IncompleteReadError) as error:
+            await client._release(connection, False)
+            self._connection = None
+            raise _TransportError("connection failed during HTTP exchange") from error
+        self._minor = minor
+        self._response_headers = headers
+        return StreamingClientResponse(
+            status=status,
+            headers=tuple(headers),
+            http_version=f"1.{minor}",
+            reason=reason,
+            _chunks=client._iter_body(
+                connection.reader, self._method, status, headers
+            ),
+        )
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        connection = self._connection
+        if connection is None:
+            return False
+        self._connection = None
+        client = self._client
+        # Reusable only when the body reached its declared end *and* the
+        # framing allows it. A partially-read response leaves the socket
+        # mid-message, and pooling it would hand the next caller a prefix.
+        reusable = (
+            exc_type is None
+            and client._framed_cleanly
+            and client._keeps_alive(self._minor, self._response_headers, True)
+        )
+        await client._release(connection, reusable)
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingClientResponse:
+    """A response whose head has arrived and whose body has not.
+
+    Deliberately *not* a `ClientResponse`. That class documents itself as
+    "Immutable, fully buffered" and callers rely on `.body`; giving this one a
+    `.body` that sometimes worked would be worse than not having one.
+
+    Yielded by `HttpClient.stream`, and only valid inside that block.
+    """
+
+    status: int
+    headers: tuple[tuple[bytes, bytes], ...]
+    http_version: str
+    #: `bytes`, matching `ClientResponse.reason`: it is a wire field with no
+    #: declared charset, and picking one for someone else's header is how a
+    #: client starts corrupting values.
+    reason: bytes
+    _chunks: Any
+
+    def iter_bytes(self) -> Any:
+        """The body, as it arrives. Iterate once."""
+        return self._chunks
+
+    def header(self, name: bytes) -> bytes | None:
+        """The first value for `name`, or None. Names are lowercase on the wire."""
+        for key, value in self.headers:
+            if key == name:
+                return value
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ClientResponse:
     """One complete outbound response. Immutable, fully buffered.
@@ -798,6 +923,10 @@ class HTTPClient:
     __slots__ = (
         "_active",
         "_base_path",
+        #: Set by `_iter_body` when a body reached its declared end. `stream`
+        #: reads it to decide whether the connection may be pooled -- a
+        #: partially-read response leaves the socket mid-message.
+        "_framed_cleanly",
         "_condition",
         "_destination",
         "_dns_addresses",
@@ -879,6 +1008,7 @@ class HTTPClient:
         self._open = 0
         self._waiters = 0
         self._requests = 0
+        self._framed_cleanly = False
         self._reused = 0
         self._started = False
 
@@ -1013,6 +1143,53 @@ class HTTPClient:
         return await self.request(
             "POST", target, headers=headers, body=body, idempotency_key=idempotency_key
         )
+
+    def stream(
+        self,
+        method: str,
+        target: str,
+        *,
+        headers: tuple[tuple[bytes, bytes], ...] = (),
+        body: bytes | bytearray | memoryview = b"",
+    ) -> _StreamContext:
+        """Send one request and hand back the response before its body arrives.
+
+        The half `request` cannot do. `request` reads the whole body into memory
+        under `ClientLimits.max_response_bytes`, which is right for an API call
+        and impossible for a proxy, a large download, or an SSE stream that
+        never ends.
+
+        ```python
+        async with client.stream("GET", "/big") as response:
+            async for chunk in response.iter_bytes():
+                await sink.write(chunk)
+        ```
+
+        **The connection is held for the life of the block**, which is why this
+        is a context manager and not a coroutine returning a response: the body
+        is still on the socket, and releasing the connection early would hand
+        the next caller a pool entry with someone else's bytes in front of it.
+
+        A body left unread is not a bug, and the exit path handles it the only
+        safe way: the connection is closed rather than pooled. Draining an
+        unknown remainder to make it reusable would let an upstream decide how
+        long a client blocks.
+
+        **No retries and no redirects**, deliberately. Once a byte of the body
+        has been delivered the request cannot be replayed, and a streaming call
+        that silently restarted would deliver a prefix twice. Use `request` when
+        those matter; they are what it is for.
+
+        Args:
+            method: Case-insensitive; uppercased before it goes on the wire.
+            target: Origin-relative path, `/`-prefixed, ASCII/percent-encoded.
+            headers: Raw byte pairs, sent in order after the client's own head.
+            body: The request body, sent before the response is read.
+
+        Returns:
+            An async context manager yielding a `StreamingClientResponse`.
+        """
+        return _StreamContext(self, method, target, headers, bytes(body))
 
     async def request(
         self,
@@ -1564,9 +1741,100 @@ class HTTPClient:
             except (ConnectionError, OSError):
                 pass
 
-    async def _read_response(
-        self, reader: asyncio.StreamReader, method: str
-    ) -> tuple[ClientResponse, bool]:
+    async def _iter_body(
+        self,
+        reader: asyncio.StreamReader,
+        method: str,
+        status: int,
+        headers: list[tuple[bytes, bytes]],
+    ) -> Any:
+        """Yield the body as it arrives, and finish by yielding nothing.
+
+        The streaming twin of `_read_body`, framed by the same
+        `_client_codec.response_framing` call so the two cannot disagree about
+        where a body ends -- which is the disagreement a proxy turns into a
+        desync.
+
+        `max_response_bytes` is deliberately **not** applied. It exists to stop
+        a buffered read from eating the heap, and nothing is buffered here; a
+        caller streaming a 2 GB file has already said that is what it wants.
+        The bound that still applies is the caller's own: it stops iterating.
+        """
+        mode, length = _client_codec.response_framing(method, status, headers)
+        if mode == "none":
+            self._framed_cleanly = True
+            return
+        if mode == "chunked":
+            async for chunk in self._iter_chunked(reader):
+                yield chunk
+            self._framed_cleanly = True
+            return
+        if mode == "length":
+            remaining = length
+            while remaining > 0:
+                chunk = await _timed(
+                    reader.read(min(64 * 1024, remaining)), self._timeout.response_body
+                )
+                if not chunk:
+                    raise ProtocolError("upstream closed mid-body")
+                remaining -= len(chunk)
+                yield chunk
+            self._framed_cleanly = True
+            return
+        # Close-delimited: the end *is* the close, so the connection can never
+        # be reused afterwards however cleanly it ended.
+        while True:
+            chunk = await _timed(reader.read(64 * 1024), self._timeout.response_body)
+            if not chunk:
+                return
+            yield chunk
+
+    async def _iter_chunked(self, reader: asyncio.StreamReader) -> Any:
+        """Yield chunk payloads, verifying every size line and the trailers."""
+        while True:
+            line = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
+            if len(line) > 1024:
+                raise ProtocolError("response chunk line exceeds limit")
+            size_data = line[:-2].split(b";", 1)[0]
+            if not size_data or any(
+                byte not in b"0123456789abcdefABCDEF" for byte in size_data
+            ):
+                raise ProtocolError("invalid response chunk size")
+            size = int(size_data, 16)
+            if size == 0:
+                trailer_bytes = 0
+                while True:
+                    trailer = await _timed(
+                        reader.readuntil(b"\r\n"), self._timeout.response_body
+                    )
+                    trailer_bytes += len(trailer)
+                    if trailer_bytes > self._limits.max_response_header_bytes:
+                        raise ProtocolError("response trailers exceed configured limit")
+                    if trailer == b"\r\n":
+                        return
+                return
+            remaining = size
+            while remaining > 0:
+                chunk = await _timed(
+                    reader.read(min(64 * 1024, remaining)), self._timeout.response_body
+                )
+                if not chunk:
+                    raise ProtocolError("upstream closed mid-chunk")
+                remaining -= len(chunk)
+                yield chunk
+            terminator = await _timed(reader.readexactly(2), self._timeout.response_body)
+            if terminator != b"\r\n":
+                raise ProtocolError("chunk not terminated by CRLF")
+
+    async def _read_head(
+        self, reader: asyncio.StreamReader
+    ) -> tuple[int, int, bytes, list[tuple[bytes, bytes]]]:
+        """Read one final response head, discarding any 1xx that precede it.
+
+        Split out of `_read_response` so the streaming path can stop here. The
+        two must not drift: a streamed response that parsed its head by a second
+        set of rules would accept heads the buffered path refuses.
+        """
         while True:
             try:
                 head = await _timed(
@@ -1589,9 +1857,32 @@ class HTTPClient:
             if status == 101:
                 raise ProtocolError("protocol switching is not supported")
             if status >= 200:
-                break
+                return minor, status, reason, headers
 
-        body, framed = await self._read_body(reader, method, status, headers)
+    @staticmethod
+    def _keeps_alive(minor: int, headers: list[tuple[bytes, bytes]], framed: bool) -> bool:
+        """Whether this connection may go back in the pool.
+
+        Both readers use this. It was extracted for the streaming path and
+        `_read_response` was left with an inline copy of the same three lines --
+        two spellings of one condition, and the `framed` operand was dead in the
+        only caller that remained, because streaming always passes True. A
+        mutation run noticed: dropping `framed` changed no test's mind.
+
+        `framed` is False for a close-delimited body, where the end of the
+        response *is* the close, so the connection can never be reused however
+        cleanly it ended.
+
+        **That operand survives mutation, and it is redundant rather than
+        untested.** `framed` is False only for a close-delimited body, which by
+        definition ends at EOF -- and `_release` independently refuses to pool a
+        connection whose `reader.at_eof()`. So dropping the clause changes no
+        observable behaviour, and no test can distinguish it. It is kept because
+        this is where reusability is *decided* and saying "a close-delimited
+        response is reusable" here would be false; `_release`'s check is about
+        transport state, not about framing. Recorded so the next reader does not
+        spend a session re-deriving it.
+        """
         connection_tokens = {
             token.strip().lower()
             for name, value in headers
@@ -1602,9 +1893,16 @@ class HTTPClient:
         reusable = framed and b"close" not in connection_tokens
         if minor == 0:
             reusable = reusable and b"keep-alive" in connection_tokens
+        return reusable
+
+    async def _read_response(
+        self, reader: asyncio.StreamReader, method: str
+    ) -> tuple[ClientResponse, bool]:
+        minor, status, reason, headers = await self._read_head(reader)
+        body, framed = await self._read_body(reader, method, status, headers)
         return (
             ClientResponse(status, tuple(headers), body, f"1.{minor}", reason),
-            reusable,
+            self._keeps_alive(minor, headers, framed),
         )
 
     async def _read_body(
@@ -1719,6 +2017,7 @@ __all__ = [
     "ConnectError",
     "DNSFailure",
     "DestinationPolicy",
+    "StreamingClientResponse",
     "DestinationRejected",
     "HTTPClient",
     "PoolTimeout",

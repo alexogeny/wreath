@@ -13,6 +13,7 @@ import errno
 import importlib
 
 import pytest
+from _metal import requires_metal
 
 from wreath.http_client import DestinationPolicy, HTTPClient
 
@@ -68,6 +69,7 @@ def _run(loop, coro, transports):
         loop.close()
 
 
+@requires_metal
 def test_client_ingress_fuses_on_metal_loop() -> None:
     loop = _metal_loop_or_skip()
     transports: list = []
@@ -96,6 +98,7 @@ def test_client_ingress_fuses_on_metal_loop() -> None:
     assert all(t._fused_http1 is False for t in fused)
 
 
+@requires_metal
 def test_client_framing_parity_on_metal_loop() -> None:
     """Chunked with trailers, content-length, and close-delimited bodies all
     decode identically through the fused reader."""
@@ -130,6 +133,7 @@ def test_client_framing_parity_on_metal_loop() -> None:
     )
 
 
+@requires_metal
 def test_client_large_body_spans_many_reads_on_metal_loop() -> None:
     """A body far larger than one 16 KiB provided buffer arrives intact."""
     loop = _metal_loop_or_skip()
