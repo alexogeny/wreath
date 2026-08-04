@@ -24,9 +24,14 @@ import time
 import weakref
 
 import pytest
+from _metal import requires_metal
 
 import wreath.reactor as reactor
 from wreath.server import Server, ServerConfig
+
+#: Every test here drives the metal loop, so the whole module goes.
+pytestmark = requires_metal
+
 
 
 def _metal_loop(**kwargs):

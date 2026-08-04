@@ -27,6 +27,10 @@ import threading
 from pathlib import Path
 
 import pytest
+from _metal import requires_metal
+
+#: Every test here drives the metal loop, so the whole module goes.
+pytestmark = requires_metal
 
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/http2 codec
 
@@ -131,6 +135,8 @@ import sys
 import threading
 
 from wreath.server import Server, ServerConfig
+
+
 
 mode = sys.argv[1]
 if mode == "wreath":

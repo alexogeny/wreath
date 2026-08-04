@@ -21,10 +21,15 @@ import errno
 import importlib
 
 import pytest
+from _metal import requires_metal
 
 from wreath import Wreath
 from wreath.response import FileResponse
 from wreath.server import ServerConfig, serve
+
+#: Every test here drives the metal loop, so the whole module goes.
+pytestmark = requires_metal
+
 
 BODY = b"metal-sendfile-" * 512
 
