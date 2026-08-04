@@ -102,4 +102,4 @@ def render(report: Report, *, verbose: bool = False) -> str:
 
 
 def render_json(report: Report) -> str:
-    return json.dumps(report.to_json(), indent=2)
+    return json.dumps(report.as_dict(), indent=2)

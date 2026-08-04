@@ -878,7 +878,7 @@ def test_the_report_separates_a_control_nobody_watches_from_one_nobody_reaches()
     assert "REVIEW ASSERTIONS" in text
     assert "%" not in text
     assert report.score == pytest.approx(0.5)
-    document = report.to_json()
+    document = report.as_dict()
     assert document["rating"]["label"] == "REVIEW ASSERTIONS"
     assert "score" not in document
 

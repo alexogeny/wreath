@@ -52,7 +52,7 @@ class ConfidenceRating:
     tone: str
     action: str
 
-    def to_json(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, str]:
         return {"label": self.label, "tone": self.tone, "action": self.action}
 
 
@@ -174,7 +174,7 @@ class Verdict:
     seconds: float = 0.0
     note: str = ""
 
-    def to_json(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.mutation.identifier,
             "operator": self.mutation.operator,
@@ -226,7 +226,7 @@ class Report:
             return None
         return len(self.by_outcome(Outcome.KILLED)) / decided
 
-    def to_json(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         counts = {outcome.value: len(self.by_outcome(outcome)) for outcome in Outcome}
         return {
             "sources": list(self.sources),
@@ -236,7 +236,7 @@ class Report:
                 "seconds": round(self.baseline_seconds, 3),
             },
             "counts": counts,
-            "rating": rate_counts(counts).to_json(),
+            "rating": rate_counts(counts).as_dict(),
             "seconds": round(self.total_seconds, 3),
             "live_kills": self.live_kills,
             "live": {
@@ -250,5 +250,5 @@ class Report:
                     else None
                 ),
             },
-            "mutants": [v.to_json() for v in self.verdicts],
+            "mutants": [v.as_dict() for v in self.verdicts],
         }
