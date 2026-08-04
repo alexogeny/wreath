@@ -179,7 +179,7 @@ def execute(namespace) -> int:
     rules = set(getattr(namespace, "rule", None) or ())
     context = int(getattr(namespace, "context", 0) or 0)
     if getattr(namespace, "as_json", False):
-        print(json.dumps(report.to_json(), indent=2))
+        print(json.dumps(report.as_dict(), indent=2))
     elif getattr(namespace, "by_rule", False):
         print(render_by_rule(report), end="")
     elif rules or context:

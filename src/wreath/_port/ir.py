@@ -33,7 +33,7 @@ class Finding:
     message: str
     category: str
 
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         return {
             "file": self.file,
             "line": self.line,
@@ -60,7 +60,7 @@ class SkippedFile:
     reason: str
     detail: str
 
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         return {"file": self.file, "reason": self.reason, "detail": self.detail}
 
 
@@ -160,7 +160,7 @@ class Report:
         return cats
 
     # -- renderings -----------------------------------------------------------
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         overall = self.coverage_overall()
         return {
             "roots": self.roots,
@@ -174,8 +174,8 @@ class Report:
                 cat: {**slot, "coverage": _round(self.coverage(cat))}
                 for cat, slot in sorted(self.categories().items())
             },
-            "findings": [f.to_json() for f in self.findings],
-            "skipped": [s.to_json() for s in self.skipped],
+            "findings": [f.as_dict() for f in self.findings],
+            "skipped": [s.as_dict() for s in self.skipped],
         }
 
     def to_markdown(self) -> str:

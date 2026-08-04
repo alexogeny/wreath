@@ -44,7 +44,7 @@ def test_empty_tree_reports_no_coverage_rather_than_perfect_coverage(tmp_path):
     assert report.coverage_overall() is None
     assert report.coverage("routing") is None
 
-    doc = report.to_json()
+    doc = report.as_dict()
     assert doc["coverage_overall"] is None
     assert doc["files_analyzed"] == 0
 
@@ -168,7 +168,7 @@ def test_skips_are_visible_in_both_renderings(tmp_path):
 
     report = port.analyze(root)
 
-    assert [s["reason"] for s in report.to_json()["skipped"]] == ["syntax-error"]
+    assert [s["reason"] for s in report.as_dict()["skipped"]] == ["syntax-error"]
     markdown = report.to_markdown()
     assert "could not be analyzed" in markdown
     assert "python2.py" in markdown

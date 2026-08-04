@@ -11,7 +11,7 @@ VALID_TAGS = {"translated", "needs-review", "unsupported"}
 
 
 def test_report_shape(corpus_app_roots):
-    doc = port.analyze_all(corpus_app_roots).to_json()
+    doc = port.analyze_all(corpus_app_roots).as_dict()
     assert set(doc) >= {"counts", "findings"}
     assert set(doc["counts"]) >= {"translated", "needs_review", "unsupported"}
     for finding in doc["findings"]:
@@ -32,7 +32,7 @@ def test_every_query_is_still_reported(corpus_app_roots):
     matters here is that every chain still produces a finding, because silence
     is the only genuinely useless verdict.
     """
-    doc = port.analyze_all(corpus_app_roots).to_json()
+    doc = port.analyze_all(corpus_app_roots).as_dict()
     query_findings = [f for f in doc["findings"] if f["construct"] == "orm_query"]
     assert query_findings, "corpus deliberately contains .objects. query calls"
     assert all(f["tag"] in {"translated", "needs-review", "unsupported"}
