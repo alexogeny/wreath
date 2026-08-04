@@ -110,7 +110,7 @@ def statements(*, schema: str = SCHEMA) -> tuple[str, ...]:
     )
 
 
-def component(*, schema: str = SCHEMA) -> Any:
+def schema_claim(schema: str = SCHEMA) -> Any:
     """The settled-bucket store's claim on the wreath schema.
 
     Sealing writes here, so without these tables a sealed series cannot store a
@@ -129,7 +129,7 @@ def component(*, schema: str = SCHEMA) -> Any:
 
 def schema_sql(*, schema: str = SCHEMA) -> str:
     """The settled-bucket DDL, semicolon-joined. A derivation of `statements`."""
-    return component(schema=schema).sql()
+    return schema_claim(schema).sql()
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +153,7 @@ class SettledStore:
 
     def component(self) -> Any:
         """This store's claim on the wreath schema."""
-        return component(schema=self.schema)
+        return schema_claim(self.schema)
 
     def schema_sql(self) -> str:
         """The DDL, semicolon-joined. A derivation of `component()`."""
