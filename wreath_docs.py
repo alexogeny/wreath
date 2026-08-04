@@ -234,6 +234,7 @@ nav = Nav(
             Page("Add an endpoint or model", "cookbook/agents/add-an-endpoint.md"),
             Page("Verify a change", "cookbook/agents/verify-a-change.md"),
             Page("Documenting a module", "cookbook/agents/documenting-a-module.md"),
+            Page("One name, one meaning", "cookbook/agents/naming.md"),
         ),
     ),
     Section(
