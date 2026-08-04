@@ -196,13 +196,21 @@ class Palette:
 
 #: Coherent, ready-made themes. Pass one as `Site(palette=THEMES["nord"])`.
 THEMES: dict[str, Palette] = {
-    # Pressed viridian: an evergreen structural colour on faintly green-cast
-    # paper, brass held back for state. The dark mode grounds on a pine ink
-    # rather than the usual blue-black, which keeps the hue family intact
-    # instead of switching themes when the lights go out.
+    # Ink on a plate, after the logo -- which is a botanical engraving, not a
+    # green mark. Light is a warm laid paper carrying near-black ink and
+    # hairline rules; dark is the *scratchboard* the dark logo already is, a
+    # white line cut out of near-black rather than a dimmed version of the day
+    # theme. Viridian survives, demoted to state: a link, an active nav row, a
+    # focus ring, and nothing else. The engraving carries two flowers on an
+    # otherwise monochrome ring, and the accent is used about that often.
     "wreath": Palette(
+        primary="#12140f", accent="#1d5b4a",
+        bg="#f6f5ef", fg="#12140f", muted="#5c635a",
+        border="#d8d9cd", surface="#eeede4",
+        dark_bg="#0b0d0a", dark_fg="#e8ebe4", dark_muted="#8b948a",
+        dark_border="#232a24", dark_surface="#12160f",
         link="#1d5b4a", dark_link="#6fd3b0",
-        dark_primary="#4bb595", dark_accent="#e0a94c"),
+        dark_primary="#e8ebe4", dark_accent="#6fd3b0"),
     "slate": Palette(
         primary="#4f46e5", accent="#0ea5e9", fg="#0f172a", muted="#64748b",
         bg="#ffffff", border="#e2e8f0", surface="#f1f5f9",

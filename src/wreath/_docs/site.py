@@ -30,6 +30,7 @@ from . import (
     figures,
     hero,
     markdown,
+    plate,
     repo,
     scripts,
     search,
@@ -56,6 +57,14 @@ _SECTION_CHARS = 280
 #: The heading a section opens with, and the `#` permalink every heading carries.
 _OWN_HEADING = re.compile(r"^<h[1-6][^>]*>.*?</h[1-6]>", re.DOTALL)
 _PERMALINK = re.compile(r'<a class="anchor".*?</a>', re.DOTALL)
+#: The dependency plate's list of package names, which is *shown* on the home
+#: page and must not be *indexed* there. Those names are the capability map's
+#: vocabulary: `capabilities.py` deliberately scores them as a low-weight alias
+#: field so the page that maps them outranks any page that merely mentions
+#: them, and a home page carrying all hundred and fifty-five as ordinary prose
+#: would beat the map at its own job -- with a search snippet that is a run of
+#: package names and no sentence.
+_PLATE_NAMES = re.compile(r'<ul class="plate-names".*?</ul>', re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,30 +139,47 @@ def _render_items(
     return f'<div class="{css}">{"".join(parts)}</div>', on_path
 
 
-def _nav_context(site: Site, current: str) -> tuple[str, str]:
-    """The header tabs and the sidebar tree for one page.
+def _nav_context(site: Site, current: str) -> tuple[str, str, str, str]:
+    """The section menu, the sidebar tree, the section's name, and its landing href.
 
-    With tabs on, the top level of the nav moves into the header and the sidebar
-    shows only the section you are inside. A 129-page tree in one scroller is a
-    list; split at the top level it is a structure you can hold in your head.
+    With sections on, the top level of the nav moves into the header's section
+    switcher and the sidebar shows only the section you are inside. A 237-page
+    tree in one scroller is a list; split at the top level it is a structure you
+    can hold in your head.
+
+    The third value is what the switcher shows when it is closed. It is the
+    whole reason the control can replace a row of tabs: a tab row communicates
+    "where am I" by underlining one of twelve, which only works if all twelve
+    are on screen, and they never were.
+
+    The fourth is where that section *starts*, which the sidebar heads itself
+    with. Without it the only route from a recipe back to the cookbook's own
+    index was a nav entry labelled "Overview", with nothing on the page saying
+    which section "Overview" belonged to -- so the way back existed and did not
+    read as one.
     """
     if not site.use_tabs():
         side, _ = _render_items(site.nav.items, current, 0)
-        return "", side
+        return "", side, "", ""
 
-    tabs: list[str] = []
+    entries: list[str] = []
     side = ""
+    here = ""
+    landing_href = ""
     for item in site.nav.items:
         landing = _first_page(item)
         if landing is None:
             continue
         active = _holds(item, current)
         href = _relative(current, _output_path(landing.source))
-        tabs.append(f'<a href="{_esc(href)}"{" class=\"active\"" if active else ""}'
-                    f'{" aria-current=\"true\"" if active else ""}>{_esc(item.title)}</a>')
-        if active and isinstance(item, Section):
-            side, _ = _render_items(item.items, current, 0)
-    return "".join(tabs), side
+        entries.append(f'<a href="{_esc(href)}"{" class=\"active\"" if active else ""}'
+                       f'{" aria-current=\"true\"" if active else ""}>{_esc(item.title)}</a>')
+        if active:
+            here = item.title
+            if isinstance(item, Section):
+                side, _ = _render_items(item.items, current, 0)
+                landing_href = href
+    return "".join(entries), side, here, landing_href
 
 
 def _render_toc(entries) -> str:
@@ -248,6 +274,11 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             unpublished_chart_sources if orphan else chart_sources)
         text, figure_tokens = figures.extract(text)
         text, hero_tokens = hero.extract(text)
+        # The home page's dependency plate, minted from the same subsystem
+        # manifest the capability map reads. Same bargain as every other
+        # generated block: strict fails, a preview carries on.
+        text, plate_tokens = plate.extract(
+            text, source_dir, errors if site.strict else warnings)
         if capabilities.has_directive(text):
             # The capability map, minted from the subsystem manifest. Same
             # bargain as the reference directive: strict fails, a preview keeps
@@ -267,12 +298,16 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
                 text, page.source, errors if site.strict else warnings
             )
         rendered = markdown.render(text)
-        html = hero.restore(
-            figures.restore(charts.restore(rendered.html, chart_tokens), figure_tokens),
-            hero_tokens)
+        html = plate.restore(
+            hero.restore(
+                figures.restore(
+                    charts.restore(rendered.html, chart_tokens), figure_tokens),
+                hero_tokens),
+            plate_tokens)
         (rendered_orphans if orphan else rendered_pages).append(_RenderedPage(
             page, _output_path(page.source),
-            rendered.title or hero.title_of(hero_tokens) or page.title,
+            rendered.title or hero.title_of(hero_tokens)
+            or plate.title_of(plate_tokens) or page.title,
             html, rendered.toc, frozenset(e.slug for e in rendered.toc), description,
             keywords, boost, aliases))
 
@@ -308,7 +343,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     for pos, rp in enumerate(rendered_pages):
         prev = rendered_pages[pos - 1] if pos > 0 else None
         nxt = rendered_pages[pos + 1] if pos + 1 < len(rendered_pages) else None
-        tabs_html, nav_html = _nav_context(site, rp.out_rel)
+        tabs_html, nav_html, section_title, section_href = _nav_context(site, rp.out_rel)
         content = _rewrite_md_links(rp.html)
         html = theme.page(
             site_name=site.name,
@@ -316,6 +351,8 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             content=content,
             nav_html=nav_html,
             tabs_html=tabs_html,
+            section_title=section_title,
+            section_href=section_href,
             toc_html=_render_toc(rp.toc),
             css_href=_relative(rp.out_rel, _CSS_PATH),
             js_href=_relative(rp.out_rel, _JS_PATH),
@@ -429,6 +466,7 @@ def _prose(html: str) -> str:
     at the head of every snippet.
     """
     html = _OWN_HEADING.sub("", html.lstrip())
+    html = _PLATE_NAMES.sub(" ", html)
     return _WS.sub(" ", _TAG.sub(" ", _PERMALINK.sub("", html))).strip()
 
 
@@ -444,10 +482,11 @@ def _write_404(output_dir: Path, site: Site, repo_html: str, links_html: str) ->
         "# Page not found\n\nThe page you were looking for doesn't exist. "
         "Head back to the [home page](index.html) or press "
         "`Ctrl K` to search the docs.\n")
-    tabs_html, nav_html = _nav_context(site, "404.html")
+    tabs_html, nav_html, section_title, section_href = _nav_context(site, "404.html")
     html = theme.page(
         site_name=site.name, page_title="Page not found",
         content=_rewrite_md_links(body.html), nav_html=nav_html, tabs_html=tabs_html,
+        section_title=section_title, section_href=section_href,
         toc_html="", css_href=_relative("404.html", _CSS_PATH),
         js_href=_relative("404.html", _JS_PATH), palette=site.palette,
         feel=site.feel, search_root="", description="", footer="",

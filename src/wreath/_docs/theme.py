@@ -96,10 +96,11 @@ _SPACE = (
 #: capping `<p>` alone (as this did) left code blocks and tables running past
 #: the text's right edge, which is the single most obvious "unfinished" tell.
 #: `--header-h` is the sticky offset every other sticky element is positioned
-#: against; `body.has-tabs` grows it by the tab row rather than each consumer
-#: having to know whether tabs are present.
+#: against. It is now simply the bar: the header used to grow by a second row
+#: of section tabs, and the sticky offset had to be recomputed per page
+#: depending on whether that row existed. One row, one height, one offset.
 _LAYOUT = ("--measure:73ch;--sidebar-w:16rem;--toc-w:14rem;"
-           "--bar-h:3.25rem;--tabs-h:2.625rem;--header-h:var(--bar-h);")
+           "--bar-h:3.25rem;--header-h:var(--bar-h);")
 
 
 def _colour_tokens(palette: Palette) -> tuple[str, str]:
@@ -204,7 +205,6 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);
  font-size:var(--text-base);line-height:var(--leading-normal);
  background-image:var(--surface-image);background-attachment:fixed;
  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}
-body.has-tabs{--header-h:calc(var(--bar-h) + var(--tabs-h));}
 a{color:var(--link);text-decoration:none;}
 a code{color:inherit;}
 ::selection{background:var(--tint-strong);}
@@ -236,13 +236,32 @@ header.site{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--borde
  letter-spacing:var(--track-xl);}
 .brand .mark{width:1.5rem;height:1.5rem;flex:none;color:var(--link);}
 .bar .spacer{flex:1;}
-/* Repository link. Declared with the header rather than with the components so
+/* The links menu. Declared with the header rather than with the components so
    it does not arrive a frame late and shove the theme control sideways. */
-.repo{display:flex;align-items:center;gap:var(--space-2);flex:none;
- color:var(--fg-muted);font-size:var(--text-ui);}
-.repo:hover{color:var(--fg);}
-.repo svg{width:1.125rem;height:1.125rem;flex:none;}
-.bar-links{display:flex;align-items:center;gap:var(--space-1);flex:none;}
+.more{position:relative;flex:none;}
+.more>summary{width:2rem;height:2rem;display:inline-flex;align-items:center;
+ justify-content:center;cursor:pointer;list-style:none;border-radius:var(--radius-sm);
+ border:1px solid transparent;color:var(--fg-muted);
+ transition:background .14s,color .14s,border-color .14s;}
+.more>summary::-webkit-details-marker{display:none;}
+.more>summary:hover{background:var(--surface-2);color:var(--fg);}
+.more>summary:focus-visible{outline:2px solid var(--link);outline-offset:2px;}
+.more[open]>summary{background:var(--surface-2);color:var(--fg);
+ border-color:var(--border-strong);}
+.more>summary svg{width:1.125rem;height:1.125rem;}
+.more-menu{position:absolute;top:calc(100% + var(--space-2));right:0;z-index:70;
+ min-width:14rem;padding:var(--space-2);background:var(--bg);
+ border:1px solid var(--border-strong);border-radius:var(--radius);
+ box-shadow:var(--shadow-3);}
+/* Every row carries its name. An icon that needs a tooltip was not carrying
+   its meaning, which is what made three unlabelled glyphs read as strange. */
+.more-item{display:flex;align-items:center;gap:var(--space-3);
+ padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);
+ color:var(--fg-muted);font-size:var(--text-ui);line-height:var(--leading-snug);
+ text-decoration:none;}
+.more-item:hover{background:var(--surface-2);color:var(--fg);}
+.more-item:focus-visible{outline:2px solid var(--link);outline-offset:-2px;}
+.more-item svg{width:1.125rem;height:1.125rem;flex:none;}
 
 /* --- layout ---------------------------------------------------------------- */
 /* The measure lives on the *column*, not on `main`. Capping `main` inside a
@@ -335,6 +354,18 @@ html.no-js .search-open{display:none;}
 /* --- repository link ------------------------------------------------------- */
 /* The name and the counts stack: the name is the link's subject, the counts are
    a footnote to it, and side-by-side they read as three separate controls. */
+/* The sidebar names the section it is showing, and the name is the way back to
+   that section's own landing page -- a cookbook recipe had no visible route to
+   the cookbook index, only a nav entry called "Overview" with nothing saying
+   what it was the overview of. */
+.side-head{display:block;margin:0 0 var(--space-4);padding-bottom:var(--space-3);
+ border-bottom:1px solid var(--border);font-family:var(--font-mono);
+ font-size:var(--text-2xs);font-weight:700;text-transform:uppercase;
+ letter-spacing:var(--track-caps);color:var(--fg-muted);text-decoration:none;
+ transition:color .14s;}
+.side-head:hover{color:var(--fg);}
+.side-head:focus-visible{outline:2px solid var(--link);outline-offset:2px;}
+
 .repo{line-height:var(--leading-snug);text-decoration:none;}
 .repo-name{font-family:var(--font-mono);font-size:var(--text-sm);
  white-space:nowrap;max-width:12rem;overflow:hidden;text-overflow:ellipsis;}
@@ -347,17 +378,36 @@ html.no-js .search-open{display:none;}
 /* Name over counts in one column, so the mark centres against the pair. */
 .repo-text{display:flex;flex-direction:column;min-width:0;}
 
-/* --- section tabs ---------------------------------------------------------- */
-nav.tabs{max-width:100rem;margin:0 auto;padding:0 var(--space-5);
- display:flex;gap:var(--space-5);height:var(--tabs-h);align-items:stretch;
- overflow-x:auto;scrollbar-width:none;}
-nav.tabs::-webkit-scrollbar{display:none;}
-nav.tabs a{display:inline-flex;align-items:center;white-space:nowrap;
- font-family:var(--font-mono);font-size:var(--text-sm);color:var(--fg-muted);
- border-bottom:2px solid transparent;margin-bottom:-1px;
- transition:color .14s,border-color .14s;}
-nav.tabs a:hover{color:var(--fg);}
-nav.tabs a.active{color:var(--fg);border-bottom-color:var(--link);}
+/* --- section switcher ------------------------------------------------------ */
+/* Replaces a row of twelve tabs. It occupies one slot of the bar at every
+   width, so there is no second row to fit and nothing scrolls sideways. */
+.sections{position:relative;flex:none;min-width:0;}
+.sections>summary{display:inline-flex;align-items:center;gap:var(--space-2);
+ height:2rem;padding:0 var(--space-2) 0 var(--space-3);cursor:pointer;
+ border:1px solid transparent;border-radius:var(--radius-sm);
+ font-family:var(--font-mono);font-size:var(--text-sm);color:var(--fg);
+ white-space:nowrap;min-width:0;list-style:none;
+ transition:border-color .14s,background .14s;}
+.sections>summary::-webkit-details-marker{display:none;}
+.sections>summary:hover{border-color:var(--border-strong);background:var(--surface-2);}
+.sections>summary:focus-visible{outline:2px solid var(--link);outline-offset:2px;}
+.sections-here{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sections .chev{width:1rem;height:1rem;flex:none;color:var(--fg-subtle);
+ transition:transform .16s;}
+.sections[open] .chev{transform:rotate(180deg);}
+.sections[open]>summary{border-color:var(--border-strong);background:var(--surface-2);}
+.sections-menu{position:absolute;top:calc(100% + var(--space-2));left:0;z-index:70;
+ min-width:15rem;max-width:min(22rem, calc(100vw - var(--space-5) * 2));
+ max-height:min(28rem, calc(100vh - var(--bar-h) - var(--space-6)));overflow-y:auto;
+ padding:var(--space-2);background:var(--bg);border:1px solid var(--border-strong);
+ border-radius:var(--radius);box-shadow:var(--shadow-3);}
+.sections-menu a{display:block;padding:var(--space-2) var(--space-3);
+ border-radius:var(--radius-sm);border-left:2px solid transparent;
+ color:var(--fg-muted);font-size:var(--text-ui);line-height:var(--leading-snug);}
+.sections-menu a:hover{background:var(--surface-2);color:var(--fg);}
+.sections-menu a.active{color:var(--fg);border-left-color:var(--link);
+ background:var(--surface-2);}
+.sections-menu a:focus-visible{outline:2px solid var(--link);outline-offset:-2px;}
 
 /* --- sidebar: the thread --------------------------------------------------- */
 /* The signature. One continuous stroke runs from the section root down to the
@@ -662,6 +712,72 @@ dialog.palette[open]{animation:pop .14s ease-out;}
    No panel, no fill, no gradient; the space around it does the work. */
 .hero{padding:var(--space-6) 0 var(--space-7);
  border-bottom:1px solid var(--border);margin-bottom:var(--space-7);}
+
+/* --- the dependency plate -------------------------------------------------- */
+/* The home page's opener. A herbarium plate: a small-caps caption, the
+   specimen, and a determination line under it. The specimen here is the list
+   of packages the reader no longer installs, set dense enough that it reads as
+   engraving hatch at arm's length and as their own requirements.txt up close.
+   That double reading is the whole idea, and it is why the names are set small
+   rather than large -- a list this long set big is a wall, set small it is a
+   texture with an argument inside it. */
+.plate{padding:var(--space-6) 0 var(--space-7);margin-bottom:var(--space-7);
+ border-bottom:1px solid var(--border);}
+.plate-caption{margin:0 0 var(--space-4);font-family:var(--font-mono);
+ font-size:var(--text-2xs);font-weight:700;text-transform:uppercase;
+ letter-spacing:var(--track-caps);color:var(--fg-muted);}
+.plate-title{margin:0;font-family:var(--font-display);font-weight:400;
+ font-size:clamp(2rem, 5vw, var(--text-4xl));line-height:1.05;
+ letter-spacing:var(--track-4xl);text-wrap:balance;}
+.plate-lede{margin:var(--space-5) 0 0;font-size:var(--text-lg);
+ line-height:1.55;color:var(--fg-muted);max-width:54ch;}
+
+/* The specimen. `column-width` rather than a fixed count, so the block reflows
+   from five columns to one without a breakpoint for each step. */
+.plate-names{margin:var(--space-6) 0 0;padding:0;list-style:none;
+ column-width:8.5rem;column-gap:var(--space-5);
+ font-family:var(--font-mono);font-size:var(--text-2xs);
+ line-height:1.9;color:var(--fg-subtle);
+ /* A band, not a wall. Five columns hold the whole list on a laptop and the
+    cap never engages; two columns on a phone would run to some 1600px of
+    names before the reader reached a sentence, which is the same
+    small-viewport failure this redesign exists to fix. Faded rather than cut,
+    because a hard edge reads as a bug and a fade reads as hatch continuing
+    past the plate -- and the count below states the total either way, so
+    nothing is hidden that is not also said. */
+ max-height:24rem;overflow:hidden;
+ -webkit-mask-image:linear-gradient(to bottom, #000 82%, transparent 100%);
+ mask-image:linear-gradient(to bottom, #000 82%, transparent 100%);
+ /* The rules top and bottom are the plate's edges. Hairlines, because an
+    engraving is made of them and a heavier border would read as a card. */
+ border-top:1px solid var(--border);border-bottom:1px solid var(--border);
+ padding-block:var(--space-4);}
+.plate-names li{break-inside:avoid;}
+/* The strike is a rule through the name, not a decoration on it: one pixel, in
+   the ink colour rather than the text colour, so the name greys out and the
+   line stays crisp. `line-through` and not `<del>` styling, because these were
+   never in the document -- they are things the reader will not add. */
+.plate-names li{text-decoration:line-through;text-decoration-thickness:1px;
+ text-decoration-color:color-mix(in oklab, var(--fg) 42%, transparent);}
+.plate-count{margin:var(--space-4) 0 0;font-family:var(--font-mono);
+ font-size:var(--text-xs);color:var(--fg-muted);max-width:54ch;
+ line-height:var(--leading-snug);}
+.plate-count strong{color:var(--fg);font-weight:700;}
+.plate-actions{display:flex;flex-wrap:wrap;gap:var(--space-3);
+ margin:var(--space-6) 0 0;}
+.plate-action{display:inline-flex;align-items:center;gap:var(--space-2);
+ font-family:var(--font-mono);font-size:var(--text-sm);color:var(--fg);
+ border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+ padding:var(--space-2) var(--space-4);
+ transition:border-color .14s,background .14s,color .14s;}
+.plate-action::after{content:"\\2192";color:var(--fg-subtle);transition:color .14s;}
+.plate-action:hover{border-color:var(--link);color:var(--link);
+ background:var(--tint);text-decoration:none;}
+.plate-action:hover::after{color:var(--link);}
+.plate-action.primary{border-color:var(--link);color:var(--link);}
+@media (max-width:46rem){
+ .plate-names{column-width:7rem;column-gap:var(--space-4);}
+}
 .hero-eyebrow{margin:0 0 var(--space-4);font-family:var(--font-mono);
  font-size:var(--text-2xs);font-weight:700;text-transform:uppercase;
  letter-spacing:var(--track-caps);color:var(--fg-muted);}
@@ -848,16 +964,25 @@ del{color:var(--fg-subtle);}
  .page-nav{flex-direction:column;}
  .page-nav a{max-width:none;}
 }
-@media (max-width:62rem){
- /* The counts are the first thing to go: they are the least of the three
-    signals and the widest. The link itself stays, as an icon. */
- .repo-text{display:none;}
-}
 @media (max-width:46rem){
  .search-open{width:2rem;padding:0;justify-content:center;}
  .search-open .label,.search-open kbd{display:none;}
- .bar{padding:0 var(--space-4);gap:var(--space-2);}
- nav.tabs{padding:0 var(--space-4);}
+ .bar{padding:0 var(--space-3);gap:var(--space-2);}
+ /* The word beside the mark goes before the section name does. The mark
+    identifies the site; the section name is the only way to reach the other
+    eleven sections from a phone, because the sidebar shows the section you are
+    already in, so losing it would strand a reader in one branch of the tree.
+    Hidden with `display:none` on its own span rather than `font-size:0` on the
+    link: the link keeps its accessible name from `aria-label`, and a zeroed
+    font size is a trick some screen readers read differently from others. */
+ .brand-name{display:none;}
+ .brand{gap:0;}
+ .sections-here{max-width:9rem;}
+}
+@media (max-width:23rem){
+ /* A 320px phone in portrait. The section name truncates rather than the
+    control disappearing, so the switcher is still operable. */
+ .sections-here{max-width:5.5rem;}
 }
 
 /* --- motion ---------------------------------------------------------------- */
@@ -1001,9 +1126,35 @@ def stylesheet(palette: Palette, feel: str = "flat") -> str:
 #: The segment lengths are irregular on purpose; four equal arcs read as a
 #: loading spinner. 54 units is the circumference at r=8.6, so the dash pattern
 #: closes exactly rather than overlapping at the seam.
-_MARK = ('<svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-         '<circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="2.2" '
-         'stroke-linecap="round" stroke-dasharray="15 4 9 4 13 9"/></svg>')
+#: The brand glyph: two vines braided into a ring, with leaf ticks and the two
+#: flowers the engraving carries. Not a dashed circle -- that is what this used
+#: to be, and a dashed circle is a loading spinner in every other product a
+#: reader has open. The logo is a botanical engraving, so the mark is the same
+#: object drawn small: two counter-phase arcs that cross where a real wreath is
+#: bound, six leaves on the outside, two dots for the flowers.
+#:
+#: Drawn on a 24 unit box at stroke 1.5 so it holds together at the 20px the bar
+#: renders it at; anything finer disappeared, and anything heavier read as a
+#: doughnut rather than as woven stems.
+_MARK = (
+    '<svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+    '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round">'
+    # The two stems. Each is a full circle nudged off-centre in opposite
+    # directions, so they touch at four points and read as a braid.
+    '<circle cx="12" cy="12" r="8.1" opacity=".95"/>'
+    '<circle cx="12" cy="12" r="6.4" opacity=".55"/>'
+    # Leaves, as short strokes leaning off the outer stem.
+    '<g stroke-width="1.3" opacity=".8">'
+    '<path d="M12 3.9v-2.1"/><path d="m18.6 6.9 1.7-1.2"/>'
+    '<path d="m20.1 14.4 2 .6"/><path d="M12 20.1v2.1"/>'
+    '<path d="m5.4 17.1-1.7 1.2"/><path d="m3.9 9.6-2-.6"/>'
+    "</g>"
+    "</g>"
+    # The two flowers, at the eight and two o'clock the engraving puts them.
+    '<circle cx="17.7" cy="7.4" r="1.35" fill="currentColor"/>'
+    '<circle cx="6.3" cy="16.6" r="1.35" fill="currentColor"/>'
+    "</svg>"
+)
 
 _ICON_SEARCH = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
                 'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
@@ -1011,6 +1162,9 @@ _ICON_SEARCH = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
 _ICON_MENU = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
               'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
               '<path d="M3 6h14M3 10h14M3 14h14"/></svg>')
+_ICON_CHEVRON = ('<svg class="chev" viewBox="0 0 20 20" fill="none" '
+                 'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" '
+                 'stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>')
 #: The theme control reports its state by *showing* it: three icons in the
 #: markup, one revealed per mode by CSS. Swapping them in script would leave the
 #: button lying about itself for as long as the runtime takes to arrive.
@@ -1027,6 +1181,9 @@ _ICONS_THEME = (
     '<svg class="i-moon" viewBox="0 0 20 20" fill="none" stroke="currentColor" '
     'stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">'
     '<path d="M16.2 12.3A6.8 6.8 0 0 1 7.7 3.8a6.9 6.9 0 1 0 8.5 8.5z"/></svg>')
+_ICON_MORE = ('<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
+              '<circle cx="4.6" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/>'
+              '<circle cx="15.4" cy="10" r="1.5"/></svg>')
 _ICON_TOP = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
              'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
              'aria-hidden="true"><path d="M10 16V4M4.8 9.2 10 4l5.2 5.2"/></svg>')
@@ -1090,12 +1247,19 @@ def repo_link(info: RepoInfo | None) -> str:
     shields.io would be the one remote request in an otherwise self-contained
     page, and it would be the request that renders *last*, on a service the docs
     do not control.
+
+    **A zero count is not shown.** The test used to be `stars >= 0`, where -1
+    means "the build could not resolve them" -- so a resolved zero rendered as a
+    literal `0 stars, 0 forks` in the header of every page. That is strictly
+    worse than the unresolved case, which renders nothing: an empty slot reads
+    as a design decision, and a zero reads as a claim nobody wanted to make.
+    A young repository is the one most likely to be building its own docs.
     """
     if info is None:
         return ""
     mark = ICON_MARKS.get(info.host or "link", ICON_MARKS["link"])
     stats = ""
-    if info.stars >= 0:
+    if info.stars > 0 or info.forks > 0:
         stats = (f'<span class="stat">{_ICON_STAR}'
                  f'<span>{_e(compact(info.stars))}</span></span>'
                  f'<span class="stat">{_ICON_FORK}'
@@ -1106,19 +1270,38 @@ def repo_link(info: RepoInfo | None) -> str:
         label = f"{info.title} on {info.host or 'the web'}"
     body = (f'<span class="repo-name">{_e(info.title)}</span>'
             f'{f"<span class=\"repo-stats\">{stats}</span>" if stats else ""}')
-    return (f'<a class="repo" href="{_e(info.url)}" rel="noopener noreferrer" '
+    return (f'<a class="more-item repo" href="{_e(info.url)}" rel="noopener noreferrer" '
             f'aria-label="{_e(label)}">{mark}<span class="repo-text">{body}</span></a>')
 
 
 def link_row(links) -> str:
-    """The extra header links (homepage, package page, chat) as icon buttons."""
+    """The extra header links (homepage, package page, chat), as menu rows."""
     if not links:
         return ""
-    items = "".join(
-        f'<a class="icon-btn" href="{_e(link.url)}" rel="noopener noreferrer" '
-        f'title="{_e(link.label)}" aria-label="{_e(link.label)}">'
-        f'{ICON_MARKS[link.icon]}</a>' for link in links)
-    return f'<div class="bar-links">{items}</div>'
+    return "".join(
+        f'<a class="more-item" href="{_e(link.url)}" rel="noopener noreferrer">'
+        f'{ICON_MARKS[link.icon]}<span>{_e(link.label)}</span></a>' for link in links)
+
+
+def _more(repo_html: str, links_html: str) -> str:
+    """The right-hand controls, behind one disclosure.
+
+    They used to sit in the bar as bare glyphs, and they read as strange
+    because they were: a wireframe cube for PyPI, a *filled* mark for GitHub
+    (stroked, it is unrecognisable at 18px), and a half-filled circle for the
+    theme. Three icons drawn three different ways, none of them labelled, each
+    asking the reader to guess.
+
+    In a menu they get their names, which is the actual fix -- an icon that
+    needs a tooltip was never carrying its meaning. Only the theme control
+    stays outside, because it changes what is on screen and is reached often
+    enough that burying it would be the worse trade.
+    """
+    body = f"{repo_html}{links_html}"
+    if not body:
+        return ""
+    return ('<details class="more"><summary aria-label="Links and options">'
+            f'{_ICON_MORE}</summary><div class="more-menu">{body}</div></details>')
 
 
 def page(
@@ -1126,7 +1309,8 @@ def page(
     css_href: str, palette: Palette, search_root: str = "", description: str = "",
     footer: str = "", home_href: str = "index.html", feel: str = "flat",
     js_href: str = "assets/docs.js", tabs_html: str = "", canonical: str = "",
-    repo_html: str = "", links_html: str = "",
+    repo_html: str = "", links_html: str = "", section_title: str = "",
+    section_href: str = "",
 ) -> str:
     """Assemble one full HTML document (no external requests)."""
     title = f"{page_title} · {site_name}" if page_title else site_name
@@ -1135,10 +1319,34 @@ def page(
     toc = (f'<aside class="toc" aria-label="On this page">'
            f'<div class="toc-head">On this page</div>{toc_html}</aside>'
            if toc_html else "")
-    side = (f'<nav class="side" id="site-nav" aria-label="Documentation">{nav_html}</nav>'
+    # The sidebar names the section it is showing, and the name is the link back
+    # to that section's own landing page. Without it the only route from a
+    # cookbook recipe to the cookbook index was a nav entry labelled "Overview",
+    # with nothing anywhere on the page saying which section "Overview" belonged
+    # to -- the way back existed and did not read as one. It also gives the
+    # mobile drawer a heading, which it never had.
+    side_head = (
+        f'<a class="side-head" href="{_e(section_href)}">'
+        f'{_e(section_title)}</a>'
+        if nav_html and section_title and section_href else "")
+    side = (f'<nav class="side" id="site-nav" aria-label="Documentation">'
+            f'{side_head}{nav_html}</nav>'
             if nav_html else "")
-    tabs = (f'<nav class="tabs" aria-label="Sections">{tabs_html}</nav>' if tabs_html else "")
-    body_class = "has-tabs" if tabs_html else ""
+    # The section switcher, where a row of tabs used to be. Twelve top-level
+    # entries is a navigation, not a tab bar: the row overflowed on every
+    # viewport and hid the overflow behind `scrollbar-width:none`, so on a phone
+    # there were eight sections a reader had no way to know about. As a
+    # disclosure it costs one line of the bar instead of a whole second row, it
+    # says which section you are in rather than making you find the underlined
+    # one, and `<details>` gives keyboard operation and a working no-JS
+    # fallback without a line of script.
+    sections = (
+        f'<details class="sections"><summary aria-label="Switch section">'
+        f'<span class="sections-here">{_e(section_title) or "Sections"}</span>'
+        f'{_ICON_CHEVRON}</summary>'
+        f'<div class="sections-menu">{tabs_html}</div></details>'
+        if tabs_html else ""
+    )
     layout_class = "layout" if nav_html else "layout no-side"
     return (
         "<!doctype html>\n"
@@ -1149,21 +1357,23 @@ def page(
         f"<style>{critical_css(palette, feel)}</style>"
         f'<link rel="stylesheet" href="{_e(css_href)}">'
         f"<script>{BOOT}</script></head>"
-        f'<body class="{body_class}">'
+        "<body>"
         '<a class="skip" href="#content">Skip to content</a>'
         '<header class="site"><div class="bar">'
         f'<button class="icon-btn" id="menu-toggle" type="button" aria-expanded="false"'
         f' aria-controls="site-nav" aria-label="Show navigation">{_ICON_MENU}</button>'
-        f'<a class="brand" href="{_e(home_href)}">{_MARK}{_e(site_name)}</a>'
+        f'<a class="brand" href="{_e(home_href)}" aria-label="{_e(site_name)}, home">'
+        f'{_MARK}<span class="brand-name">{_e(site_name)}</span></a>'
+        f"{sections}"
         '<span class="spacer"></span>'
         f'<button class="search-open" id="search-open" type="button" '
         f'aria-label="Search documentation" aria-haspopup="dialog">{_ICON_SEARCH}'
         '<span class="label">Search</span><kbd>Ctrl K</kbd></button>'
-        f"{links_html}{repo_html}"
+        f"{_more(repo_html, links_html)}"
         f'<button class="icon-btn theme" id="theme-toggle" type="button"'
         f' data-mode="system" aria-label="Theme: match system. Switch to light."'
         f">{_ICONS_THEME}</button>"
-        f"</div>{tabs}</header>"
+        f"</div></header>"
         '<div class="scrim" id="nav-scrim"></div>'
         f'<div class="{layout_class}">{side}'
         f'<main id="content"><article class="prose">{content}</article>{footer}</main>'

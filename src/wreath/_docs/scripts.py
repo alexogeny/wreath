@@ -519,7 +519,7 @@ _RUNTIME = r"""
     main.innerHTML = incoming.innerHTML;
     replace('nav.side', next);
     replace('aside.toc', next);
-    replace('nav.tabs', next);
+    replace('.sections', next);
     var nextInput = $('#docs-search', next);
     if (input && nextInput) {
       input.setAttribute('data-root', nextInput.getAttribute('data-root') || '');
@@ -621,6 +621,39 @@ _RUNTIME = r"""
       }
     }
   })();
+
+  /* --- section switcher ------------------------------------------------------ */
+  /* `<details>` already opens, closes, and takes focus without any of this. The
+     two things it does not do are what a reader expects from a menu: dismiss on
+     Escape, and dismiss when you click away from it. Both are added here rather
+     than depending on them, so the control still works with the script blocked
+     -- it just needs a second click on the summary to close.
+
+     One handler covers both header disclosures. Opening either while the other
+     is open is handled by the click listener, which closes whichever is open
+     before the new one's own toggle runs. */
+
+  var DISCLOSURES = '.sections[open], .more[open]';
+
+  function closeDisclosure(focusSummary) {
+    var open = $(DISCLOSURES);
+    if (!open) { return false; }
+    open.removeAttribute('open');
+    if (focusSummary) {
+      var summary = $('summary', open);
+      if (summary) { summary.focus(); }
+    }
+    return true;
+  }
+
+  document.addEventListener('click', function (event) {
+    var open = $(DISCLOSURES);
+    if (open && !open.contains(event.target)) { closeDisclosure(false); }
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') { closeDisclosure(true); }
+  });
 
   /* --- run ------------------------------------------------------------------ */
 
