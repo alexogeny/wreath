@@ -2321,6 +2321,13 @@ class UploadState:
         )
 
     def to_json(self) -> bytes:
+        """Serialized JSON, which is what the name says and what this returns.
+
+        The one `to_json` in the tree. Nine others returned a `dict` -- a verb
+        naming a wire format handing back a Python object -- and are now
+        `as_dict`, so the two names mean two things: `as_dict` for a plain
+        mapping a caller may still shape, `to_json` for bytes ready to store.
+        """
         return _json.dumps(
             {
                 "id": self.id,
