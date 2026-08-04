@@ -317,13 +317,17 @@ class Log:
             )
         return tuple(parts)
 
-    def component(self, *, name: str) -> Any:
+    def schema_claim(self, name: str) -> Any:
         """This declaration's claim on the wreath schema, under `name`.
 
         `name` is the caller's, because one `Log` shape backs several
         subsystems and each needs its own version marker and its own advisory
         lock -- sharing one would make an upgrade to the audit trail block a
         worker that only streams.
+
+        Named apart from the zero-argument `component()` protocol for the
+        reason `wreath.store.Keyed.schema_claim` gives: a declaration needs the
+        argument, and the walk cannot pass one.
         """
         from .schema import Component, Step
 
@@ -529,9 +533,9 @@ class PostgresLog:
         """The backing table, schema-qualified as it reaches SQL."""
         return self._declaration.qualified_table
 
-    def component(self, *, name: str) -> Any:
+    def schema_claim(self, name: str) -> Any:
         """This log's claim on the wreath schema, under `name`."""
-        return self._declaration.component(name=name)
+        return self._declaration.schema_claim(name)
 
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined."""

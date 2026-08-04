@@ -189,7 +189,7 @@ def test_dedup_declares_the_column_the_index_is_over():
 
 
 def test_the_component_names_the_relation_it_needs():
-    component = _log().component(name="audit_log")
+    component = _log().schema_claim("audit_log")
     assert component.name == "audit_log"
     assert component.relations == ("audit_records",)
     assert component.schema == "wreath"
