@@ -8,8 +8,14 @@ from __future__ import annotations
 import asyncio
 import socket
 
+from _metal import requires_metal
+
 from .conftest import require_reactor
 from .support import run, socketpair, tcp_listener
+
+#: Every test here drives the metal loop, so the whole module goes.
+pytestmark = requires_metal
+
 
 
 def test_add_reader_fires_when_readable(loop):

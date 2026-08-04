@@ -11,6 +11,7 @@ import datetime
 import socket
 import ssl
 import tempfile
+import time
 
 import pytest
 
@@ -282,30 +283,64 @@ async def test_unbuilt_h3_fails_without_downgrade(
 
 
 async def test_atomic_startup_udp_bind_failure_closes_tcp():
-    # Occupy a UDP port, then request h3 on that exact port so UDP bind fails;
-    # startup must be atomic (no TCP listener left running).
+    """Occupy a UDP port, ask for h3 on it, and require the TCP half be undone.
+
+    Startup must be atomic: the TCP listener is created first, so a UDP bind
+    that fails afterwards has to take the TCP listener down with it.
+
+    **The port is reserved on both protocols before the test starts.** The
+    assertion is "this port is bindable for TCP now", which only means "the
+    listener was torn down" if nothing *else* could have taken it. It used to
+    take an ephemeral UDP port and probe TCP on the same number, and under
+    `-n 8` another worker's ephemeral allocation occasionally landed on it --
+    the probe then failed with `EADDRINUSE` and the test reported a leaked
+    listener that never existed. Binding TCP first and holding it keeps the
+    number out of every other worker's ephemeral range, because the kernel does
+    not hand out a port it has already bound; the reservation is released only
+    for the instant `serve` needs to bind it itself.
+
+    The probe retries against a deadline for the same reason it is safe to: a
+    listener that genuinely leaked holds the port until the process exits, so a
+    retry cannot turn a real failure green -- it only absorbs the microseconds
+    between `serve` releasing the port and the probe asking for it.
+    """
     if not _http3_available():
         pytest.skip("HTTP/3 backend not built")
     cert, key = _cert()
+    # Reserve on TCP first; its number is what the rest of the test is about.
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    reservation.bind(("127.0.0.1", 0))
+    port = reservation.getsockname()[1]
+    # UDP and TCP are separate port spaces, so the same number binds on both.
     blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    blocker.bind(("127.0.0.1", 0))
-    port = blocker.getsockname()[1]
+    blocker.bind(("127.0.0.1", port))
     try:
+        reservation.close()          # `serve` needs the TCP half to bind
         with pytest.raises(OSError):
             await serve(
                 _app,
                 ServerConfig(host="127.0.0.1", port=port, lifespan="off",
                              protocols=("http/1.1", "h3")),
                 tls=TLSConfig(cert, key))
-        # The TCP listener that was created first must have been torn down, so the
-        # port is bindable for TCP now.
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        finally:
-            probe.close()
+        deadline = time.monotonic() + 2.0
+        while True:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"TCP port {port} still bound 2s after a failed h3 start: "
+                        "the listener created before the UDP bind was not torn down"
+                    ) from None
+                await asyncio.sleep(0.02)
+            finally:
+                probe.close()
     finally:
+        reservation.close()
         blocker.close()
 
 

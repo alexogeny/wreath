@@ -19,6 +19,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/ for sibling imports
 
+
+from _metal import requires_metal
+
 from postgres.test_connection import FakePostgres
 
 
@@ -54,6 +57,7 @@ def _run_fused(loop, coro, transports=None):
     return result, transports
 
 
+@requires_metal
 def test_pg_ingress_fuses_on_metal_loop() -> None:
     native_pg = importlib.import_module("wreath._native._postgres")
     loop = _metal_loop_or_skip()
@@ -95,6 +99,7 @@ def test_pg_ingress_fuses_on_metal_loop() -> None:
     assert all(t._direct_protocol_writes >= 1 for t in fused)
 
 
+@requires_metal
 def test_pg_fusion_survives_abrupt_connection_loss() -> None:
     """connection_lost with fused ingress leaves the driver in a clean error
     state instead of crashing or hanging."""

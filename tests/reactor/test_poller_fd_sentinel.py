@@ -24,6 +24,11 @@ import sys
 import textwrap
 
 import pytest
+from _metal import requires_metal
+
+#: Every test here drives the metal loop, so the whole module goes.
+pytestmark = requires_metal
+
 
 #: Every one of these makes `rp_init` return -1, each from a different point
 #: relative to the `memset` that used to wipe the ring's sentinel.

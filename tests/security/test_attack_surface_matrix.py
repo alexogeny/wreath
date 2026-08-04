@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _metal import requires_metal
 
 from wreath import Wreath
 from wreath._graphql.parser import GraphQLSyntaxError, Limits, parse
@@ -32,6 +33,7 @@ _ROOT = Path(__file__).parents[2]
     sorted((_ROOT / "tests" / "security").glob("poc_*.py")),
     ids=lambda path: path.stem.removeprefix("poc_"),
 )
+@requires_metal
 def test_standalone_proof_of_concept_is_a_collected_regression(script: Path) -> None:
     """A PoC must reach its explicit safe outcome, not merely exit non-zero."""
     environment = os.environ.copy()
