@@ -72,18 +72,13 @@ from time import monotonic_ns as _monotonic_ns
 from typing import Any
 from uuid import UUID
 
+from ._b64 import b64_encode as _b64encode_str
 from ._codecs import parse_qs
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
 from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
 from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._native import _core
-
-if _core is not None and hasattr(_core, "b64encode"):
-    _b64encode_str = _core.b64encode
-else:
-    def _b64encode_str(value: bytes) -> str:
-        return base64.b64encode(value).decode("ascii")
 from .exceptions import BadRequest
 from .geospatial import Coordinate
 from .negotiation import PROTOBUF_MEDIA_TYPES as _PROTOBUF_MEDIA_TYPES
