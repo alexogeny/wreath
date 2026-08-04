@@ -36,7 +36,6 @@ deletes:
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -47,6 +46,11 @@ from typing import Any
 
 from ._auth._ecverify import on_p256_curve, verify_ed25519, verify_es256
 from ._b64 import b64url_decode as _b64url_decode
+
+#: Unpadded base64url, which is how WebAuthn writes bytes into JSON. Re-exported
+#: rather than redefined: this module had its own copy of the three-step stdlib
+#: chain, as did `_userkit`, `_webpush`, the session cookie and PKCE.
+from ._b64 import b64url_encode as b64url_encode
 
 __all__ = [
     "AuthenticatorData",
@@ -83,11 +87,6 @@ class WebAuthnError(ValueError):
 
 
 # --- base64url --------------------------------------------------------------
-
-
-def b64url_encode(raw: bytes) -> str:
-    """Unpadded base64url, which is how WebAuthn writes bytes into JSON."""
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def b64url_decode(text: str) -> bytes:
