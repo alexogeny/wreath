@@ -57,8 +57,8 @@ async def test_the_declaration_names_its_table_and_payload() -> None:
 
 async def test_the_declaration_offers_a_schema_component() -> None:
     """Wreath owns its own furniture: this table never enters a user's artifact."""
-    component = challenge_declaration(table=_table()).component(
-        name="second_factor_challenges"
+    component = challenge_declaration(table=_table()).schema_claim(
+        "second_factor_challenges"
     )
     assert component.name == "second_factor_challenges"
     assert any(step.version == 1 for step in component.steps)

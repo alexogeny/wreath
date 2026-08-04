@@ -1601,9 +1601,9 @@ class PostgresChallengeStore:
         """The `Keyed` this store was built from."""
         return self._store.declaration
 
-    def component(self, *, name: str = "second_factor_challenges") -> Any:
+    def component(self) -> Any:
         """This store's claim on the wreath schema."""
-        return self._store.component(name=name)
+        return self._store.schema_claim("second_factor_challenges")
 
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined."""
