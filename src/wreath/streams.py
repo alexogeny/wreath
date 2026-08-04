@@ -76,11 +76,11 @@ docstring for the rest of that boundary -- this is one of its four callers.
 from __future__ import annotations
 
 import asyncio
-from base64 import b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, NamedTuple
 
+from ._b64 import b64_encode
 from ._jobcore import validate_identifier
 from .log import DEFAULT_LIMIT, Column, Cursor, Flush, Log, PostgresLog
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse, StreamingResponse
@@ -354,7 +354,7 @@ class StreamEvent:
                 )
             except UnicodeDecodeError:
                 return ServerSentEvent(
-                    data=b64encode(self.data).decode("ascii"),
+                    data=b64_encode(self.data),
                     event="chunk64",
                     id=self.id,
                 )
@@ -376,7 +376,7 @@ class StreamEvent:
             try:
                 payload["data"] = self.data.decode("utf-8")
             except UnicodeDecodeError:
-                payload["data64"] = b64encode(self.data).decode("ascii")
+                payload["data64"] = b64_encode(self.data)
         elif self.detail:
             payload["detail"] = self.detail
         return payload
@@ -654,9 +654,9 @@ class Streams:
         schema, the retention walk, and the honest completeness number."""
         return self._log
 
-    def component(self, *, name: str = "streams") -> Any:
+    def component(self) -> Any:
         """This module's claim on the wreath schema."""
-        return self._log.component(name=name)
+        return self._log.schema_claim("streams")
 
     def retention_pass(self, *, name: str = "stream_chunks", **options: Any) -> Any:
         """The counted walk that executes the chunk log's retention window."""
