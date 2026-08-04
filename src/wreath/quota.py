@@ -356,7 +356,7 @@ class PostgresQuotaStore:
 
     def component(self) -> Any:
         """This store's claim on the wreath schema."""
-        return self._store.component(name="quota")
+        return self._store.schema_claim("quota")
 
     @property
     def schema_database(self) -> Any:
