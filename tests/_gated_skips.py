@@ -158,8 +158,8 @@ def deselect_lines(counts: dict[str, int]) -> list[str]:
         "Three defects reached the tree behind this exact gap: a permanent hang,",
         "a first-catalog-read failure, and three tests that had never executed.",
         "",
-        _commented("uv run pytest -m ''", "everything, including these"),
-        _commented(f"uv run pytest -m {first}", "just one of them"),
+        _commented("uv run wreath test -m ''", "everything, including these"),
+        _commented(f"uv run wreath test -m {first}", "just one of them"),
     ]
 
 

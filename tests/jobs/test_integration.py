@@ -19,7 +19,17 @@ pytestmark = pytest.mark.skipif(
     reason="set WREATH_TEST_POSTGRES_DSN to run live jobs integration tests",
 )
 
-_SCHEMA = "wreath_test_jobs"
+#: Per xdist worker, because the fixture below both `TRUNCATE`s the table and
+#: `DROP SCHEMA ... CASCADE`s it. On one shared name that is not isolation, it
+#: is one worker deleting another's tables mid-test, and it surfaces as
+#: `relation "wreath_test_jobs.jobs" does not exist` on whichever test happened
+#: to be running -- which reads like a missing migration rather than a
+#: test-isolation bug. Assigned rather than defaulted, and read at import in the
+#: *worker*: `os.environ.setdefault` in a conftest silently does nothing here,
+#: because the controller imports it during collection and then spawns workers
+#: with its own environment. `tests/_camera_trap.py` and
+#: `tests/test_replay_live_faults.py` are the other copies of this pattern.
+_SCHEMA = f"wreath_test_jobs_{os.environ.get('PYTEST_XDIST_WORKER', 'solo')}"
 
 
 async def _apply(db, sql):

@@ -640,7 +640,7 @@ async def test_a_trace_lookup_joins_four_subsystems_on_a_seeded_database() -> No
             await connection.execute(f'DROP SCHEMA IF EXISTS "{workflow_schema}" CASCADE')
             await connection.execute(f'CREATE SCHEMA "{schema}"')
             await connection.execute(f'CREATE SCHEMA "{workflow_schema}"')
-            for component in (runner.component(), bus.component(), _ledger.component(schema)):
+            for component in (runner.component(), bus.component(), _ledger.schema_claim(schema)):
                 for statement in component.statements():
                     await connection.execute(statement)
             for statement in PostgresWorkflowStore.schema_sql(

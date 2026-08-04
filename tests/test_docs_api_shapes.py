@@ -16,6 +16,7 @@ leaving a stale assertion behind.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -78,3 +79,49 @@ def test_pool_still_has_no_query_methods(name: str) -> None:
 
 def test_acquire_is_still_a_plain_coroutine_function(name: str = "acquire") -> None:
     assert inspect.iscoroutinefunction(getattr(Pool, name))
+
+def test_every_component_method_is_callable_with_no_arguments() -> None:
+    """`Wreath.schema_components` calls `component()`, so nothing may need an argument.
+
+    The collection walk is duck-typed -- `getattr(candidate, "component", None)`
+    then `claim()` -- so a table-owning object that requires a keyword is a
+    `TypeError` waiting for the first application whose `schema_owners` reaches
+    it. That is not hypothetical plumbing: `quota.QuotaRegistry.schema_owners`
+    already answers with store objects rather than with itself.
+
+    `component` used to mean four different things: this zero-argument protocol,
+    a declaration-level `component(*, name)` with no default, a walk-facing
+    `component(*, name=<default>)`, and two module-level factories taking a
+    schema. The first and third are indistinguishable at the call site and the
+    second would have raised. The declaration level is now `schema_claim`, which
+    leaves one meaning per name.
+
+    Read from source rather than by walking a built application: an arity defect
+    on a subsystem this test forgot to register would not show up, and the
+    signature is the whole claim.
+    """
+    offenders = []
+    root = Path(__file__).resolve().parents[1] / "src" / "wreath"
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if not isinstance(item, ast.FunctionDef) or item.name != "component":
+                    continue
+                args = item.args
+                required = [a.arg for a in args.posonlyargs + args.args if a.arg != "self"]
+                required += [
+                    a.arg
+                    for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+                    if d is None
+                ]
+                optional = [a.arg for a, d in zip(args.kwonlyargs, args.kw_defaults,
+                                                  strict=True) if d is not None]
+                if required or optional:
+                    offenders.append(
+                        f"{path.relative_to(root)}:{item.lineno} "
+                        f"{node.name}.component takes {required + optional}"
+                    )
+    assert offenders == []

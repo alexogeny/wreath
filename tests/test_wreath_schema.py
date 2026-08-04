@@ -302,8 +302,8 @@ async def test_every_subsystem_that_owns_tables_offers_a_component() -> None:
     claims = [
         JobRunner(None, name="q").component(),
         MessageBus(None, name="b").component(),
-        ledger.component("wreath"),
-        settle.component(),
+        ledger.schema_claim("wreath"),
+        settle.schema_claim(),
         PostgresSessionStore(None).component(),
         PostgresRateLimitStore(None).component(),
         PostgresIdempotencyStore(None).component(),
@@ -338,7 +338,7 @@ async def test_schema_sql_is_a_derivation_of_the_statements() -> None:
         # The joined form leads with CREATE SCHEMA; the rest is the tuple.
         assert joined[0].startswith("CREATE SCHEMA")
         assert joined[1:] == [s.strip() for s in owner.component().statements()]
-    for owner in (ledger.component("wreath"), settle.component()):
+    for owner in (ledger.schema_claim("wreath"), settle.schema_claim()):
         joined = [s.strip() for s in owner.sql().split(";\n") if s.strip()]
         assert joined[0].startswith("CREATE SCHEMA")
         assert joined[1:] == [s.strip() for s in owner.statements()]

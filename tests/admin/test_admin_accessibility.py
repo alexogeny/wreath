@@ -96,7 +96,7 @@ async def test_every_admin_page_has_no_accessibility_errors(
 ) -> None:
     rendered = await _pages(account_model)
     report = _audit(page, rendered[page])
-    assert report.errors == [], [f.to_dict() for f in report.errors]
+    assert report.errors == [], [f.as_dict() for f in report.errors]
 
 
 @pytest.mark.parametrize(
@@ -117,7 +117,7 @@ async def test_every_admin_page_has_no_accessibility_warnings(
     # response, so the admin sets it and the rule stays live.
     deployment = {"compression-enabled", "cache-control", "security-headers", "hsts"}
     warnings = [f for f in report.warnings if f.rule_id not in deployment]
-    assert warnings == [], [f.to_dict() for f in warnings]
+    assert warnings == [], [f.as_dict() for f in warnings]
 
 
 async def test_every_page_carries_the_scriptless_policy(account_model: type) -> None:
