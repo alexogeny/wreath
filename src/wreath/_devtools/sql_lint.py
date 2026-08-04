@@ -46,7 +46,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .native_lint import repo_root
+from .native_lint import repo_root, report_findings
 
 DRIVER = "src/wreath/_pure/postgres.py"
 
@@ -391,11 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_encodable:
         print(" ".join(sorted(encodable_types(root))))
         return 0
-    findings = scan(root)
-    for finding in findings:
-        print(finding.render())
-    print(f"wreath-sql-lint: {len(findings)} finding(s).")
-    return 1 if findings else 0
+    return report_findings("wreath-sql-lint", scan(root))
 
 
 if __name__ == "__main__":

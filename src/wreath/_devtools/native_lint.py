@@ -31,6 +31,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # Scanned when no explicit paths are given, relative to the repository root.
 DEFAULT_ROOTS = ("src/wreath/_native",)
@@ -469,6 +470,43 @@ def iter_sources(paths: list[Path]) -> list[Path]:
 def repo_root() -> Path:
     # Installed editable from the repo: src/wreath/_devtools/native_lint.py
     return Path(__file__).resolve().parents[3]
+
+
+def report_findings(prog: str, findings: list[Any]) -> int:
+    """Print `findings`, then the summary line, and return the exit code.
+
+    The reporting tail every repository-scanning lint shares. Kept separate
+    from `run_root_lint` because `sql-lint` has an argument of its own and so
+    cannot use the whole body -- only this part, which is the part that was
+    actually identical.
+    """
+    for finding in findings:
+        print(finding.render())
+    print(f"{prog}: {len(findings)} finding(s).")
+    return 1 if findings else 0
+
+
+def run_root_lint(
+    argv: list[str] | None,
+    *,
+    prog: str,
+    description: str,
+    scan: Callable[[Path], list[Any]],
+) -> int:
+    """The command body for a lint that scans the repository rather than C sources.
+
+    `build-lint` and `roadmap-lint` were byte-identical here, down to the help
+    text of `--root`. `run_lint` below does not fit them: it iterates C sources
+    and takes a per-file scanner, where these take the root itself.
+
+    Lives in this module because `repo_root` does and both callers already
+    import it from here -- not because either is a native lint.
+    """
+    parser = argparse.ArgumentParser(prog=prog, description=description)
+    parser.add_argument("--root", default=None, help="repository root (default: detected)")
+    args = parser.parse_args(argv)
+    root = Path(args.root).resolve() if args.root else repo_root()
+    return report_findings(prog, scan(root))
 
 
 def run_lint(

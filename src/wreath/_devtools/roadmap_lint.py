@@ -64,14 +64,13 @@ Run it with `uv run wreath-roadmap-lint`; `0` means clean.
 
 from __future__ import annotations
 
-import argparse
 import ast
 import importlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .native_lint import repo_root
+from .native_lint import run_root_lint
 
 ROADMAP = "docs/reference/roadmap.md"
 
@@ -293,18 +292,12 @@ def scan(root: Path) -> list[Finding]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    return run_root_lint(
+        argv,
         prog="wreath-roadmap-lint",
         description="Fail when the roadmap claims a surface is absent and it is not.",
+        scan=scan,
     )
-    parser.add_argument("--root", default=None, help="repository root (default: detected)")
-    args = parser.parse_args(argv)
-    root = Path(args.root).resolve() if args.root else repo_root()
-    findings = scan(root)
-    for finding in findings:
-        print(finding.render())
-    print(f"wreath-roadmap-lint: {len(findings)} finding(s).")
-    return 1 if findings else 0
 
 
 if __name__ == "__main__":

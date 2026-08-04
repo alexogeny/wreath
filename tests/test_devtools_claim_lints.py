@@ -209,7 +209,10 @@ def test_a_prose_marker_whose_surface_now_exists_is_reported(tmp_path: Path) -> 
 
 
 def test_a_prose_marker_for_a_surface_still_absent_is_clean(tmp_path: Path) -> None:
-    root = _roadmap(tmp_path, "\nA reconnect is a fresh snapshot.\n<!-- absent: wreath.sync.resume -->\n")
+    root = _roadmap(
+        tmp_path,
+        "\nA reconnect is a fresh snapshot.\n<!-- absent: wreath.sync.resume -->\n",
+    )
     _module(root, "wreath.sync", "def subscribe(shape):\n    return shape\n")
 
     assert roadmap_lint.scan(root) == []
@@ -254,7 +257,11 @@ def test_a_conditionally_imported_re_export_still_counts_as_shipped(tmp_path: Pa
 
 def test_a_name_local_to_a_function_is_not_a_surface(tmp_path: Path) -> None:
     root = _roadmap(tmp_path, "\nAbsent.\n<!-- absent: wreath.organizations.scim_router -->\n")
-    _module(tmp_path, "wreath.organizations", "def build():\n    scim_router = 1\n    return scim_router\n")
+    _module(
+        tmp_path,
+        "wreath.organizations",
+        "def build():\n    scim_router = 1\n    return scim_router\n",
+    )
 
     assert roadmap_lint.scan(root) == []
 

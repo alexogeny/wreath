@@ -130,7 +130,7 @@ class Group:
         """Lines a collapse would remove: everything after the first copy."""
         return sum(site.lines for site in self.sites[1:])
 
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         return {
             "digest": self.digest,
             "redundant_lines": self.redundant_lines,
@@ -281,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "scanned_functions": scanned,
             "min_lines": args.min_lines,
-            "groups": [g.to_json() for g in groups],
+            "groups": [g.as_dict() for g in groups],
         }, indent=2))
         return 0
 

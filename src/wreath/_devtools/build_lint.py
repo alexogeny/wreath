@@ -44,12 +44,11 @@ Run it with `uv run wreath-build-lint`; `0` means clean.
 
 from __future__ import annotations
 
-import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .native_lint import repo_root
+from .native_lint import run_root_lint
 
 #: Every extension `setup.py` defines, named as a dotted module string.
 _EXTENSION_RE = re.compile(r'"(wreath\._(?:native|exp)\._[a-z0-9_]+)"')
@@ -161,18 +160,12 @@ def scan(root: Path) -> list[Finding]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    return run_root_lint(
+        argv,
         prog="wreath-build-lint",
         description="Report compiled extensions older than the sources they are built from.",
+        scan=scan,
     )
-    parser.add_argument("--root", default=None, help="repository root (default: detected)")
-    args = parser.parse_args(argv)
-    root = Path(args.root).resolve() if args.root else repo_root()
-    findings = scan(root)
-    for finding in findings:
-        print(finding.render())
-    print(f"wreath-build-lint: {len(findings)} finding(s).")
-    return 1 if findings else 0
 
 
 if __name__ == "__main__":

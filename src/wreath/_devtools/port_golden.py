@@ -85,7 +85,7 @@ class GoldenFinding:
         mark = "updated" if self.updated else self.reason
         return f"{mark:>17}  {self.golden}" + (f" — {self.detail}" if self.detail else "")
 
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         return {
             "golden": self.golden,
             "reason": self.reason,
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "goldens": seen,
             "updated": sum(1 for f in findings if f.updated),
-            "findings": [f.to_json() for f in findings],
+            "findings": [f.as_dict() for f in findings],
         }, indent=2))
     else:
         for finding in findings:
