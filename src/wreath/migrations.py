@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import re
 import struct
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -29,7 +30,13 @@ from .orm.types import BIT_OID, ExtensionType
 #: why `oid >= 16384` was a sufficient test until `Bit(length)` existed.
 _MODIFIER_BEARING_OIDS = frozenset({BIT_OID})
 
+#: A tenant schema is interpolated into the lock key and reaches the catalog
+#: query as a parameter; the identifier rule is the same one the rest of the
+#: tree applies, spelled here because migrations imports no store.
+_SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 _SINGLE_CATALOG_SQL = """
+
 WITH migration_objects AS (
     SELECT
         n.nspname::text AS schema_name,
@@ -215,6 +222,29 @@ SELECT schema_name, table_name, object_name, object_kind, signature
 FROM migration_objects
 ORDER BY object_kind, schema_name, table_name, object_name
 """
+#: The same catalog query with every *tenant-local* schema name blanked, so two
+#: structurally identical tenant schemas produce the same image and therefore the
+#: same fingerprint. Without this a fleet cannot exist: `nspname` is the first
+#: column of every branch, so `t_alice` and `t_bob` fingerprint differently even
+#: when their structure is byte-identical, and one artifact could never verify
+#: against a second tenant.
+#:
+#: **A foreign key's target schema is neutralised only when it is the tenant's
+#: own.** An FK into a *shared* schema is a genuine structural fact that every
+#: tenant has identically, so blanking it would erase a real difference between
+#: an artifact that references shared data and one that does not; leaving a
+#: tenant-local target named would make every tenant differ. The `CASE` is the
+#: whole distinction and it is why this is a derivation rather than a blanket
+#: `replace` of `nspname`.
+_FLEET_CATALOG_SQL = _SINGLE_CATALOG_SQL.replace(
+    "n.nspname::text AS schema_name", "''::text AS schema_name"
+).replace(
+    "        n.nspname::text,", "        ''::text,"
+).replace(
+    "COALESCE(fn.nspname, '')",
+    "CASE WHEN fn.nspname = $1::text THEN '' ELSE COALESCE(fn.nspname, '') END",
+)
+
 
 # History status codes shared with the native fleet resolver
 # (wreath/_native/postgres/migration_resolver.c). A tenant-directory row
@@ -475,6 +505,10 @@ class MigrationRevertResult:
 
 
 _HAZARD_KIND_NAMES = {1: "table", 2: "column", 3: "constraint", 4: "index"}
+
+
+class FleetRunInProgress(RuntimeError):
+    """Another runner holds the fleet lock for this migration."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,8 +799,19 @@ def _descriptor_record(
     ) + b"".join(parts)
 
 
-def _registry_descriptor(registry: Any) -> bytes:
-    """Pack immutable ORM intent once for native migration compilation."""
+def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
+    """Pack immutable ORM intent once for native migration compilation.
+
+    `fleet=True` writes every schema name as **empty**, which is what makes one
+    artifact usable across a fleet of identical tenant schemas: the desired
+    image no longer names the tenant it was generated from, and the rendered DDL
+    comes out unqualified so it binds to whatever `search_path` the applying
+    transaction set -- which `wreath.orm.TenantContext` is already how you set.
+
+    A `tenant_search_path` spec declares no schema of its own and is therefore
+    only describable this way; it used to be refused outright, with a message
+    naming the compiler that did not exist yet.
+    """
     records: list[bytes] = []
     # This database's default operator class per (access method, indexed type),
     # if anything has read it yet. See the operator-class comment below; a
@@ -775,12 +820,17 @@ def _registry_descriptor(registry: Any) -> bytes:
     # offline renderers want.
     default_opclasses = registry.default_opclasses or {}
     for spec in registry.specs:
-        if spec.sql_namespace != "qualified" or not spec.schema:
+        if not fleet and (spec.sql_namespace != "qualified" or not spec.schema):
             raise ValueError(
-                "isolated tenant templates require the fleet desired-image compiler"
+                "a tenant template has no schema of its own; build it with "
+                "fleet=True, which writes the schema empty so one artifact "
+                "applies to every tenant under its own search_path"
             )
+        # Empty for a fleet, so nothing downstream can name one tenant: the
+        # image is hashed over these bytes and the DDL is rendered from them.
+        schema = "" if fleet else spec.schema
         records.append(
-            _descriptor_record(spec.schema, spec.table, "", 1, "table\x1fr\x1fp")
+            _descriptor_record(schema, spec.table, "", 1, "table\x1fr\x1fp")
         )
         for column in spec.columns:
             # An extension type spells itself; a built-in leaves the slot empty
@@ -820,7 +870,7 @@ def _registry_descriptor(registry: Any) -> bytes:
             )
             records.append(
                 _descriptor_record(
-                    spec.schema,
+                    schema,
                     spec.table,
                     column.database_name,
                     2,
@@ -830,14 +880,14 @@ def _registry_descriptor(registry: Any) -> bytes:
         primary_columns = ",".join(column.database_name for column in spec.primary_key)
         primary_name = f"p:{primary_columns}:::"
         records.append(
-            _descriptor_record(spec.schema, spec.table, primary_name, 3, primary_name)
+            _descriptor_record(schema, spec.table, primary_name, 3, primary_name)
         )
         for column in spec.columns:
             if column.unique and not column.primary_key:
                 unique_name = f"u:{column.database_name}:::"
                 records.append(
                     _descriptor_record(
-                        spec.schema, spec.table, unique_name, 3, unique_name
+                        schema, spec.table, unique_name, 3, unique_name
                     )
                 )
             if column.indexed:
@@ -870,7 +920,7 @@ def _registry_descriptor(registry: Any) -> bytes:
                     signature += f"\x1f\x1f{ops}\x1f{options}"
                 records.append(
                     _descriptor_record(
-                        spec.schema,
+                        schema,
                         spec.table,
                         index_name,
                         4,
@@ -886,8 +936,13 @@ def _registry_descriptor(registry: Any) -> bytes:
                 # is the same positional assumption that made schema validation
                 # compare a `confkey` attnum against a declaration index, and the
                 # name needs no assumption at all.
+                # The target's schema is neutralised on the same terms as the
+                # owner's: a fleet registry describes tenant-local models, so
+                # its foreign keys point within the tenant and naming one would
+                # make every tenant differ from every other.
+                target_schema = "" if fleet else target.schema
                 foreign_name = (
-                    f"f:{column.database_name}:{target.schema}:{target.table}:"
+                    f"f:{column.database_name}:{target_schema}:{target.table}:"
                     f"{reference.column}"
                 )
                 # The name is the FK's identity (columns + target); the signature
@@ -899,13 +954,13 @@ def _registry_descriptor(registry: Any) -> bytes:
                 )
                 records.append(
                     _descriptor_record(
-                        spec.schema, spec.table, foreign_name, 3, foreign_signature
+                        schema, spec.table, foreign_name, 3, foreign_signature
                     )
                 )
         for constraint in spec.table_uniques:
             unique_name = f"u:{','.join(constraint.columns)}:::"
             records.append(
-                _descriptor_record(spec.schema, spec.table, unique_name, 3, unique_name)
+                _descriptor_record(schema, spec.table, unique_name, 3, unique_name)
             )
         for table_index in spec.table_indexes:
             prefix = "ui" if table_index.unique else "i"
@@ -927,7 +982,7 @@ def _registry_descriptor(registry: Any) -> bytes:
                 )
                 signature = f"index:{prefix}:{columns}:btree\x1f{predicate}"
             records.append(
-                _descriptor_record(spec.schema, spec.table, index_name, 4, signature)
+                _descriptor_record(schema, spec.table, index_name, 4, signature)
             )
     return b"WMD1" + struct.pack("<II", 1, len(records)) + b"".join(records)
 
@@ -1072,10 +1127,25 @@ async def detect_single(registry: Any, connection: Any) -> MigrationDetection:
     )
 
 
-async def generate_single_plan(registry: Any, connection: Any) -> MigrationGeneration:
-    """Build a deterministic named plan for one live physical schema."""
+async def generate_single_plan(
+    registry: Any, connection: Any, *, fleet: bool = False
+) -> MigrationGeneration:
+    """Build a deterministic named plan for one live physical schema.
+
+    `fleet=True` fingerprints the catalog with every tenant-local schema name
+    blanked, so the artifact verifies against *any* structurally identical
+    tenant rather than only the one it was generated from. That is the whole
+    reason one artifact can cross a fleet: `nspname` is the first column of
+    every catalog branch, so two byte-identical tenants otherwise fingerprint
+    differently and an artifact could never match the second one.
+
+    A fleet artifact and a single-schema artifact are therefore **not
+    interchangeable**, and cannot be confused for one another: their
+    fingerprints differ, so applying the wrong kind fails the source-fingerprint
+    refusal rather than migrating anything.
+    """
     await _resolve_default_opclasses(registry, connection)
-    desired_descriptor = _registry_descriptor(registry)
+    desired_descriptor = _registry_descriptor(registry, fleet=fleet)
     desired = _metal()._migration_compile_desired(desired_descriptor)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
@@ -1083,7 +1153,9 @@ async def generate_single_plan(registry: Any, connection: Any) -> MigrationGener
             "generate_single_plan requires exactly one resolved physical schema"
         )
     actual = await _decode_catalog_snapshot(
-        connection, _SINGLE_CATALOG_SQL, (next(iter(schemas)),)
+        connection,
+        _FLEET_CATALOG_SQL if fleet else _SINGLE_CATALOG_SQL,
+        (next(iter(schemas)),),
     )
     diff = _diff_packed_images(desired, actual.image)
     plan = _plan_descriptors(desired_descriptor, actual.descriptor)
@@ -1164,14 +1236,48 @@ async def apply_single_artifact(
         raise ValueError(
             "apply_single_artifact requires exactly one resolved physical schema"
         )
-    schema = next(iter(schemas))
+    await _bootstrap_migration_history(connection)
+    outcome = await _apply_artifact_to_schema(
+        connection,
+        artifact,
+        schema=next(iter(schemas)),
+        allow_destructive=allow_destructive,
+        skip_if_applied=False,
+    )
+    if outcome is None:  # pragma: no cover - skip_if_applied is False here
+        raise RuntimeError("artifact reported already applied without being asked")
+    return outcome
+
+
+async def _apply_artifact_to_schema(
+    connection: Any,
+    artifact: Any,
+    *,
+    schema: str,
+    allow_destructive: bool,
+    skip_if_applied: bool,
+    catalog_sql: str = _SINGLE_CATALOG_SQL,
+    bind_search_path: bool = False,
+) -> MigrationApplyResult | None:
+    """One schema's guarded apply. Returns None when already at the target.
+
+    Extracted so the fleet runner reuses this rather than restating it. The five
+    refusals below are the whole safety argument of a migration, and a second
+    copy of them is a second thing to keep correct -- the fleet path would be
+    exactly where a drift went unnoticed, because it is the path nobody runs by
+    hand.
+
+    `skip_if_applied` is what makes a fleet run resumable. A run that stopped
+    on tenant 400 of 1000 must be re-runnable, and the parent-checksum refusal
+    would otherwise reject every tenant that already succeeded -- turning a
+    resumed run into a wall of errors that all mean "this one is fine".
+    """
     module = _metal()
     ddl_block = module._migration_build_ddl_block(
         artifact.sql_tape, allow_destructive
     )
     history = _qualified_history_table()
     zero_checksum = bytes(32)
-    await _bootstrap_migration_history(connection)
     await connection.execute("BEGIN")
     committed = False
     try:
@@ -1179,6 +1285,15 @@ async def apply_single_artifact(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
             f"wreath:migrations:{schema}",
         )
+        if bind_search_path:
+            # A fleet artifact renders its DDL **unqualified** so one artifact
+            # describes every tenant; unqualified DDL lands wherever
+            # `search_path` points, which is `public` unless something says
+            # otherwise. Binding it here is what aims the statements at this
+            # tenant -- the same mechanism `wreath.orm.TenantContext` uses for
+            # queries, and `SET LOCAL` so it reverts with the transaction
+            # rather than leaking onto a pooled connection's next borrower.
+            await connection.execute(f'SET LOCAL search_path TO "{schema}"')
         previous = await connection.fetchrow(
             f"""SELECT checksum, target_fingerprint
                 FROM {history}
@@ -1197,6 +1312,13 @@ async def apply_single_artifact(
         else:
             previous_checksum = bytes(previous[0])
             previous_target = bytes(previous[1])
+            if skip_if_applied and previous_checksum == artifact.checksum:
+                # Already at the target. Reported as a skip rather than an
+                # error, and *inside* the lock so two concurrent runners cannot
+                # both decide to apply it.
+                await connection.execute("COMMIT")
+                committed = True
+                return None
             if artifact.parent_checksum != previous_checksum:
                 raise RuntimeError(
                     "cannot apply migration: artifact parent "
@@ -1209,9 +1331,7 @@ async def apply_single_artifact(
                     f"{artifact.source_fingerprint.hex()} does not match history target "
                     f"{previous_target.hex()} for schema {schema!r}"
                 )
-        actual = await _decode_catalog_snapshot(
-            connection, _SINGLE_CATALOG_SQL, (schema,)
-        )
+        actual = await _decode_catalog_snapshot(connection, catalog_sql, (schema,))
         actual_fingerprint = _fingerprint_image(actual.image)
         if actual_fingerprint != artifact.source_fingerprint:
             raise RuntimeError(
@@ -1228,9 +1348,7 @@ async def apply_single_artifact(
         if pass_hazards:
             raise MigrationBlockedByPass(schema, pass_hazards)
         await connection.execute(ddl_block)
-        resulting = await _decode_catalog_snapshot(
-            connection, _SINGLE_CATALOG_SQL, (schema,)
-        )
+        resulting = await _decode_catalog_snapshot(connection, catalog_sql, (schema,))
         resulting_fingerprint = _fingerprint_image(resulting.image)
         if resulting_fingerprint != artifact.target_fingerprint:
             raise RuntimeError(
@@ -1264,6 +1382,179 @@ async def apply_single_artifact(
         target_fingerprint=artifact.target_fingerprint,
         destructive_approved=allow_destructive,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class TenantOutcome:
+    """What happened to one tenant schema in a fleet run.
+
+    `state` is `"applied"`, `"skipped"` (already at the target) or `"failed"`.
+    `error` carries the refusal for a failure and is None otherwise -- the
+    message, not the exception, because a result is something a caller logs,
+    serialises and compares, and an exception object is none of those.
+    """
+
+    schema: str
+    state: str
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FleetApplyResult:
+    """One artifact's progress across a tenant fleet.
+
+    **A fleet run has no atomic answer, and this shape refuses to pretend it
+    does.** One transaction across a thousand schemas would hold every lock for
+    the length of the slowest one and exceed what a server will keep open, so
+    each tenant commits on its own -- which means a run that stops leaves the
+    fleet genuinely split. The honest report is therefore per tenant, and
+    `applied`/`skipped`/`failed` are separate rather than a pass rate.
+    """
+
+    outcomes: tuple[TenantOutcome, ...]
+
+    @property
+    def applied(self) -> tuple[str, ...]:
+        """Schemas this run migrated."""
+        return tuple(o.schema for o in self.outcomes if o.state == "applied")
+
+    @property
+    def skipped(self) -> tuple[str, ...]:
+        """Schemas already at the target before this run."""
+        return tuple(o.schema for o in self.outcomes if o.state == "skipped")
+
+    @property
+    def failed(self) -> tuple[TenantOutcome, ...]:
+        """Schemas that refused, each with the reason."""
+        return tuple(o for o in self.outcomes if o.state == "failed")
+
+    @property
+    def complete(self) -> bool:
+        """Whether every tenant asked for is now at the target."""
+        return not self.failed
+
+    def summary(self) -> str:
+        """One line for an operator: what moved, what did not, what broke."""
+        return (
+            f"{len(self.applied)} applied, {len(self.skipped)} already current, "
+            f"{len(self.failed)} failed"
+        )
+
+
+async def apply_fleet(
+    database: Any,
+    artifact_data: bytes,
+    schemas: Any,
+    *,
+    allow_destructive: bool = False,
+    stop_on_error: bool = True,
+    workload: str = "write",
+) -> FleetApplyResult:
+    """Apply one artifact across many tenant schemas, under a fleet lock.
+
+    ```python
+    result = await apply_fleet(app.postgres("main"), artifact, tenant_schemas)
+    if not result.complete:
+        raise SystemExit(result.summary())
+    ```
+
+    Every tenant goes through the *same* guarded apply as a single-schema run --
+    the same five refusals, the same fingerprint verification, the same history
+    row -- because a fleet path with its own copy of that logic is exactly where
+    a drift would go unnoticed.
+
+    **One transaction per tenant, not one for the fleet.** A single transaction
+    spanning a thousand schemas holds every lock for the length of the slowest,
+    and no server will keep that open. So a run that stops leaves the fleet
+    split, and `FleetApplyResult` reports which side each tenant is on rather
+    than reducing it to a boolean.
+
+    **Resumable by construction.** A tenant already at the artifact's checksum
+    is skipped, not refused, so re-running after a stop is the ordinary way to
+    finish -- rather than a wall of parent-checksum errors that all mean "this
+    one already worked".
+
+    **Serial, deliberately.** Concurrent DDL across schemas contends on shared
+    catalog rows, and the failure it produces is a deadlock partway through a
+    fleet -- the worst possible time to be debugging lock ordering. Ordering is
+    the caller's list, so a run is reproducible and a resumed run visits
+    tenants in the same order.
+
+    `stop_on_error=True` (the default) halts at the first refusal, which keeps
+    the blast radius to one tenant when the artifact is simply wrong for this
+    fleet. Pass False to attempt every tenant and collect the failures, which is
+    what a caller wants when the failures are expected to be independent.
+
+    The **fleet lock** is a session advisory lock held for the whole run: two
+    deploys racing would otherwise interleave per-tenant transactions and leave
+    a fleet neither artifact describes. It is `pg_try_advisory_lock`, so a
+    second runner is refused immediately rather than queueing behind a run that
+    may take an hour.
+    """
+    targets = [str(schema) for schema in schemas]
+    if not targets:
+        raise ValueError("apply_fleet needs at least one tenant schema")
+    if len(set(targets)) != len(targets):
+        seen: set[str] = set()
+        repeated = sorted({s for s in targets if s in seen or seen.add(s)})  # type: ignore[func-returns-value]
+        raise ValueError(
+            f"apply_fleet was given the same schema twice: {', '.join(repeated)}; "
+            "a fleet is a set of tenants and a repeat is a directory bug"
+        )
+    for schema in targets:
+        # Interpolated into the catalog query and the lock key, so the same
+        # rule the rest of the tree applies to an identifier applies here.
+        if not _SCHEMA_NAME.fullmatch(schema):
+            raise ValueError(f"tenant schema {schema!r} is not a plain SQL identifier")
+
+    artifact = _load_native_artifact(artifact_data)
+    connection = await database.acquire(workload)
+    outcomes: list[TenantOutcome] = []
+    try:
+        await _bootstrap_migration_history(connection)
+        held = await connection.fetchval(
+            "SELECT pg_try_advisory_lock(hashtextextended($1::text, 0))",
+            f"wreath:migrations:fleet:{artifact.migration_id}",
+        )
+        if not held:
+            raise FleetRunInProgress(
+                f"another runner holds the fleet lock for migration "
+                f"{artifact.migration_id}; a second concurrent run would interleave "
+                "per-tenant transactions and leave the fleet in a state neither "
+                "artifact describes"
+            )
+        try:
+            for schema in targets:
+                try:
+                    result = await _apply_artifact_to_schema(
+                        connection,
+                        artifact,
+                        schema=schema,
+                        allow_destructive=allow_destructive,
+                        skip_if_applied=True,
+                        catalog_sql=_FLEET_CATALOG_SQL,
+                        bind_search_path=True,
+                    )
+                except Exception as error:  # noqa: BLE001 - recorded per tenant
+                    # Broad and *reported*: every refusal this can raise names a
+                    # tenant, and one tenant's refusal must not hide the state of
+                    # the others. Swallowing is what would be wrong; this
+                    # surfaces in `failed` with its message.
+                    outcomes.append(TenantOutcome(schema, "failed", str(error)))
+                    if stop_on_error:
+                        break
+                    continue
+                outcomes.append(
+                    TenantOutcome(schema, "skipped" if result is None else "applied")
+                )
+        finally:
+            await connection.execute(
+                "SELECT pg_advisory_unlock(hashtextextended($1::text, 0))",
+                f"wreath:migrations:fleet:{artifact.migration_id}",
+            )
+    finally:
+        await database.release(workload, connection)
+    return FleetApplyResult(tuple(outcomes))
 
 
 _PLAN_ACTION_NAMES = {1: "add", 2: "drop", 3: "alter"}

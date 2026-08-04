@@ -845,10 +845,14 @@ migration_compile_desired(PyObject *module, PyObject *args)
         offset += 12;
         payload_length = (Py_ssize_t)schema_length + table_length +
             name_length + signature_length;
-        if (schema_length == 0 || table_length == 0 || payload_length > length - offset) {
+        /* A zero-length schema is a tenant template rather than a corrupt
+           record: the desired image is built without naming any one tenant so
+           that one artifact describes them all. The table name has no such
+           reading and stays required. */
+        if (table_length == 0 || payload_length > length - offset) {
             PyErr_Format(
                 PyExc_ValueError,
-                "invalid desired WMD1 record %u: schema/table names must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
+                "invalid desired WMD1 record %u: the table name must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
                 index, payload_length, length - offset);
             goto done;
         }
@@ -970,11 +974,11 @@ open_named_descriptor(
         offset += 12;
         payload_length = (Py_ssize_t)record->schema_length + record->table_length +
             record->name_length + record->signature_length;
-        if (record->schema_length == 0 || record->table_length == 0 ||
-            payload_length > length - offset) {
+        /* A zero-length schema is a tenant template, as above. */
+        if (record->table_length == 0 || payload_length > length - offset) {
             PyErr_Format(
                 PyExc_ValueError,
-                "invalid %s WMD1 record %u: schema/table names must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
+                "invalid %s WMD1 record %u: the table name must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
                 label, index, payload_length, length - offset);
             goto error;
         }

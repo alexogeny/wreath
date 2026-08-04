@@ -115,9 +115,21 @@ append_identifier(
 }
 
 
+/* A zero-length schema is a *tenant template*: the statement is rendered
+   unqualified so it binds to whatever search_path the applying transaction has
+   set, which is how one artifact crosses a fleet of identical schemas. A
+   qualified render would name the tenant it was generated from and recreate
+   that tenant's objects on every other one.
+
+   Emitting `""."table"` instead would be a syntax error at apply time, a long
+   way from the descriptor that caused it, so the empty case is answered here
+   rather than refused upstream. */
 static int
 append_qualified(WreathPgBuffer *buffer, const WreathSqlOperation *operation)
 {
+    if (operation->schema_length == 0) {
+        return append_identifier(buffer, operation->table, operation->table_length);
+    }
     return append_identifier(buffer, operation->schema, operation->schema_length) < 0 ||
            append_literal(buffer, ".") < 0 ||
            append_identifier(buffer, operation->table, operation->table_length) < 0
@@ -295,11 +307,15 @@ parse_plan(
         offset += 20;
         payload_length = (Py_ssize_t)operation->schema_length + operation->table_length +
             operation->name_length + operation->before_length + operation->after_length;
-        if (operation->schema_length == 0 || operation->table_length == 0 ||
-            payload_length > length - offset) {
+        /* A zero-length *schema* is now meaningful rather than malformed: it
+           is a tenant template, rendered unqualified against the applying
+           transaction's search_path (see `append_qualified`). The table name
+           has no such reading and stays required -- an operation naming no
+           relation is a corrupt tape however it was produced. */
+        if (operation->table_length == 0 || payload_length > length - offset) {
             PyErr_Format(
                 PyExc_ValueError,
-                "invalid WMP1 operation %u: schema/table names must be nonempty and its %zd-byte payload must fit in the remaining %zd bytes",
+                "invalid WMP1 operation %u: the table name must be nonempty and its %zd-byte payload must fit in the remaining %zd bytes",
                 index, payload_length, length - offset);
             goto error;
         }
@@ -893,10 +909,12 @@ render_drop_index(WreathPgBuffer *statement, const WreathSqlOperation *operation
     int unique;
     if (!index_form(operation, parts, &unique, &method)) return 1;
     if (!index_method_is_known(&method)) return 1;
-    if (append_literal(statement, "drop index ") < 0 ||
-        append_identifier(statement, operation->schema, operation->schema_length) < 0 ||
-        append_literal(statement, ".") < 0 ||
-        append_derived_object_name(statement, operation) < 0 ||
+    if (append_literal(statement, "drop index ") < 0) return -1;
+    /* As `append_qualified`: a tenant template drops unqualified. */
+    if (operation->schema_length != 0 &&
+        (append_identifier(statement, operation->schema, operation->schema_length) < 0 ||
+         append_literal(statement, ".") < 0)) return -1;
+    if (append_derived_object_name(statement, operation) < 0 ||
         append_literal(statement, ";") < 0) return -1;
     return 0;
 }
