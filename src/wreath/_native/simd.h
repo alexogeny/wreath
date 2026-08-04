@@ -909,6 +909,31 @@ wreath_b64url_decode_avx2(const char *in, ptrdiff_t len, unsigned char *out)
 }
 #endif
 
+/* The three codec families below -- base64url decode, base64 encode, hex decode
+ * -- carry a scalar arm and an AVX2 arm, and deliberately no SSE2, SWAR or NEON
+ * arm. The scan families above carry all five, so the asymmetry is worth
+ * stating rather than leaving for someone to read off the `#if`s:
+ *
+ *   * SSE2 and SWAR are absent because these are *transforms*, not searches.
+ *     A scan arm's win comes from a movemask over a comparison, which SSE2 does
+ *     nearly as well as AVX2. A codec's win comes from the shuffle and multiply
+ *     network in the bodies below, and the SSE2 spelling of it is close enough
+ *     to the scalar loop's throughput at these sizes not to earn a fourth
+ *     implementation to keep differentially tested.
+ *   * **NEON is absent and this costs aarch64 real throughput.** Apple Silicon
+ *     and ARM servers take the scalar arm for every JWT segment, session
+ *     cookie, WebAuthn payload and `bytea` value -- `postgres/codec.c` reaches
+ *     `wreath_hex_decode` on the driver's read path. NEON has `vqtbl1q_u8`,
+ *     which is the shuffle these need, so the arms are writable; nobody has
+ *     written them. `wreath_hex_decode` is the one to do first: it is the
+ *     simplest of the three and the only one on a hot path that is not
+ *     already bounded by a hash or a signature check.
+ *
+ * Anything added here must also be added to `tests/test_native_simd.py`, which
+ * reads this header as text and checks declaration order for every arm --
+ * including the ones the local machine cannot compile.
+ */
+
 static inline ptrdiff_t
 wreath_b64url_decode(const char *in, ptrdiff_t len, unsigned char *out)
 {

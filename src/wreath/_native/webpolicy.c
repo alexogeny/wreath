@@ -1,3 +1,19 @@
+/* No `simd.h` here, and that is a decision rather than an oversight.
+ *
+ * Every scalar loop below walks either one header token or one header list.
+ * `ascii_equal_ci` compares against a literal like "gzip" or "no-store" and
+ * returns on the first length mismatch; `trim_ows` walks the whitespace at
+ * each end, which is nearly always zero or one byte; `parse_quality` reads at
+ * most five characters and refuses anything longer. The list walks are over
+ * tens of headers, not thousands.
+ *
+ * So the loop is priced the way AGENTS.md asks: the body is already minimal
+ * and the length is single-digit. An arm needs 16 or 32 bytes before its first
+ * load pays for the setup, so every one of these would spend more reaching the
+ * vector path than it spends finishing scalar. Reach for `simd.h` here only if
+ * a caller starts handing this file a buffer rather than a token.
+ */
+
 #include "wreathcore.h"
 
 #include <ctype.h>
