@@ -379,6 +379,22 @@ class CDNPurge:
             return
         self._enqueued += 1
 
+    def counters(self) -> Any:
+        """This purger's counters, for `wreath.metrics.collect`.
+
+        `dropped` is the reason this exists. Its failure mode is *silence* --
+        the edge keeps serving stale content and nothing in the application
+        looks wrong -- so a number nobody scrapes is a number that cannot do
+        the one job it was added for.
+        """
+        from .metrics import Counters
+
+        return Counters(
+            subsystem="cdn_purge",
+            instance=self._task,
+            values={"enqueued": self._enqueued, "dropped": self._dropped},
+        )
+
     def __repr__(self) -> str:
         return (
             f"<CDNPurge task={self._task!r} watching={sorted(self._watching)} "
