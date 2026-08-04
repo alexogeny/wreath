@@ -1,11 +1,16 @@
-# Wreath
+```plate
+caption: One package · no runtime dependencies · Python 3.14
+title: Everything here is something you no longer install.
+lede: Wreath gathers the parts a web application is always assembled from — routing, validation, authentication, data access, background work, and the server that carries it all — into one coherent whole, and gives each of them a module named after the thing it does.
+action: What you don't have to install -> capabilities.md
+action: Install and build something -> getting-started/index.md
+```
 
 A wreath is a circle of separate things — leaves, branches, small flowers —
 gathered and woven until they hold a single shape. That is the idea behind this
-framework. A web application is made of many parts: routing, validation,
-authentication, data access, and the server that carries it all. Wreath gathers
-those parts into one coherent whole and gives each of them a clear, honest place
-to live.
+framework, and the list above is the literal version of it: every one of those
+names is a capability that now lives in a module of Wreath, tested and released
+with everything it sits beside.
 
 The brand is allowed to be poetic. The API is not.
 
