@@ -130,7 +130,7 @@ def test_discover_static_dirs(tmp_path) -> None:
 # --- dogfooding: wreath's own docs audit clean of the two fixed rules -------------
 def test_api_docs_clean_of_heading_and_table_rules() -> None:
     report = run_audit(_app(), title="Demo", version="1.0.0", discover_static=False)
-    assert report.errors == [], [f.to_dict() for f in report.errors]
+    assert report.errors == [], [f.as_dict() for f in report.errors]
     offenders = [f.rule_id for f in report.findings
                  if f.rule_id in ("heading-order", "table-headers")]
     assert offenders == [], offenders

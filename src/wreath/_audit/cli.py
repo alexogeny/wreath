@@ -36,7 +36,7 @@ def _render_human(report: Report) -> None:
 
 def _emit(namespace: Any, report: Report) -> int:
     if getattr(namespace, "as_json", False):
-        print(json.dumps(report.to_json(), sort_keys=True, separators=(",", ":")))
+        print(json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":")))
     else:
         _render_human(report)
     if report.errors or (getattr(namespace, "strict", False) and report.warnings):

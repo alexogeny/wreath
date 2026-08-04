@@ -29,7 +29,7 @@ class Finding:
     location: str = ""
     suggestion: str = ""
 
-    def to_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, str]:
         return {
             "rule": self.rule_id,
             "severity": self.severity.value,
@@ -64,12 +64,12 @@ class Report:
             self.findings, key=lambda f: (f.surface, _ORDER[f.severity], f.rule_id, f.location)
         )
 
-    def to_json(self) -> dict:
+    def as_dict(self) -> dict:
         return {
             "summary": {
                 "errors": len(self.errors),
                 "warnings": len(self.warnings),
                 "total": len(self.findings),
             },
-            "findings": [f.to_dict() for f in self.sorted()],
+            "findings": [f.as_dict() for f in self.sorted()],
         }

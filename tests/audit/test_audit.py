@@ -28,7 +28,7 @@ def test_self_audit_api_docs_has_no_errors() -> None:
     # Wreath's own API-docs shell ships <html lang>, <title>, and a zoomable viewport,
     # so the tool's first job is a clean self-audit (warnings are permitted).
     report = run_audit(_app(), title="Demo", version="1.0.0")
-    assert report.errors == [], [f.to_dict() for f in report.errors]
+    assert report.errors == [], [f.as_dict() for f in report.errors]
     assert any(f.surface == "api-docs" for f in report.findings) or not report.findings
 
 

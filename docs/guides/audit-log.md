@@ -97,7 +97,7 @@ the statements that make the table append-only:
 ```python
 from wreath.audit_log import append_only_statements, declaration
 
-declaration().component(name="audit_log")     # for wreath's schema bootstrap
+declaration().schema_claim("audit_log")       # for wreath's schema bootstrap
 append_only_statements("audit_records")       # REVOKE + trigger
 ```
 
