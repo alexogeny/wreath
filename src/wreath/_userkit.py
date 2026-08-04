@@ -14,7 +14,6 @@ giving single-use semantics without server-side token storage.
 from __future__ import annotations
 
 import asyncio
-import base64
 import email.policy
 import hashlib
 import hmac
@@ -29,7 +28,7 @@ from email.utils import formatdate, make_msgid
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from ._b64 import b64url_decode
+from ._b64 import b64url_decode, b64url_encode
 from ._dkim import DkimSigner
 
 __all__ = [
@@ -73,8 +72,9 @@ _SCRYPT_MAXMEM = 64 * 1024 * 1024
 MAX_PASSWORD_BYTES = 1024
 
 
-def _b64(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+#: Named locally because `_unb64` below is its inverse and the pair reads as
+#: one. The implementation is shared; see `wreath._b64.b64url_encode`.
+_b64 = b64url_encode
 
 
 def _unb64(text: str) -> bytes:
