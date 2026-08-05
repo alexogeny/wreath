@@ -589,6 +589,24 @@ def build_parser() -> argparse.ArgumentParser:
     audit_runtime.add_argument(
         "--strict", action="store_true", help="exit non-zero on warnings as well as errors"
     )
+    audit_code = audit_actions.add_parser(
+        "code", help="audit application source for security defect patterns"
+    )
+    audit_code.add_argument(
+        "paths", nargs="*", default=["."], metavar="PATH",
+        help="files or directories to scan (default: the working directory)",
+    )
+    audit_code.add_argument(
+        "--tests", action="store_true",
+        help="include test directories, which legitimately trip several rules",
+    )
+    audit_code.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="emit the machine-readable report JSON",
+    )
+    audit_code.add_argument(
+        "--strict", action="store_true", help="exit non-zero on warnings as well as errors"
+    )
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )
