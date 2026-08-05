@@ -86,6 +86,7 @@ PyInit__server(void)
      * distinguish peer disconnect cancellation from application failures. */
     disconnect_error = PyExc_ConnectionError; /* borrowed */
     if (PyType_Ready(&ImmediateAwaitableType) < 0 ||
+        PyType_Ready(&StartedCoroutineType) < 0 ||
         PyType_Ready(&ValueAwaitableType) < 0) {
         disconnect_error = NULL;
         Py_DECREF(module);
@@ -131,6 +132,13 @@ PyInit__server(void)
     /* Http1Protocol is the canonical name; HttpProtocol is retained as an
      * alias for backward compatibility. Http2Protocol and
      * NegotiatingHttpProtocol arrive in later checkpoints. */
+    /* `wreath.server` registers this with `collections.abc.Coroutine` so
+     * `create_task` will accept it; see `_StartedCoroutine` there. */
+    if (PyModule_AddObjectRef(module, "StartedCoroutine",
+                              (PyObject *)&StartedCoroutineType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
     if (PyModule_AddObjectRef(module, "Http1Protocol", protocol_type) < 0 ||
         PyModule_AddObjectRef(module, "HttpProtocol", protocol_type) < 0) {
         Py_DECREF(protocol_type);

@@ -41,32 +41,102 @@ if TYPE_CHECKING:
     from ssl import SSLContext
 
 
-async def _resume_started_coroutine(coroutine: Any, awaited: Any) -> Any:
-    """Resume a coroutine whose first step was run by the native HTTP driver."""
-    while True:
-        try:
-            if awaited is None:
-                await asyncio.sleep(0)
-                result = None
-            else:
-                if getattr(awaited, "_asyncio_future_blocking", False):
-                    awaited._asyncio_future_blocking = False
-                result = await awaited
-        except BaseException as error:  # noqa: BLE001 -- forwarded, never swallowed
-            # This drives a coroutine the native HTTP layer already started, so
-            # it must behave like the event loop it stands in for: *every*
-            # exception goes back into the coroutine via `throw`, including
-            # `CancelledError`. Narrowing to `Exception` would silently strip
-            # cancellation from a request mid-flight.
-            try:
-                awaited = coroutine.throw(error)
-            except StopIteration as completed:
-                return completed.value
-        else:
-            try:
-                awaited = coroutine.send(result)
-            except StopIteration as completed:
-                return completed.value
+def _load_native_started_coroutine() -> Any | None:
+    """The native continuation type, or None when this build has no extension.
+
+    Resolved once at import rather than per request, and by the same rule the
+    protocol selection uses: `WREATH_PURE` takes the readable implementation.
+    """
+    if os.environ.get("WREATH_PURE"):
+        return None
+    try:
+        extension = importlib.import_module("wreath._native._server")
+    except ImportError:
+        return None
+    return getattr(extension, "StartedCoroutine", None)
+
+
+class _StartedCoroutine:
+    """A coroutine the native HTTP driver already stepped once, made adoptable.
+
+    `spawn_app_task` calls the application and steps the coroutine straight away,
+    so a handler that never waits returns on that first step and the request owns
+    no asyncio Task at all. When it *does* suspend, the half-run coroutine has to
+    reach the loop -- and `Task` cannot take it, because its own first step sends
+    `None` into a coroutine that is waiting for a future's result.
+
+    This is what it takes instead: re-yield the value the native step already
+    received, then be the coroutine underneath for every step after. The Task
+    then does exactly what it would have done had it driven the handler from the
+    start -- it is the *same* value reaching the same scheduler, one step later.
+
+    Registering with `collections.abc.Coroutine` is what makes `create_task`
+    accept it; `asyncio.iscoroutine` is an isinstance check against that ABC.
+
+    The previous version of this was an `async def` that re-awaited each value
+    itself. That cost a Python coroutine frame per resumption -- measured at
+    ~7,000 instructions a suspending request, against ~15,000 for the Task the
+    loop needs regardless -- which is why the native twin below exists and why
+    this shape (an object that delegates) is what both implement.
+
+    **Every exception goes into the coroutine, `CancelledError` included.** This
+    stands in for the event loop, and narrowing that would silently strip
+    cancellation from a request in flight: the task would die and the query it
+    was waiting on would run to completion with nobody to receive it.
+    `tests/test_server_continuation.py` pins each half of that.
+    """
+
+    __slots__ = ("_coroutine", "_pending", "_started")
+
+    def __init__(self, coroutine: Any, awaited: Any) -> None:
+        self._coroutine = coroutine
+        self._pending = awaited
+        self._started = False
+
+    def send(self, value: Any) -> Any:
+        if self._started:
+            return self._coroutine.send(value)
+        # The first step's value, handed on untouched: the flag asyncio's
+        # `Future.__await__` set is exactly the one the Task expects to see.
+        self._started = True
+        pending, self._pending = self._pending, None
+        return pending
+
+    def throw(self, *arguments: Any) -> Any:
+        self._started = True
+        self._pending = None
+        return self._coroutine.throw(*arguments)
+
+    def close(self) -> Any:
+        self._pending = None
+        return self._coroutine.close()
+
+    def __await__(self) -> Any:
+        return self
+
+    def __iter__(self) -> Any:
+        return self
+
+    def __next__(self) -> Any:
+        return self.send(None)
+
+
+#: Neither twin registers with `collections.abc.Coroutine`, and neither needs
+#: to: that ABC's `__subclasshook__` accepts anything carrying `__await__`,
+#: `send`, `throw` and `close`, which is exactly what `asyncio.iscoroutine` --
+#: and therefore `loop.create_task` -- tests for. Renaming one of those four
+#: would make the loop refuse the continuation, so
+#: `tests/test_server_continuation.py` asserts `iscoroutine` on both.
+
+#: The native twin, when this build has one. `None` selects the class above.
+_native_started_coroutine = _load_native_started_coroutine()
+
+
+def _started_coroutine_continuation(coroutine: Any, awaited: Any) -> Any:
+    """The continuation for an already-stepped coroutine, native where built."""
+    if _native_started_coroutine is not None:
+        return _native_started_coroutine(coroutine, awaited)
+    return _StartedCoroutine(coroutine, awaited)
 
 
 def _create_recorder(config: ServerConfig) -> Any:

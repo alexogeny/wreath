@@ -2234,8 +2234,7 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
     /* A real suspension needs loop ownership. The trampoline adopts the value
      * already yielded by the first step and forwards results, errors and
      * cancellation into the original coroutine. */
-    continuation = PyObject_CallFunctionObjArgs(
-        resume_started_coroutine, coro, yielded, NULL);
+    continuation = wreath_started_coroutine(coro, yielded);
     if (continuation == NULL) goto done;
     task = PyObject_CallOneArg(self->loop_create_task, continuation);
     if (task == NULL) goto done;

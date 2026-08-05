@@ -125,7 +125,6 @@ PyObject *immediate_none = NULL;       /* stateless completed awaitable */
 /* Cached callables for the per-request hot path. */
 PyObject *task_add_done_callback = NULL;   /* unbound Task.add_done_callback */
 PyObject *task_exception_fn = NULL;        /* unbound Task.exception */
-PyObject *resume_started_coroutine = NULL; /* Python continuation trampoline */
 /* The type those two descriptors belong to, plus their names for everything
  * else. `loop.create_task` is the loop's choice, not ours: wreath.reactor
  * returns a WreathTask, which is an asyncio.Future subclass and not a Task at
@@ -361,6 +360,242 @@ completed_value(PyObject *value)
 }
 
 
+/* --- a coroutine the driver already stepped, made adoptable -------------- */
+
+/* `spawn_app_task` steps the application coroutine before deciding anything, so
+ * a handler that never waits owns no asyncio Task at all. When it does wait, the
+ * half-run coroutine still has to reach the loop -- and Task cannot take one,
+ * because its own first step sends `None` into a coroutine that is waiting for a
+ * future's result.
+ *
+ * This is the adapter: re-yield the value the first step already produced, then
+ * be the coroutine underneath for every step after it. The Task then does
+ * exactly what it would have done driving the handler from the start.
+ *
+ * It replaces a Python `async def` that re-awaited each value itself, which cost
+ * a coroutine frame per resumption -- measured at ~7,000 instructions a
+ * suspending request against the ~15,000 the Task itself costs. The readable
+ * twin is `wreath.server._StartedCoroutine` and the two are pinned against each
+ * other by tests/test_server_continuation.py.
+ *
+ * Every exception is forwarded *into* the coroutine, `CancelledError` included.
+ * Anything narrower silently strips cancellation from a request in flight: the
+ * task dies and the query it was waiting on runs on with nobody to receive it. */
+typedef struct {
+    PyObject_HEAD
+    PyObject *coroutine;  /* owned; the handler, already stepped once */
+    PyObject *pending;    /* owned; what that step yielded, until re-yielded */
+    int started;
+} StartedCoroutine;
+
+
+/* Raise `StopIteration(value)` the way a generator's return does.
+ *
+ * `PyErr_SetObject` reads a tuple as an argument list and an exception instance
+ * as the exception itself, so a handler returning either would have its value
+ * unpacked or swallowed. The same wrapping `value_awaitable_next` does, and for
+ * the same reason. Steals `value`. */
+static PyObject *
+stop_iteration_with(PyObject *value)
+{
+    if (PyTuple_Check(value) || PyExceptionInstance_Check(value)) {
+        PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, value);
+        Py_DECREF(value);
+        if (stop == NULL) {
+            return NULL;
+        }
+        PyErr_SetObject(PyExc_StopIteration, stop);
+        Py_DECREF(stop);
+        return NULL;
+    }
+    PyErr_SetObject(PyExc_StopIteration, value);
+    Py_DECREF(value);
+    return NULL;
+}
+
+
+static PyObject *
+started_send(PyObject *op, PyObject *value)
+{
+    StartedCoroutine *self = (StartedCoroutine *)op;
+    if (self->started) {
+        if (self->coroutine == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "continuation already finished");
+            return NULL;
+        }
+        PyObject *yielded = NULL;
+        PySendResult state = PyIter_Send(self->coroutine, value, &yielded);
+        if (state == PYGEN_NEXT) {
+            return yielded;
+        }
+        if (state == PYGEN_ERROR) {
+            return NULL;
+        }
+        /* The handler returned: the adopted coroutine is finished with, and
+         * holding it past that keeps a frame alive until the Task is collected. */
+        Py_CLEAR(self->coroutine);
+        return stop_iteration_with(yielded);
+    }
+    /* The first step's value, handed on untouched: the flag asyncio's
+     * `Future.__await__` set is the one the Task expects to see. */
+    self->started = 1;
+    PyObject *pending = self->pending;
+    self->pending = NULL;
+    if (pending == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "continuation has no pending value");
+        return NULL;
+    }
+    return pending;  /* reference transferred to the caller */
+}
+
+
+static PyObject *
+started_send_method(PyObject *op, PyObject *value)
+{
+    return started_send(op, value);
+}
+
+
+static PyObject *
+started_next(PyObject *op)
+{
+    return started_send(op, Py_None);
+}
+
+
+static PyObject *
+started_throw(PyObject *op, PyObject *args)
+{
+    StartedCoroutine *self = (StartedCoroutine *)op;
+    self->started = 1;
+    Py_CLEAR(self->pending);
+    if (self->coroutine == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "continuation already finished");
+        return NULL;
+    }
+    PyObject *method = PyObject_GetAttrString(self->coroutine, "throw");
+    if (method == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_Call(method, args, NULL);
+    Py_DECREF(method);
+    return result;
+}
+
+
+static PyObject *
+started_close(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    StartedCoroutine *self = (StartedCoroutine *)op;
+    Py_CLEAR(self->pending);
+    if (self->coroutine == NULL) {
+        Py_RETURN_NONE;
+    }
+    PyObject *method = PyObject_GetAttrString(self->coroutine, "close");
+    if (method == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallNoArgs(method);
+    Py_DECREF(method);
+    return result;
+}
+
+
+static int
+started_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    StartedCoroutine *self = (StartedCoroutine *)op;
+    Py_VISIT(self->coroutine);
+    Py_VISIT(self->pending);
+    return 0;
+}
+
+
+static int
+started_clear(PyObject *op)
+{
+    StartedCoroutine *self = (StartedCoroutine *)op;
+    Py_CLEAR(self->coroutine);
+    Py_CLEAR(self->pending);
+    return 0;
+}
+
+
+static void
+started_dealloc(PyObject *op)
+{
+    PyObject_GC_UnTrack(op);
+    (void)started_clear(op);
+    Py_TYPE(op)->tp_free(op);
+}
+
+
+static PyObject *
+started_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *coroutine;
+    PyObject *pending;
+    static char *keywords[] = {"coroutine", "awaited", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO:StartedCoroutine",
+                                     keywords, &coroutine, &pending)) {
+        return NULL;
+    }
+    StartedCoroutine *self = (StartedCoroutine *)type->tp_alloc(type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    self->coroutine = Py_NewRef(coroutine);
+    self->pending = Py_NewRef(pending);
+    self->started = 0;
+    return (PyObject *)self;
+}
+
+
+static PyMethodDef started_methods[] = {
+    {"send", started_send_method, METH_O, "Resume the adopted coroutine."},
+    {"throw", (PyCFunction)started_throw, METH_VARARGS,
+     "Forward an exception into the adopted coroutine."},
+    {"close", started_close, METH_NOARGS, "Close the adopted coroutine."},
+    {NULL, NULL, 0, NULL},
+};
+
+
+static PyAsyncMethods started_async = {
+    .am_await = PyObject_SelfIter,
+};
+
+
+PyTypeObject StartedCoroutineType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "wreath._native._server.StartedCoroutine",
+    .tp_basicsize = sizeof(StartedCoroutine),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_new = started_new,
+    .tp_dealloc = started_dealloc,
+    .tp_traverse = started_traverse,
+    .tp_clear = started_clear,
+    .tp_methods = started_methods,
+    .tp_as_async = &started_async,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = started_next,
+};
+
+
+PyObject *
+wreath_started_coroutine(PyObject *coroutine, PyObject *pending)
+{
+    StartedCoroutine *self =
+        (StartedCoroutine *)StartedCoroutineType.tp_alloc(&StartedCoroutineType, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    self->coroutine = Py_NewRef(coroutine);
+    self->pending = Py_NewRef(pending);
+    self->started = 0;
+    return (PyObject *)self;
+}
+
+
 /* --- small helpers ------------------------------------------------------- */
 
 Py_ssize_t
@@ -536,7 +771,6 @@ server_module_free(void *Py_UNUSED(module))
     Py_CLEAR(asyncio_task_type);
     Py_CLEAR(s_add_done_callback);
     Py_CLEAR(s_exception);
-    Py_CLEAR(resume_started_coroutine);
     Py_CLEAR(header_host);
     Py_CLEAR(s_type);
     Py_CLEAR(s_body);
@@ -701,12 +935,6 @@ init_cached_constants(void)
     if (task_add_done_callback == NULL || task_exception_fn == NULL
         || s_add_done_callback == NULL || s_exception == NULL) return -1;
 
-    PyObject *server_module = PyImport_ImportModule("wreath.server");
-    if (server_module == NULL) return -1;
-    resume_started_coroutine = PyObject_GetAttrString(
-        server_module, "_resume_started_coroutine");
-    Py_DECREF(server_module);
-    if (resume_started_coroutine == NULL) return -1;
     /* One shared extensions mapping for every scope; consumers treat scope
      * contents as read-only, matching the pure twin's module-level constant. */
     extensions_dict = Py_BuildValue("{s:{}}", "wreath.response");
