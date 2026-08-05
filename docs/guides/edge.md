@@ -23,6 +23,66 @@ application shows up as one story rather than two.
 ## The smallest useful edge
 
 ```python
+from wreath.edge import Upstream, UpstreamPool, serve
+
+pool = UpstreamPool([
+    Upstream("http://10.0.0.4:8000"),
+    Upstream("http://10.0.0.5:8000"),
+])
+handle = await serve(pool, host="0.0.0.0", port=8080)
+```
+
+That is the whole configuration, and everything in it happens once. `serve()`
+parses the upstream URLs, compiles them into a C table, opens eight connections
+to each origin and binds a listener. From then on a forwarded request never
+enters Python: a native protocol parses the head in place, picks an upstream,
+writes the outbound head to an already-open transport and relays the response
+back. No scope, no `Request`, no coroutine, no Task.
+
+**There is no `app` parameter, and its absence is the design.** Give the proxy
+something to call and a scope has to be built to call it with, and the Python
+this exists to remove comes straight back. Having nothing to call is what makes
+"no Python on the request path" structural rather than aspirational.
+
+The connections are opened up front because `loop.create_connection` is a
+coroutine. Reaching for one mid-request drags asyncio's Task and Future
+machinery onto the path — 6.3 CPU-microseconds for the Task alone, before any
+of the orchestration around it.
+
+`connections=` is the per-upstream concurrency: a request that arrives while
+every connection to the chosen origin is busy waits in C until one frees, rather
+than being refused. It is the one setting worth thinking about, and unlike the
+ASGI proxy below, getting it wrong costs latency rather than spurious 502s.
+
+### Terminating TLS
+
+```python
+from wreath.reactor import metal_tls_context
+
+handle = await serve(
+    pool, host="0.0.0.0", port=443,
+    ssl=metal_tls_context(certfile="cert.pem", keyfile="key.pem"),
+)
+```
+
+The crypto runs in C on the same transport as everything else. An ordinary
+`ssl.SSLContext` works too and still terminates correctly, but takes asyncio's
+TLS — measured at 2.14× the per-request cost, because a TLS connection on that
+path leaves the native transport entirely.
+
+An `https://` upstream is handled the same way, and its handshake is paid during
+the pre-warm rather than on a request. `upstream_cafile` names the trust store;
+verification is on unless `upstream_verify=False` is typed out.
+
+### The ASGI proxy, for what `serve()` refuses
+
+`serve()` does not retry onto a second upstream and does not carry an upgrade.
+Those are refused when the proxy is configured, by name, rather than at the
+request that first needs one. When you need them — or when the proxy has to sit
+*inside* an application, sharing its routes and middleware — `ReverseProxy` is
+the ASGI one, and slower by construction.
+
+```python
 from wreath import Request, Wreath
 from wreath.edge import ReverseProxy, Upstream, UpstreamPool
 from wreath.http_client import ClientLimits, ClientTimeout, HTTPClient
@@ -157,55 +217,111 @@ nothing about the inbound framing survives into the outbound message.
 
 ## How fast, honestly
 
-A micro benchmark on one laptop, one small JSON response, 32 connections, median
-of three five-second runs after a warm-up, with an A/A noise floor of about
-0.5%. The same wreath origin sits behind every proxy and is measured on its own,
-so the comparison says what the *proxy* costs rather than how fast the origin is:
+One laptop, a small JSON response, three five-second runs after a warm-up. Every
+proxy is single-threaded and **pinned to its own physical core**, with the load
+generator on separate cores; the origin has a core of its own. That pinning is
+not fussiness — see the note at the end, because without it none of these
+numbers mean what they appear to.
 
-| | req/s | p50 | p99 | share of the origin |
-| --- | --- | --- | --- | --- |
-| origin, nothing in front | 38,800 | 0.79 ms | 1.59 ms | — |
-| haproxy 3.4.3 | 37,300 | 0.74 ms | 1.63 ms | 96% |
-| nginx 1.30.4 | 32,500 | 0.97 ms | 1.20 ms | 84% |
-| **`wreath.edge`** | **5,800** | 5.4 ms | 6.1 ms | **15%** |
+**Requests per second per core, not CPU per process.** Roughly a third of a
+proxy's core goes to kernel softirq handling loopback packets, and that work
+appears in *no* process's CPU accounting. Per-process figures made this proxy
+look 22% cheaper than nginx; per core the honest answer is 7%.
 
-**`wreath.edge` is roughly five to six times slower than nginx, and that is the
-number to plan against.** haproxy and nginx are C event loops that have been
-tuned at this for two decades, and a proxy that runs a second full HTTP request
-cycle per request was never going to match them.
+### Plaintext
 
-Where the cost is, established by ablation rather than by profiler:
+| | req/s per core |
+| --- | --- |
+| origin, nothing in front | 74,000–75,000 |
+| haproxy in **L4 mode** — no HTTP parsing at all | 39,100–39,400 |
+| **`wreath.edge.serve()`** | **33,300–33,900** |
+| nginx | 30,900–31,700 |
+| haproxy, HTTP mode | 26,300–27,300 |
+| `ReverseProxy` (ASGI) | 8,300 |
 
-- **Not the parser.** The HTTP client's native C reader is already in use, and
-  turning it off (`WREATH_CLIENT_NATIVE_STREAM=0`) costs only about 20% —
-  12,600 requests a second becomes 10,500. Rewriting more of this in C is not
-  the lever it looks like.
-- **Not the server.** Wreath answers at 38,800 in the same run, with a Python
-  handler.
-- **The client is the ceiling.** `HTTPClient` on its own, no server in front,
-  reaches about 12,600 requests a second. Nothing built on it can go faster.
-- **The proxy sits under that ceiling** at about 5,800, and roughly one loop
-  turn of the difference is structural: a handler is stepped before it owns an
-  asyncio Task, so the first client call inside one yields once to acquire a
-  task before it can arm a timeout.
+Two rows matter more than the ranking. **The origin's row is not a target a
+proxy can approach**: forwarding is two message cycles and twice the packets, so
+even haproxy doing *zero* HTTP work tops out at 53% of it. And the L4 row is the
+real ceiling for a userspace proxy here — `serve()` is at 85% of it while
+parsing two heads, transforming headers and selecting an upstream.
 
-Read the headline as a sizing statement rather than a verdict. Several thousand
-requests a second in front of a handful of origins covers a great many real
-deployments, and it buys one stack, one configuration language and one set of
-logs. Past that, put haproxy in front — which is exactly the arrangement
-[`ProxyHeadersMiddleware`](middleware.md) exists for.
+### TLS, which is what an edge actually does
+
+| | req/s per core |
+| --- | --- |
+| **`wreath.edge.serve()`, `ssl=`** | **37,100–38,200** |
+| nginx, TLS-terminating proxy | 36,800–37,600 |
+
+Parity — ahead in two runs of three. Getting there needed TLS in C: through
+`asyncio.sslproto` the same work costs 2.14× more, because a TLS connection left
+the native transport entirely. Pass
+[`metal_tls_context`](../reference/reactor.md); an ordinary `ssl.SSLContext`
+still works and still takes the slow path.
+
+### Body size
+
+| body | `edge.serve()` | haproxy | nginx |
+| --- | --- | --- | --- |
+| 1 KB | 32,200 | 30,100 | 32,500 |
+| 64 KB | 8,650 | **10,394** | 8,008 |
+| 1 MB | 611 | **861** | 473 |
+
+No cliff, and ahead of nginx throughout. haproxy pulls away on large bodies
+because it `splice()`s them kernel-side while this copies through userspace —
+worth about 40% at 1 MB, and not yet done.
+
+### Run it on `metal_event_loop()`
+
+Worth about +50%, for one argument:
+
+```python
+from wreath.reactor import metal_event_loop
+
+asyncio.run(main(), loop_factory=metal_event_loop)
+```
+
+Use `metal_event_loop()` rather than building an `EventLoop` yourself: with the
+native pieces switched off it is slower than stock asyncio, so a half-configured
+one is worse than none.
+
+### Two traps these numbers are pinned against
+
+Both cost a day each here, and both make a benchmark read as a result when it is
+measuring the harness.
+
+- **The load generator is not free.** `oha` spent 22.5 CPU-µs per request
+  driving a server that costs 9.9 — more than twice the thing under test.
+  `h2load` is closer to parity. Either way you need more cores generating than
+  serving, and any `req/s` figure taken without checking is the generator's.
+- **Nothing looked saturated until it was pinned.** Every process sat at
+  0.6–0.7 of a core at every concurrency from 32 to 512, while the machine
+  burned 4–5 cores. The missing capacity was kernel softirq on loopback,
+  invisible per process. Pinned to one core each, both origin and proxy sit at
+  0.99 — they were saturated the whole time.
+
+Finally, what this table does not say: one small response over loopback is the
+shape that isolates per-request cost, and not the shape of production traffic.
+Real network latency and connection churn are unmeasured here.
 
 ## What this does not do yet
 
 Said plainly, because a proxy that is quiet about its limits is the dangerous
 kind:
 
-- **Request bodies are buffered** under `DEFAULT_MAX_BODY` and refused with a
-  413 above it. Responses stream; the request half needs
-  `wreath.http_client`'s write path to accept an async iterator, which it does
-  not yet.
+- **Request bodies are buffered** under `max_body` and refused with a 413 above
+  it, on both paths. Responses stream in both directions on `serve()`; on
+  `ReverseProxy` the request half needs `wreath.http_client`'s write path to
+  accept an async iterator, which it does not yet.
 - **No WebSocket or other upgrade.** `Upgrade` is hop-by-hop and dropped, so an
   upgrade request reaches the origin as an ordinary one.
+- **`serve()` does not retry onto a second upstream.** A failed attempt is a
+  502. Passive ejection still applies, so a failing origin stops being chosen,
+  but the request that found it is not re-sent. `ReverseProxy` has the attempt
+  loop.
+- **Large bodies are copied through userspace.** haproxy `splice()`s them
+  kernel-side and is about 40% cheaper at 1 MB as a result.
+- **`serve()` is HTTP/1.1 on both sides.** `ReverseProxy` inherits whatever the
+  server in front of it negotiated.
 - **One certificate.** `wreath.server`'s `TLSConfig` takes a single
   certificate and key, so terminating TLS for several hostnames — SNI selection
   — is not available here yet.

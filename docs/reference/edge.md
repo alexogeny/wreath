@@ -19,6 +19,8 @@ yet.
 
 ::: wreath.edge
 
+::: wreath.edge.serve
+
 ::: wreath.edge.upstream
 
 ::: wreath.edge.headers

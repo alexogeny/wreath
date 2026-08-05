@@ -53,16 +53,20 @@ from __future__ import annotations
 
 from .headers import HOP_BY_HOP, forwardable
 from .proxy import DEFAULT_ATTEMPTS, DEFAULT_MAX_BODY, IDEMPOTENT, ReverseProxy
+from .serve import DEFAULT_CONNECTIONS, EdgeHandle, serve
 from .upstream import Ejection, Upstream, UpstreamPool
 
 __all__ = [
     "DEFAULT_ATTEMPTS",
+    "DEFAULT_CONNECTIONS",
     "DEFAULT_MAX_BODY",
     "HOP_BY_HOP",
     "IDEMPOTENT",
+    "EdgeHandle",
     "Ejection",
     "ReverseProxy",
     "Upstream",
     "UpstreamPool",
     "forwardable",
+    "serve",
 ]

@@ -134,63 +134,32 @@ def append_forwarded(
 _REQUEST_DROP: frozenset[bytes] = _ALWAYS_DROP | {b"host", b"content-length"}
 
 
-def request_headers(
-    inbound: list[tuple[bytes, bytes]],
-    *,
-    client: str | None,
-    scheme: bytes,
-    via: bytes,
-) -> list[tuple[bytes, bytes]]:
-    """The outbound request headers, built in a single pass.
+try:
+    from wreath._native import _edge
+except ImportError:  # pragma: no cover - the module cannot function without it
+    _edge = None
 
-    Fused deliberately. The readable version -- filter, then `next()` for the
-    host, then a comprehension for the `Via` chain, then append -- walks the
-    inbound headers five times and copies them once, and an ablation put that at
-    roughly a third of the proxy's whole request cost. Emitting five headers
-    should not cost more than talking to the upstream.
+if _edge is None:  # pragma: no cover - see above
+    raise ImportError(
+        "wreath.edge requires the wreath._native._edge extension. The reverse "
+        "proxy is native-only by design: a Python forward path would degrade "
+        "silently by roughly five times in the one component whose purpose is "
+        "to be faster than what it replaces. See AGENTS.md."
+    )
 
-    `via` and `scheme` arrive pre-encoded because they are constant for the life
-    of the proxy; building them per request was an f-string and an `encode` on
-    the hot path for a value that never changes.
-
-    Shares `_ALWAYS_DROP` and `_connection_named` with `forwardable`, which
-    still serves the *response* direction. The two are separate because the
-    directions genuinely differ -- a response has no `Host` to rewrite and no
-    forwarding record to add -- not because the rule was written twice.
-    """
-    out: list[tuple[bytes, bytes]] = []
-    host: bytes | None = None
-    connection: bytes | None = None
-    chain: list[bytes] = []
-    for pair in inbound:
-        name = pair[0]
-        if name == b"host":
-            host = pair[1]
-        elif name == b"connection":
-            connection = pair[1]
-        elif name == b"via":
-            chain.append(pair[1])
-        elif name not in _REQUEST_DROP:
-            out.append(pair)
-    if connection is not None:
-        named = {
-            token.strip().lower()
-            for token in connection.split(b",")
-            if token.strip() not in (b"", b"close", b"keep-alive")
-        }
-        if named:
-            out = [pair for pair in out if pair[0] not in named]
-
-    if client is not None:
-        encoded = client.encode("latin-1")
-        out.append((b"x-forwarded-for", encoded))
-        forwarded = b'for="' + encoded + b'"; proto=' + scheme
-    else:
-        forwarded = b"proto=" + scheme
-    out.append((b"x-forwarded-proto", scheme))
-    if host is not None:
-        out.append((b"x-forwarded-host", host))
-        forwarded += b'; host="' + host + b'"'
-    out.append((b"forwarded", forwarded))
-    out.append((b"via", b", ".join([*chain, via]) if chain else via))
-    return out
+#: The outbound request headers for one forwarded request, in a single pass.
+#:
+#: `request_headers(inbound, *, client, scheme, via) -> list[tuple[bytes, bytes]]`
+#:
+#: Native, and with nothing behind it. The Python this replaces was already
+#: fused into one pass -- the readable version walked the inbound headers five
+#: times and an ablation put that at roughly a third of the proxy's whole
+#: request cost -- and it was still the largest single line item left, at 44.4
+#: of 117 CPU-microseconds per forwarded request.
+#:
+#: `via` and `scheme` are passed pre-encoded because they are constant for the
+#: life of the proxy. What it must produce is pinned by
+#: `tests/test_edge_forwarding_contract.py`, written from a differential run
+#: against haproxy and nginx, and asserted directly in
+#: `tests/test_edge_native_headers.py`.
+request_headers = _edge.request_headers

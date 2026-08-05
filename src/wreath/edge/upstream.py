@@ -109,6 +109,16 @@ class UpstreamPool:
     def upstreams(self) -> list[Upstream]:
         return self._upstreams
 
+    @property
+    def policy(self) -> str:
+        """How `choose` picks. Read by `serve()`, which compiles it into C."""
+        return self._policy
+
+    @property
+    def ejection(self) -> Ejection:
+        """When a failing upstream stops being chosen, and for how long."""
+        return self._ejection
+
     def choose(
         self, now: float | None = None, exclude: frozenset[str] = frozenset()
     ) -> Upstream | None:
