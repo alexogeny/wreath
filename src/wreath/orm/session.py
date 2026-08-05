@@ -11,6 +11,7 @@ direct result of an awaited call.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -163,7 +164,10 @@ def _validate_raw_result(
         )
     names: tuple[str, ...] = plan.result_names
     oids: tuple[int, ...] = plan.result_oids
-    duplicates = sorted({name for name in names if names.count(name) > 1})
+    # `Counter`, not `names.count(name)` per name: that spelling rescanned the
+    # whole tuple once for every column, so checking a 50-column result cost
+    # 2,500 comparisons to answer a question one pass settles.
+    duplicates = sorted(name for name, seen in Counter(names).items() if seen > 1)
     if duplicates:
         raise MappingError(
             f"result names {', '.join(duplicates)} appear more than once; "
@@ -711,6 +715,17 @@ class Session:
             rows = await connection._fetch_into(sql, args, (plan, self._identity, self))
             # One row per match, so a key that matched twice yields the same
             # object twice; the object graph is right, the list needs collapsing.
+            #
+            # Asked first, and asked in C. The hydrator builds this list in
+            # batches without a Python frame per row, and `_hydrate_plan`
+            # answers only for a single-model unjoined query -- so a repeat
+            # needs the query itself to return one primary key twice, which is
+            # the exception rather than the shape. Walking every row in Python
+            # to discover there was nothing to collapse spent the batching to
+            # answer a question `set(map(id, ...))` settles at C speed.
+            identities = set(map(id, rows))
+            if len(identities) == len(rows):
+                return rows
             seen: set[int] = set()
             objects = []
             for item in rows:

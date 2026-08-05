@@ -472,3 +472,30 @@ def test_a_foreign_key_with_no_reference_falls_back_to_the_primary_key() -> None
     registry = compile_models(Owner, Pet)
     sql = compile_select(registry, Pet.select().include(Pet.owner.joined())).sql
     assert 'ON "j1"."id" = "t0"."owner_id"' in sql, sql
+
+
+def test_a_json_column_serializes_the_value_it_holds_at_the_wire_not_at_assignment() -> None:
+    """Mutating a stored JSON value in place changes what is written.
+
+    `_check_json` serializes on assignment to refuse an unencodable value where
+    the offending line is, and `_json_to_wire` serializes again at the wire.
+    That looks like the same work done twice and it is tempting to cache the
+    first result against the second -- this is why that is wrong. The cell holds
+    the caller's own object, so `document.body["a"].append(3)` changes what the
+    column contains without going through the descriptor again, and a cached
+    encoding would write the value the caller *had* rather than the one it has.
+
+    Dirty tracking is per assignment, so a column mutated in place is only
+    flushed when something else already marked it dirty -- but when it is
+    flushed, this is the value that goes.
+    """
+    class Document(Model, table="documents_mutated"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        body: Mapped[object] = column(Json)
+
+    instance = Document(id=1, body={"a": [1, 2]})
+    body = instance.body
+    assert isinstance(body, dict)
+    body["a"].append(3)
+
+    assert Json.to_wire(instance.body) == '{"a":[1,2,3]}'

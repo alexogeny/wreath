@@ -443,6 +443,15 @@ def _check_numeric(value: Any) -> Decimal:
 def _check_json(value: Any) -> Any:
     # Serializing here rejects unencodable values on assignment instead of at
     # flush time, when the failure is far from the offending line.
+    #
+    # This encoding is deliberately **discarded** rather than cached for
+    # `_json_to_wire`, and the two dumps are not the same work done twice. The
+    # cell holds the caller's own object, so `document.body["a"].append(3)`
+    # changes what the column contains without coming back through this
+    # function -- a cached encoding would write the value the caller had at
+    # assignment rather than the one it has at flush. Pinned by
+    # `tests/orm/test_declaration.py::test_a_json_column_serializes_the_value_
+    # it_holds_at_the_wire_not_at_assignment`.
     _json_dumps(value)
     return value
 

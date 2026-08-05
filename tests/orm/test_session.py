@@ -878,3 +878,33 @@ async def test_adding_through_a_closed_session_is_rejected(
     await session.close()
     with pytest.raises(SessionClosedError):
         session.add(User(email="a@b.c", name="A"))
+
+
+async def test_native_fetch_hands_back_a_result_with_no_repeats_untouched(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """The collapse must not cost a Python pass over a result that has none.
+
+    The hydrator builds the whole list in C, in batches; walking it again in
+    Python to discover that every row is distinct undoes that batching for the
+    shape it applies to -- `_hydrate_plan` only answers for a single-model,
+    unjoined query, where a repeated identity needs the *query* to return one
+    primary key twice.
+
+    Asserted by identity rather than equality, because equality cannot tell a
+    list that was handed back from a copy of it, and being handed back is the
+    whole claim.
+    """
+    rows = [object(), object(), object()]
+
+    class NativeConnection:
+        async def _fetch_into(self, sql, args, destination):
+            return rows
+
+    monkeypatch.setattr(Session, "_hydrate_plan", lambda *_args: object())
+
+    objects = await session._fetch_objects(
+        NativeConnection(), object(), "SELECT distinct identities", ()
+    )
+
+    assert objects is rows
