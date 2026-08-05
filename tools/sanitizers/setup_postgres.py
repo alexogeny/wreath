@@ -29,7 +29,7 @@ SOURCES = [
     "postgres/hydrate.c",
     "postgres/plan.c",
     "postgres/connection.c",
-    "postgres/pool.c",
+    "postgres/pipeline.c",
     "postgres/migration_artifact.c",
     "postgres/migration_image.c",
     "postgres/migration_resolver.c",

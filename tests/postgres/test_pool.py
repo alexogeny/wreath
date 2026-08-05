@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from wreath.postgres import Database, PoolConfig
+from wreath.postgres import Database, InterfaceError, PoolConfig
 
 
 class FakeConnection:
@@ -294,5 +294,106 @@ async def test_the_queue_high_water_survives_the_queue_draining() -> None:
         drained = pool.snapshot()
         assert drained.waiters == 0, "the queue drained"
         assert drained.queue_high_water == 2, "but the watermark remembers"
+    finally:
+        await db.stop()
+
+
+#: What `Pool.acquire` can raise: its two documented failures, plus the
+#: `RuntimeError` this driver exists to catch -- `asyncio.timeout` outside a
+#: Task. Named rather than caught blindly, so a fourth kind of failure escapes
+#: to the loop's handler and is seen instead of being re-homed onto a future.
+_POOL_RAISES = (InterfaceError, TimeoutError, RuntimeError)
+
+
+def _drive_taskless(loop: asyncio.AbstractEventLoop, coroutine: Any) -> asyncio.Future:
+    """Drive a coroutine to completion without ever creating a Task.
+
+    This is what `app.py`'s `_handle_http_plain` does: the elided-call fast path
+    steps the handler's coroutine from a protocol callback rather than handing
+    it to `loop.create_task`, which is the point of
+    `benchmarks/bench_request_call_elision.py`. `asyncio.current_task()` is
+    therefore `None` for everything the handler awaits.
+
+    Wrapping the coroutine in `ensure_future` to test it would create the very
+    Task whose absence is the bug -- the first version of this test did exactly
+    that and passed against the broken pool.
+    """
+    done: asyncio.Future = loop.create_future()
+
+    def step(value: object = None, error: BaseException | None = None) -> None:
+        try:
+            awaited = coroutine.throw(error) if error else coroutine.send(value)
+        except StopIteration as stop:
+            if not done.done():
+                done.set_result(stop.value)
+            return
+        except _POOL_RAISES as raised:
+            if not done.done():
+                done.set_exception(raised)
+            return
+
+        def resume(finished: asyncio.Future) -> None:
+            try:
+                step(finished.result())
+            except _POOL_RAISES as raised:
+                step(error=raised)
+
+        awaited.add_done_callback(resume)
+
+    loop.call_soon(step)
+    return done
+
+
+@pytest.mark.asyncio
+async def test_contended_acquire_works_without_an_enclosing_task() -> None:
+    """A queued acquire must not require the caller to be inside a Task.
+
+    `asyncio.timeout` raises `RuntimeError("Timeout should be used inside a
+    task")` when there is none, and the pool only reaches its deadline code
+    once every connection is leased -- so this failed under load and nowhere
+    else. It cost 30,000+ 500s in a Fortunes benchmark run whose throughput
+    still read as plausible.
+    """
+    connector = Connector()
+    db = Database(
+        "main", "postgresql://primary/app",
+        pools={"read": PoolConfig(min_size=1, max_size=1, acquire_timeout=5.0)},
+        connector=connector,
+    )
+    await db.start()
+    try:
+        pool = db.pool("read")
+        held = await pool.acquire()
+
+        loop = asyncio.get_running_loop()
+        queued = _drive_taskless(loop, pool.acquire())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not queued.done(), "the pool should be holding this caller"
+
+        await pool.release(held)
+        handed = await asyncio.wait_for(queued, timeout=2.0)
+        assert handed is held, "the released connection goes to the waiting caller"
+        await pool.release(handed)
+    finally:
+        await db.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_acquire_still_times_out() -> None:
+    """Removing `asyncio.timeout` must not remove the deadline with it."""
+    connector = Connector()
+    db = Database(
+        "main", "postgresql://primary/app",
+        pools={"read": PoolConfig(min_size=1, max_size=1, acquire_timeout=0.05)},
+        connector=connector,
+    )
+    await db.start()
+    try:
+        pool = db.pool("read")
+        held = await pool.acquire()
+        with pytest.raises(TimeoutError, match="timed out acquiring"):
+            await pool.acquire()
+        await pool.release(held)
     finally:
         await db.stop()

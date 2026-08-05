@@ -9,6 +9,7 @@ import contextlib
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import os
 import secrets
 import struct
@@ -1133,6 +1134,94 @@ class _ScramState:
     client_first_bare: str
 
 
+#: Opting in to md5 authentication. PostgreSQL deprecated md5 in 10 and the
+#: hash it sends is password-equivalent, so this driver refuses it by default.
+#: The one legitimate caller is a benchmark harness reproducing a published
+#: suite whose database is pinned to md5 -- see `LEGACY_MD5_VALUE`.
+LEGACY_MD5_ENV = "WREATH_POSTGRES_LEGACY_MD5"
+#: The value the variable must carry. It is a sentence rather than "1" so that
+#: nothing sets it by habit and every occurrence in a shell history says what
+#: it is for.
+LEGACY_MD5_VALUE = "legacy-benchmark-only"
+
+
+def _loopback(info: _ConnectInfo, peer: Any) -> bool:
+    """Whether this connection stays on this machine.
+
+    Decided from the **connected peer**, not from the DSN. The host in a DSN is
+    a name somebody else may control and may not even be an address -- the
+    benchmark database is reached as `tfb-database`, which resolves to
+    127.0.0.1 -- so judging the string both refuses the legitimate case and
+    accepts a `localhost` that a resolver sends elsewhere. The peer address is
+    where the bytes are actually going, which is the only thing the question is
+    about.
+
+    The peer is passed in rather than read off the writer, because the two
+    connect paths hand `_authenticate` different objects: the pure path's is an
+    `asyncio.StreamWriter`, the native path's is a C `BufferedProtocol` with no
+    `get_extra_info` at all. Reading it from the writer worked in a unit test
+    and silently answered "not loopback" for every native connection, which is
+    the refusal arriving for a reason that was not true.
+
+    A unix socket cannot leave the machine. When no peer is available the DSN
+    host is the fallback, which is conservative: an unknown peer that does not
+    look like loopback is refused.
+    """
+    if info.unix:
+        return True
+    host = peer[0] if isinstance(peer, tuple) and peer else info.host
+    host = str(host).strip("[]")
+    if host in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _md5_password(user: str, password: str, salt: bytes) -> bytes:
+    """PostgreSQL's md5 answer: "md5" + md5(hex(md5(password + user)) + salt).
+
+    `usedforsecurity=False` is not decoration. It states what is true -- this
+    hash authenticates against a legacy server and is not relied on for
+    secrecy -- and it keeps the call working on a FIPS build, where an md5
+    construction claiming to be security-relevant is refused outright.
+    """
+    inner = hashlib.md5(f"{password}{user}".encode(), usedforsecurity=False).hexdigest()
+    outer = hashlib.md5(inner.encode() + salt, usedforsecurity=False).hexdigest()
+    return b"md5" + outer.encode()
+
+
+def _md5_refusal(info: _ConnectInfo, peer: Any) -> str | None:
+    """Why md5 is refused for this connection, or None when it is permitted.
+
+    Two conditions, and both have to hold. The environment variable is the
+    deliberate act; loopback is the structural one. An md5 hash is
+    password-equivalent -- a peer that captures it can replay it -- so the
+    exposure that matters is carrying one across a network, and refusing that
+    is what stops the flag from being pointed at a production database by
+    somebody who copied a line out of a benchmark README.
+    """
+    if os.environ.get(LEGACY_MD5_ENV) != LEGACY_MD5_VALUE:
+        return (
+            "md5 authentication is refused: PostgreSQL deprecated it in 10 and the "
+            "hash it sends is password-equivalent. Configure the server for "
+            "scram-sha-256 instead. If this is a benchmark harness reproducing a "
+            "published suite whose database is pinned to md5, set "
+            f"{LEGACY_MD5_ENV}={LEGACY_MD5_VALUE} -- it is honoured only over "
+            "loopback and is supported for that case alone."
+        )
+    if not _loopback(info, peer):
+        return (
+            f"md5 authentication is permitted only over loopback, and this "
+            f"connection is not. {LEGACY_MD5_ENV} exists for a "
+            "benchmark harness talking to a database on the same machine; "
+            "carrying a replayable password hash across a network is the "
+            "exposure it is deliberately unable to create."
+        )
+    return None
+
+
 def _scram_start(user: str, nonce: str | None = None) -> tuple[_ScramState, str]:
     nonce = nonce or secrets.token_urlsafe(24).rstrip("=")
     escaped_user = user.replace("=", "=3D").replace(",", "=2C")
@@ -1850,9 +1939,12 @@ class Connection:
             batch_size += len(operation.packet)
             operation.state = "emitted"
             self._emitted.append(operation)
-            self._idle_event.clear()
             emitted += 1
         if packets:
+            # Once per flight, not once per operation: `_idle_event` is edge
+            # state -- "is the pipeline empty" -- so clearing it k times to emit
+            # a batch of k repeated the same work k times.
+            self._idle_event.clear()
             try:
                 if self._register_operations is not None:
                     self._register_operations(tuple(operations))
@@ -1902,11 +1994,31 @@ class Connection:
 
     async def _read_pipeline(self) -> None:
         try:
-            # Stay alive while there are operations in flight OR active LISTEN
-            # channels, so asynchronous notifications are drained even when the
-            # connection is otherwise idle. Without a listen channel the loop
-            # still exits as soon as the pipeline drains.
-            while (self._emitted or self._listen_channels) and not self._closed:
+            # **The reader waits on the socket, and only on the socket.**
+            #
+            # This loop used to end the moment `_emitted` emptied. At pipeline
+            # depth one -- a pooled connection serving one query per lease,
+            # which is every request on the Fortunes board -- that meant
+            # `_flush` built a fresh `Task` for the very next query: one Task
+            # allocated, scheduled, called back and torn down *per query*.
+            #
+            # The first fix parked on a wakeup future that `_flush` resolved.
+            # That removed the Task and added a future, a wake and a
+            # *suspension* -- and a suspension on this loop was measured at
+            # ~6,250 instructions, which is not a rounding error against a
+            # ~66,000-instruction query.
+            #
+            # Waiting on the socket unconditionally removes all three. There is
+            # nothing to wake: `_flush` writes, the server answers, and the read
+            # completes on its own. It is also what this loop already did
+            # whenever a LISTEN channel was registered, so it is one behaviour
+            # instead of two.
+            #
+            # The task now lives until the connection closes. `close()` cancels
+            # it; `_fail_connection` closes the transport, which fails the read
+            # waiter and lands in the handler below. A reader blocked on a
+            # socket costs nothing while it waits.
+            while not self._closed:
                 # Publish the head-of-line operation as current BEFORE blocking
                 # on the socket: a concurrent cancel must observe an active
                 # operation while its query is still running server-side, so it
@@ -2173,7 +2285,28 @@ class Connection:
                 self._transaction_barrier = False
         elif operation.state == "emitted":
             operation.discarded = True
-            if self._current is operation:
+            # `_current` alone is not enough to decide "is the backend running
+            # this right now".
+            #
+            # It is published by the reader just before it blocks on the socket,
+            # which used to be the same moment the operation was emitted --
+            # `_flush` started or woke the reader, and the reader's first act
+            # was to publish. Once the reader began waiting on the socket
+            # *unconditionally* it was already parked in `_receive_message()`
+            # when `_flush` emitted, so nothing re-published `_current` until
+            # the first response byte arrived. A cancel inside that window saw
+            # `_current is None`, sent no CancelRequest, and left the backend
+            # running the query -- which is precisely the defect the comment in
+            # `_read_pipeline` records the LISTEN/NOTIFY rewrite causing once
+            # before, reached the second time by a different route.
+            #
+            # The head of `_emitted` is the operation the backend is executing,
+            # by construction and without depending on the reader having been
+            # scheduled. `_current` still has to be tested as well: it is what
+            # names an operation that has been popped from `_emitted` and is in
+            # transit through decoding, belonging to no queue at all.
+            head = self._emitted[0] if self._emitted else None
+            if self._current is operation or head is operation:
                 if self._backend_pid and self._backend_key:
                     task = self._loop.create_task(self._send_cancel_request())
                     self._track_background(task)
@@ -2263,6 +2396,7 @@ async def _authenticate(
     reader: Any,
     writer: asyncio.StreamWriter,
     info: _ConnectInfo,
+    peer: Any = None,
 ) -> tuple[int, int]:
     backend_pid = 0
     backend_key = 0
@@ -2286,6 +2420,18 @@ async def _authenticate(
                 if info.password is None:
                     raise OperationalError("password required")
                 writer.write(_message(b"p", _cstring(info.password)))
+                await writer.drain()
+            elif method == 5:
+                # Legacy, gated, and loopback-only. See `_md5_refusal`.
+                refusal = _md5_refusal(info, peer)
+                if refusal is not None:
+                    raise OperationalError(refusal)
+                if info.password is None:
+                    raise OperationalError("password required")
+                if len(auth_data) != 4:
+                    raise ProtocolError("AuthenticationMD5Password needs a 4-byte salt")
+                answer = _md5_password(info.user, info.password, auth_data)
+                writer.write(_message(b"p", answer + b"\x00"))
                 await writer.drain()
             elif method == 10:
                 mechanisms = auth_data.rstrip(b"\x00").split(b"\x00")
@@ -2336,7 +2482,9 @@ async def _connect_with_type(
             reader, writer = await asyncio.open_unix_connection(info.host)
         else:
             reader, writer = await asyncio.open_connection(info.host, int(info.port))
-        backend_pid, backend_key = await _authenticate(reader, writer, info)
+        backend_pid, backend_key = await _authenticate(
+            reader, writer, info, writer.get_extra_info("peername")
+        )
     except PostgresError:
         if "writer" in locals():
             writer.close()
@@ -2382,13 +2530,18 @@ async def _connect_buffered(
     info = _parse_dsn(dsn)
     loop = asyncio.get_running_loop()
     protocol = protocol_type()
+    # The transport is kept: it is the only object on this path that knows the
+    # peer, and `protocol` is a native type with no `get_extra_info`.
     if info.unix:
-        await loop.create_unix_connection(lambda: protocol, info.host)
+        transport, _ = await loop.create_unix_connection(lambda: protocol, info.host)
     else:
-        await loop.create_connection(lambda: protocol, info.host, int(info.port))
+        transport, _ = await loop.create_connection(
+            lambda: protocol, info.host, int(info.port)
+        )
     try:
         backend_pid, backend_key = await _authenticate(
-            _BufferedStartupReader(protocol), protocol, info
+            _BufferedStartupReader(protocol), protocol, info,
+            transport.get_extra_info("peername"),
         )
     except BaseException:
         protocol.close()

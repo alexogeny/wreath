@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import os
 import threading
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -159,9 +160,9 @@ class Pool:
     """A bounded, exclusive-lease pool for one database workload."""
 
     __slots__ = (
-        "_available", "_borrowed", "_condition", "_config", "_connections",
-        "_connector", "_dsn", "_high_water", "_read_only", "_started",
-        "_statements", "_stopping", "_waiters",
+        "_available", "_borrowed", "_config", "_connections",
+        "_connector", "_drained", "_dsn", "_high_water", "_read_only",
+        "_started", "_statements", "_stopping", "_waiters",
     )
 
     def __init__(
@@ -178,11 +179,19 @@ class Pool:
         self._connector = connector
         self._read_only = read_only
         self._statements = statements
-        self._condition = asyncio.Condition()
         self._available: list[Any] = []
         self._connections: set[Any] = set()
         self._borrowed: set[Any] = set()
-        self._waiters = 0
+        # One future per queued caller, oldest first. This replaces an
+        # `asyncio.Condition`, and the replacement is not a refactor: the
+        # Condition was taken on *every* acquire and release, including the
+        # uncontended path where the work it guards is a `list.pop` and a
+        # `set.add` with no await between them. On a single-threaded loop that
+        # sequence cannot interleave, so the lock protected nothing and cost
+        # two lock round-trips per database request on the path whose whole
+        # design goal is eliding frames.
+        self._waiters: deque[asyncio.Future[Any]] = deque()
+        self._drained: asyncio.Future[None] | None = None
         self._high_water = 0
         self._started = False
         self._stopping = False
@@ -225,7 +234,7 @@ class Pool:
         return PoolSnapshot(
             borrowed=len(self._borrowed),
             available=len(self._available),
-            waiters=self._waiters,
+            waiters=len(self._waiters),
             max_size=self._config.max_size,
             queue_high_water=self._high_water,
         )
@@ -303,53 +312,121 @@ class Pool:
             raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._config.acquire_timeout
-        counted = False
-        try:
-            while True:
-                async with self._condition:
-                    if self._stopping:
-                        raise InterfaceError("PostgreSQL pool is shutting down")
-                    if self._available:
-                        connection = self._available.pop()
-                        self._borrowed.add(connection)
-                        return connection
-                    if len(self._connections) < self._config.max_size:
-                        # Reserve capacity while opening outside the condition.
-                        placeholder = object()
-                        self._connections.add(placeholder)
-                        break
-                    if not counted:
-                        if self._waiters >= self._config.max_queue:
-                            raise InterfaceError("PostgreSQL pool queue is full")
-                        self._waiters += 1
-                        # Recorded on the way in: a sampler polling `waiters`
-                        # will usually miss a queue that formed and drained
-                        # between two polls, and that queue is the whole signal.
-                        self._high_water = max(self._high_water, self._waiters)
-                        counted = True
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise TimeoutError("timed out acquiring PostgreSQL connection")
-                    try:
-                        async with asyncio.timeout(remaining):
-                            await self._condition.wait()
-                    except TimeoutError:
-                        raise TimeoutError("timed out acquiring PostgreSQL connection") from None
-            try:
-                connection = await self._open()
-            except BaseException:
-                async with self._condition:
+        while True:
+            # Fast path. Nothing awaits between the test and the take, so on a
+            # single-threaded loop this cannot interleave with another caller.
+            if self._available:
+                connection = self._available.pop()
+                self._borrowed.add(connection)
+                return connection
+
+            if len(self._connections) < self._config.max_size:
+                # Reserve capacity while opening, so two callers cannot both
+                # decide there is room for the last connection.
+                placeholder = object()
+                self._connections.add(placeholder)
+                try:
+                    connection = await self._open()
+                except BaseException:
                     self._connections.discard(placeholder)
-                    self._condition.notify()
-                raise
-            async with self._condition:
+                    self._wake_one()
+                    raise
                 self._connections.discard(placeholder)
                 self._borrowed.add(connection)
-            return connection
-        finally:
-            if counted:
-                async with self._condition:
-                    self._waiters -= 1
+                return connection
+
+            if len(self._waiters) >= self._config.max_queue:
+                raise InterfaceError("PostgreSQL pool queue is full")
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("timed out acquiring PostgreSQL connection")
+
+            # The deadline is a timer on this caller's own future rather than
+            # `asyncio.timeout`, which requires `asyncio.current_task()` and so
+            # raised `RuntimeError` outright on the server's elided-call fast
+            # path -- under load only, because an uncontended acquire returns
+            # above without ever reaching here.
+            waiter: asyncio.Future[Any] = loop.create_future()
+            self._waiters.append(waiter)
+            # Recorded on the way in: a sampler polling `waiters` will usually
+            # miss a queue that formed and drained between two polls, and that
+            # queue is the whole signal.
+            self._high_water = max(self._high_water, len(self._waiters))
+            timer = loop.call_later(remaining, self._expire, waiter)
+            try:
+                handed = await waiter
+            except BaseException:
+                # Only the failing paths leave a waiter in the queue.
+                # `_hand_off`, `_wake_one` and `stop` all `popleft` before they
+                # resolve, so on the success path this waiter is already gone
+                # and `deque.remove` walks the whole queue to raise ValueError
+                # for `_unqueue` to swallow. That queue is `concurrency -
+                # max_size` deep -- about 456 entries at the Fortunes board's
+                # 512 against a pool of 56 -- so the scan was O(queue) per
+                # acquisition, and worst under exactly the load the queue
+                # exists for. `_expire` and cancellation are the two that do
+                # need it: neither touches the deque.
+                self._unqueue(waiter)
+                raise
+            finally:
+                timer.cancel()
+                self._settle_drain()
+            if handed is not None:
+                # `release` handed this caller a connection directly and has
+                # already marked it borrowed on its behalf.
+                return handed
+            # Woken because capacity freed rather than a connection arriving;
+            # go round and try to open one.
+
+    def _expire(self, waiter: asyncio.Future[Any]) -> None:
+        """Fail one queued caller when its own deadline passes."""
+        if not waiter.done():
+            waiter.set_exception(
+                TimeoutError("timed out acquiring PostgreSQL connection")
+            )
+
+    def _unqueue(self, waiter: asyncio.Future[Any]) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def _hand_off(self, connection: Any) -> bool:
+        """Give a returned connection straight to the longest-waiting caller.
+
+        Returns False when nobody is queued, so the caller idles it instead.
+        Expired and cancelled futures are discarded on the way past: a waiter
+        that has already timed out must not be handed a lease nobody will
+        release.
+        """
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.done():
+                continue
+            self._borrowed.add(connection)
+            waiter.set_result(connection)
+            return True
+        return False
+
+    def _wake_one(self) -> None:
+        """Tell one queued caller that capacity freed, so it can open."""
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+
+    def _settle_drain_now(self) -> None:
+        """Stop waiting for leases: the grace period is over."""
+        drained = self._drained
+        if drained is not None and not drained.done():
+            drained.set_result(None)
+
+    def _settle_drain(self) -> None:
+        """Resolve `stop`'s waiter once every lease is back."""
+        drained = self._drained
+        if drained is not None and not drained.done() and not self._borrowed:
+            drained.set_result(None)
 
     async def release(self, connection: Any) -> None:
         """Return a leased connection, and wake one waiter.
@@ -366,19 +443,24 @@ class Pool:
                 rather than tolerated because a double release would put one
                 connection in the idle set twice and hand it to two callers.
         """
-        async with self._condition:
-            if connection not in self._borrowed:
-                raise InterfaceError("connection was not borrowed from this pool")
-            self._borrowed.remove(connection)
-            if self._stopping or getattr(connection, "closed", False):
-                self._connections.discard(connection)
-                close = True
-            else:
-                self._available.append(connection)
-                close = False
-            self._condition.notify()
-        if close and not getattr(connection, "closed", False):
-            await connection.close()
+        if connection not in self._borrowed:
+            raise InterfaceError("connection was not borrowed from this pool")
+        self._borrowed.remove(connection)
+        if self._stopping or getattr(connection, "closed", False):
+            # Dropped rather than reused. The capacity it was holding is freed,
+            # so a queued caller is woken to open a replacement.
+            self._connections.discard(connection)
+            self._wake_one()
+            self._settle_drain()
+            if not getattr(connection, "closed", False):
+                await connection.close()
+            return
+        # Hand it straight to the longest-waiting caller if there is one; the
+        # connection never touches the idle list in that case, which is one
+        # fewer place for a lease to be lost.
+        if not self._hand_off(connection):
+            self._available.append(connection)
+        self._settle_drain()
 
     async def stop(self, grace_period: float) -> None:
         """Stop accepting acquisitions, drain for `grace_period`, then close everything.
@@ -401,21 +483,29 @@ class Pool:
         self._stopping = True
         loop = asyncio.get_running_loop()
         deadline = loop.time() + grace_period
-        async with self._condition:
-            self._condition.notify_all()
-            while self._borrowed and loop.time() < deadline:
-                try:
-                    async with asyncio.timeout(deadline - loop.time()):
-                        await self._condition.wait()
-                except TimeoutError:
-                    break
-            idle = tuple(self._available)
-            borrowed = tuple(self._borrowed)
-            self._available.clear()
-            self._borrowed.clear()
-            self._connections.clear()
-            self._started = False
-            self._condition.notify_all()
+        # Refuse everybody still queued before waiting: they can never be
+        # served now, and holding them would spend the whole grace period on
+        # callers that are going to fail anyway.
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_exception(
+                    InterfaceError("PostgreSQL pool is shutting down")
+                )
+        if self._borrowed and grace_period > 0:
+            self._drained = loop.create_future()
+            timer = loop.call_later(deadline - loop.time(), self._settle_drain_now)
+            try:
+                await self._drained
+            finally:
+                timer.cancel()
+                self._drained = None
+        idle = tuple(self._available)
+        borrowed = tuple(self._borrowed)
+        self._available.clear()
+        self._borrowed.clear()
+        self._connections.clear()
+        self._started = False
         for connection in (*idle, *borrowed):
             if not getattr(connection, "closed", False):
                 await connection.close()

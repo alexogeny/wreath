@@ -1,6 +1,7 @@
 #include "connection.h"
 
 #include "operation.h"
+#include "pipeline.h"
 #include "plan.h"
 #include "record.h"
 
@@ -170,6 +171,9 @@ wreath_pg_connection_init(PyObject *module)
     }
     if (PyModule_AddObjectRef(module, "Connection", connection_type) < 0 ||
         PyModule_AddFunctions(module, connection_methods) < 0) goto error;
+    /* After the type exists and after the backend hooks above, because the
+       pipeline reads `_plan_type`/`_operation_type`/`_batch_decode` off it. */
+    if (wreath_pg_pipeline_init(module, connection_type) < 0) goto error;
     Py_DECREF(connection_type);
     return 0;
 
@@ -181,6 +185,7 @@ error:
 void
 wreath_pg_connection_fini(void)
 {
+    wreath_pg_pipeline_fini();
     connection_type = NULL;
     Py_CLEAR(connect_buffered);
     Py_CLEAR(buffered_protocol_type);

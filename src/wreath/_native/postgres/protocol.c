@@ -1000,13 +1000,24 @@ parse_messages(WreathPgBufferedProtocol *self)
             if (consume_bytes(self, wire_length) < 0) return -1;
             continue;
         }
+        /* CommandComplete, for every result mode rather than only `execute`.
+         *
+         * `_consume_message`'s `C` branch does exactly what the block below
+         * does -- assign `operation.command` -- so queueing the message to
+         * Python bought nothing and cost a crossing: one reader resumption and
+         * one `_consume_message` call. It was measurable, because a
+         * row-returning query surfaced two messages to Python where an
+         * `execute` surfaced one (`queued_messages` 2.000 against 1.002), and a
+         * row-returning query is every query the Fortunes board issues.
+         *
+         * The mode is still read, because it is what the surrounding code uses
+         * to tell a result set from a bare command, and it stays in the context
+         * for `direct_data_row` above. It just no longer gates this. */
         if (kind_byte == 'C' &&
             queue_len(self->operation_contexts, self->operations_head) > 0) {
             PyObject *context =
                 PyList_GET_ITEM(self->operation_contexts, self->operations_head);
-            long mode = PyLong_AsLong(PyTuple_GET_ITEM(context, 4));
-            if (mode == -1 && PyErr_Occurred()) return -1;
-            if (mode == 0) {
+            {
                 PyObject *payload_object_value = payload_object(
                     self, 5, (Py_ssize_t)length - 4, 0
                 );

@@ -94,12 +94,20 @@ async def test_a_reader_defect_fails_every_caller_wherever_it_is_raised(
     and `_finish_operation` cases never returned, so a bare `pytest.raises`
     would have hung the run instead of failing one test.
 
-    Patched on the pure `Connection` for both backends: the reader, its queues,
-    and the sweep are pure Python, and the native class is a subclass that
-    overrides only `_receive_message`. A C type's own attributes cannot be
-    patched, so patching the base is also the only way to reach the native
-    backend at all -- and it is the native one that batches decoding, which is
-    the shape the real defect took.
+    Patched on **the backend's own `Connection`**, not always the pure one.
+
+    That distinction used to make no difference, because the native class
+    overrode only `_receive_message` and inherited every hook below from the
+    pure base. It stopped being true when `_finish_operation` and
+    `_publish_completed` moved into C: patching the base still worked for the
+    pure backend and reached nothing at all in the native one, where the
+    subclass's own attribute wins. The fault was injected, no exception was
+    raised, and the test failed -- correctly, because a seam it believed it was
+    walking had gone unwalked.
+
+    The native `Connection` is a heap type, so its attributes *are* assignable;
+    the older claim to the contrary here was about a design that no longer
+    exists. Patching per backend is what keeps this test honest against both.
     """
     if hook == "_flush_decode_batch" and not backend.Connection._batch_decode:
         pytest.skip("this backend decodes row by row and never flushes a batch")
@@ -109,7 +117,7 @@ async def test_a_reader_defect_fails_every_caller_wherever_it_is_raised(
 
     connection = await backend.connect(loopback_dsn)
     try:
-        monkeypatch.setattr(PureConnection, hook, explode)
+        monkeypatch.setattr(backend.Connection, hook, explode)
 
         # Two operations, so "every waiting caller" is more than a claim: the
         # first is the one in transit, the second is still queued behind it.

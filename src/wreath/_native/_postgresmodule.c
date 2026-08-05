@@ -15,7 +15,6 @@
 #include "postgres/model.h"
 #include "postgres/operation.h"
 #include "postgres/plan.h"
-#include "postgres/pool.h"
 #include "postgres/protocol.h"
 #include "postgres/record.h"
 #include "postgres/slab.h"
@@ -66,7 +65,6 @@ PyInit__postgres(void)
         wreath_pg_protocol_init(module) < 0 ||
         wreath_pg_plan_init(module) < 0 ||
         wreath_pg_connection_init(module) < 0 ||
-        wreath_pg_pool_init(module) < 0 ||
         PyModule_AddStringConstant(module, "_implementation", "native") < 0) {
         Py_DECREF(module);
         return NULL;
