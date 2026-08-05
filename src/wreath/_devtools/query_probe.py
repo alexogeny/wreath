@@ -79,6 +79,8 @@ ARMS: dict[str, str] = {
                "subtract it from every arm below before reading them",
     "operation": "allocate one Operation and nothing else",
     "future": "create one future on this loop and nothing else",
+    "awaitable": "allocate the submission awaitable and drop it -- `_submit` is "
+                 "lazy, so this is the awaitable's allocation and nothing else",
     "is_txn": "the transaction-control test `_submit` runs on every SQL string",
     "plan_get": "one plan-cache lookup and nothing else",
     "flush_idle": "one `_flush` with an empty queue -- the bookkeeping, no write",
@@ -173,6 +175,11 @@ async def _run_arm(arm: str, queries: int, target: str, count_calls: bool) -> No
         def create_future(connection: Any) -> None:
             connection._loop.create_future()
 
+        def allocate_awaitable(connection: Any) -> None:
+            # Never awaited: submission is deferred to the first step, so this
+            # allocates the awaitable, and drops it, and touches nothing else.
+            connection._submit("fetchrow", one, (1,))
+
         def is_transaction(connection: Any) -> None:
             _is_transaction_sql(one)
 
@@ -213,6 +220,8 @@ async def _run_arm(arm: str, queries: int, target: str, count_calls: bool) -> No
                 allocate_operation(connection)
             elif arm == "future":
                 create_future(connection)
+            elif arm == "awaitable":
+                allocate_awaitable(connection)
             elif arm == "is_txn":
                 is_transaction(connection)
             elif arm == "plan_get":
@@ -244,7 +253,7 @@ async def _run_arm(arm: str, queries: int, target: str, count_calls: bool) -> No
             for _ in range(3):
                 await connection.fetchrow(one, 1)
         if arm in ("build", "submit", "operation", "future", "nothing",
-                   "is_txn", "plan_get", "flush_idle"):
+                   "is_txn", "plan_get", "flush_idle", "awaitable"):
             plan = connections[0]._plans.get(one)
             if plan is None:
                 raise SystemExit("no cached plan; the warmup did not run")
