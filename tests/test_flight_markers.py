@@ -36,10 +36,14 @@ class _StubPool:
     def __init__(self) -> None:
         self.connection = _StubConnection()
 
-    async def acquire(self):
+    # `shared` mirrors `Pool.acquire`/`Pool.release`: a `Statement` asks for a
+    # shared lease so concurrent statements batch into one flight. The stub
+    # hands back the same connection either way -- what it stands in for is the
+    # seam the phase markers are attributed from, not the sharing.
+    async def acquire(self, *, shared: bool = False):
         return self.connection
 
-    async def release(self, connection) -> None:
+    async def release(self, connection, *, shared: bool = False) -> None:
         return None
 
 

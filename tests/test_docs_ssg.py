@@ -1312,7 +1312,10 @@ def test_apidoc_marks_coroutine_functions_async() -> None:
     from wreath._docs import apidoc
 
     out = apidoc.expand("::: wreath.postgres.Pool")
-    assert "async acquire()" in out
+    # `acquire` grew a `shared` keyword when the pool learned to batch, so this
+    # matches the `async` marker and the name rather than the whole signature --
+    # what the test is for is the marker, not the parameter list.
+    assert "async acquire(" in out
     assert "async release(connection" in out
     assert "async " not in out.split("#### `snapshot`")[1].split("```")[1]
 
