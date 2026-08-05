@@ -193,6 +193,24 @@ ext_modules = [
             extra_compile_args=extra_compile_args,
         ),
         Extension(
+            # wreath.edge's request path. Native-only by design (AGENTS.md), so
+            # this is the implementation rather than an accelerator -- there is
+            # no Python behind it to fall back to.
+            "wreath._native._edge",
+            sources=[
+                "src/wreath/_native/_edgemodule.c",
+                "src/wreath/_native/edge_headers.c",
+                "src/wreath/_native/edge_serve.c",
+            ],
+            depends=[
+                "src/wreath/_native/edge.h",
+                "src/wreath/_native/wreath_stream.h",
+                "src/wreath/_native/wreathcore.h",
+            ],
+            extra_compile_args=hot_compile_args,
+            extra_link_args=hot_link_args,
+        ),
+        Extension(
             "wreath._native._server",
             sources=[
                 "src/wreath/_native/_servermodule.c",
@@ -234,7 +252,7 @@ ext_modules = [
                 "src/wreath/_native/postgres/migration_sql.c",
                 "src/wreath/_native/postgres/plan.c",
                 "src/wreath/_native/postgres/connection.c",
-                "src/wreath/_native/postgres/pool.c",
+                "src/wreath/_native/postgres/pipeline.c",
             ],
             depends=[
                 "src/wreath/_native/wreath_stream.h",
@@ -243,6 +261,7 @@ ext_modules = [
                 "src/wreath/_native/postgres/codec.h",
                 "src/wreath/_native/postgres/tape.h",
                 "src/wreath/_native/postgres/decode.h",
+                "src/wreath/_native/postgres/pipeline.h",
                 "src/wreath/_native/postgres/protocol.h",
                 "src/wreath/_native/postgres/operation.h",
                 "src/wreath/_native/postgres/record.h",
@@ -255,7 +274,6 @@ ext_modules = [
                 "src/wreath/_native/postgres/migration_sql.h",
                 "src/wreath/_native/postgres/plan.h",
                 "src/wreath/_native/postgres/connection.h",
-                "src/wreath/_native/postgres/pool.h",
             ],
             extra_compile_args=extra_compile_args,
         ),
@@ -285,16 +303,22 @@ if sys.platform.startswith("linux"):
             sources=[
                 "src/wreath/_native/_reactormodule.c",
                 "src/wreath/_native/reactor_wheel.c",
+                "src/wreath/_native/reactor_tls.c",
             ],
             depends=[
                 "src/wreath/_native/server.h",
                 "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/reactor_internal.h",
+                "src/wreath/_native/reactor_tls.h",
                 "src/wreath/_native/reactor_ring.c",
                 "src/wreath/_native/reactor_buffers.c",
                 "src/wreath/_native/reactor_transport.c",
                 "src/wreath/_native/reactor_poller.c",
             ],
+            # OpenSSL, for TLS terminated in C. The metal tier is Linux-only and
+            # already builds against system libraries; `_http3` links the same
+            # libssl for its QUIC handshake.
+            libraries=["ssl", "crypto"],
             extra_compile_args=hot_compile_args,
             extra_link_args=hot_link_args,
         )

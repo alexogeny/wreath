@@ -147,6 +147,8 @@ wreath-native-profile = "wreath._devtools.native_profile:main"
 wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
 # Instructions/cycles/IPC per request -- the frequency-invariant floor metric.
 wreath-cpu-probe = "wreath._devtools.cpu_probe:main"
+# Instructions and Python calls per PostgreSQL query; see _devtools/query_probe.py.
+wreath-query-probe = "wreath._devtools.query_probe:main"
 # Drives an ASan/UBSan build and attributes what it finds; see _devtools/sanitize.py.
 wreath-sanitize = "wreath._devtools.sanitize:main"
 # Checks that the agent-facing maps still describe the repository.

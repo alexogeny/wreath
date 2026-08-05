@@ -104,3 +104,9 @@ benchmarks/rust_arms/target
 
 # Red-team CTF range. Local-only target app, planted flags, runtime state.
 /.ctf/
+
+# Work that has not been decided on yet. A draft harness lives here while the
+# question "should this be generalised into benchmarks/?" is still open; nothing
+# under it is cited by the manifest or the maps, so `wreath-map-lint` never
+# reads it and a half-built rig cannot fail a gate it was never promoted into.
+/.futures/
