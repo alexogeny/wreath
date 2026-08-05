@@ -519,19 +519,34 @@ class ProblemResponse(Response):
 class HTMLResponse(Response):
     """A UTF-8 HTML document, sent as `text/html; charset=utf-8`.
 
-    Encodes `body` with UTF-8 and sets `content-length` from the encoded bytes.
-    Status defaults to 200. Nothing is escaped or validated -- the markup is sent
-    exactly as given, so interpolated user text is escaped by the caller or by a
-    template (`wreath.templates` escapes by default). `background`, keyword-only
-    here, is awaited after the response has been sent.
+    A `str` is encoded with UTF-8; **bytes are already the document and are sent
+    as they arrive.** That second form is the one to reach for behind a
+    template: `Template.render_bytes` produces exactly the bytes that go on the
+    wire, so handing them here through `render()` decodes the whole document and
+    this constructor encodes it straight back -- two full passes over every page
+    for no change in what is sent.
+
+    `content-length` comes from the encoded bytes either way. Status defaults to
+    200. Nothing is escaped or validated -- the markup is sent exactly as given,
+    so interpolated user text is escaped by the caller or by a template
+    (`wreath.templates` escapes by default). `background`, keyword-only here, is
+    awaited after the response has been sent.
     """
 
     media_type = b"text/html; charset=utf-8"
 
     def __init__(
-        self, body: str, status: int = 200, *, background: Background | None = None
+        self,
+        body: str | bytes,
+        status: int = 200,
+        *,
+        background: Background | None = None,
     ) -> None:
-        super().__init__(body.encode("utf-8"), status=status, background=background)
+        super().__init__(
+            body if isinstance(body, bytes) else body.encode("utf-8"),
+            status=status,
+            background=background,
+        )
 
 
 class RedirectResponse(Response):

@@ -13,6 +13,7 @@ import pytest
 
 from wreath.response import (
     FileResponse,
+    HTMLResponse,
     JSONResponse,
     PreparedResponse,
     Response,
@@ -279,3 +280,22 @@ async def test_a_sent_descriptor_response_is_not_closed_twice(tmp_path) -> None:
     assert response._fd is None
     assert b"".join(m.get("body", b"") for m in sent[1:]) == b"payload"
     del response
+
+
+def test_html_response_takes_the_bytes_a_template_already_produced() -> None:
+    """`Template.render_bytes` emits UTF-8; `HTMLResponse` must not make it a str.
+
+    The native renderer produces exactly the bytes that go on the wire. Routing
+    them through `render()` decodes the document and this constructor encodes it
+    straight back -- two full passes over every templated page. Accepting bytes
+    is what lets a caller hand the rendered document over untouched, and the
+    equality below is what pins that the two spellings still agree byte for byte.
+    """
+    document = "<p>café &amp; ☃</p>"
+
+    from_str = HTMLResponse(document)
+    from_bytes = HTMLResponse(document.encode("utf-8"))
+
+    assert from_bytes.body == from_str.body
+    assert from_bytes.headers == from_str.headers
+    assert from_bytes.status == from_str.status
