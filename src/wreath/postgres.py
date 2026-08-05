@@ -364,6 +364,9 @@ class Pool:
                 this caller is not interrupted by it.
         """
         if shared and self._config.pipeline_depth > 1:
+            connection = self.try_acquire_shared()
+            if connection is not None:
+                return connection
             return await self._acquire_shared()
         if not self._started or self._stopping:
             raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
@@ -435,6 +438,97 @@ class Pool:
             # Woken because capacity freed rather than a connection arriving;
             # go round and try to open one.
 
+    def try_acquire_shared(self) -> Any | None:
+        """Take an idle connection into the shared set, or return None.
+
+        The uncontended shared lease, done in the caller's frame. Returning
+        `None` means "this one needs the coroutine" -- nothing idle, not
+        started, or shutting down -- and the caller falls through to
+        `_acquire_shared`, which owns every decision this does not make.
+
+        It is a separate synchronous method rather than a branch inside
+        `_acquire_shared` because the cost being removed *is* the coroutine: a
+        lease and its release created and stepped seven of them to move one
+        connection between a deque and a dict, which measured 18,732
+        instructions with no query attached to it. `wreath-decomp --suite
+        calibrate` prices a non-suspending await at 95.7ns against 49.8ns for a
+        guarded synchronous call, and seven of the first is most of that lease.
+
+        The policy stays in one place: this is the same branch `_acquire_shared`
+        opens with, in the same order, and every other case is still that
+        method's.
+        """
+        # At depth 1 a "shared" lease *is* an exclusive one, so there is no fast
+        # path to take: `acquire()` owns that case whole, including the queueing
+        # this method cannot do.
+        if self._config.pipeline_depth <= 1:
+            return None
+        if not self._started or self._stopping:
+            return None
+        # An idle connection is always the best choice, and taking it here also
+        # brings it into the shared set.
+        if self._available:
+            connection = self._available.pop()
+            self._shared[id(connection)] = (connection, 1)
+            return connection
+        # Otherwise the least-loaded shared connection, if any has room. This
+        # selection has to be here rather than only in the coroutine: a pool
+        # sized so that requests *do* collide -- which is the point of sharing --
+        # reaches this branch far more often than the idle one, so leaving it
+        # behind would mean the fast path never ran under the load it is for.
+        #
+        # The scan stops at the first connection carrying one borrower because
+        # nothing can be lower, which is also what the loop below it would have
+        # settled on: it takes the first strict minimum, and 1 is the minimum.
+        best_key = None
+        best_count = self._config.pipeline_depth
+        for key, (_connection, count) in self._shared.items():
+            if count < best_count:
+                best_key, best_count = key, count
+                if count == 1:
+                    break
+        if best_key is None:
+            return None
+        connection, count = self._shared[best_key]
+        self._shared[best_key] = (connection, count + 1)
+        return connection
+
+    def try_release_shared(self, connection: Any) -> bool:
+        """Give back a shared lease without suspending, or return False.
+
+        True means the lease is fully returned. False means the connection has
+        to go back through `release`, which is every case that can await:
+        the pool is shutting down, or the connection reports itself closed and
+        has to be closed here.
+
+        Raises:
+            InterfaceError: this connection holds no shared lease from this
+                pool. Refused here rather than deferred to the slow path so a
+                double release is caught in the frame that made it.
+        """
+        # Depth 1 leases exclusively, so the connection is in `_borrowed` rather
+        # than `_shared` and the ordinary release is the only one that applies.
+        if self._config.pipeline_depth <= 1:
+            return False
+        key = id(connection)
+        entry = self._shared.get(key)
+        if entry is None:
+            raise InterfaceError("connection was not borrowed from this pool")
+        count = entry[1]
+        if count > 1:
+            self._shared[key] = (connection, count - 1)
+            return True
+        if self._stopping or getattr(connection, "closed", False):
+            return False
+        # Last borrower out, and the connection is reusable: idle it exactly as
+        # the exclusive release does -- hand-off first, so a queued caller gets
+        # it without it ever touching the idle list.
+        del self._shared[key]
+        if not self._hand_off(connection):
+            self._available.append(connection)
+        self._settle_drain()
+        return True
+
     async def _acquire_shared(self) -> Any:
         """Lease a connection that concurrent statements may share.
 
@@ -459,22 +553,11 @@ class Pool:
         if not self._started or self._stopping:
             raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
 
-        # An idle connection is always the best choice, and taking it here also
-        # brings it into the shared set.
-        if self._available:
-            connection = self._available.pop()
-            self._shared[id(connection)] = (connection, 1)
-            return connection
-
-        # Otherwise the least-loaded shared connection, if any has room.
-        best_key = None
-        best_count = depth
-        for key, (_connection, count) in self._shared.items():
-            if count < best_count:
-                best_key, best_count = key, count
-        if best_key is not None:
-            connection, count = self._shared[best_key]
-            self._shared[best_key] = (connection, count + 1)
+        # Everything that can be decided without suspending lives in
+        # `try_acquire_shared`, and `acquire` has already tried it -- but not
+        # every caller arrives through `acquire`, so this is not an assumption.
+        connection = self.try_acquire_shared()
+        if connection is not None:
             return connection
 
         # Every shared connection is full and none is idle: open one if the
@@ -573,6 +656,8 @@ class Pool:
                 connection in the idle set twice and hand it to two callers.
         """
         if shared and self._config.pipeline_depth > 1:
+            if self.try_release_shared(connection):
+                return
             await self._release_shared(connection)
             return
         if connection not in self._borrowed:
@@ -704,11 +789,25 @@ class Statement:
         # never opens a transaction, so several may share a connection and be
         # batched into one flight. At `pipeline_depth=1` this is exactly
         # `acquire()`.
-        acquire_shared = getattr(self.database, "acquire_shared", None)
-        connection = await (
-            acquire_shared(self.workload) if acquire_shared is not None
-            else self.database.acquire(self.workload)
+        #
+        # The synchronous attempt first: an uncontended lease is a deque pop and
+        # a dict store, and awaiting it through `Database` and `Pool` cost two
+        # coroutines to do that. `None` means it has to be awaited after all.
+        # Each `getattr` is the same double-compatibility check
+        # `Database.acquire_shared` documents -- a database object that
+        # implements neither still gets exclusive leases.
+        database = self.database
+        try_acquire_shared = getattr(database, "try_acquire_shared", None)
+        connection = (
+            try_acquire_shared(self.workload) if try_acquire_shared is not None
+            else None
         )
+        if connection is None:
+            acquire_shared = getattr(database, "acquire_shared", None)
+            connection = await (
+                acquire_shared(self.workload) if acquire_shared is not None
+                else database.acquire(self.workload)
+            )
         try:
             marker = _phase_marker.get(None)
             if marker is None:
@@ -733,12 +832,16 @@ class Statement:
                 marker(_PH_DB_QUERY, self.database._flight_dep_id,
                        _COV_EXTERNAL, _monotonic_ns() - start)
         finally:
-            release_shared = getattr(self.database, "release_shared", None)
-            await (
-                release_shared(self.workload, connection)
-                if release_shared is not None
-                else self.database.release(self.workload, connection)
-            )
+            try_release_shared = getattr(database, "try_release_shared", None)
+            if try_release_shared is None or not try_release_shared(
+                self.workload, connection
+            ):
+                release_shared = getattr(database, "release_shared", None)
+                await (
+                    release_shared(self.workload, connection)
+                    if release_shared is not None
+                    else database.release(self.workload, connection)
+                )
 
     async def execute(self, *args: object) -> str:
         """Run the statement for its effect and return the command tag.
@@ -1103,6 +1206,30 @@ class Database:
         marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
                _monotonic_ns() - start)
         return connection
+
+    def try_acquire_shared(self, workload: Workload = "read") -> Any | None:
+        """The uncontended shared lease, taken without a coroutine.
+
+        `None` means it has to be awaited: nothing idle, or the pool is
+        shutting down -- and deliberately also whenever a Flight Recorder phase
+        marker is armed, because `acquire_shared` is the one seam pool waiting
+        is attributed from and an armed request must keep going through it.
+
+        See `Pool.try_acquire_shared` for why the synchronous path exists.
+        """
+        if _phase_marker.get(None) is not None:
+            return None
+        # A pool-shaped double predates these methods, and the rule is the same
+        # one `acquire_shared` states: a method a double does not have has to be
+        # invisible to it. Missing means "await it", which is what every such
+        # double already does.
+        attempt = getattr(self._resolve_pool(workload), "try_acquire_shared", None)
+        return attempt() if attempt is not None else None
+
+    def try_release_shared(self, workload: Workload, connection: Any) -> bool:
+        """Return a shared lease without a coroutine; False if it has to await."""
+        attempt = getattr(self._resolve_pool(workload), "try_release_shared", None)
+        return attempt(connection) if attempt is not None else False
 
     async def release_shared(self, workload: Workload, connection: Any) -> None:
         """Return a shared lease to the pool it came from."""
