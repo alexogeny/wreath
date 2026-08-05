@@ -42,6 +42,79 @@ typedef struct {
     PyObject *old_value;  /* owned, or NULL when there was no prior binding */
 } loop_frame;
 
+/* One tape instruction with its operands already out of their Python objects.
+ *
+ * The tape is a tuple of tuples of Python ints, and a loop body is executed
+ * once per row: rendering the Fortunes document walked ~80 instructions out of
+ * a tape of 11, so the same `PyLong_AsLong` ran seven times over for every
+ * opcode, jump target and line number in the body. That showed up as 6.9% of
+ * the render's cycles across `PyLong_AsLong` and `PyLong_AsSsize_t`, second
+ * only to the renderer itself.
+ *
+ * Decoding is O(tape) once per render and execution is O(instructions
+ * executed), so this pays for any template with a loop in it and costs a tape
+ * walk for one without. Every pointer is borrowed from the tape, which the
+ * caller holds for the whole render.
+ *
+ * Unknown opcodes are decoded as themselves with no operands, so an invalid one
+ * still raises where it is *reached* rather than where it is decoded. */
+typedef struct {
+    int op;
+    int line;
+    Py_ssize_t target;  /* OP_IF else-branch, OP_JUMP destination, OP_FOR end */
+    PyObject *first;    /* borrowed: text fragment, lookup path, or loop var */
+    PyObject *path;     /* borrowed: OP_FOR's iterable path */
+} decoded;
+
+#define TAPE_STACK_SLOTS 64  /* tapes at or below this decode without malloc */
+
+static int
+decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
+{
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *instr = PyTuple_GET_ITEM(tape, i);
+        decoded *slot = &out[i];
+        slot->line = 0;
+        slot->target = 0;
+        slot->first = NULL;
+        slot->path = NULL;
+        long op = PyLong_AsLong(PyTuple_GET_ITEM(instr, 0));
+        if (op == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        slot->op = (int)op;
+        switch (op) {
+        case OP_TEXT:
+            slot->first = PyTuple_GET_ITEM(instr, 1);
+            break;
+        case OP_VAR:
+            slot->first = PyTuple_GET_ITEM(instr, 1);
+            slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 2));
+            break;
+        case OP_IF:
+            slot->first = PyTuple_GET_ITEM(instr, 1);
+            slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 2));
+            slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 3));
+            break;
+        case OP_JUMP:
+            slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 1));
+            break;
+        case OP_FOR:
+            slot->first = PyTuple_GET_ITEM(instr, 1);
+            slot->path = PyTuple_GET_ITEM(instr, 2);
+            slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 3));
+            slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 4));
+            break;
+        default:
+            break;  /* ENDIF and ENDFOR carry no operands; unknown ops none. */
+        }
+        if (PyErr_Occurred()) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int
 outbuf_reserve(outbuf *b, Py_ssize_t extra)
 {
@@ -231,6 +304,30 @@ emit_value(outbuf *b, PyObject *value)
         }
         return append_escaped(b, s, n);
     }
+    /* An exact `int` is decimal digits, and no digit is one of the five
+     * characters escaping replaces -- so `str()` would allocate a `str`, format
+     * into it, hand back its UTF-8, be scanned for specials that cannot be
+     * there, and be freed again. Formatting straight into the output buffer
+     * skips all five.
+     *
+     * Exact, not `PyLong_Check`: the contract is `str(value)`, and `bool` and
+     * every `int` subclass may answer that differently -- `str(True)` is
+     * "True", not "1". A value wider than a C long falls through to the
+     * general path, which is where arbitrary precision belongs. */
+    if (PyLong_CheckExact(value)) {
+        int overflowed = 0;
+        long number = PyLong_AsLongAndOverflow(value, &overflowed);
+        if (number == -1 && PyErr_Occurred()) {
+            return -1;  /* -1 is also a legal value; the sentinel needs both */
+        }
+        if (!overflowed) {
+            char digits[24];
+            int written = snprintf(digits, sizeof(digits), "%ld", number);
+            if (written > 0 && written < (int)sizeof(digits)) {
+                return outbuf_append(b, digits, written);
+            }
+        }
+    }
     PyObject *text = PyObject_Str(value);
     if (text == NULL) {
         return -1;
@@ -270,8 +367,27 @@ wreath_template_render(PyObject *self, PyObject *args)
         return NULL;
     }
 
+    Py_ssize_t n = PyTuple_GET_SIZE(tape);
+    decoded stack_program[TAPE_STACK_SLOTS];
+    decoded *program = stack_program;
+    if (n > TAPE_STACK_SLOTS) {
+        program = PyMem_Malloc((size_t)n * sizeof(decoded));
+        if (program == NULL) {
+            return PyErr_NoMemory();
+        }
+    }
+    if (decode_tape(tape, n, program) < 0) {
+        if (program != stack_program) {
+            PyMem_Free(program);
+        }
+        return NULL;
+    }
+
     PyObject *local = PyDict_Copy(context);
     if (local == NULL) {
+        if (program != stack_program) {
+            PyMem_Free(program);
+        }
         return NULL;
     }
 
@@ -279,7 +395,6 @@ wreath_template_render(PyObject *self, PyObject *args)
     loop_frame frames[MAX_LOOP_DEPTH];
     Py_ssize_t depth = 0;
     Py_ssize_t ip = 0;
-    Py_ssize_t n = PyTuple_GET_SIZE(tape);
     int failed = 0;
 
     while (ip < n) {
@@ -287,23 +402,17 @@ wreath_template_render(PyObject *self, PyObject *args)
             failed = 1;
             break;
         }
-        PyObject *instr = PyTuple_GET_ITEM(tape, ip);
-        long op = PyLong_AsLong(PyTuple_GET_ITEM(instr, 0));
-        if (op == -1 && PyErr_Occurred()) {
-            failed = 1;
-            break;
-        }
+        const decoded *instr = &program[ip];
+        int op = instr->op;
         if (op == OP_TEXT) {
-            PyObject *fragment = PyTuple_GET_ITEM(instr, 1);
+            PyObject *fragment = instr->first;
             if (outbuf_append(&buf, PyBytes_AS_STRING(fragment),
                               PyBytes_GET_SIZE(fragment)) < 0) {
                 goto overflow_or_error;
             }
             ip++;
         } else if (op == OP_VAR) {
-            PyObject *value =
-                lookup_path(local, PyTuple_GET_ITEM(instr, 1),
-                            (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 2)));
+            PyObject *value = lookup_path(local, instr->first, instr->line);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -315,9 +424,7 @@ wreath_template_render(PyObject *self, PyObject *args)
             }
             ip++;
         } else if (op == OP_IF) {
-            PyObject *value =
-                lookup_path(local, PyTuple_GET_ITEM(instr, 1),
-                            (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 3)));
+            PyObject *value = lookup_path(local, instr->first, instr->line);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -328,16 +435,15 @@ wreath_template_render(PyObject *self, PyObject *args)
                 failed = 1;
                 break;
             }
-            ip = truth ? ip + 1 : PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 2));
+            ip = truth ? ip + 1 : instr->target;
         } else if (op == OP_JUMP) {
-            ip = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 1));
+            ip = instr->target;
         } else if (op == OP_ENDIF) {
             ip++;
         } else if (op == OP_FOR) {
-            PyObject *var = PyTuple_GET_ITEM(instr, 1);
-            int line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 4));
-            PyObject *iterable =
-                lookup_path(local, PyTuple_GET_ITEM(instr, 2), line);
+            PyObject *var = instr->first;
+            int line = instr->line;
+            PyObject *iterable = lookup_path(local, instr->path, line);
             if (iterable == NULL) {
                 failed = 1;
                 break;
@@ -349,8 +455,7 @@ wreath_template_render(PyObject *self, PyObject *args)
                     PyErr_Clear();
                     PyObject *joiner = PyUnicode_FromString(".");
                     PyObject *joined =
-                        joiner ? PyUnicode_Join(joiner, PyTuple_GET_ITEM(instr, 2))
-                               : NULL;
+                        joiner ? PyUnicode_Join(joiner, instr->path) : NULL;
                     Py_XDECREF(joiner);
                     raise_render(line, joined ? PyUnicode_FromFormat(
                                                     "%R is not iterable", joined)
@@ -367,7 +472,7 @@ wreath_template_render(PyObject *self, PyObject *args)
                     failed = 1;
                     break;
                 }
-                ip = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 3));
+                ip = instr->target;
                 continue;
             }
             if (depth >= MAX_LOOP_DEPTH) {
@@ -450,6 +555,9 @@ wreath_template_render(PyObject *self, PyObject *args)
         Py_DECREF(frames[depth].iterator);
     }
     Py_DECREF(local);
+    if (program != stack_program) {
+        PyMem_Free(program);
+    }
 
     if (failed) {
         PyMem_Free(buf.data);

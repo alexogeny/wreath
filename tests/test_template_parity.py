@@ -71,6 +71,57 @@ def test_pure_native_byte_parity(source: str, context: dict) -> None:
         assert native == pure
 
 
+class Weird(int):
+    """An int whose `str` is not its digits, so `str()` is not substitutable."""
+
+    def __str__(self) -> str:
+        return "weird"
+
+
+#: One per kind the emitter may treat specially. `str(value)` is the contract,
+#: so anything that answers `__str__` differently from its digits -- `bool`,
+#: an `int` subclass -- must not take a digits fast path, and an integer wider
+#: than a C long must not be truncated to fit one.
+NUMERIC_CASES = [
+    {"v": 0},
+    {"v": 7},
+    {"v": -7},
+    {"v": 2**62},
+    {"v": 2**63},                 # one past a signed C long
+    {"v": -(2**63) - 1},
+    {"v": 2**200 + 12345},        # far past any machine word
+    {"v": True},                  # `str(True)` is "True", not "1"
+    {"v": False},
+    {"v": Weird(5)},              # `str` is overridden; digits would be wrong
+    {"v": 1.5},
+    {"v": float("inf")},
+]
+
+
+@pytest.mark.parametrize("context", NUMERIC_CASES, ids=lambda case: repr(case["v"]))
+def test_non_string_values_render_as_str_in_both_engines(context: dict) -> None:
+    tape = compile_tape("{{ v }}")
+    pure = render_tape(tape, context)
+    assert pure == str(context["v"]).encode()
+    if _HAS_NATIVE:
+        assert _core.template_render(tape, context, 16 * 1024 * 1024) == pure
+
+
+def test_a_number_inside_a_loop_renders_once_per_row() -> None:
+    """The loop body is where a decoded tape would be reused across rows.
+
+    Rendering the same instruction thirteen times must produce thirteen
+    distinct values, not the first one repeated -- which is the way a
+    pre-decoded instruction stream fails when an operand is cached too eagerly.
+    """
+    tape = compile_tape("{% for r in rows %}<i>{{ r.id }}</i>{% endfor %}")
+    rows = [{"id": index} for index in range(13)]
+    expected = b"".join(f"<i>{index}</i>".encode() for index in range(13))
+    assert render_tape(tape, {"rows": rows}) == expected
+    if _HAS_NATIVE:
+        assert _core.template_render(tape, {"rows": rows}, 1 << 20) == expected
+
+
 @pytest.mark.parametrize(
     "source, context",
     [
