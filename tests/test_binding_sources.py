@@ -202,3 +202,27 @@ async def test_depends_is_still_written_as_a_default() -> None:
         response = await client.get("/items")
 
     assert response.json() == {"value": "provided"}
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_query_parameter_binds_the_first_occurrence() -> None:
+    """`?page=1&page=9` binds 1, and nothing else pinned that.
+
+    The binder folds the parsed pairs into a mapping to answer each declared
+    parameter once, and which occurrence survives that fold is observable to
+    every caller -- a client that appends rather than replaces a parameter gets
+    a different answer if it ever flips. It was `setdefault` in a Python loop
+    and is now the same fold in one C call; this is what makes the two the same
+    fold rather than two spellings that happen to agree today.
+    """
+    app = Wreath()
+
+    @app.get("/search")
+    async def search(request: Any, page: Annotated[int, Query()] = 0) -> dict[str, int]:
+        return {"page": page}
+
+    async with TestClient(app) as client:
+        response = await client.get("/search?page=1&page=9")
+
+    assert response.status == 200
+    assert response.json() == {"page": 1}

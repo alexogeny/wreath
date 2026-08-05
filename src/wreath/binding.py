@@ -2601,9 +2601,12 @@ def compile_binder(
             # `_RequestContext`, so reading it here built the whole thing on
             # every bound handler purely to reach one member.
             query = parse_qs(request.query_string)
-            values: dict[str, str] = {}
-            for key, value in query:
-                values.setdefault(key, value)
+            # First occurrence wins, which `dict` gives from the pairs reversed:
+            # the earliest pair is assigned last. Both twins return a list, so
+            # `reversed` is a view rather than a copy and the whole fold is one
+            # C loop -- it was a Python loop of `setdefault` calls, one per pair,
+            # over pairs a C parser had just produced.
+            values: dict[str, str] = dict(reversed(query))
             for name, alias, annotation, default, constraint in query_plan:
                 raw = values.get(alias)
                 if raw is None:
