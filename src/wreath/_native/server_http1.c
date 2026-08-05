@@ -2205,7 +2205,6 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
     PyObject *yielded = NULL;
     PyObject *continuation = NULL;
     PyObject *task = NULL;
-    PyObject *ignored = NULL;
     int result = -1;
 
     PyObject *app_args[3] = {scope, self->receive_callable, self->send_callable};
@@ -2240,9 +2239,7 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
     if (continuation == NULL) goto done;
     task = PyObject_CallOneArg(self->loop_create_task, continuation);
     if (task == NULL) goto done;
-    PyObject *cb_args[2] = {task, self->done_callable};
-    ignored = PyObject_Vectorcall(task_add_done_callback, cb_args, 2, NULL);
-    if (ignored == NULL) goto done;
+    if (wreath_task_add_done_callback(task, self->done_callable) < 0) goto done;
     Py_XSETREF(self->task, task);
     task = NULL;
     result = 0;
@@ -2251,7 +2248,6 @@ done:
     Py_XDECREF(yielded);
     Py_XDECREF(continuation);
     Py_XDECREF(task);
-    Py_XDECREF(ignored);
     return result;
 }
 
@@ -3975,8 +3971,7 @@ finalize_app_task(WreathHttpProtocol *self, PyObject *task, int drive_buffered)
     /* Reached only for a task already known to be done, so exception() cannot
      * be pending here: any raise is CancelledError, which apply_app_outcome
      * reads as a NULL exception. */
-    PyObject *args[1] = {task};
-    PyObject *exc = PyObject_Vectorcall(task_exception_fn, args, 1, NULL);
+    PyObject *exc = wreath_task_exception(task);
     if (exc == NULL) {
         PyErr_Clear();
     }

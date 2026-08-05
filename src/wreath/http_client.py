@@ -286,6 +286,30 @@ class ClientLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientTLS:
+    """Where this client's trust comes from, as paths rather than a context.
+
+    **Paths, not a built `ssl.SSLContext`, and that is what makes the fast path
+    reachable.** There is no supported way to borrow OpenSSL's `SSL_CTX *` out
+    of a Python context, so a client handed one can only take asyncio's TLS --
+    a Python object per read and per write, measured at 2.14x the cost of the
+    native path. Naming the material lets the reactor build its own. `TLSConfig`
+    and the HTTP/3 backend already answer this the same way.
+
+    Args:
+        cafile: PEM bundle of trusted roots. None uses the system store.
+        capath: Directory of hashed trusted roots.
+        verify: Check the peer's chain and host name. Off is a decision that has
+            to be typed out, because a client that skips the check is faster
+            than one that does not and looks identical until it matters.
+    """
+
+    cafile: str | None = None
+    capath: str | None = None
+    verify: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ClientTimeout:
     """Deadlines for one outbound request, in seconds. Validated at construction.
 
@@ -947,6 +971,7 @@ class HTTPClient:
         "_reused",
         "_scheme",
         "_ssl_context",
+        "_tls",
         "_started",
         "_timeout",
         "_trace",
@@ -965,6 +990,7 @@ class HTTPClient:
         destination: DestinationPolicy = _DEFAULT_DESTINATION,
         rate: RatePolicy = _DEFAULT_RATE,
         trace: TracePolicy = _DEFAULT_TRACE,
+        tls: ClientTLS | None = None,
     ) -> None:
         if not name:
             raise ValueError("HTTP client name cannot be empty")
@@ -1003,6 +1029,7 @@ class HTTPClient:
         self._dns_addresses: tuple[_AddressInfo, ...] = ()
         self._dns_expires_at = 0.0
         self._ssl_context: ssl.SSLContext | None = None
+        self._tls = tls or ClientTLS()
         self._active: set[_Connection] = set()
         self._idle: list[_Connection] = []
         self._open = 0
@@ -1663,10 +1690,34 @@ class HTTPClient:
         )
         return _Connection(reader, writer)
 
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        """The outbound context, native when the reactor can provide one.
+
+        Built once per client, at first connect. The native context is an
+        `ssl.SSLContext` as well as a C one, so it is safe on any loop -- a loop
+        that does not recognise it simply uses the Python half. That is why this
+        does not sniff which loop is running.
+        """
+        from .reactor import metal_tls_client_context
+
+        tls = self._tls
+        try:
+            return metal_tls_client_context(
+                cafile=tls.cafile, capath=tls.capath, verify=tls.verify)
+        except RuntimeError:
+            # The extension is absent -- the metal tier is Linux-only. Fall
+            # through to the portable context rather than refusing https.
+            pass
+        context = ssl.create_default_context(cafile=tls.cafile, capath=tls.capath)
+        if not tls.verify:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        return context
+
     async def _connect(self) -> _Connection:
         addresses = await self._resolve()
         if self._scheme == "https" and self._ssl_context is None:
-            self._ssl_context = ssl.create_default_context()
+            self._ssl_context = self._build_ssl_context()
         tasks = [
             asyncio.create_task(
                 self._open_address(
@@ -2013,6 +2064,7 @@ __all__ = [
     "ClientLimits",
     "ClientResponse",
     "ClientSnapshot",
+    "ClientTLS",
     "ClientTimeout",
     "ConnectError",
     "DNSFailure",

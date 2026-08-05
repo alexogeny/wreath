@@ -1134,7 +1134,7 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
             )
         ]
 
-    def create_default_context() -> ssl.SSLContext:
+    def build_ssl_context(_self: HTTPClient) -> ssl.SSLContext:
         nonlocal contexts
         contexts += 1
         return cast(ssl.SSLContext, object())
@@ -1146,7 +1146,11 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
         return cast(asyncio.StreamReader, object()), cast(asyncio.StreamWriter, object())
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
-    monkeypatch.setattr(ssl, "create_default_context", create_default_context)
+    # Counted at the client's own builder rather than at `ssl` module level:
+    # the context is native where the reactor can provide one, so the module
+    # function is no longer the seam. What is under test -- built once, not per
+    # request -- is unchanged.
+    monkeypatch.setattr(HTTPClient, "_build_ssl_context", build_ssl_context)
     # DNS/TLS-setup caching is transport-agnostic; spoof the streams seam.
     monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
