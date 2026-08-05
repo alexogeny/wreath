@@ -1098,6 +1098,7 @@
       ],
       "tests": [
         "tests/test_server.py",
+        "tests/test_server_continuation.py",
         "tests/test_server_protocol.py",
         "tests/test_server_protocols.py",
         "tests/test_server_env.py",
