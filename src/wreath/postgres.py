@@ -74,6 +74,16 @@ _DEFAULT_CONNECTOR = connect
 
 Connector = Callable[[str], Awaitable[Any]]
 
+#: `Statement._call` reaches the driver's result methods with
+#: `getattr(connection, method)`, which allocates a bound method per query.
+#: Resolving the four unbound functions once and calling them with the instance
+#: was tried, behind an exact-type check (a connection is not always a
+#: `Connection` -- the pool suites lease duck-typed fakes). It measured 3.48us
+#: for the Statement+pool facade before and 3.48us after: one bound-method
+#: allocation is not resolvable against a 35us query, and the branch it needed
+#: made `_call` worse to read. Left as it was, so the next reader does not
+#: re-derive it.
+
 
 def register_extension_codec(name: str, oid: int, kind: int) -> None:
     """Teach the active codec that `oid` carries an extension wire format.
@@ -112,6 +122,34 @@ class PoolConfig:
     statement_cache_size: int = 100
     #: Approximate retained bytes for automatic plans on each connection.
     statement_cache_bytes: int = 4 * 1024 * 1024
+    #: Concurrent `Statement` operations allowed to share one connection.
+    #:
+    #: The driver has always been able to hold several operations in flight on
+    #: a connection; the pool is what decided nobody could reach one at the
+    #: same time as anybody else. Raising this lets concurrent statements batch
+    #: into the same flight -- one write and one backend wakeup for several
+    #: queries instead of one each, which is what every other driver on the
+    #: Fortunes board has been doing.
+    #:
+    #: **4 because it was measured.** Swept on the Fortunes board, six workers
+    #: on three physical cores, 512 concurrent connections against a pool of 56:
+    #:
+    #:     depth  1   49,289 req/s      (exclusive leasing)
+    #:     depth  2   53,993 req/s      +9.5%
+    #:     depth  4   59,318 req/s      +20.3%   <- peak
+    #:     depth  8   57,804 req/s      +17.3%
+    #:
+    #: It turns over past 4: a deeper share queues more operations on one
+    #: connection than a single flight can carry, which is latency without
+    #: throughput to show for it.
+    #:
+    #: `1` restores exclusive leasing exactly, and is what to set when a caller
+    #: needs a connection to itself for reasons the pool cannot see.
+    #: `Database.acquire()` is exclusive whatever this says, because a caller
+    #: holding an explicit lease may open a transaction and the driver refuses
+    #: concurrent operations once it has -- so `Statement.map`, `_Transaction`
+    #: and every direct `acquire` are unaffected by this setting.
+    pipeline_depth: int = 4
 
     def __post_init__(self) -> None:
         if self.min_size < 0:
@@ -126,6 +164,8 @@ class PoolConfig:
             raise ValueError("pool statement_cache_size must be positive")
         if self.statement_cache_bytes < 1:
             raise ValueError("pool statement_cache_bytes must be positive")
+        if self.pipeline_depth < 1:
+            raise ValueError("pool pipeline_depth must be at least 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,12 +197,19 @@ class PoolSnapshot:
 
 
 class Pool:
-    """A bounded, exclusive-lease pool for one database workload."""
+    """A bounded lease pool for one database workload.
+
+    A lease is exclusive by default. `PoolConfig.pipeline_depth` above 1 lets
+    concurrent *statements* share a connection so their operations batch into
+    one flight -- see `acquire`, and the note on that field for the measurement
+    that chose the depth. Anything holding an explicit lease still has the
+    connection to itself, because a shared one cannot carry a transaction.
+    """
 
     __slots__ = (
         "_available", "_borrowed", "_config", "_connections",
         "_connector", "_drained", "_dsn", "_high_water", "_read_only",
-        "_started", "_statements", "_stopping", "_waiters",
+        "_shared", "_started", "_statements", "_stopping", "_waiters",
     )
 
     def __init__(
@@ -192,6 +239,11 @@ class Pool:
         # design goal is eliding frames.
         self._waiters: deque[asyncio.Future[Any]] = deque()
         self._drained: asyncio.Future[None] | None = None
+        #: Share counts for connections lent out for batching, by identity.
+        #: A connection appears here only while it has shared borrowers; an
+        #: exclusive lease never enters it, which is what keeps the two kinds
+        #: of loan from being mistaken for each other on release.
+        self._shared: dict[int, tuple[Any, int]] = {}
         self._high_water = 0
         self._started = False
         self._stopping = False
@@ -290,8 +342,11 @@ class Pool:
         self._available.extend(opened)
         self._started = True
 
-    async def acquire(self) -> Any:
-        """Lease one connection exclusively. Always pair it with `release`.
+    async def acquire(self, *, shared: bool = False) -> Any:
+        """Lease one connection. Always pair it with `release`.
+
+        `shared=True` allows up to `pipeline_depth` concurrent holders, so their
+        operations batch into one flight; the default is an exclusive lease.
 
         Three outcomes, tried in this order: an idle connection is handed over
         immediately; otherwise a new one is opened if the pool is below
@@ -308,6 +363,8 @@ class Pool:
                 deadline covers the wait only — a connection being opened for
                 this caller is not interrupted by it.
         """
+        if shared and self._config.pipeline_depth > 1:
+            return await self._acquire_shared()
         if not self._started or self._stopping:
             raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
         loop = asyncio.get_running_loop()
@@ -378,6 +435,75 @@ class Pool:
             # Woken because capacity freed rather than a connection arriving;
             # go round and try to open one.
 
+    async def _acquire_shared(self) -> Any:
+        """Lease a connection that concurrent statements may share.
+
+        Up to `pipeline_depth` callers hold one at a time, so their operations
+        queue on the same connection and the driver batches them into one
+        flight. Pair it with `release_shared`.
+
+        Falls back to `acquire()` at depth 1, which is exactly exclusive
+        leasing, so the serial path stays one code path rather than a special
+        case of this one.
+
+        The connection with the fewest borrowers wins, which spreads load
+        rather than filling one connection before touching the next: a deep
+        queue on one connection is latency that a `max_emitted_operations`
+        flight cannot drain in one go, while the same operations spread across
+        idle connections go out in parallel.
+        """
+        depth = self._config.pipeline_depth
+        if depth <= 1:
+            return await self.acquire()
+
+        if not self._started or self._stopping:
+            raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
+
+        # An idle connection is always the best choice, and taking it here also
+        # brings it into the shared set.
+        if self._available:
+            connection = self._available.pop()
+            self._shared[id(connection)] = (connection, 1)
+            return connection
+
+        # Otherwise the least-loaded shared connection, if any has room.
+        best_key = None
+        best_count = depth
+        for key, (_connection, count) in self._shared.items():
+            if count < best_count:
+                best_key, best_count = key, count
+        if best_key is not None:
+            connection, count = self._shared[best_key]
+            self._shared[best_key] = (connection, count + 1)
+            return connection
+
+        # Every shared connection is full and none is idle: open one if the
+        # pool has room, else wait exactly as an exclusive caller would.
+        connection = await self.acquire()
+        self._borrowed.discard(connection)
+        self._shared[id(connection)] = (connection, 1)
+        return connection
+
+    async def _release_shared(self, connection: Any) -> None:
+        """Return a shared lease. The connection idles when the last one goes."""
+        if self._config.pipeline_depth <= 1:
+            await self.release(connection)
+            return
+        key = id(connection)
+        entry = self._shared.get(key)
+        if entry is None:
+            raise InterfaceError("connection was not borrowed from this pool")
+        _connection, count = entry
+        if count > 1:
+            self._shared[key] = (connection, count - 1)
+            return
+        del self._shared[key]
+        # Last borrower out: it becomes an ordinary idle connection again, so
+        # every path that reasons about idleness -- hand-off, drain, shutdown --
+        # sees it in the one place it expects.
+        self._borrowed.add(connection)
+        await self.release(connection)
+
     def _expire(self, waiter: asyncio.Future[Any]) -> None:
         """Fail one queued caller when its own deadline passes."""
         if not waiter.done():
@@ -428,8 +554,11 @@ class Pool:
         if drained is not None and not drained.done() and not self._borrowed:
             drained.set_result(None)
 
-    async def release(self, connection: Any) -> None:
+    async def release(self, connection: Any, *, shared: bool = False) -> None:
         """Return a leased connection, and wake one waiter.
+
+        `shared` must match the acquisition: a shared lease is one of several on
+        that connection, and only the last one out returns it to the pool.
 
         The connection goes back to the idle set and is reused — unless the pool
         is shutting down or the connection reports itself closed, in which case
@@ -443,6 +572,9 @@ class Pool:
                 rather than tolerated because a double release would put one
                 connection in the idle set twice and hand it to two callers.
         """
+        if shared and self._config.pipeline_depth > 1:
+            await self._release_shared(connection)
+            return
         if connection not in self._borrowed:
             raise InterfaceError("connection was not borrowed from this pool")
         self._borrowed.remove(connection)
@@ -568,7 +700,15 @@ class Statement:
         self.workload = workload
 
     async def _call(self, method: str, args: tuple[object, ...]) -> Any:
-        connection = await self.database.acquire(self.workload)
+        # Shared, not exclusive: a statement is one autocommit round trip and
+        # never opens a transaction, so several may share a connection and be
+        # batched into one flight. At `pipeline_depth=1` this is exactly
+        # `acquire()`.
+        acquire_shared = getattr(self.database, "acquire_shared", None)
+        connection = await (
+            acquire_shared(self.workload) if acquire_shared is not None
+            else self.database.acquire(self.workload)
+        )
         try:
             marker = _phase_marker.get(None)
             if marker is None:
@@ -593,7 +733,12 @@ class Statement:
                 marker(_PH_DB_QUERY, self.database._flight_dep_id,
                        _COV_EXTERNAL, _monotonic_ns() - start)
         finally:
-            await self.database.release(self.workload, connection)
+            release_shared = getattr(self.database, "release_shared", None)
+            await (
+                release_shared(self.workload, connection)
+                if release_shared is not None
+                else self.database.release(self.workload, connection)
+            )
 
     async def execute(self, *args: object) -> str:
         """Run the statement for its effect and return the command tag.
@@ -602,7 +747,7 @@ class Statement:
         `"UPDATE 3"` — so it is where a row count comes from when there are no
         rows to fetch. Rows the statement does produce are discarded.
         """
-        return cast(str, await self._call("execute", args))
+        return await self._call("execute", args)
 
     async def fetch(self, *args: object) -> list[Any]:
         """Run the statement and return every row, as a list of `Record`.
@@ -610,7 +755,7 @@ class Statement:
         The whole result is materialized; there is no cursor here. A statement
         that can match an unbounded number of rows should carry its own `LIMIT`.
         """
-        return cast(list[Any], await self._call("fetch", args))
+        return await self._call("fetch", args)
 
     async def fetchrow(self, *args: object) -> Any:
         """Run the statement and return its first row, or `None` for no rows.
@@ -886,6 +1031,24 @@ class Database:
         except KeyError:
             raise KeyError(f"PostgreSQL workload is not configured: {workload}") from None
 
+    def _resolve_pool(self, workload: Workload) -> Pool:
+        """The started pool for `workload`, without re-validating the name.
+
+        `pool()` runs `_workload()` on its argument and is the right shape for a
+        public accessor. It is the wrong shape for `acquire`/`release`, which
+        run it twice per query on a string a `Statement` already validated when
+        it was registered -- two interpreter frames per request buying a check
+        that can only fail on a programming error.
+
+        A miss falls through to `pool()`, so an unconfigured or misspelled
+        workload raises exactly what it raised before -- `ValueError` for a
+        string that is not a workload, `KeyError` for one that is not
+        configured, `InterfaceError` before startup. The fast path is a single
+        dict lookup and no frame beyond this one.
+        """
+        pool = self._pools.get(workload) if self.started else None
+        return pool if pool is not None else self.pool(workload)
+
     def _configured_pool(self, workload: Workload) -> Pool:
         if workload not in self._configs:
             raise KeyError(workload)
@@ -907,13 +1070,43 @@ class Database:
         # ContextVar read. This is the one acquisition seam, so Statement,
         # Statement.map, and direct acquire callers are all covered.
         marker = _phase_marker.get(None)
+        pool = self._resolve_pool(workload)
         if marker is None:
-            return await self.pool(workload).acquire()
+            return await pool.acquire()
         start = _monotonic_ns()
-        connection = await self.pool(workload).acquire()
+        connection = await pool.acquire()
         marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
                _monotonic_ns() - start)
         return connection
+
+    async def acquire_shared(self, workload: Workload = "read") -> Any:
+        """Lease a connection concurrent statements may share. See `PoolConfig`.
+
+        Additive and internal on purpose. Folding `shared=` into `acquire()`
+        instead looked tidier -- one seam, one keyword -- and broke twenty-four
+        tests across jobs, passes and workflow recording, because every
+        `Database`-shaped double in the tree is written against `acquire()`'s
+        current signature. A new method they do not have is invisible to them;
+        a new keyword on one they do have is not.
+
+        `Statement` reaches this through `_acquire_for_statement`, which falls
+        back to `acquire()` for any database object that does not implement it
+        -- so a double keeps working and simply gets exclusive leases, which is
+        the conservative answer rather than a failure.
+        """
+        marker = _phase_marker.get(None)
+        pool = self._resolve_pool(workload)
+        if marker is None:
+            return await pool.acquire(shared=True)
+        start = _monotonic_ns()
+        connection = await pool.acquire(shared=True)
+        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
+               _monotonic_ns() - start)
+        return connection
+
+    async def release_shared(self, workload: Workload, connection: Any) -> None:
+        """Return a shared lease to the pool it came from."""
+        await self._resolve_pool(workload).release(connection, shared=True)
 
     async def release(self, workload: Workload, connection: Any) -> None:
         """Return a connection to the pool it was leased from.
@@ -922,7 +1115,7 @@ class Database:
         handed to that pool, and a pool refuses a connection it did not lease
         with `InterfaceError`.
         """
-        await self.pool(workload).release(connection)
+        await self._resolve_pool(workload).release(connection)
 
     # -- distributed advisory locks ----------------------------------------
     # Cluster-global mutexes built on PostgreSQL advisory locks. See
