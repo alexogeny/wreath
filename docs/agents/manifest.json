@@ -167,7 +167,7 @@
         "caddy",
         "envoy"
       ],
-      "policy": "Upstream selection, health and in-flight counts are memory: no request-path database call decides where a request goes. PostgreSQL is where desired state would belong, and that half is not built. Every upstream is chosen once before any scoring runs -- a cold upstream's latency is a guess, and without that rule it starves permanently the moment a warm upstream measures faster than the guess. A pool with every upstream ejected still returns one, because refusing while every origin is briefly ejected is an outage of the proxy's own making and the declined request is the one that proves recovery. Only idempotent methods -- or a request carrying `Idempotency-Key` -- are retried on a second upstream, and only before the response head has been read, since after that a retry would deliver a prefix twice. `Host` and `Content-Length` are recomputed rather than relayed: the outbound framing must describe what this proxy actually sends, which is the egress half of the request-smuggling defence. `X-Forwarded-For` is replaced where `Via` is appended, because the first is an authorization input every parser reads leftmost and the second is a chain.",
+      "policy": "NATIVE-ONLY, BY DESIGN -- the one exception to the native/pure twin rule in AGENTS.md, and the first thing to know about this subsystem. Do not add a pure twin. For a reverse proxy a Python fallback is a footgun, not a safety net: it degrades silently by ~5x (117 CPU-us per forwarded request against single-threaded haproxy's 25.7) in the one component whose whole job is to beat the thing in front of it, and nothing at runtime announces which path was taken. `serve()` is the native proxy and the shape everything else is measured against: a `loop.create_server` protocol that parses a request head in place, selects an upstream from the compiled table, writes the outbound head to an already-open upstream transport and relays the response back -- no scope, no Request, no coroutine, no Task. It takes no ASGI app, and that absence is the design: an app is the seam Python returns through. Upstream connections are opened while the proxy is being configured because `loop.create_connection` is a coroutine, and reaching for one mid-request drags asyncio's Task and Future machinery back onto the path. `ReverseProxy` remains for what `serve()` refuses -- TLS upstreams, retry onto a second upstream, upgrades -- and is the ASGI proxy, slower by construction. Do not migrate `ReverseProxy` leaf by leaf: moving the header transform alone into C was tried and measured nothing (113.2 against 110.1-117.2), because the primitives were never the cost. The Python that remains is configuration (Upstream, Ejection, UpstreamPool, DestinationPolicy): startup-only, compiled into the native structures once, free per request. Anything the native path cannot do yet is refused when the pool is constructed, naming what is missing -- never a slow path at request time. Correctness is checked differentially against haproxy and nginx rather than against a twin, because a self-twin can be wrong in both halves and still agree. WREATH_PURE=1 does not disable it: that variable selects a pure twin where one exists, and here none does, so gating on it would turn 'run the readable implementation' into 'this module cannot be imported'. A build without the extension refuses at import with a named error. Mutation sweeps one mode. Upstream selection, health and in-flight counts are memory: no request-path database call decides where a request goes. PostgreSQL is where desired state would belong, and that half is not built. Every upstream is chosen once before any scoring runs -- a cold upstream's latency is a guess, and without that rule it starves permanently the moment a warm upstream measures faster than the guess. A pool with every upstream ejected still returns one, because refusing while every origin is briefly ejected is an outage of the proxy's own making and the declined request is the one that proves recovery. Only idempotent methods -- or a request carrying `Idempotency-Key` -- are retried on a second upstream, and only before the response head has been read, since after that a retry would deliver a prefix twice. `Host` and `Content-Length` are recomputed rather than relayed: the outbound framing must describe what this proxy actually sends, which is the egress half of the request-smuggling defence. `X-Forwarded-For` is replaced where `Via` is appended, because the first is an authorization input every parser reads leftmost and the second is a chain.",
       "guides": [
         "docs/guides/edge.md"
       ],
@@ -175,10 +175,17 @@
         "docs/reference/edge.md"
       ],
       "sources": [
-        "src/wreath/edge/"
+        "src/wreath/edge/",
+        "src/wreath/_native/edge.h",
+        "src/wreath/_native/edge_headers.c",
+        "src/wreath/_native/edge_serve.c"
       ],
       "tests": [
-        "tests/test_edge.py"
+        "tests/test_edge.py",
+        "tests/test_edge_forwarding_contract.py",
+        "tests/test_edge_native_forwarding.py",
+        "tests/test_edge_native_headers.py",
+        "tests/test_edge_native_serve.py"
       ]
     },
     {
@@ -892,8 +899,8 @@
     },
     {
       "name": "audit",
-      "capability": "An offline accessibility (WCAG 2.1 A/AA) and performance auditor for the HTML and responses your app returns",
-      "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion or performance budget, its severity, and whether --fix can remediate it. Reached through `wreath audit`, not a public module.",
+      "capability": "An offline auditor in three tiers: accessibility (WCAG 2.1 A/AA) and performance over the HTML your app returns, HTTP compliance and secure headers over a live response, and a source-level security ruleset over the application's own modules",
+      "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion, performance budget or CWE, its severity, and whether --fix can remediate it. Reached through `wreath audit` -- `static`, `runtime`, `code` -- not a public module. **The source tier (`rules/code.py`) is precision-first and its quiet half is the half that has to be proved.** Taint starts at the route boundary, because a handler is identifiable from its decorator alone and its parameters are therefore caller-controlled without an application object; that is what separates a module constant interpolated into SQL (a schema-qualified statement) from a handler parameter (an injection), and the first draft that conflated them reported 103 findings against src/wreath. The same move generalises: a rule decides on *provenance* rather than on shape, so `\"admin\" in roles` over a collection stays quiet while the same line against a value the file declares `str` does not, and `error-detail-leaked` fires only on a broad `except` because a narrow one's message is written by whoever named the type. A finding the project has already declared is not reported again -- an existing ruff noqa for the equivalent flake8-bandit code is honoured, and `# wreath-audit: allow <rule> -- <reason>` covers the rest, with the reason required. Two gates hold this, and an assert_clean alone holds neither: `wreath audit code src/wreath example` must stay at zero, and `wreath mutant --path src/wreath/_audit/rules/code.py --changed <ref>` must kill the precision guards, because a surviving mutant there means the rule can be widened back to noise with nothing going red. Two pre-existing findings stand deliberately unsuppressed: `unsafe-xml-parser` on objects.py (S3 responses parsed with stdlib ElementTree rather than wreath.xml, which the rule's own declared test contract flags) and `hardcoded-secret` on _devtools/complexity_probe.py (a documented example credential in a benchmark fixture).",
       "guides": [
         "docs/guides/auditing.md"
       ],
@@ -902,7 +909,8 @@
       ],
       "sources": [
         "src/wreath/_audit/",
-        "src/wreath/_audit/rules/"
+        "src/wreath/_audit/rules/",
+        "src/wreath/_audit/scan.py"
       ],
       "tests": [
         "tests/audit/"
@@ -1112,13 +1120,15 @@
     },
     {
       "name": "reactor",
-      "capability": "An asyncio-compatible event loop for the experimental metal server tier, with inline completion for non-suspending requests and an optional native timing wheel",
+      "capability": "An asyncio-compatible event loop for the experimental metal server tier, with inline completion for non-suspending requests and an optional native timing wheel Terminates and initiates TLS in C: `metal_tls_context` and `metal_tls_client_context` build an SSL_CTX from certificate and key *paths* (a Python ssl.SSLContext will not give up its material, which is why paths), and the per-connection SSL lives inside SocketTransport as a layer rather than a second transport type -- every read goes through metal_recv and every write through metal_send, so intercepting those reuses the existing flow control, buffered-protocol dispatch and lifecycle. Worth 2.14x against asyncio.sslproto, which a TLS connection previously fell back to entirely. TLS connections currently use the readiness path rather than io_uring multishot receive, because OpenSSL owns the descriptor through SSL_set_fd.",
       "policy": "The metal tier's loop. Free-threading and the optional JIT are separately tested execution modes, not assumptions. See tests/reactor/README.md for the tier layout and counter contracts.",
       "guides": [
         "docs/guides/server.md"
       ],
       "sources": [
-        "src/wreath/reactor.py"
+        "src/wreath/reactor.py",
+        "src/wreath/_native/reactor_tls.c",
+        "src/wreath/_native/reactor_tls.h"
       ],
       "tests": [
         "tests/reactor/",
