@@ -51,6 +51,28 @@ Use `escape` and `Markup` when you need to control escaping by hand, and expect
 clear, typed errors for syntax and render mistakes rather than a stack trace from
 deep inside the engine.
 
+## Hand the rendered bytes straight to the response
+
+`render()` returns a `str`, which is what you want when you are going to
+interpolate or inspect the result. When you are going to *send* it, reach for
+`render_bytes` instead:
+
+```python
+@app.get("/")
+async def home(request) -> HTMLResponse:
+    return HTMLResponse(home_template.render_bytes({"title": "Wreath"}))
+```
+
+The engine renders to UTF-8 — those are already the bytes that go on the wire.
+`render()` decodes them into a `str` and `HTMLResponse` encodes that straight
+back, so the two-line version walks the whole document twice for no change in
+what is sent. On a page of any size that is the largest thing left on the
+response path.
+
+`render_bytes` takes the context as a mapping rather than as keyword arguments,
+which is the only difference at the call site. `HTMLResponse` accepts either
+form; nothing else changes.
+
 ## Private names are not reachable
 
 A lookup resolves by subscript first and then by attribute, so `{{ order.total }}`
