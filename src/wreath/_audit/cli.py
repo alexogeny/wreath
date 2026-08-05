@@ -86,12 +86,25 @@ def _run_runtime(namespace: Any) -> int:
     return _emit(namespace, run_runtime_audit(url))
 
 
+def _run_code(namespace: Any) -> int:
+    from .scan import scan_paths
+
+    roots = list(getattr(namespace, "paths", None) or ["."])
+    report = scan_paths(roots, include_tests=getattr(namespace, "tests", False))
+    return _emit(namespace, report)
+
+
 def execute(namespace: Any, load_application: Callable[..., Any]) -> int:
     action = getattr(namespace, "audit_action", None)
     if action == "runtime":
         return _run_runtime(namespace)
+    if action == "code":
+        return _run_code(namespace)
     if action != "static":
-        print("wreath audit: expected the 'static' or 'runtime' action.", file=sys.stderr)
+        print(
+            "wreath audit: expected the 'static', 'runtime' or 'code' action.",
+            file=sys.stderr,
+        )
         return 2
 
     app = load_application(namespace.target, factory=namespace.factory)

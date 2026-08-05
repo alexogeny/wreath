@@ -81,9 +81,97 @@ Mounting `SecurityHeadersMiddleware` clears the header-based warnings; the cooki
 and status-code rules are satisfied by how your handlers set cookies and raise
 `Unauthorized(challenge=…)` / `MethodNotAllowed(allow=…)`.
 
+## Source-level security (code)
+
+`wreath audit code <path>…` reads your application's own modules. The other two
+tiers look at what an application *emits* — rendered HTML, live response headers
+— and neither can see the defect classes that do the real damage, because those
+leave no trace in a correct-looking 200. A query built by string formatting, a
+signing key that is a literal, an authorization check that returns instead of
+refusing: all of them serve a perfectly ordinary response.
+
+This tier needs no application object and no running server, only paths, so it
+runs on a diff in CI. Test directories are skipped unless you pass `--tests`,
+because test code legitimately hardcodes secrets, seeds PRNGs deterministically
+and compares tokens with `==`.
+
+| Rule | Reference | Severity | Checks |
+|---|---|---|---|
+| `sql-interpolation` | CWE-89 | error | SQL built by string interpolation reaches the database unmodified |
+| `timing-unsafe-compare` | CWE-208 | error | a secret compared with `==` leaks its prefix through response timing |
+| `weak-randomness` | CWE-338 | error | a security value drawn from `random`, which is a predictable Mersenne Twister |
+| `hardcoded-secret` | CWE-798 | error | a signing key or password written as a string literal, passed **or declared** |
+| `ssrf-policy-widened` | CWE-918 | error | an outbound client permitted to reach private, loopback or link-local addresses |
+| `outbound-url-from-request` | CWE-918 | error | an outbound request whose destination the caller chose |
+| `unsafe-xml-parser` | CWE-611 | error | XML read with a parser that resolves external entities |
+| `template-from-request` | CWE-1336 | error | a template compiled from a value that is not a literal |
+| `dynamic-import` | CWE-470 | error | a module, attribute or expression resolved from data |
+| `unsafe-archive-extract` | CWE-22 | error | an archive extracted without member, size, ratio or symlink limits |
+| `mass-assignment` | CWE-915 | error | a request body walked onto an object with `setattr` |
+| `cors-reflect-origin` | CWE-942 | error | the request `Origin` reflected into `Access-Control-Allow-Origin` |
+| `wildcard-trust-list` | CWE-346 | error | a trust boundary configured to accept every peer |
+| `secret-in-log` | CWE-532 | error | a credential, or a caller's own body, formatted into a log record |
+| `authz-fail-open` | CWE-863 | error | an authorization check that returns, rather than refuses, when it cannot decide |
+| `auth-disable-flag` | CWE-1188 | error | a configuration flag that skips authentication entirely |
+| `auth-fallback-on-exception` | CWE-1390 | error | an authentication path that retries with a weaker verifier when the strong one raises |
+| `substring-security-match` | CWE-697 | error | a security decision made by substring, so a longer value satisfies a shorter rule |
+| `case-mapped-authz` | CWE-178 | warn | an authorization decision made after a Unicode case mapping |
+| `debug-enabled` | CWE-489 | warn | the application constructed with `debug=True` as a literal |
+| `untrusted-forwarded-header` | CWE-348 | warn | a forwarded client address read without a configured proxy trust boundary |
+| `error-detail-leaked` | CWE-209 | warn | a caught exception's own text returned to the caller |
+| `env-conditional-security` | CWE-1188 | warn | a security control whose strength depends on which environment is running |
+| `unparseable` | `wreath:audit` | warn | the file could not be parsed, so no rule could be applied to it |
+
+Every finding names the Wreath primitive that replaces the defect, because a
+finding with no remediation is a complaint. `--fix` does not apply to this tier:
+these are decisions, not markup.
+
+### What makes it quiet
+
+A security linter that cries wolf gets suppressed wholesale, and then it is
+worse than nothing, because the suppression outlives the person who understood
+it. Three properties keep this ruleset usable, and each was arrived at by
+sweeping it over `src/wreath` and `example/` and narrowing whatever fired:
+
+* **Taint starts at the route boundary.** A handler is identifiable from its
+  decorator alone, so its parameters are known to be caller-controlled without
+  an application object. Interpolating a *module constant* into SQL is how you
+  write a schema-qualified statement; interpolating a *handler parameter* is an
+  injection. The first draft of this tier did not separate them and reported 103
+  findings against Wreath's own source.
+* **Provenance decides, not shape.** `"admin" in roles` over a collection and
+  `"admin" in scope_string` are one shape and two different pieces of code; the
+  rule fires only where the file itself declares the subject to be a string.
+* **A narrow `except` is trusted.** If you named the type you caught, you know
+  what its message says because you wrote it, so `error-detail-leaked` fires
+  only on a broad handler — the one that cannot know what it is holding.
+
+The current sweep is **zero findings** from these rules against `src/wreath` and
+`example/`. Two pre-existing findings remain and are listed in the audit
+subsystem's notes rather than suppressed.
+
+### Waivers
+
+A finding your project has already declared and justified is not reported again.
+Where ruff's `flake8-bandit` has an equivalent code, an existing `# noqa` for it
+is honoured — `S608` for `sql-interpolation`, `S105`/`S106`/`S107` for
+`hardcoded-secret`, `S102`/`S307` for `dynamic-import`, `S311` for
+`weak-randomness`, `S314`/`S405`/`S320` for `unsafe-xml-parser`, `S202` for
+`unsafe-archive-extract`. Re-raising something you have already declared under a
+second name is how the second tool gets switched off.
+
+For a finding ruff has no code for, the audit has its own marker, and the reason
+is required:
+
+```python
+# wreath-audit: allow case-mapped-authz -- the list is ASCII by construction
+```
+
+A bare marker with no reason is itself a finding.
+
 ## Adding a rule
 
-A rule is a callable registered in one of three lists, all re-exported from
+A rule is a callable registered in one of four lists, all re-exported from
 `wreath._audit.rules`:
 
 | Registry | Module | Signature |
@@ -91,9 +179,13 @@ A rule is a callable registered in one of three lists, all re-exported from
 | `A11Y_RULES` | `_audit/rules/a11y.py` | `(root: Node, surface: str) -> Iterator[Finding]` |
 | `HTML_PERF_RULES` | `_audit/rules/perf.py` | `(root: Node, surface: str) -> Iterator[Finding]` |
 | `RESPONSE_SECURITY_RULES` | `_audit/rules/security.py` | `(view: ResponseView) -> Iterator[Finding]` |
+| `CODE_RULES` | `_audit/rules/code.py` | a `CodeRule` row plus detection in `_Scanner` |
 
-Each module has a local `_rule` decorator that appends to its registry, so adding
-one is a decorated function next to its neighbours — no registration elsewhere.
+The first three modules have a local `_rule` decorator that appends to their
+registry, so adding one is a decorated function next to its neighbours — no
+registration elsewhere. The source tier is one AST walk, so a rule there is a
+row in `CODE_RULES` carrying its CWE and remediation, plus the detection in
+`_Scanner`.
 
 Four things go with it, and a rule is not finished without all four:
 
@@ -109,6 +201,14 @@ Four things go with it, and a rule is not finished without all four:
 4. **A severity you can defend.** `error` fails the build; `warn` fails only
    under `--strict`; `info` reports. Prefer the lower one until the rule has
    been wrong a few times and stayed right.
+
+For a source rule, the quiet half needs more than an `assert_clean`, because one
+passes trivially against a rule that never fires at all. Two checks establish it:
+`wreath audit code src/wreath example` must stay at zero, and
+`wreath mutant --path src/wreath/_audit/rules/code.py --changed <ref>` must kill
+the guards you wrote. A surviving mutant on a precision guard means no test
+holds that guard down, and the rule can be widened back to noise without anything
+going red.
 
 Keep it decidable from static markup or a recorded response — see *Out of
 scope* below — and keep it dependency-free, like the rest of `src/wreath`.

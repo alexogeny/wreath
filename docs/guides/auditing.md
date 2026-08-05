@@ -110,6 +110,50 @@ wildcard-with-credentials, and `nosniff`/`Referrer-Policy`. Point it at a stagin
 production URL to get a compliance report for your own service — see the
 [audit reference](../reference/audit.md#security-http-compliance-runtime) for every rule.
 
+## Source mode
+
+`wreath audit code <path>…` reads your application's own modules instead of its
+output. The other two modes see what you *emit*, and the defects that do the
+real damage leave no trace there — a query built by string formatting, a signing
+key that is a literal, an authorization check that returns instead of refusing.
+Every one of them serves a perfectly ordinary 200.
+
+```bash
+wreath audit code src --strict
+```
+
+It needs no application object and no running server, only paths, so it is the
+one mode that runs on a diff:
+
+```bash
+wreath audit code $(git diff --name-only origin/main -- '*.py')
+```
+
+Test directories are skipped unless you pass `--tests`, because test code
+legitimately hardcodes secrets, seeds PRNGs deterministically and compares
+tokens with `==` — findings that are all correct and all useless.
+
+Every finding names the primitive that replaces the defect rather than telling
+you that something is dangerous:
+
+```
+src/stations/router.py
+  ERROR outbound-url-from-request (CWE-918) 84:15: the destination of this
+        request comes from registration
+         → give the client a DestinationPolicy naming the hosts you mean; it
+           checks every DNS answer and every redirect, not just the string you
+           were handed
+```
+
+The ruleset is curated and deliberately quiet: a rule that fires on the correct
+spelling of the same intent is worse than no rule, because a gate nobody can
+keep clean is a gate everybody learns to pass. If one is wrong for a line you
+have already reasoned about, an existing ruff `# noqa` for the equivalent
+`flake8-bandit` code is honoured, and `# wreath-audit: allow <rule> -- <reason>`
+covers the rest. The reason is required. See the
+[audit reference](../reference/audit.md#source-level-security-code) for every
+rule and for what keeps each one quiet.
+
 ## Dev middleware
 
 Mount `AuditMiddleware` in **development only** to log a11y findings for every `text/html`

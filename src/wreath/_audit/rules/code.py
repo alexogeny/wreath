@@ -7,11 +7,28 @@ formatting, a signing key that is a literal, a comparison that returns early on
 the first wrong byte -- all of them serve a perfectly ordinary response.
 
 So this tier parses the source instead. It is a **curated** ruleset, not a
-general-purpose linter: every rule here corresponds to a defect class that was
-planted in a red-team range against a Wreath application and captured, and
-every one of them has a safe spelling that Wreath already ships. That framing
-is what makes the suggestions worth reading -- a finding does not say "this is
-dangerous", it says "you wrote X; the primitive for this is Y".
+general-purpose linter. A rule earns its place by meeting two tests: the defect
+class ships in real applications rather than in exercises, and it has a safe
+spelling that Wreath already provides. That second half is what makes the
+suggestions worth reading -- a finding does not say "this is dangerous", it
+says "you wrote X; the primitive for this is Y".
+
+## Three questions, not one
+
+Most of the rules ask *is this expression dangerous?* -- of a call, or of a
+comparison. Two further questions need the same walk and no more machinery, and
+between them they cover the defects that expression-level rules structurally
+cannot see:
+
+* **What does this declaration say?** A signing key is most often the default
+  value of a settings field, not an argument to a call. Nothing complains at
+  startup, because from the application's point of view the setting is
+  populated -- with the key that is in the source.
+* **What happens on the branch where the check could not be made?** A control
+  that raises on denial and *returns* on "cannot tell" has two exits and one of
+  them is open. The defect is never the `return`; it is that the undecidable
+  case and the permitted case are spelled identically, so no caller can tell
+  them apart.
 
 ## Precision over recall, deliberately
 
@@ -59,6 +76,7 @@ import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from ...crud import SENSITIVE_FIELD
 from ..model import Finding, Severity
 
 __all__ = ["CODE_RULES", "CodeRule", "scan_source"]
@@ -150,6 +168,56 @@ CODE_RULES: tuple[CodeRule, ...] = (
         "a forwarded client address read without a configured proxy trust boundary",
     ),
     CodeRule(
+        "wildcard-trust-list", Severity.ERROR, "CWE-346",
+        "name the hosts, origins or CIDRs you mean; a trust list of '*' is not a boundary",
+        "a trust boundary configured to accept every peer",
+    ),
+    CodeRule(
+        "secret-in-log", Severity.ERROR, "CWE-532",
+        "hold it in wreath.config.Secret, whose repr and str are redacted, and log through "
+        "wreath.logging, which redacts by default",
+        "a credential or a caller's own body formatted into a log record",
+    ),
+    CodeRule(
+        "authz-fail-open", Severity.ERROR, "CWE-863",
+        "raise on the undecidable branch too; an authorizer answers Allow or Deny and has no "
+        "third answer",
+        "an authorization check that returns, rather than refuses, when it cannot decide",
+    ),
+    CodeRule(
+        "auth-disable-flag", Severity.ERROR, "CWE-1188",
+        "give a test a test principal; there is no supported way to switch authentication off",
+        "a configuration flag that skips authentication entirely",
+    ),
+    CodeRule(
+        "auth-fallback-on-exception", Severity.ERROR, "CWE-1390",
+        "verify with one JwtVerifier and one key source; catch the specific error and refuse",
+        "an authentication path that retries with a weaker verifier when the strong one raises",
+    ),
+    CodeRule(
+        "outbound-url-from-request", Severity.ERROR, "CWE-918",
+        "give the client a DestinationPolicy naming the hosts you mean; it checks every DNS "
+        "answer and every redirect, not just the string you were handed",
+        "an outbound request whose destination the caller chose",
+    ),
+    CodeRule(
+        "substring-security-match", Severity.ERROR, "CWE-697",
+        "compare whole values: str.startswith for a prefix, a frozenset for membership, a Cedar "
+        "action for a policy",
+        "a security decision made by substring, so a longer value satisfies a shorter rule",
+    ),
+    CodeRule(
+        "error-detail-leaked", Severity.WARN, "CWE-209",
+        "write the refusal the caller should read; the Flight Recorder keeps the diagnosis",
+        "a caught exception's own text returned to the caller",
+    ),
+    CodeRule(
+        "env-conditional-security", Severity.WARN, "CWE-1188",
+        "declare it in wreath.config with a secure default, so weakening it is a value someone "
+        "can see rather than a branch in the source",
+        "a security control whose strength depends on which environment is running",
+    ),
+    CodeRule(
         "unparseable", Severity.WARN, "wreath:audit",
         "check the file parses under the interpreter this audit runs on",
         "the file could not be parsed, so no rule could be applied to it",
@@ -208,8 +276,11 @@ _COMPARISON_ROLES = (
 )
 
 #: Suffixes that make a name an identifier or a tag rather than a secret.
-#: `credential_id` is a primary key; `_TOKEN_VERSION` is a format marker.
-_NOT_SECRET_SUFFIXES = ("_id", "_ids", "_name", "_version", "_type", "_kind", "_key_id")
+#: `credential_id` is a primary key; `_TOKEN_VERSION` is a format marker;
+#: `token_uid` is what a resource is called, not what authorises reaching it.
+_NOT_SECRET_SUFFIXES = (
+    "_id", "_ids", "_name", "_version", "_type", "_kind", "_key_id", "_uid", "_uuid",
+)
 #: Deliberately excludes a bare "key" (`for key, value in ...` is everywhere),
 #: and "auth"/"sig", which matched `oauth2` helpers and anything with "signal"
 #: in the name across 25 false positives in Wreath's own source.
@@ -229,6 +300,18 @@ _UNSAFE_XML_MODULES = ("xml.sax", "xml.dom", "xml.etree", "xml.parsers", "lxml")
 
 #: Statement-level sinks that execute SQL exactly as given.
 _SQL_SINKS = frozenset({"raw", "declared", "execute", "fetch", "fetchrow", "fetchval"})
+
+#: Keyword arguments that configure a trust boundary. A literal `"*"` in one of
+#: these is unambiguous: it is the boundary switched off.
+_TRUST_KEYWORDS = frozenset(
+    {"trusted", "trusted_hosts", "trusted_proxies", "trusted_origins", "allowed_hosts"}
+)
+
+#: Origins are the exception, and are handled separately: a public read-only API
+#: is entitled to answer any origin, so `allow_origins=["*"]` alone is a design
+#: decision rather than a defect. It becomes one opposite credentials, which is
+#: the single pair `CORSMiddleware` refuses at construction.
+_ORIGIN_KEYWORDS = frozenset({"allow_origins", "allow_origin", "origins"})
 
 #: Headers that carry a client address only when a proxy is trusted.
 _FORWARDED_HEADERS = frozenset(
@@ -262,6 +345,130 @@ _INJECTED_PARAMS = frozenset({"self", "cls", "request", "websocket"})
 #: Annotations that mark a parameter as framework-injected.
 _INJECTED_ANNOTATIONS = ("Session", "FromORM", "Depends", "Request", "AppScope")
 
+#: Attributes that write a log record. The receiver is checked too, so
+#: `results.info` is not mistaken for a logger.
+_LOG_LEVELS = frozenset(
+    {"debug", "info", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
+)
+
+#: The provenance half of `timing-unsafe-compare`. Two secret-named operands
+#: whose provenance differs are a presented value being checked against a held
+#: one -- the same signal `_COMPARISON_ROLES` carries, in the spelling a
+#: double-submit check actually uses.
+_PROVENANCE_WORDS = (
+    "cookie", "header", "session", "stored", "saved", "request", "client",
+    "server", "incoming", "submitted", "body", "query", "param", "form",
+)
+
+#: Names that mean "authentication is off". Deliberately the disabling half
+#: only: a flag that turns a control *on* is configuration, and one that turns
+#: it off is a backdoor with a config key attached. Nobody writes these by
+#: accident, which is what lets the list stay short and the rule stay quiet.
+_AUTH_DISABLE_WORDS = (
+    "no_auth", "noauth", "auth_disabled", "disable_auth", "disable_authentication",
+    "skip_auth", "skip_authentication", "bypass_auth", "auth_bypass", "allow_anonymous",
+    "anonymous_ok", "insecure_skip_verify", "auth_off", "disable_security",
+)
+
+#: Values whose weak setting is a vulnerability rather than a preference. The
+#: `env-conditional-security` rule is narrow on purpose: environments differ,
+#: and that is what they are for.
+_SECURITY_FLAG_NAMES = frozenset(
+    {"secure", "httponly", "http_only", "samesite", "same_site", "csrf", "csrf_enabled",
+     "csrf_required", "verify", "verify_ssl", "ssl_verify", "tls_verify", "check_hostname",
+     "hsts", "strict_transport_security", "signature_required", "auth_required",
+     "authentication_required", "authorization_required"}
+)
+
+#: Names that mean "which deployment is this?". The security-flag rule needs one
+#: of these on the deciding side, so an ordinary feature toggle stays quiet.
+_ENVIRONMENT_WORDS = (
+    "env", "environment", "stage", "deployment", "debug", "devel", "development",
+    "testing", "local",
+)
+
+#: Exceptions that refuse a request on authorization grounds.
+_AUTHZ_EXCEPTIONS = ("forbidden", "unauthoris", "unauthoriz", "authoris", "authoriz",
+                     "permission", "denied", "notpermitted", "accessdenied")
+
+#: Status codes that make an `HTTPException(...)`-shaped call a refusal.
+_REFUSAL_STATUSES = frozenset({401, 403})
+
+#: Names that mark a function as deciding who the caller is. `auth-fallback-on-
+#: exception` is only about these; `AGENTS.md` legislates broad handlers
+#: generally, and a rule that repeated it everywhere would be a lint, not a
+#: security finding.
+_AUTHENTICATION_FUNCTIONS = (
+    "authenticate", "authentication", "verify", "validate_token", "login", "identify",
+    "decode_token", "check_token", "current_user", "principal",
+)
+
+#: Calls that verify a credential. The handler of a broad `except` reaching for
+#: one of these is the fallback this rule is named for.
+_VERIFIER_CALLS = ("decode", "verify", "authenticate", "validate", "unseal", "check_token")
+
+#: Callables whose argument becomes the response body. A caught exception's own
+#: text reaching one of these is free reconnaissance for the caller.
+_RESPONSE_CALLEES = (
+    "httpexception", "badrequest", "unauthorized", "forbidden", "notfound", "conflict",
+    "unprocessableentity", "internalerror", "internalservererror", "toomanyrequests",
+    "payloadtoolarge", "response", "jsonresponse", "plaintextresponse", "htmlresponse",
+    "problemresponse", "abort",
+)
+
+#: Keyword arguments that carry response text.
+_RESPONSE_TEXT_KEYWORDS = frozenset({"detail", "content", "message", "body", "text", "reason"})
+
+#: Receivers that make `.get`/`.post` an outbound request rather than a mapping
+#: lookup. `.get` is `dict.get` far more often than it is an HTTP verb, and the
+#: caller's own body is the most common receiver of both -- so the rule decides
+#: on the receiver, not on the verb.
+#: `session` is deliberately absent: an ORM session is far more common in a
+#: Wreath application than a `requests.Session`, and `self._session.delete(row)`
+#: is not an outbound request.
+_HTTP_CLIENT_NAMES = ("client", "http", "requests", "httpx", "urllib", "aiohttp", "fetch")
+
+#: Methods that issue an outbound request.
+_HTTP_VERBS = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "request", "stream", "send"}
+)
+
+#: Left-hand operands whose membership test is a security decision. A substring
+#: match against one of these is the finding; `character in "aeiou"` is not.
+_MATCH_CONTEXT_WORDS = (
+    "header", "method", "scheme", "path", "route", "url", "role", "scope",
+    "permission", "action", "origin", "host", "claim", "audience",
+)
+
+#: Right-hand operands that are a policy, a path or a scope *string*. Paired
+#: with a `str` annotation, this is what separates `"admin" in roles` -- correct
+#: code over a collection -- from `"admin" in scope_string`, which is not.
+_MATCH_SUBJECT_WORDS = (
+    "path", "url", "route", "endpoint", "condition", "scope", "scopes", "permission",
+    "permissions", "policy", "authorities", "claims", "target",
+)
+
+#: Below this, a string literal on the right of `in` is a character class
+#: (`c in "aeiou"`) rather than a value somebody meant to compare.
+_MEMBERSHIP_LITERAL_LENGTH = 6
+
+
+def _wildcard_in(node: ast.AST) -> bool:
+    """Whether this value is, or contains, a literal `"*"`."""
+    if isinstance(node, ast.Constant):
+        return node.value == "*"
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return any(_wildcard_in(element) for element in node.elts)
+    return False
+
+
+def _establishes_trust(node: ast.Call) -> bool:
+    """Whether a `ProxyHeadersMiddleware(...)` call names a real boundary."""
+    for keyword in node.keywords:
+        if keyword.arg == "trusted":
+            return not _wildcard_in(keyword.value)
+    return False
+
 
 def _is_route_decorator(node: ast.AST) -> bool:
     """Whether this decorator publishes the function on the network."""
@@ -290,6 +497,258 @@ def _is_weak_secret_name(name: str) -> bool:
     return not lowered.endswith(_NOT_SECRET_SUFFIXES) and _mentions(
         lowered, _WEAK_SECRET_WORDS
     )
+
+
+def _is_credential_name(name: str) -> bool:
+    """Whether this name holds a credential.
+
+    `crud.SENSITIVE_FIELD` is the repository's one spelling of this vocabulary
+    -- it already carries `token`, `authorization`, `cookie`, `credential` and
+    the `*_key` family, with its exclusions written down -- so this reuses it
+    rather than growing a fourth list beside `_SECRET_WORDS`. The identifier
+    suffixes still apply on top: `token_uid` names a resource, not the thing
+    that authorises reaching it.
+    """
+    lowered = name.lower()
+    if lowered.endswith(_NOT_SECRET_SUFFIXES):
+        return False
+    return _is_secret_name(lowered) or bool(SENSITIVE_FIELD.search(lowered))
+
+
+#: How long a declared literal must be before it is a key rather than a format
+#: marker. `"HS256"`, `"Bearer"` and a header name all sit under it; a signing
+#: key does not, because nothing usable is shorter than this.
+_DECLARED_SECRET_LENGTH = 16
+
+#: The characters a key is drawn from -- hex, base64, base64url. Anything else
+#: in the literal means it is a sentinel or a URN rather than a secret.
+_KEY_ALPHABET = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=-_"
+)
+
+
+def _looks_like_a_key(value: str | bytes) -> bool:
+    """Whether a declared literal is a key rather than a name that reads like one.
+
+    Length alone is not enough, and the four literals that proved it all share
+    one shape -- they are *identifiers*, not keys: a sentinel standing for "no
+    password", two `request.state` keys, and a SAML URN. Each is long, each sits
+    under a name from the credential vocabulary, and none is a secret.
+
+    What separates them is the alphabet and the digits. A key is hex or base64
+    and carries both letters and digits; a readable identifier carries a colon,
+    a bang, a space, or no digit at all. The deliberate cost is a declared
+    *passphrase* with no digit in it, which this will not see -- the keyword
+    rule still catches one that is passed to anything, and precision here is
+    worth more than that case.
+    """
+    text = value.decode("latin-1") if isinstance(value, bytes) else value
+    if len(text) < _DECLARED_SECRET_LENGTH or not set(text) <= _KEY_ALPHABET:
+        return False
+    return any(character.isdigit() for character in text) and any(
+        character.isalpha() for character in text
+    )
+
+
+def _is_security_flag(name: str) -> bool:
+    """Whether this name holds a value whose weak setting is a vulnerability."""
+    lowered = name.lower()
+    return (
+        lowered in _SECURITY_FLAG_NAMES
+        or lowered.startswith(("require_", "enforce_"))
+        or lowered.endswith("_required")
+    )
+
+
+def _is_logger_name(part: str) -> bool:
+    """Whether this receiver is a logger, and not merely a `catalog`."""
+    stripped = part.lower().strip("_")
+    return stripped in ("log", "logger", "logging") or stripped.startswith(
+        ("log_", "logger", "logging")
+    )
+
+
+def _provenance(name: str) -> frozenset[str]:
+    """Where a value came from, as far as its name admits."""
+    lowered = name.lower()
+    return frozenset(word for word in _PROVENANCE_WORDS if word in lowered)
+
+
+def _expression_names(node: ast.AST) -> list[str]:
+    """Every name and attribute mentioned in an expression.
+
+    Both halves matter: `credentials.as_dict()` is a secret because of its
+    *receiver*, and `row.password` is one because of its *attribute*. Taking
+    only one of the two missed whichever spelling the caller happened to use.
+    """
+    names: list[str] = []
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Name):
+            names.append(inner.id)
+        elif isinstance(inner, ast.Attribute):
+            names.append(inner.attr)
+    return names
+
+
+def _interpolated(node: ast.AST) -> list[ast.AST]:
+    """The run-time expressions a formatted string will render.
+
+    A constant is not one of them, which is what keeps a rule about *values*
+    off a message that merely names the thing it is talking about.
+    """
+    if isinstance(node, ast.JoinedStr):
+        return [part.value for part in node.values if isinstance(part, ast.FormattedValue)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return [node.right]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return [side for side in (node.left, node.right) if not isinstance(side, ast.Constant)]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "format":
+        return [*node.args, *(keyword.value for keyword in node.keywords)]
+    return []
+
+
+def _is_logging_call(node: ast.Call) -> bool:
+    """Whether this call writes a log record."""
+    callee = node.func
+    if not isinstance(callee, ast.Attribute) or callee.attr not in _LOG_LEVELS:
+        return False
+    parts = _dotted(callee).split(".")[:-1] or [_name_of(callee.value)]
+    return any(_is_logger_name(part) for part in parts if part)
+
+
+def _refuses_authorization(node: ast.AST) -> bool:
+    """Whether this function refuses a request on authorization grounds.
+
+    The precondition for `authz-fail-open`, and the whole of its precision: a
+    function that never refuses has no open exit to find, which is what keeps
+    the rule off every `get_or_none`.
+    """
+    for inner in ast.walk(node):
+        if not isinstance(inner, ast.Raise) or inner.exc is None:
+            continue
+        raised = inner.exc
+        name = _name_of(raised).lower().replace("_", "")
+        if any(word in name for word in _AUTHZ_EXCEPTIONS):
+            return True
+        if isinstance(raised, ast.Call):
+            for argument in (*raised.args, *(k.value for k in raised.keywords)):
+                if isinstance(argument, ast.Constant) and argument.value in _REFUSAL_STATUSES:
+                    return True
+    return False
+
+
+def _is_undecided_test(node: ast.AST) -> bool:
+    """Whether this condition means "the value could not be resolved"."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return True
+    if isinstance(node, ast.Compare):
+        return any(isinstance(op, ast.Is) for op in node.ops) and any(
+            isinstance(comparator, ast.Constant) and comparator.value is None
+            for comparator in node.comparators
+        )
+    if isinstance(node, ast.BoolOp):
+        return any(_is_undecided_test(value) for value in node.values)
+    return False
+
+
+def _is_open_return(node: ast.AST) -> bool:
+    """Whether this statement leaves without deciding anything.
+
+    `return`, `return None`, and the empty containers -- an empty filter is not
+    a restriction, it is every row.
+    """
+    if not isinstance(node, ast.Return):
+        return False
+    value = node.value
+    if value is None:
+        return True
+    if isinstance(value, ast.Constant) and value.value is None:
+        return True
+    return isinstance(value, (ast.Dict, ast.List, ast.Set, ast.Tuple)) and not (
+        value.keys if isinstance(value, ast.Dict) else value.elts
+    )
+
+
+def _is_broad_handler(handler: ast.ExceptHandler) -> bool:
+    """`except:`, `except Exception:`, `except BaseException:`."""
+    if handler.type is None:
+        return True
+    return _name_of(handler.type) in ("Exception", "BaseException")
+
+
+#: Characters a whole value is made of. A left operand outside them is a syntax
+#: fragment rather than something being matched.
+_VALUE_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/"
+)
+
+
+def _is_whole_value(node: ast.AST) -> bool:
+    """Whether the left of an `in` is a value, rather than a syntax fragment.
+
+    Searching a route *template* for a brace, a backslash or a percent escape is
+    a lexical check on a pattern the application wrote, not a security decision
+    about a request -- and it is how every path-matching implementation is
+    spelled. What the rule is about is a *rule* being tested for containment in
+    a subject: a name, or a literal that could be a whole value on its own.
+    """
+    if not isinstance(node, ast.Constant):
+        return True
+    if not isinstance(node.value, str):
+        return False
+    return (
+        len(node.value) >= _MEMBERSHIP_LITERAL_LENGTH
+        and set(node.value) <= _VALUE_CHARACTERS
+    )
+
+
+def _debug_gated(scope: ast.AST, target: ast.AST) -> bool:
+    """Whether `target` sits under an `if ...debug...:` inside `scope`."""
+    for inner in ast.walk(scope):
+        if not isinstance(inner, ast.If):
+            continue
+        if not any(_mentions(name, ("debug",)) for name in _expression_names(inner.test)):
+            continue
+        if any(node is target for statement in inner.body for node in ast.walk(statement)):
+            return True
+    return False
+
+
+def _verifier_call(body: list[ast.stmt]) -> str:
+    """The name of the credential check this block performs, if it performs one."""
+    for statement in body:
+        for inner in ast.walk(statement):
+            if isinstance(inner, ast.Call):
+                name = _name_of(inner.func)
+                if _mentions(name, _VERIFIER_CALLS):
+                    return name
+    return ""
+
+
+def _mentions_disable(node: ast.AST) -> bool:
+    """Whether this condition reads a flag that switches authentication off."""
+    return any(_mentions(name, _AUTH_DISABLE_WORDS) for name in _expression_names(node))
+
+
+def _annotates_str(annotation: ast.AST | None) -> bool:
+    """Whether this annotation says the value is a string.
+
+    `str`, `str | None` and `Optional[str]` all count; a `list[str]` does not,
+    because membership against a list of strings is the correct spelling this
+    rule must stay quiet on.
+    """
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Name):
+        return annotation.id == "str"
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return annotation.value.replace(" ", "").split("|")[0] == "str"
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _annotates_str(annotation.left) or _annotates_str(annotation.right)
+    if isinstance(annotation, ast.Subscript) and _name_of(annotation.value) == "Optional":
+        return _annotates_str(annotation.slice)
+    return False
 
 
 def _bound_names(target: ast.AST) -> list[str]:
@@ -373,6 +832,18 @@ class _Scanner(ast.NodeVisitor):
         self.origin_bound: set[str] = set()
         self.archive_members: set[str] = set()
         self.proxy_trusted = False
+        #: Whether any outbound client in this module names a destination
+        #: policy. The same "is there a boundary?" precondition `proxy_trusted`
+        #: applies to forwarding headers.
+        self.destination_policy = False
+        #: Names the file itself declares to hold a string. What separates
+        #: `"admin" in roles` -- correct, over a collection -- from the same
+        #: line written against a policy string.
+        self.str_names: set[str] = set()
+        #: One finding per rule per line. The control-flow rules walk each
+        #: function, and a nested function is walked again with its parent, so
+        #: without this a factory and the closure it returns report twice.
+        self._seen: set[tuple[str, str]] = set()
         #: Names whose value a caller chose: handler parameters, request data,
         #: and anything derived from them. This is what separates an injection
         #: from a schema-qualified statement.
@@ -407,6 +878,10 @@ class _Scanner(ast.NodeVisitor):
         line = getattr(node, "lineno", 0)
         if self._waived(rule_id, line):
             return
+        location = f"{line}:{getattr(node, 'col_offset', 0)}"
+        if (rule_id, location) in self._seen:
+            return
+        self._seen.add((rule_id, location))
         rule = _BY_ID[rule_id]
         self.findings.append(
             Finding(
@@ -415,7 +890,7 @@ class _Scanner(ast.NodeVisitor):
                 surface=self.surface,
                 message=message,
                 reference=rule.reference,
-                location=f"{getattr(node, 'lineno', 0)}:{getattr(node, 'col_offset', 0)}",
+                location=location,
                 suggestion=rule.suggestion,
             )
         )
@@ -436,11 +911,21 @@ class _Scanner(ast.NodeVisitor):
             if isinstance(node, ast.Call):
                 dotted = _dotted(node.func)
                 name = _name_of(node.func)
-                if name == "ProxyHeadersMiddleware":
+                if name == "ProxyHeadersMiddleware" and _establishes_trust(node):
+                    # Only a *real* boundary silences `untrusted-forwarded-header`.
+                    # `trusted=["*"]` trusts every peer, which is no boundary at
+                    # all, and treating it as one meant the worst possible
+                    # spelling bought the quietest possible result.
                     self.proxy_trusted = True
+                if name == "DestinationPolicy":
+                    self.destination_policy = True
                 if dotted.endswith("infolist") or dotted.endswith("namelist") \
                         or dotted.endswith("getmembers"):
                     self.archive_members.add(dotted.split(".")[0])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._collect_string_parameters(node)
+            if isinstance(node, ast.AnnAssign) and _annotates_str(node.annotation):
+                self.str_names.update(_bound_names(node.target))
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 self._bind(node)
             if isinstance(node, ast.For):
@@ -476,6 +961,20 @@ class _Scanner(ast.NodeVisitor):
                 if any(marker in annotation for marker in _INJECTED_ANNOTATIONS):
                     continue
                 self.caller_controlled.add(argument.arg)
+
+    def _collect_string_parameters(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Parameters the signature declares to be a string.
+
+        The provenance signal for `substring-security-match`. Deciding on what
+        the file *says* rather than on what the expression looks like is the
+        same move `sql-interpolation` makes with module constants, and for the
+        same reason: `"admin" in roles` and `"admin" in scope_string` are one
+        shape and two different pieces of code.
+        """
+        arguments = node.args
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+            if _annotates_str(argument.annotation):
+                self.str_names.add(argument.arg)
 
     def _propagate(self) -> None:
         """One hop at a time until nothing new is caller-controlled.
@@ -554,6 +1053,7 @@ class _Scanner(ast.NodeVisitor):
         self._sql(node)
         self._secrets(node)
         self._ssrf(node)
+        self._wildcard_trust(node)
         self._xml(node)
         self._template(node)
         self._dynamic_import(node)
@@ -562,7 +1062,87 @@ class _Scanner(ast.NodeVisitor):
         self._debug(node)
         self._forwarded(node)
         self._random_use(node)
+        self._secret_in_log(node)
+        self._outbound_url(node)
         self.generic_visit(node)
+
+    def _secret_in_log(self, node: ast.Call) -> None:
+        """A credential, or a caller's own body, formatted into a log record.
+
+        Debug logging is off in production until the day somebody turns it on
+        to investigate an incident, which is the day the value leaves the
+        database's retention policy for the log aggregator's -- a different
+        audience, a different lifetime, and usually a different jurisdiction.
+
+        The rule is about the *value*, so only interpolated expressions count.
+        Naming a secret in the message is a label and stays quiet.
+        """
+        if not _is_logging_call(node):
+            return
+        candidates: list[ast.AST] = []
+        for argument in node.args:
+            rendered = _interpolated(argument)
+            if rendered:
+                candidates.extend(rendered)
+            elif not isinstance(argument, ast.Constant):
+                # Everything that is not the message itself is a value that
+                # reaches the record: `logger.info("...%s", token)` defers the
+                # formatting, and `logger.info(token)` skips it entirely.
+                candidates.append(argument)
+        # Every keyword too. `extra=` is how structured logging carries fields,
+        # and the rest -- `exc_info`, `stacklevel` -- hold nothing a credential
+        # vocabulary matches, so narrowing to one name bought nothing.
+        candidates.extend(keyword.value for keyword in node.keywords)
+        for expression in candidates:
+            secret = next(
+                (name for name in _expression_names(expression) if _is_credential_name(name)),
+                None,
+            )
+            if secret:
+                self._flag("secret-in-log", node, f"{secret} is formatted into a log record")
+                return
+            referenced = {n.id for n in ast.walk(expression) if isinstance(n, ast.Name)}
+            supplied = referenced & self.request_bound
+            if supplied:
+                self._flag(
+                    "secret-in-log", node,
+                    f"{sorted(supplied)[0]} is the caller's own body, which is not known to be "
+                    "free of credentials",
+                )
+                return
+
+    def _outbound_url(self, node: ast.Call) -> None:
+        """A request whose destination the caller chose.
+
+        Checking the string once is not a fix, which is why the remediation is
+        a policy rather than a validator: the redirect target and every address
+        DNS returns are the destination too.
+        """
+        if self.destination_policy:
+            return
+        callee = node.func
+        if not isinstance(callee, ast.Attribute) or callee.attr not in _HTTP_VERBS:
+            return
+        keyed = next((k.value for k in node.keywords if k.arg == "url"), None)
+        if keyed is not None:
+            target = keyed
+        else:
+            receiver = _dotted(callee).split(".")[:-1] or [_name_of(callee.value)]
+            # `.get` is `dict.get` far more often than it is an HTTP verb, and
+            # the caller's own body is the most common receiver of both. The
+            # receiver is what decides, not the verb.
+            if not any(_mentions(part, _HTTP_CLIENT_NAMES) for part in receiver):
+                return
+            target = node.args[0] if node.args else None
+        if target is None:
+            return
+        referenced = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+        chosen = referenced & (self.caller_controlled | self.request_bound)
+        if chosen:
+            self._flag(
+                "outbound-url-from-request", node,
+                f"the destination of this request comes from {sorted(chosen)[0]}",
+            )
 
     def _sql(self, node: ast.Call) -> None:
         if not isinstance(node.func, ast.Attribute) or node.func.attr not in _SQL_SINKS:
@@ -603,6 +1183,30 @@ class _Scanner(ast.NodeVisitor):
                         "hardcoded-secret", node,
                         f"{keyword.arg}= is a literal",
                     )
+
+    def _wildcard_trust(self, node: ast.Call) -> None:
+        credentialed = any(
+            keyword.arg == "allow_credentials"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        )
+        for keyword in node.keywords:
+            if not _wildcard_in(keyword.value):
+                continue
+            if keyword.arg in _TRUST_KEYWORDS:
+                self._flag(
+                    "wildcard-trust-list", node,
+                    f"{keyword.arg}= accepts every peer",
+                )
+            elif keyword.arg in _ORIGIN_KEYWORDS and credentialed:
+                # A public read-only API may answer any origin. Credentials are
+                # what turn the wildcard into a trust decision, and that single
+                # pair is the one `CORSMiddleware` refuses at construction.
+                self._flag(
+                    "wildcard-trust-list", node,
+                    f"{keyword.arg}= is a wildcard alongside allow_credentials=True",
+                )
 
     def _ssrf(self, node: ast.Call) -> None:
         if _name_of(node.func) != "DestinationPolicy":
@@ -732,7 +1336,64 @@ class _Scanner(ast.NodeVisitor):
                 "weak-randomness", node,
                 f"{names[0]} is drawn from random rather than secrets",
             )
+        self._declared_secret(names, node)
+        self._env_conditional(names, node)
         self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        names = _bound_names(node.target)
+        self._declared_secret(names, node)
+        self._env_conditional(names, node)
+        self.generic_visit(node)
+
+    def _declared_secret(self, names: list[str], node: ast.Assign | ast.AnnAssign) -> None:
+        """A signing key written as the value of a declaration.
+
+        The shape a key actually ships in: a default on a settings field, so
+        every deployment that has not set the environment variable signs with
+        what is in the source, and nothing complains at startup because from
+        the application's point of view the setting is populated.
+
+        `_looks_like_a_key` is what keeps this off the declarations that share
+        the vocabulary and carry no secret -- an algorithm name, a state key, a
+        sentinel, a URN. Those are identifiers, and they do not look like keys.
+        """
+        value = node.value
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes)):
+            return
+        if not _looks_like_a_key(value.value):
+            return
+        for name in names:
+            if _is_credential_name(name):
+                self._flag(
+                    "hardcoded-secret", node,
+                    f"{name} is declared with a literal value",
+                )
+                return
+
+    def _env_conditional(self, names: list[str], node: ast.Assign | ast.AnnAssign) -> None:
+        """A security control whose strength depends on which environment runs.
+
+        Every review reads "secure in production" and stops. Nobody rereads it
+        when a new environment name appears, when a staging deployment is
+        pointed at real data, or when the variable is simply unset -- and the
+        unset default is the weak arm, because that is the one a developer
+        needed.
+        """
+        if not any(_is_security_flag(name) for name in names):
+            return
+        value = node.value
+        if isinstance(value, ast.IfExp):
+            decider: ast.AST = value.test
+        elif isinstance(value, ast.Compare):
+            decider = value
+        else:
+            return
+        if any(_mentions(name, _ENVIRONMENT_WORDS) for name in _expression_names(decider)):
+            self._flag(
+                "env-conditional-security", node,
+                f"{names[0]} is decided by which environment is running",
+            )
 
     def _draws_on_random(self, node: ast.AST) -> bool:
         for inner in ast.walk(node):
@@ -748,7 +1409,43 @@ class _Scanner(ast.NodeVisitor):
     def visit_Compare(self, node: ast.Compare) -> None:
         self._timing(node)
         self._case_mapped(node)
+        self._substring_match(node)
         self.generic_visit(node)
+
+    def _substring_match(self, node: ast.Compare) -> None:
+        """A security decision made by substring, so a longer value satisfies a
+        shorter rule.
+
+        Two spellings, one class. Against a string *literal* it is usually a
+        one-element tuple that lost its comma, which both over-matches and
+        reads as correct because it does happen to match the value it was
+        written for. Against a value the file declares to be a string it is a
+        policy or a path being tested for containment, where a route merely
+        *containing* an exempted segment is exempt.
+        """
+        if not any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            return
+        subject = node.comparators[0]
+        if isinstance(subject, ast.Constant) and isinstance(subject.value, str):
+            if len(subject.value) < _MEMBERSHIP_LITERAL_LENGTH:
+                return
+            if any(_mentions(name, _MATCH_CONTEXT_WORDS)
+                   for name in _expression_names(node.left)):
+                self._flag(
+                    "substring-security-match", node,
+                    f'this tests for a substring of "{subject.value}", not equality with it',
+                )
+            return
+        # Deciding on what the file *says* the value is, rather than on what the
+        # expression looks like: `"admin" in roles` over a collection is correct
+        # code, and nothing distinguishes it by shape alone.
+        if isinstance(subject, ast.Name) and subject.id in self.str_names \
+                and _mentions(subject.id, _MATCH_SUBJECT_WORDS) \
+                and _is_whole_value(node.left):
+            self._flag(
+                "substring-security-match", node,
+                f"{subject.id} is a string, so this is a containment test rather than a match",
+            )
 
     def _timing(self, node: ast.Compare) -> None:
         if not any(isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops):
@@ -764,7 +1461,17 @@ class _Scanner(ast.NodeVisitor):
         weak = any(_is_weak_secret_name(name) for name in names) and any(
             _mentions(name, _COMPARISON_ROLES) for name in names
         )
-        if strong or weak:
+        # The provenance spelling of the same second signal. A double-submit
+        # check writes `cookie_token == header_token`, where neither operand
+        # names a comparison role but the pair says exactly what the role words
+        # say: a presented value is being checked against a held one.
+        provenances = [_provenance(name) for name in names]
+        paired = (
+            all(_is_weak_secret_name(name) for name in names)
+            and all(provenances)
+            and provenances[0] != provenances[1]
+        )
+        if strong or weak or paired:
             self._flag(
                 "timing-unsafe-compare", node,
                 "a secret is compared with == , which returns on the first wrong byte",
@@ -787,14 +1494,156 @@ class _Scanner(ast.NodeVisitor):
                 f".{left.func.attr}() is applied before an authorization comparison",  # type: ignore[union-attr]
             )
 
+    # -- control flow --------------------------------------------------------
+    #
+    # The rules above decide an expression. These decide a *branch*, which
+    # needs one fact the expression rules do not: what the enclosing function
+    # is for. A `return None` is unremarkable in a lookup and is an open door
+    # in an authorizer, and only the function around it says which this is.
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._function(node)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._function(node)
+        self.generic_visit(node)
+
+    def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if _refuses_authorization(node):
+            self._fail_open(node)
+        self._auth_fallback(node, authentication=_mentions(node.name, _AUTHENTICATION_FUNCTIONS))
+
+    def _fail_open(self, node: ast.AST) -> None:
+        """An authorization check that returns when it cannot decide.
+
+        The defect is not the `return`; it is that the undecidable case and the
+        permitted case are spelled identically, so no caller can tell them
+        apart. The comment on that branch is always some version of "the
+        handler will sort it out", and the handler never does -- what reaches
+        it is an absent restriction, which is every row.
+
+        The precondition is the whole of the precision: a function that never
+        refuses has no open exit to find, which is what keeps this off every
+        `get_or_none`.
+        """
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.If) or not _is_undecided_test(inner.test):
+                continue
+            for statement in inner.body:
+                if _is_open_return(statement):
+                    self._flag(
+                        "authz-fail-open", statement,
+                        "this leaves the check without deciding, so an unresolved subject is "
+                        "indistinguishable from a permitted one",
+                    )
+                    break
+
+    def _auth_fallback(self, node: ast.AST, *, authentication: bool) -> None:
+        """A broad handler that retries, in a path that decides who the caller is.
+
+        Two defects share this shape and either one is enough. The path
+        degrades to a *weaker* verifier when the strong one raises, so anything
+        that can make the strong path fail selects the weak one. And a refusal
+        raised inside the `try` is caught by the same handler, which converts an
+        explicit denial into a retry rather than a 401.
+
+        A handler that re-raises keeps one exit and is not this.
+        """
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Try):
+                continue
+            for handler in inner.handlers:
+                if not _is_broad_handler(handler):
+                    continue
+                if any(isinstance(statement, ast.Raise) for statement in handler.body):
+                    continue
+                verifier = _verifier_call(handler.body)
+                if authentication and verifier:
+                    self._flag(
+                        "auth-fallback-on-exception", handler,
+                        f"a failed verification falls through to {verifier}()",
+                    )
+                elif _refuses_authorization(ast.Module(body=inner.body, type_ignores=[])):
+                    self._flag(
+                        "auth-fallback-on-exception", handler,
+                        "a refusal raised in this block is caught here, so a denial becomes a "
+                        "retry rather than a refusal",
+                    )
+
+    def visit_If(self, node: ast.If) -> None:
+        if _mentions_disable(node.test):
+            for statement in node.body:
+                if isinstance(statement, ast.Return):
+                    self._flag(
+                        "auth-disable-flag", node,
+                        "a configuration flag short-circuits this check",
+                    )
+                    break
+        self.generic_visit(node)
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        if _mentions_disable(node.test):
+            self._flag(
+                "auth-disable-flag", node,
+                "a configuration flag decides whether this control is applied",
+            )
+        self.generic_visit(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._error_detail(node)
+        self.generic_visit(node)
+
+    def _error_detail(self, node: ast.Try) -> None:
+        """A caught exception's own text returned to the caller.
+
+        The message names the schema, the statement, sometimes the parameters.
+        It is written for one debugging session and it is never removed.
+
+        **Only a broad handler.** If you named the type you caught, you know
+        what its message says and you wrote it -- `except _ProtobufDecodeError
+        as exc: raise BadRequest(f"invalid protobuf body: {exc}")` is a refusal
+        addressed to the caller, and `AGENTS.md` asks for exactly that narrow
+        catch. It is the broad one that cannot know what it holds, which is the
+        same reason it is the exception rather than the rule.
+        """
+        for handler in node.handlers:
+            if not handler.name or not _is_broad_handler(handler):
+                continue
+            for inner in ast.walk(handler):
+                if not isinstance(inner, ast.Call) or _is_logging_call(inner):
+                    continue
+                if _debug_gated(handler, inner):
+                    # Disclosure behind a debug flag is a decision somebody
+                    # made and can see. Shipping the flag on is the finding,
+                    # and `debug-enabled` is the rule that reports it.
+                    continue
+                responder = _name_of(inner.func).lower().replace("_", "")
+                if responder not in _RESPONSE_CALLEES:
+                    # A result object with an `error=` field is not a response.
+                    continue
+                candidates = [k.value for k in inner.keywords if k.arg in _RESPONSE_TEXT_KEYWORDS]
+                candidates.extend(inner.args)
+                for candidate in candidates:
+                    if any(name == handler.name for name in _expression_names(candidate)):
+                        self._flag(
+                            "error-detail-leaked", inner,
+                            f"the caught exception's own text is returned to the caller "
+                            f"as {responder or 'the response'} content",
+                        )
+                        return
+
     def visit_For(self, node: ast.For) -> None:
         self._mass_assignment(node)
         self._archive_member_path(node)
         self.generic_visit(node)
 
     def _mass_assignment(self, node: ast.For) -> None:
+        # A bound body model is the same value as `await request.json()` with a
+        # schema in front of it, and walking *it* onto a row throws the schema
+        # away again -- so the caller-controlled set counts here too.
         iterated = {n.id for n in ast.walk(node.iter) if isinstance(n, ast.Name)}
-        if not (iterated & self.request_bound):
+        if not (iterated & (self.request_bound | self.caller_controlled)):
             return
         for inner in ast.walk(node):
             if isinstance(inner, ast.Call) and _name_of(inner.func) == "setattr":
