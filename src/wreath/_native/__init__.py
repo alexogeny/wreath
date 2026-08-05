@@ -37,3 +37,14 @@ try:
     _reactor = importlib.import_module("wreath._native._reactor")
 except ImportError:
     _reactor = None
+
+# Same rule as `_reactor` directly above, for the same reason: `wreath.edge` is
+# native-only by design (AGENTS.md), so there is no pure twin for WREATH_PURE=1
+# to select and gating it here would only make the module unimportable in a mode
+# that has nothing else to offer it. `wreath.edge.headers` raises a named error
+# when it is absent.
+_edge: Any = None
+try:
+    _edge = importlib.import_module("wreath._native._edge")
+except ImportError:
+    _edge = None

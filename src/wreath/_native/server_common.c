@@ -126,6 +126,13 @@ PyObject *immediate_none = NULL;       /* stateless completed awaitable */
 PyObject *task_add_done_callback = NULL;   /* unbound Task.add_done_callback */
 PyObject *task_exception_fn = NULL;        /* unbound Task.exception */
 PyObject *resume_started_coroutine = NULL; /* Python continuation trampoline */
+/* The type those two descriptors belong to, plus their names for everything
+ * else. `loop.create_task` is the loop's choice, not ours: wreath.reactor
+ * returns a WreathTask, which is an asyncio.Future subclass and not a Task at
+ * all, and an unbound Task descriptor refuses it. */
+static PyObject *asyncio_task_type = NULL;
+static PyObject *s_add_done_callback = NULL;
+static PyObject *s_exception = NULL;
 
 /* Interned key/value constants so hot dict operations skip per-call string
  * creation and hashing. */
@@ -474,6 +481,49 @@ append_decimal(PyObject *buffer, Py_ssize_t value)
 }
 
 
+/* --- task interop --------------------------------------------------------
+ *
+ * `asyncio.Task.add_done_callback` and `.exception` are C descriptors bound to
+ * the Task type, and calling them unbound is the cheapest way to reach a Task.
+ * But the object comes from `loop.create_task`, and the loop decides what that
+ * is: on `wreath.reactor.EventLoop` it is a `WreathTask`, an `asyncio.Future`
+ * subclass, and the descriptor raises TypeError on sight of one.
+ *
+ * So: use the descriptor when it applies, and a normal method lookup when it
+ * does not. Stock asyncio keeps the fast path unchanged; every other loop --
+ * including Wreath's own -- gets a correct one instead of no path at all.
+ */
+
+int
+wreath_task_add_done_callback(PyObject *task, PyObject *callback)
+{
+    PyObject *result;
+    if (PyObject_TypeCheck(task, (PyTypeObject *)asyncio_task_type)) {
+        PyObject *args[2] = {task, callback};
+        result = PyObject_Vectorcall(task_add_done_callback, args, 2, NULL);
+    }
+    else {
+        result = PyObject_CallMethodOneArg(task, s_add_done_callback, callback);
+    }
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+
+PyObject *
+wreath_task_exception(PyObject *task)
+{
+    if (PyObject_TypeCheck(task, (PyTypeObject *)asyncio_task_type)) {
+        PyObject *args[1] = {task};
+        return PyObject_Vectorcall(task_exception_fn, args, 1, NULL);
+    }
+    return PyObject_CallMethodNoArgs(task, s_exception);
+}
+
+
 /* --- module lifecycle ---------------------------------------------------- */
 
 
@@ -483,6 +533,9 @@ server_module_free(void *Py_UNUSED(module))
     Py_CLEAR(immediate_none);
     Py_CLEAR(task_add_done_callback);
     Py_CLEAR(task_exception_fn);
+    Py_CLEAR(asyncio_task_type);
+    Py_CLEAR(s_add_done_callback);
+    Py_CLEAR(s_exception);
     Py_CLEAR(resume_started_coroutine);
     Py_CLEAR(header_host);
     Py_CLEAR(s_type);
@@ -642,8 +695,11 @@ init_cached_constants(void)
     if (task_type == NULL) return -1;
     task_add_done_callback = PyObject_GetAttrString(task_type, "add_done_callback");
     task_exception_fn = PyObject_GetAttrString(task_type, "exception");
-    Py_DECREF(task_type);
-    if (task_add_done_callback == NULL || task_exception_fn == NULL) return -1;
+    asyncio_task_type = task_type;  /* reference kept; freed in module_free */
+    s_add_done_callback = PyUnicode_InternFromString("add_done_callback");
+    s_exception = PyUnicode_InternFromString("exception");
+    if (task_add_done_callback == NULL || task_exception_fn == NULL
+        || s_add_done_callback == NULL || s_exception == NULL) return -1;
 
     PyObject *server_module = PyImport_ImportModule("wreath.server");
     if (server_module == NULL) return -1;

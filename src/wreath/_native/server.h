@@ -333,6 +333,13 @@ extern PyObject *task_add_done_callback;  /* unbound Task.add_done_callback */
 extern PyObject *task_exception_fn;  /* unbound Task.exception */
 extern PyObject *resume_started_coroutine;  /* Python continuation trampoline */
 
+/* Call those two on whatever `loop.create_task` returned. The cached
+ * descriptors above only apply to real `asyncio.Task` objects; these take the
+ * descriptor when they can and a method lookup when they cannot, so a loop
+ * with its own Task type (wreath.reactor's `WreathTask`) still works. */
+int wreath_task_add_done_callback(PyObject *task, PyObject *callback);
+PyObject *wreath_task_exception(PyObject *task);
+
 /* Interned key/value constants so hot dict operations skip per-call string
  * creation and hashing. */
 extern PyObject *s_type;
