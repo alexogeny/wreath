@@ -55,6 +55,8 @@ static PyObject *g_s_context_run;
 /* and a bounded eager read-drain so a burst costs fewer readiness CQEs.     */
 /* ======================================================================== */
 
+#include "reactor_tls.h"
+
 #include "reactor_ring.c"
 #include "reactor_transport.c"
 #include "reactor_poller.c"
@@ -135,6 +137,111 @@ load_handle_layout(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * Loop fast path: create_future / get_debug
+ * ------------------------------------------------------------------ */
+
+/* `EventLoop` inherits both of these from `asyncio.base_events` as Python
+ * functions, and between them they cost two interpreter frames on every future
+ * this loop creates -- `create_future` itself, plus the `get_debug` that
+ * `asyncio.Future.__init__` calls on its loop before deciding whether to
+ * capture a source traceback.
+ *
+ * That is charged per future, and a PostgreSQL query creates two (the
+ * operation's, and the protocol's read waiter). Grafting C equivalents onto the
+ * heap type removes both frames without changing what either returns:
+ * `get_debug` still reports `self._debug`, so `loop.set_debug(True)` keeps
+ * working and a debug loop still gets its tracebacks.
+ *
+ * Deliberately *not* a custom Future type, which was the tempting next step:
+ * CPython's C `Task` has a `Future_CheckExact` fast path, and anything else
+ * falls back to fetching `_asyncio_future_blocking` and calling
+ * `add_done_callback` through the abstract protocol. A cheaper future that
+ * lands on the slow path is not cheaper. */
+
+static PyObject *g_future_type = NULL;
+static PyObject *g_s_debug_attr = NULL;
+static PyObject *g_loop_kwnames = NULL;
+
+static PyObject *
+loop_get_debug(PyObject *self, PyObject *unused)
+{
+    PyObject *debug;
+    int truth;
+    (void)unused;
+    debug = PyObject_GetAttr(self, g_s_debug_attr);
+    if (debug == NULL) return NULL;
+    truth = PyObject_IsTrue(debug);
+    Py_DECREF(debug);
+    if (truth < 0) return NULL;
+    return PyBool_FromLong(truth);
+}
+
+static PyObject *
+loop_create_future(PyObject *self, PyObject *unused)
+{
+    PyObject *args[1] = {self};
+    (void)unused;
+    /* `Future(loop=self)`, by vectorcall so the keyword costs no dict. */
+    return PyObject_Vectorcall(g_future_type, args, 0, g_loop_kwnames);
+}
+
+static PyMethodDef loop_fastpath_methods[] = {
+    {"create_future", loop_create_future, METH_NOARGS, NULL},
+    {"get_debug", loop_get_debug, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
+/* Graft the two onto a caller-supplied heap type. Called from `reactor.py`
+   once, at import, with `EventLoop`. */
+static PyObject *
+install_loop_fastpath(PyObject *module, PyObject *type)
+{
+    (void)module;
+    if (!PyType_Check(type)) {
+        PyErr_SetString(PyExc_TypeError, "a loop type is required");
+        return NULL;
+    }
+    for (PyMethodDef *def = loop_fastpath_methods; def->ml_name != NULL; def++) {
+        PyObject *descriptor = PyDescr_NewMethod((PyTypeObject *)type, def);
+        if (descriptor == NULL) return NULL;
+        if (PyObject_SetAttrString(type, def->ml_name, descriptor) < 0) {
+            Py_DECREF(descriptor);
+            return NULL;
+        }
+        Py_DECREF(descriptor);
+    }
+    PyType_Modified((PyTypeObject *)type);
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef reactor_module_methods[] = {
+    {"_install_loop_fastpath", install_loop_fastpath, METH_O,
+     "Graft the C create_future/get_debug onto a loop type."},
+    {NULL, NULL, 0, NULL}
+};
+
+static int
+loop_fastpath_ready(void)
+{
+    /* native-lint: allow NC004 -- one-time module initialization */
+    PyObject *futures = PyImport_ImportModule("asyncio.futures");
+    PyObject *loop_name;
+    if (futures == NULL) return -1;
+    g_future_type = PyObject_GetAttrString(futures, "Future");
+    Py_DECREF(futures);
+    if (g_future_type == NULL) return -1;
+    g_s_debug_attr = PyUnicode_InternFromString("_debug");
+    loop_name = PyUnicode_InternFromString("loop");
+    if (g_s_debug_attr == NULL || loop_name == NULL) {
+        Py_XDECREF(loop_name);
+        return -1;
+    }
+    g_loop_kwnames = PyTuple_Pack(1, loop_name);
+    Py_DECREF(loop_name);
+    return g_loop_kwnames == NULL ? -1 : 0;
+}
+
 PyMODINIT_FUNC
 PyInit__reactor(void)
 {
@@ -172,7 +279,7 @@ PyInit__reactor(void)
     if (g_buffered_protocol == NULL) {
         return NULL;
     }
-    if (load_handle_layout() < 0) {
+    if (load_handle_layout() < 0 || loop_fastpath_ready() < 0) {
         return NULL;
     }
     /* native-lint: allow NC004 -- one-time module-init lookup, never per value */
@@ -197,9 +304,11 @@ PyInit__reactor(void)
         Py_DECREF(m);
         return NULL;
     }
-    if (wreath_reactor_timers_add(m) < 0 ||
+    if (PyModule_AddFunctions(m, reactor_module_methods) < 0 ||
+        wreath_reactor_timers_add(m) < 0 ||
         PyModule_AddObjectRef(m, "SocketTransport", (PyObject *)&SocketTransportType) < 0 ||
-        PyModule_AddObjectRef(m, "ReactorPoller", (PyObject *)&ReactorPollerType) < 0) {
+        PyModule_AddObjectRef(m, "ReactorPoller", (PyObject *)&ReactorPollerType) < 0 ||
+        wreath_tls_register(m) < 0) {
         Py_DECREF(m);
         return NULL;
     }

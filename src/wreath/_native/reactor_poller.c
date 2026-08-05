@@ -421,7 +421,7 @@ rp_add_uring_listener(PyObject *op, PyObject *args)
      * three -- see `rp_activate_accepted_connection` for why carrying them
      * costs two fewer syscalls per connection than letting `socket()` ask. */
     int native_spec = PyTuple_CheckExact(callback) &&
-                      PyTuple_GET_SIZE(callback) == 6 &&
+                      PyTuple_GET_SIZE(callback) == 7 &&
                       PyCallable_Check(PyTuple_GET_ITEM(callback, 0)) &&
                       PyCallable_Check(PyTuple_GET_ITEM(callback, 2)) &&
                       PyLong_Check(PyTuple_GET_ITEM(callback, 3)) &&
@@ -773,9 +773,15 @@ rp_activate_accepted_connection(ReactorPoller *p, FdEntry *entry, int fd)
     if (protocol == NULL) {
         goto error;
     }
+    /* The seventh element is the listener's native TLS context, or None.
+     * A TLS connection is constructed without `inline_activate`: the protocol
+     * is not told about its transport until the handshake completes, which the
+     * transport drives itself. */
+    PyObject *tls = PyTuple_GET_ITEM(spec, 6);
     transport = PyObject_CallFunctionObjArgs(
         (PyObject *)&SocketTransportType, p->loop, sock, protocol,
-        Py_None, Py_None, server, Py_True, fd_object, NULL);
+        Py_None, Py_None, server, tls == Py_None ? Py_True : Py_False,
+        fd_object, tls, NULL);
     if (transport == NULL) {
         goto error;
     }

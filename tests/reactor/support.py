@@ -157,6 +157,28 @@ def sync_ok_app():
     return app
 
 
+def suspending_app(*, fail: bool = False):
+    """A handler that really suspends before it replies.
+
+    Every other app here awaits only already-completed receive/send objects, so
+    `spawn_app_task` finishes them on its first `PyIter_Send` and no asyncio
+    Task is ever built. This one yields to the loop first, which is the *only*
+    way into that function's Task branch -- and it is the branch every handler
+    that talks to a database or an upstream takes on every request.
+
+    `fail=True` raises after suspending, to reach the completion path instead.
+    """
+
+    async def app(scope, receive, send):
+        await asyncio.sleep(0)
+        if fail:
+            raise RuntimeError("handler failed after suspending")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    return app
+
+
 def reactor_serve(loop, app, protocols=("http/1.1",), config=None):
     """Start the framework's server on the native reactor.
 

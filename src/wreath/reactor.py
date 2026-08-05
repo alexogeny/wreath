@@ -41,6 +41,7 @@ import dataclasses
 import gc
 import selectors
 import socket
+import ssl
 from asyncio import events as _events
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -74,10 +75,137 @@ from ._native import _reactor as _wheel_ext
 __all__ = [
     "new_event_loop",
     "available_backends",
+    "metal_tls_client_context",
+    "metal_tls_context",
     "serve",
     "EventLoop",
     "WreathTask",
 ]
+
+
+class _MetalTLSContext(ssl.SSLContext):
+    """An `ssl.SSLContext` that also carries a native one.
+
+    It has to be a real `SSLContext` because `loop.create_server` type-checks
+    the `ssl=` argument and refuses anything else, and it has to carry the
+    native handle because there is no supported way to borrow an `SSL_CTX *`
+    out of a Python context. Loading the same material into both halves means
+    any path that does *not* recognise this subclass still terminates TLS
+    correctly, just through asyncio.
+    """
+
+    __slots__ = ("metal",)
+
+    #: The native `_reactor.TLSContext`. Declared as well as slotted because a
+    #: slot is a descriptor rather than an annotation, and the type checker
+    #: reads the latter.
+    metal: Any
+
+
+def metal_tls_client_context(
+    *,
+    cafile: str | None = None,
+    capath: str | None = None,
+    verify: bool = True,
+    alpn: tuple[str, ...] = ("http/1.1",),
+) -> ssl.SSLContext:
+    """An outbound TLS context whose crypto runs in C, for `metal_event_loop()`.
+
+    The other half of `metal_tls_context`. Pass it as `ssl=` to
+    `create_connection` with a `server_hostname`; on the metal loop the
+    connection keeps the native transport and runs `SSL_connect` in C.
+
+    **Verification is on by default and the default is the point.** A TLS client
+    that skips the trust check is faster than one that does not and looks
+    identical until it matters, so `verify=False` has to be typed out. Both the
+    chain and the host name are checked inside OpenSSL, because setting SNI
+    without setting the name to check against is the classic half-done client:
+    it reaches the right virtual host and then accepts a certificate for any
+    name at all.
+
+    Args:
+        cafile: PEM bundle of trusted roots. Defaults to the system store.
+        capath: Directory of hashed trusted roots.
+        verify: Check the peer's chain and host name.
+        alpn: Protocols to offer, in preference order.
+
+    Returns:
+        A context usable anywhere an `ssl.SSLContext` is.
+    """
+    if _wheel_ext is None or not hasattr(_wheel_ext, "TLSClientContext"):
+        raise RuntimeError(
+            "native TLS needs wreath._native._reactor built with OpenSSL; "
+            "the metal tier is Linux-only"
+        )
+    context = _MetalTLSContext(ssl.PROTOCOL_TLS_CLIENT)
+    if verify:
+        if cafile is not None or capath is not None:
+            context.load_verify_locations(cafile=cafile, capath=capath)
+        else:
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    else:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.set_alpn_protocols(list(alpn))
+    context.metal = _wheel_ext.TLSClientContext(
+        cafile=cafile, capath=capath, verify=verify, alpn=list(alpn))
+    return context
+
+
+def metal_tls_context(
+    *,
+    certfile: str,
+    keyfile: str,
+    password: str | None = None,
+    alpn: tuple[str, ...] = ("http/1.1",),
+) -> ssl.SSLContext:
+    """A server TLS context whose crypto runs in C, for `metal_event_loop()`.
+
+    Pass it as `ssl=` to `create_server` (or as `wreath.server`'s `ssl`). On the
+    metal loop the listener keeps the native transport and terminates TLS in
+    C; on any other loop it behaves as an ordinary `ssl.SSLContext`, because it
+    is one.
+
+    **Why this is not `ssl.SSLContext` alone.** `EventLoop._start_serving` takes
+    the native path only when it can build an `SSL_CTX` itself, and that needs
+    the certificate and key *paths* -- a built `SSLContext` will not give up its
+    private key, by design. `TLSConfig` already carries the paths for the same
+    reason on the HTTP/3 side.
+
+    Measured on one machine, one physical core, handshakes amortised: the
+    asyncio fallback served 21,300 req/s against nginx's 47,400, because a TLS
+    connection left the metal tier entirely -- asyncio's accept loop, asyncio's
+    transport, and `asyncio.sslproto.SSLProtocol` running Python per read and
+    per write.
+
+    Args:
+        certfile: PEM certificate chain, leaf first.
+        keyfile: PEM private key for `certfile`.
+        password: Passphrase for an encrypted key.
+        alpn: Protocols to advertise, in server preference order.
+
+    Returns:
+        A context usable anywhere an `ssl.SSLContext` is.
+
+    Raises:
+        OSError: The certificate or key could not be read or do not match.
+            Raised here, while the proxy is being configured, rather than on the
+            first handshake -- a listener that binds and then fails every
+            connection is the failure this tree refuses everywhere else.
+    """
+    if _wheel_ext is None or not hasattr(_wheel_ext, "TLSContext"):
+        raise RuntimeError(
+            "native TLS needs wreath._native._reactor built with OpenSSL; "
+            "the metal tier is Linux-only"
+        )
+    context = _MetalTLSContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile, keyfile, password)
+    context.set_alpn_protocols(list(alpn))
+    context.metal = _wheel_ext.TLSContext(
+        certfile=str(certfile), keyfile=str(keyfile),
+        password=password, alpn=list(alpn),
+    )
+    return context
 
 
 #: Accept-flag bits that ride in a socket's `type` on Linux but never appear in
@@ -434,6 +562,24 @@ if TYPE_CHECKING:
             extra: Any = None,
             server: Any = None,
         ) -> asyncio.Transport: ...
+        # The trailing keywords are deliberately `**kwargs` rather than named:
+        # CPython has changed them across releases (`call_connection_made` is
+        # absent in 3.14, the two timeouts default to constants), and naming one
+        # that a release does not accept fails invisibly -- the accept path
+        # swallows the TypeError and drops the connection.
+        def _make_ssl_transport(
+            self,
+            rawsock: socket.socket,
+            protocol: Any,
+            sslcontext: Any,
+            waiter: Any = None,
+            *,
+            server_side: bool = False,
+            server_hostname: str | None = None,
+            extra: Any = None,
+            server: Any = None,
+            **kwargs: Any,
+        ) -> asyncio.Transport: ...
 
 else:
     _LoopBase = asyncio.SelectorEventLoop
@@ -683,7 +829,8 @@ class EventLoop(_LoopBase):
         self, protocol_factory, sock, sslcontext=None, server=None, backlog=100,
         ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
     ):
-        if self._poller is not None and sslcontext is None:
+        native_tls = getattr(sslcontext, "metal", None)
+        if self._poller is not None and (sslcontext is None or native_tls is not None):
             # The listener's family/type/proto ride along because every
             # connection accepted from it has the same three, and a
             # `socket(fileno=...)` that is not told them asks the kernel --
@@ -696,9 +843,13 @@ class EventLoop(_LoopBase):
             # `.type` byte-identical to what the getsockopt path produced,
             # rather than a value only this path can return.
             sock_type = int(sock.type) & ~(_SOCK_NONBLOCK | _SOCK_CLOEXEC)
+            # The seventh element is the native TLS context, or None. A
+            # listener carrying one hands every accepted connection an `SSL`
+            # and defers `connection_made` until the handshake completes; the
+            # transport drives that itself, in C.
             native_server = (
                 protocol_factory, server, socket.socket,
-                int(sock.family), sock_type, int(sock.proto),
+                int(sock.family), sock_type, int(sock.proto), native_tls,
             )
             self._poller._add_uring_listener(sock.fileno(), native_server)
             return
@@ -710,6 +861,47 @@ class EventLoop(_LoopBase):
             backlog,
             ssl_handshake_timeout,
             ssl_shutdown_timeout,
+        )
+
+    def _make_ssl_transport(
+        self, rawsock, protocol, sslcontext, waiter=None, *,
+        server_side=False, server_hostname=None, extra=None, server=None,
+        **kwargs,
+    ):
+        """Native TLS when the context carries one, asyncio's otherwise.
+
+        The outbound hook: `create_connection(ssl=...)` lands here, and without
+        it every `https://` call keeps the `asyncio.sslproto` path even on the
+        metal loop.
+
+        **The remaining keywords are forwarded, not restated.** This signature
+        has changed across CPython releases -- `call_connection_made` exists in
+        some and not in 3.14, and the two timeouts default to constants rather
+        than None -- so naming them here would mean passing an argument the base
+        does not accept. That failure is invisible: `_accept_connection2`
+        swallows it and drops the connection, which surfaces as a client-side
+        `UNEXPECTED_EOF_WHILE_READING` with nothing in the log to connect it to.
+
+        Only the inbound-accept case is excluded (`server is not None` or
+        `server_side`): a listener with a native context never reaches here at
+        all, because `_start_serving` already took the native path.
+        """
+        native_tls = getattr(sslcontext, "metal", None)
+        if (
+            self._poller is not None
+            and native_tls is not None
+            and server is None
+            and not server_side
+            and kwargs.get("call_connection_made", True)
+        ):
+            return _wheel_ext.SocketTransport(
+                self, rawsock, protocol, waiter, extra, None, False, -1,
+                native_tls, server_hostname,
+            )
+        return super()._make_ssl_transport(
+            rawsock, protocol, sslcontext, waiter,
+            server_side=server_side, server_hostname=server_hostname,
+            extra=extra, server=server, **kwargs,
         )
 
     def _stop_serving(self, sock):
@@ -783,6 +975,24 @@ class EventLoop(_LoopBase):
 
     def reactor_stats(self) -> dict[str, int]:
         return dict(self._reactor_stats)
+
+
+# `create_future` and `get_debug` in C, replacing the two inherited from
+# `asyncio.base_events`.
+#
+# Between them they are two interpreter frames on every future this loop
+# creates: `create_future` itself, and the `get_debug` that
+# `asyncio.Future.__init__` calls on its loop before deciding whether to capture
+# a source traceback. That is charged per future, and a PostgreSQL query creates
+# two of them -- the operation's, and the protocol's read waiter.
+#
+# The C twins return exactly what the originals did, `get_debug` included, so
+# `loop.set_debug(True)` still works and a debug loop still captures tracebacks.
+# Grafted rather than declared in the class body because they are C methods on a
+# Python heap type; `_install_loop_fastpath` does the `PyDescr_NewMethod` and is
+# a no-op for every other loop.
+if _wheel_ext is not None and hasattr(_wheel_ext, "_install_loop_fastpath"):
+    _wheel_ext._install_loop_fastpath(EventLoop)
 
 
 def available_backends() -> tuple[str, ...]:

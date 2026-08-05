@@ -11,7 +11,13 @@ import socket
 import threading
 import time
 
-from .support import echo_app, reactor_serve, run, sync_ok_app
+from .support import (
+    echo_app,
+    reactor_serve,
+    run,
+    suspending_app,
+    sync_ok_app,
+)
 
 
 def _blocking_client(host, port, payload, out, *, recv_all=True):
@@ -144,3 +150,57 @@ def test_h1_slow_header_hits_request_deadline(loop):
     closed_at, elapsed = run(loop, main())
     assert closed_at in ("eof", "reset")
     assert elapsed < 0.8
+
+
+def test_h1_suspending_handler_is_served_on_the_reactor_loop(loop):
+    """A handler that actually suspends must work on Wreath's own event loop.
+
+    `spawn_app_task` steps the coroutine inline and only builds an asyncio Task
+    when that first step suspends -- and to attach the completion callback it
+    calls a cached *unbound* `asyncio.Task.add_done_callback`. On this loop
+    `create_task` returns a `WreathTask`, which derives from `asyncio.Future`
+    rather than `Task`, so the descriptor rejects it.
+
+    Every app above awaits only completed receive/send objects, so none of them
+    reaches that branch. Any handler awaiting a database or an upstream does,
+    on every request -- which is why `wreath.edge` cannot run here at all.
+    """
+    async def main():
+        h = await reactor_serve(loop, suspending_app(), protocols=("http/1.1",))
+        req = (b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+               b"Connection: close\r\n\r\n")
+        th, out = _run_client(h.host, h.port, req)
+        while th.is_alive():  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await h.aclose()
+        return out[0][1]
+
+    raw = run(loop, main())
+    assert raw.startswith(b"HTTP/1.1 200"), raw[:200]
+    assert raw.endswith(b"ok")
+
+
+def test_h1_suspending_handler_that_raises_reports_500_not_an_abort(loop):
+    """A failed suspending handler must answer 500, not drop the connection.
+
+    Separate from the test above because it fails separately and silently.
+    `finalize_app_task` reads the outcome through a cached unbound
+    `asyncio.Task.exception`, and clears any error from that call before
+    treating a NULL as cancellation. Handed a `WreathTask`, the descriptor
+    raises TypeError, the TypeError is swallowed, and a handler crash is
+    misreported as a cancelled request -- the connection is aborted with no
+    status at all.
+    """
+    async def main():
+        h = await reactor_serve(loop, suspending_app(fail=True),
+                                protocols=("http/1.1",))
+        req = (b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+               b"Connection: close\r\n\r\n")
+        th, out = _run_client(h.host, h.port, req)
+        while th.is_alive():  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await h.aclose()
+        return out[0][1]
+
+    raw = run(loop, main())
+    assert raw.startswith(b"HTTP/1.1 500"), raw[:200]

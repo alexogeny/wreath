@@ -1,4 +1,15 @@
-/* Native plaintext socket transport. */
+/* Native socket transport: plaintext, and TLS terminated in C.
+ *
+ * TLS is a layer inside this object rather than a second transport type.
+ * Every socket read goes through `metal_recv` and every write through
+ * `metal_send`/`metal_sendmsg`, so intercepting those three reuses the flow
+ * control, buffered-protocol dispatch, cork/send-queue egress and lifecycle
+ * here instead of duplicating them. See reactor_tls.c for why it is worth
+ * doing at all. */
+
+#include <limits.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 
 /* Registered stream-fusion capsules, probed in order at protocol-bind time.
  * Resolution reads sys.modules only (no import machinery): by the time a
@@ -85,6 +96,20 @@ typedef struct {
     int conn_lost;
     int eof;
     int protocol_connected;
+    /* TLS, as a layer inside this transport rather than a second transport
+     * type: `metal_recv`/`metal_send` are the only two places the socket is
+     * touched, so intercepting them reuses this object's flow control,
+     * buffered-protocol dispatch and egress instead of duplicating them. NULL
+     * on a plaintext connection, which is every connection today unless a
+     * listener was given a native `TLSContext`. */
+    SSL *ssl;
+    /* The `create_connection` future, held until the handshake
+     * settles. A TLS transport cannot resolve it at construction the
+     * way a plaintext one does: the connection is not usable, and may
+     * yet fail verification. */
+    PyObject *tls_waiter;
+    int tls_handshaking;         /* SSL_accept has not completed yet */
+    int tls_want_write;          /* the handshake is blocked on writability */
     PyObject *poller_obj;        /* owns the per-worker MetalRuntime */
     MetalRuntime *metal;         /* borrowed from poller_obj */
     uint64_t connection_token;
@@ -120,9 +145,53 @@ static void st_fatal(SocketTransport *, const char *);
 static void st_maybe_resume(SocketTransport *);
 static int st_call_soon(SocketTransport *, PyObject *, PyObject *);
 
+/* Map an OpenSSL want-more into the errno the callers already handle.
+ *
+ * Every read and write path in this file speaks `-1`/`EAGAIN`, so translating
+ * here means TLS needs no second set of branches downstream. WANT_WRITE on a
+ * *read* is real and not a curiosity -- it is what a renegotiation or a session
+ * ticket looks like -- so it is recorded rather than folded into WANT_READ,
+ * and `st_read_ready` registers for writability when it sees it. */
+static ssize_t
+tls_translate(SocketTransport *t, int result)
+{
+    int reason = SSL_get_error(t->ssl, result);
+    switch (reason) {
+    case SSL_ERROR_WANT_READ:
+        errno = EAGAIN;
+        return -1;
+    case SSL_ERROR_WANT_WRITE:
+        t->tls_want_write = 1;
+        errno = EAGAIN;
+        return -1;
+    case SSL_ERROR_ZERO_RETURN:
+        return 0;                       /* clean close_notify: EOF */
+    case SSL_ERROR_SYSCALL:
+        if (errno == 0) {
+            return 0;                   /* peer vanished without close_notify */
+        }
+        return -1;
+    default:
+        /* A protocol error. Reported as a connection reset because that is
+         * what every caller here already knows how to unwind, and the
+         * alternative is teaching six call sites about SSL. */
+        errno = ECONNRESET;
+        return -1;
+    }
+}
+
+
 static ssize_t
 metal_recv(SocketTransport *t, void *buffer, size_t size)
 {
+    if (t->ssl != NULL) {
+        if (size > INT_MAX) {
+            size = INT_MAX;
+        }
+        ERR_clear_error();
+        int n = SSL_read(t->ssl, buffer, (int)size);
+        return n > 0 ? (ssize_t)n : tls_translate(t, n);
+    }
     if (t->metal != NULL) {
         /* Metal ingress is completion-driven into provided buffers; the poll
          * readiness path must never issue a competing synchronous read. */
@@ -145,6 +214,17 @@ metal_recv(SocketTransport *t, void *buffer, size_t size)
 static ssize_t
 metal_send(SocketTransport *t, const void *buffer, size_t size)
 {
+    if (t->ssl != NULL) {
+        if (size == 0) {
+            return 0;
+        }
+        if (size > INT_MAX) {
+            size = INT_MAX;
+        }
+        ERR_clear_error();
+        int n = SSL_write(t->ssl, buffer, (int)size);
+        return n > 0 ? (ssize_t)n : tls_translate(t, n);
+    }
     ssize_t result;
     do {
         /* native-gil-lint: allow NG002 -- see metal_recv: t->fd is guaranteed
@@ -157,6 +237,28 @@ metal_send(SocketTransport *t, const void *buffer, size_t size)
 static ssize_t
 metal_sendmsg(SocketTransport *t, const struct msghdr *message)
 {
+    if (t->ssl != NULL) {
+        /* No scatter/gather through TLS: a record has to be built from one
+         * contiguous run of plaintext, so the vectored form is walked one
+         * segment at a time. It stops at the first short write, which is the
+         * same contract `sendmsg` has and what the egress loop expects. */
+        ssize_t total = 0;
+        for (size_t i = 0; i < message->msg_iovlen; i++) {
+            const struct iovec *seg = &message->msg_iov[i];
+            if (seg->iov_len == 0) {
+                continue;
+            }
+            ssize_t n = metal_send(t, seg->iov_base, seg->iov_len);
+            if (n < 0) {
+                return total > 0 ? total : -1;
+            }
+            total += n;
+            if ((size_t)n < seg->iov_len) {
+                break;
+            }
+        }
+        return total;
+    }
     ssize_t result;
     do {
         /* native-gil-lint: allow NG002 -- see metal_recv: t->fd is guaranteed
@@ -783,12 +885,134 @@ st_deliver_received(SocketTransport *t, const char *data, Py_ssize_t size)
     return 0;
 }
 
+/* Drive `SSL_accept` one step.
+ *
+ * Returns 1 when the handshake is complete and the protocol has been told,
+ * 0 when it needs more I/O (readiness has been re-registered), and -1 with the
+ * connection already failed.
+ *
+ * `connection_made` waits for completion, matching `asyncio.sslproto`: a
+ * protocol handed the transport mid-handshake could write plaintext into a
+ * session that does not exist yet.
+ */
+static int
+st_tls_handshake(SocketTransport *t)
+{
+    PyObject *op = (PyObject *)t;
+    ERR_clear_error();
+    t->tls_want_write = 0;
+    /* `SSL_do_handshake` rather than `SSL_accept`: the session already knows
+     * which side it is from `SSL_set_accept_state`/`SSL_set_connect_state`, so
+     * one driver serves inbound and outbound. */
+    int rc = SSL_do_handshake(t->ssl);
+    if (rc == 1) {
+        t->tls_handshaking = 0;
+        if (t->tls_want_write) {
+            t->tls_want_write = 0;
+        }
+        PyObject *cm = st_bound(t->protocol, "connection_made");
+        if (cm != NULL) {
+            PyObject *connected = PyObject_CallOneArg(cm, op);
+            Py_DECREF(cm);
+            if (connected == NULL) {
+                st_fatal(t, "connection_made failed after the TLS handshake");
+                return -1;
+            }
+            Py_DECREF(connected);
+        }
+        t->protocol_connected = 1;
+        if (t->tls_waiter != NULL && t->tls_waiter != Py_None) {
+            PyObject *waiter = t->tls_waiter;
+            t->tls_waiter = NULL;
+            PyObject *done = PyObject_CallMethod(waiter, "done", NULL);
+            int already = done != NULL && PyObject_IsTrue(done);
+            Py_XDECREF(done);
+            if (!already) {
+                PyObject *r = PyObject_CallMethod(waiter, "set_result", "O", Py_None);
+                Py_XDECREF(r);
+            }
+            Py_DECREF(waiter);
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+            }
+        }
+        return 1;
+    }
+    int reason = SSL_get_error(t->ssl, rc);
+    if (reason == SSL_ERROR_WANT_READ) {
+        return 0;                       /* the reader is already registered */
+    }
+    if (reason == SSL_ERROR_WANT_WRITE) {
+        /* Rare but real: a large certificate chain can fill the socket buffer
+         * mid-flight. Wait for writability, and let `st_write_ready` resume. */
+        if (!t->writing) {
+            PyObject *r = st_lazy_bound(&t->m_add_writer, t->loop, "add_writer");
+            if (r != NULL) {
+                PyObject *fd = PyLong_FromLong(t->fd);
+                if (fd != NULL) {
+                    PyObject *added = PyObject_CallFunctionObjArgs(
+                        r, fd, t->write_ready, NULL);
+                    Py_XDECREF(added);
+                    Py_DECREF(fd);
+                    t->writing = 1;
+                }
+            }
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+            }
+        }
+        return 0;
+    }
+    /* Report to the connect waiter when there is one: `create_connection`
+     * awaits that future, and a handshake that fails without resolving it is a
+     * hang rather than an error -- the failure mode a rejected certificate must
+     * never produce. */
+    if (t->tls_waiter != NULL && t->tls_waiter != Py_None) {
+        PyObject *waiter = t->tls_waiter;
+        t->tls_waiter = NULL;
+        unsigned long code = ERR_peek_last_error();
+        char detail[256];
+        if (code != 0) {
+            ERR_error_string_n(code, detail, sizeof(detail));
+        } else {
+            snprintf(detail, sizeof(detail), "connection closed during handshake");
+        }
+        PyObject *done = PyObject_CallMethod(waiter, "done", NULL);
+        int already = done != NULL && PyObject_IsTrue(done);
+        Py_XDECREF(done);
+        if (!already) {
+            PyObject *exc = PyObject_CallFunction(
+                PyExc_ConnectionError, "s", detail);
+            if (exc != NULL) {
+                PyObject *r = PyObject_CallMethod(waiter, "set_exception", "O", exc);
+                Py_XDECREF(r);
+                Py_DECREF(exc);
+            }
+        }
+        Py_DECREF(waiter);
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+    }
+    st_fatal(t, "the TLS handshake failed");
+    return -1;
+}
+
+
 static PyObject *
 st_read_ready(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     SocketTransport *t = (SocketTransport *)op;
     if (t->conn_lost) {
         Py_RETURN_NONE;
+    }
+    if (t->tls_handshaking) {
+        if (st_tls_handshake(t) <= 0) {
+            Py_RETURN_NONE;             /* incomplete, or already failed */
+        }
+        /* Complete: fall through and read whatever arrived with the final
+         * handshake flight, which for a client that writes immediately is the
+         * whole first request. */
     }
     /* Cork writes for the duration of the synchronous request drive: a burst of
      * small writes (response head + streaming chunks, and any pipelined replies
@@ -942,6 +1166,13 @@ st_write_ready(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     SocketTransport *t = (SocketTransport *)op;
     if (t->conn_lost) {
+        Py_RETURN_NONE;
+    }
+    if (t->tls_handshaking) {
+        /* The handshake asked for writability. Resume it here; there is no
+         * egress to pump until it finishes, because nothing has been given the
+         * transport to write with yet. */
+        st_tls_handshake(t);
         Py_RETURN_NONE;
     }
     st_pump_egress(t);
@@ -1546,15 +1777,18 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
 {
     SocketTransport *t = (SocketTransport *)op;
     PyObject *loop, *sock, *protocol, *waiter = Py_None, *extra = Py_None, *server = Py_None;
+    PyObject *tls = Py_None;
+    const char *server_hostname = NULL;
     int inline_activate = 0;
     int known_fd = -1;
     static char *kw[] = {
         "loop", "sock", "protocol", "waiter", "extra", "server",
-        "inline_activate", "fd", NULL
+        "inline_activate", "fd", "tls", "server_hostname", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOOpi", kw, &loop, &sock,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOOpiOz", kw, &loop, &sock,
                                      &protocol, &waiter, &extra, &server,
-                                     &inline_activate, &known_fd)) {
+                                     &inline_activate, &known_fd, &tls,
+                                     &server_hostname)) {
         return -1;
     }
     t->loop = Py_NewRef(loop);
@@ -1562,18 +1796,30 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     t->protocol = Py_NewRef(protocol);
     t->poller_obj = NULL;
     t->metal = NULL;
+    t->ssl = NULL;
+    t->tls_waiter = NULL;
+    t->tls_handshaking = 0;
+    t->tls_want_write = 0;
     t->connection_token = 0;
     t->uring_receive_active = 0;
     t->uring_receive_multishot = 0;
-    PyObject *poller_obj = PyObject_GetAttrString(loop, "_poller");
-    if (poller_obj == NULL) {
-        PyErr_Clear();
-    } else {
-        if (poller_obj != Py_None && metal_attach_transport(t, poller_obj) < 0) {
+    /* A TLS connection stays off the completion-driven receive path. Metal
+     * ingress reads ciphertext into ring-provided buffers, and OpenSSL owns
+     * this descriptor through `SSL_set_fd` -- two readers of one socket. The
+     * readiness path costs a poll wakeup that multishot avoids, and is still
+     * entirely in C; feeding the ring's buffers through a memory BIO is the
+     * next step, not this one. */
+    if (tls == Py_None) {
+        PyObject *poller_obj = PyObject_GetAttrString(loop, "_poller");
+        if (poller_obj == NULL) {
+            PyErr_Clear();
+        } else {
+            if (poller_obj != Py_None && metal_attach_transport(t, poller_obj) < 0) {
+                Py_DECREF(poller_obj);
+                return -1;
+            }
             Py_DECREF(poller_obj);
-            return -1;
         }
-        Py_DECREF(poller_obj);
     }
     t->server = Py_NewRef(server);
     t->extra = (extra == Py_None) ? PyDict_New() : PyDict_Copy(extra);
@@ -1692,6 +1938,37 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
         }
     }
 
+    /* TLS: the session is created here, once the descriptor is known, and the
+     * protocol is not told about the transport until the handshake completes.
+     * Reading starts immediately regardless -- the handshake is driven by the
+     * same readiness callback that will later carry application bytes. */
+    if (tls != Py_None) {
+        t->ssl = wreath_tls_new(tls, t->fd, server_hostname);
+        if (t->ssl == NULL) {
+            goto error;
+        }
+        t->tls_handshaking = 1;
+        /* The connect future is settled by the handshake, not by construction:
+         * until it completes there is no usable connection, and on a client it
+         * may still be rejected. Taken here so the generic waiter code below
+         * does not also resolve it. */
+        if (waiter != Py_None) {
+            t->tls_waiter = Py_NewRef(waiter);
+        }
+        PyObject *started = st_start_reading(op, NULL);
+        if (started == NULL) {
+            goto error;
+        }
+        Py_DECREF(started);
+        /* One eager step. On a client this sends the ClientHello immediately
+         * rather than waiting for a readiness event that will never come --
+         * nothing arrives until we have spoken. */
+        if (st_tls_handshake(t) < 0) {
+            return 0;                   /* already failed and unwound */
+        }
+        return 0;
+    }
+
     /* Accepted plaintext metal connections activate synchronously after every
      * transport field and server attachment is valid. Other construction paths
      * retain asyncio's scheduled connection_made/start-reading ordering. */
@@ -1775,6 +2052,7 @@ st_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(t->read_ready);
     Py_VISIT(t->write_ready);
     Py_VISIT(t->conn_lost_cb);
+    Py_VISIT(t->tls_waiter);
     return 0;
 }
 
@@ -1809,13 +2087,23 @@ st_clear(PyObject *op)
     Py_CLEAR(t->read_ready);
     Py_CLEAR(t->write_ready);
     Py_CLEAR(t->conn_lost_cb);
+    Py_CLEAR(t->tls_waiter);
     return 0;
 }
 
 static void
 st_dealloc(PyObject *op)
 {
+    SocketTransport *t = (SocketTransport *)op;
     PyObject_GC_UnTrack(op);
+    /* Freed here rather than in `st_clear`: `tp_clear` runs for cycle
+     * collection and may run more than once, while the session must be torn
+     * down exactly once and only when nothing can read from it again. It holds
+     * no Python references, so it is not part of any cycle. */
+    if (t->ssl != NULL) {
+        SSL_free(t->ssl);
+        t->ssl = NULL;
+    }
     st_clear(op);
     Py_TYPE(op)->tp_free(op);
 }
