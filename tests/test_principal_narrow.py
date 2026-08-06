@@ -180,10 +180,19 @@ def _policy_sets() -> list[str]:
     return singles + pairs
 
 
-async def _decide(
-    source: str, action: str, *, narrowing: Any = None, roles: frozenset[str] = frozenset()
-) -> bool:
-    """Whether one caller may do one action under one policy set."""
+async def _decisions(
+    source: str, *, narrowing: Any = None, roles: frozenset[str] = frozenset()
+) -> dict[str, bool]:
+    """What one caller may do, for every action, under one policy set.
+
+    All three actions through one app and one client, because the app already
+    carries a route for each and the only thing that varies between the two
+    calls the property makes is the *caller* -- fixed when the backend is
+    configured, so it needs an app of its own and the actions do not. Asking
+    per action instead cost six app constructions, six policy compilations and
+    six client lifecycles for every parameter set, which is what made this the
+    heaviest non-tooling file in the suite at a 187ms median.
+    """
     identity = Identity("alice", roles=roles, narrowing=narrowing)
     app = Wreath()
     app.configure_auth(
@@ -203,10 +212,19 @@ async def _decide(
         app.get(f"/{name}")(make(name))
 
     async with TestClient(app) as client:
-        response = await client.get(
-            f"/{action}", headers={"authorization": "Bearer t"}
-        )
-    return response.status == 200
+        return {
+            name: (
+                await client.get(f"/{name}", headers={"authorization": "Bearer t"})
+            ).status == 200
+            for name in ACTIONS
+        }
+
+
+async def _decide(
+    source: str, action: str, *, narrowing: Any = None, roles: frozenset[str] = frozenset()
+) -> bool:
+    """Whether one caller may do one action under one policy set."""
+    return (await _decisions(source, narrowing=narrowing, roles=roles))[action]
 
 
 @pytest.mark.asyncio
@@ -221,9 +239,12 @@ async def test_a_narrowed_principal_never_exceeds_its_delegator(source: str) -> 
     roles = frozenset({"editor"})
     narrowing = Narrowing(actor="agent", scope=None, on_behalf_of="alice")
 
+    parent_decisions = await _decisions(source, roles=roles)
+    child_decisions = await _decisions(source, narrowing=narrowing, roles=roles)
+
     for action in ACTIONS:
-        parent = await _decide(source, action, roles=roles)
-        child = await _decide(source, action, narrowing=narrowing, roles=roles)
+        parent = parent_decisions[action]
+        child = child_decisions[action]
         if child and not parent:
             raise AssertionError(
                 f"narrow() granted {action!r} that the delegating principal "

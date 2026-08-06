@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from _gated_skips import (
     banner_lines,
     container_runtime,
@@ -41,6 +42,28 @@ _SKIPPED: list[Any] = []
 #: on a worker) and by `pytest_testnodedown` (on an xdist controller, from what
 #: each worker sent back).
 _DESELECTED: dict[str, int] = {}
+
+
+@pytest.fixture(autouse=True)
+def _startup_audit_off(request: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the boot-time source audit out of every unrelated test.
+
+    `hardening="warn"` is the shipped default, so every application a test
+    starts re-scans the file its handlers were defined in. The scan costs about
+    0.1ms per line and caches nothing: measured across this suite it ran 674
+    times for 65.6 seconds of worker time, and 71% of that was re-reading files
+    that had not changed since the scan before. A test fixture's own source is
+    not what the audit exists to police.
+
+    `WREATH_HARDENING` outranks the `hardening=` argument, which is what makes
+    this cheap and also what makes it dangerous: set globally it would quietly
+    neuter the tests that assert what each policy *does*, and they would keep
+    passing. So they carry `pytestmark = pytest.mark.hardening` and this fixture
+    leaves them alone -- the exemption is written in the file that needs it,
+    where a reader of that file can see it.
+    """
+    if request.node.get_closest_marker("hardening") is None:
+        monkeypatch.setenv("WREATH_HARDENING", "off")
 
 
 def pytest_runtest_logreport(report: Any) -> None:

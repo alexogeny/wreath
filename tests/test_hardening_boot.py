@@ -26,6 +26,13 @@ from wreath.hardening import (
     resolve_policy,
 )
 
+#: `tests/conftest.py` turns the startup audit off for every other test by
+#: setting `WREATH_HARDENING=off`, which outranks `hardening=`. This file is the
+#: one that asserts what each policy *does*, so it keeps the real default --
+#: the exemption is stated here, in the file that needs it, rather than as a
+#: list of filenames somewhere a reader of this file would never look.
+pytestmark = pytest.mark.hardening
+
 DEFECTIVE = '''
 """A handler with one planted defect, for the boot tests."""
 from __future__ import annotations

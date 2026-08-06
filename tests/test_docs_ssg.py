@@ -2361,21 +2361,26 @@ def test_a_clipped_path_keeps_the_end_that_identifies_it(tmp_path) -> None:
     assert len(clipped.encode("utf-8")) <= 21
 
 
-def test_the_preview_logs_one_line_per_request() -> None:
+def test_the_preview_logs_one_line_per_request(tmp_path) -> None:
     """The preview asks for a recorder, because logging rides its ring.
 
     Without telemetry every `log.*` call stays the no-op it is before a server
     boots, and the console shows nothing — which is exactly the state this
     replaced.
+
+    The directory only has to exist, because `preview_app` mounts it and
+    `StaticFiles` refuses a missing one. It used to be the repository's own
+    `site/`, which exists only on a machine that has run `wreath docs` — so
+    this passed locally and failed in CI, on ambient state rather than on
+    anything it set out to assert.
     """
     import inspect
-    from pathlib import Path
 
     from wreath import _docs_cli
 
     source = inspect.getsource(_docs_cli._serve)
     assert "TelemetryConfig" in source and "Mode.PULSE" in source
-    app = _docs_cli.preview_app(Path("site"))
+    app = _docs_cli.preview_app(tmp_path)
     assert any(
         getattr(item[2], "after_inplace", None) is _docs_cli._log_access
         for item in app._global_middleware
