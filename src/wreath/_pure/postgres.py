@@ -18,6 +18,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from decimal import Decimal
 from typing import Any, Literal, NamedTuple, overload
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -445,6 +446,21 @@ class Plan:
     parameter_oids: tuple[int, ...]
     result_oids: tuple[int, ...]
     result_names: tuple[str, ...]
+    #: The Bind/Execute/Sync bytes for this plan with **no arguments**, by
+    #: result format: index 0 text (`execute`), index 1 binary (everything
+    #: else). Nothing else varies once the arguments are gone -- the statement
+    #: name is this plan's and is frozen with it -- so the bytes are built once
+    #: and handed out after that.
+    #:
+    #: It lives on the plan rather than beside it so that it needs no
+    #: invalidation: evicting the plan drops the packets with it, and a
+    #: re-prepared statement is a new plan with a new name and a new cache.
+    #: A mutable list inside a frozen dataclass is deliberate -- freezing
+    #: prevents rebinding the field, which is what protects the identity being
+    #: cached against.
+    packets: list[bytes | None] = dataclass_field(
+        default_factory=lambda: [None, None], compare=False, repr=False
+    )
 
 
 def _plan_retained_bytes(sql: str, plan: Plan) -> int:
@@ -1110,7 +1126,13 @@ def _build_cold_query_packet(
 def _build_cached_query_packet(plan: Plan, args: tuple[object, ...], mode: str) -> bytes:
     if mode not in {"execute", "fetch", "fetchrow", "fetchval"}:
         raise ValueError(f"unknown PostgreSQL result mode {mode!r}")
-    return b"".join(
+    binary_results = mode != "execute"
+    cache = getattr(plan, "packets", None)
+    if not args and cache is not None:
+        cached = cache[binary_results]
+        if cached is not None:
+            return cached
+    packet = b"".join(
         (
             _message(
                 b"B",
@@ -1126,6 +1148,9 @@ def _build_cached_query_packet(plan: Plan, args: tuple[object, ...], mode: str) 
             _message(b"S"),
         )
     )
+    if not args and cache is not None:
+        cache[binary_results] = packet
+    return packet
 
 
 @dataclass(slots=True)

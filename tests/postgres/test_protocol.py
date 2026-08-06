@@ -87,6 +87,95 @@ def test_execute_packets_omit_unused_result_metadata(postgres: Any) -> None:
     assert _bind_result_format_count(cached) == 0
 
 
+# --------------------------------------------------------------------------
+# A parameterless cached query builds the same bytes every time.
+#
+# `Bind`/`Execute`/`Sync` for a cached plan is a function of the statement name,
+# the arguments and the result mode. With no arguments only two of those vary,
+# and both belong to the plan -- so the bytes cannot change, and rebuilding them
+# per query measured 2,153 instructions that produce a value already known.
+#
+# These state what the packet may not stop depending on, which is what a cache
+# keyed too coarsely would break.
+# --------------------------------------------------------------------------
+
+
+def test_a_parameterless_packet_is_the_same_bytes_every_time(postgres: Any) -> None:
+    plan = postgres.Plan(b"wreath_1", (), (23,), ("value",))
+    first = postgres._build_cached_query_packet(plan, (), "fetch")
+    second = postgres._build_cached_query_packet(plan, (), "fetch")
+    assert first == second
+    assert _frontend_types(first) == [b"B", b"E", b"S"]
+
+
+def test_each_result_mode_keeps_its_own_parameterless_packet(postgres: Any) -> None:
+    """`execute` asks for text results and everything else asks for binary.
+
+    One packet remembered for a plan regardless of mode would hand an `execute`
+    the binary-result Bind -- the rows would come back in the wrong format and
+    be decoded as though they were not.
+    """
+    plan = postgres.Plan(b"wreath_1", (), (23,), ("value",))
+    fetch = postgres._build_cached_query_packet(plan, (), "fetch")
+    execute = postgres._build_cached_query_packet(plan, (), "execute")
+    assert _bind_result_format_count(fetch) == 1
+    assert _bind_result_format_count(execute) == 0
+    assert fetch != execute
+    # ... and asking again in the other order returns each one unchanged.
+    assert postgres._build_cached_query_packet(plan, (), "execute") == execute
+    assert postgres._build_cached_query_packet(plan, (), "fetch") == fetch
+
+
+def test_two_plans_do_not_share_a_parameterless_packet(postgres: Any) -> None:
+    """The statement name is inside the Bind, so it cannot be cached across plans."""
+    first = postgres.Plan(b"wreath_1", (), (23,), ("value",))
+    second = postgres.Plan(b"wreath_2", (), (23,), ("value",))
+    assert postgres._build_cached_query_packet(first, (), "fetch") != (
+        postgres._build_cached_query_packet(second, (), "fetch")
+    )
+
+
+def test_a_packet_with_arguments_still_carries_them(postgres: Any) -> None:
+    """Only the parameterless packet is invariant; a bound value is not."""
+    plan = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
+    first = postgres._build_cached_query_packet(plan, (42,), "fetch")
+    second = postgres._build_cached_query_packet(plan, (43,), "fetch")
+    assert first != second
+
+
+def test_a_parameterless_plan_and_a_bound_one_do_not_share_a_packet(
+    postgres: Any,
+) -> None:
+    """A remembered packet belongs to the plan that built it and to no other.
+
+    Both plans name the same prepared statement, so a cache keyed on the
+    statement name -- rather than on the plan -- would hand the bound call a
+    Bind carrying no parameters, and PostgreSQL would answer a different query
+    rather than refuse it.
+    """
+    parameterless = postgres.Plan(b"wreath_1", (), (23,), ("value",))
+    bound = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
+    empty = postgres._build_cached_query_packet(parameterless, (), "fetch")
+    assert postgres._build_cached_query_packet(bound, (42,), "fetch") != empty
+    assert postgres._build_cached_query_packet(parameterless, (), "fetch") == empty
+
+
+def test_both_engines_refuse_an_argument_count_the_plan_does_not_declare(
+    postgres: Any,
+) -> None:
+    """And refuse it as the same exception, which is what a caller catches.
+
+    The pure engine is the reference and raises `InterfaceError`; a native build
+    raising `ValueError` for the same mistake means `except InterfaceError`
+    around a query works on one build and not the other.
+    """
+    from wreath._pure.postgres import InterfaceError
+
+    plan = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
+    with pytest.raises(InterfaceError, match="argument count"):
+        postgres._build_cached_query_packet(plan, (), "fetch")
+
+
 def test_query_packet_rejects_unknown_result_mode(postgres: Any) -> None:
     plan = postgres.Plan(b"wreath_1", (23,), (), ())
     with pytest.raises(ValueError, match="result mode"):

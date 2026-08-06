@@ -10,6 +10,12 @@ typedef struct {
     PyObject *result_oids;
     PyObject *result_names;
     PyObject *decoder_plan;
+    /* Bind/Execute/Sync for this plan with no arguments, by result format:
+     * [0] text (`execute`), [1] binary (everything else). Built on first use.
+     * Held here rather than beside the plan so it needs no invalidation --
+     * evicting the plan frees the packets, and a re-prepared statement is a new
+     * plan with a new name. See `build_cached` in protocol.c. */
+    PyObject *packets[2];
 } WreathPgPlan;
 
 extern PyTypeObject *WreathPgPlanType;

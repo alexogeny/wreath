@@ -14,6 +14,11 @@
 
 #include <string.h>
 
+/* `wreath._pure.postgres.InterfaceError`, so a refusal here is the same
+ * exception a caller catches on a pure build. The pure engine is the reference
+ * and a native build that raised something else would make `except
+ * InterfaceError` around a query work on one build and not the other. */
+static PyObject *exc_interface = NULL;
 static PyObject *str_discarded = NULL;
 static PyObject *str_set_result = NULL;
 static PyObject *str_done = NULL;
@@ -144,7 +149,8 @@ append_bind(WreathPgBuffer *output, PyObject *statement, PyObject *args,
     }
     count = PyTuple_GET_SIZE(args);
     if (count != PyTuple_GET_SIZE(oids) || count > UINT16_MAX) {
-        PyErr_SetString(PyExc_ValueError, "query argument count does not match plan");
+        PyErr_SetString(exc_interface != NULL ? exc_interface : PyExc_ValueError,
+                        "query argument count does not match plan");
         return -1;
     }
     begin = wreath_pg_buffer_begin_message(output, 'B');
@@ -277,9 +283,35 @@ build_cached(PyObject *module, PyObject *args)
         return NULL;
     if (parse_result_mode(mode, &execute) < 0) return NULL;
     if (WreathPgPlanType != NULL && PyObject_TypeCheck(plan, WreathPgPlanType)) {
-        statement = Py_NewRef(((WreathPgPlan *)plan)->statement_name);
-        oids = Py_NewRef(((WreathPgPlan *)plan)->parameter_oids);
-    } else {
+        WreathPgPlan *cached_plan = (WreathPgPlan *)plan;
+        /* With no arguments the Bind is a function of this plan's statement
+         * name and the result format, and the plan is frozen -- so the bytes
+         * cannot change and are kept rather than rebuilt. Measured at 2,153
+         * instructions a query on the Fortunes shape, which is a parameterless
+         * statement run once per request.
+         *
+         * `execute` asks for text results and every other mode for binary, so
+         * there are exactly two, indexed by that. Nothing invalidates them:
+         * they die with the plan. */
+        int empty = PyTuple_Check(values) && PyTuple_GET_SIZE(values) == 0;
+        int slot = execute ? 0 : 1;
+        if (empty && cached_plan->packets[slot] != NULL) {
+            return Py_NewRef(cached_plan->packets[slot]);
+        }
+        statement = Py_NewRef(cached_plan->statement_name);
+        oids = Py_NewRef(cached_plan->parameter_oids);
+        if (statement == NULL || oids == NULL) goto done;
+        if (append_bind(&output, statement, values, oids, 1, !execute) < 0 ||
+            wreath_pg_buffer_append(&output, EXECUTE_MESSAGE, sizeof(EXECUTE_MESSAGE)) < 0 ||
+            wreath_pg_buffer_append(&output, SYNC_MESSAGE, sizeof(SYNC_MESSAGE)) < 0)
+            goto done;
+        result = wreath_pg_buffer_finish(&output);
+        if (result != NULL && empty) {
+            cached_plan->packets[slot] = Py_NewRef(result);
+        }
+        goto done;
+    }
+    {
         statement = PyObject_GetAttrString(plan, "statement_name");
         oids = PyObject_GetAttrString(plan, "parameter_oids");
     }
@@ -1596,6 +1628,13 @@ wreath_pg_protocol_init(PyObject *module)
     bases = PyTuple_Pack(1, base);
     Py_DECREF(base);
     if (bases == NULL) return -1;
+    {
+        PyObject *pure = PyImport_ImportModule("wreath._pure.postgres");
+        if (pure == NULL) return -1;
+        exc_interface = PyObject_GetAttrString(pure, "InterfaceError");
+        Py_DECREF(pure);
+        if (exc_interface == NULL) return -1;
+    }
     str_discarded = PyUnicode_InternFromString("discarded");
     str_set_result = PyUnicode_InternFromString("set_result");
     str_done = PyUnicode_InternFromString("done");

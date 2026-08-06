@@ -15,6 +15,8 @@ plan_traverse(WreathPgPlan *self, visitproc visit, void *arg)
     Py_VISIT(self->result_oids);
     Py_VISIT(self->result_names);
     Py_VISIT(self->decoder_plan);
+    Py_VISIT(self->packets[0]);
+    Py_VISIT(self->packets[1]);
     return 0;
 }
 
@@ -26,6 +28,8 @@ plan_clear(WreathPgPlan *self)
     Py_CLEAR(self->result_oids);
     Py_CLEAR(self->result_names);
     Py_CLEAR(self->decoder_plan);
+    Py_CLEAR(self->packets[0]);
+    Py_CLEAR(self->packets[1]);
     return 0;
 }
 
@@ -59,6 +63,8 @@ plan_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     }
     self = (WreathPgPlan *)type->tp_alloc(type, 0);
     if (self == NULL) return NULL;
+    self->packets[0] = NULL;
+    self->packets[1] = NULL;
     self->statement_name = Py_NewRef(statement_name);
     self->parameter_oids = Py_NewRef(parameter_oids);
     self->result_oids = Py_NewRef(result_oids);
