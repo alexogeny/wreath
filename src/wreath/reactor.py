@@ -763,9 +763,39 @@ class EventLoop(_LoopBase):
         name: str | None = None,
         context: contextvars.Context | None = None,
     ) -> Any:
+        # The factory first, and in *every* mode. It used to be reachable only
+        # on the `auto` path, because `inline` returned a `WreathTask` before
+        # `BaseEventLoop.create_task` could consult it -- so `set_task_factory`
+        # on an inline loop installed a hook that was never called, which reads
+        # as the factory being wrong rather than skipped. Keywords are forwarded
+        # only when given, matching what the base class would have passed on.
+        if self._task_factory is not None:
+            keywords: dict[str, Any] = {}
+            if name is not None:
+                keywords["name"] = name
+            if context is not None:
+                keywords["context"] = context
+            return self._task_factory(self, coro, **keywords)
         if self._tasks == "inline":
             return WreathTask(coro, loop=self, name=name, context=context)
-        return super().create_task(coro, name=name, context=context)
+        # `auto` is CPython's C Task, constructed here rather than through
+        # `BaseEventLoop.create_task`. That wrapper is two Python frames, a
+        # `**kwargs` dict built and unpacked, and a debug-only traceback trim,
+        # and it measured 5,005 instructions a task on top of the constructor's
+        # own 5,970 -- 2.8% of a Fortunes request, which takes one task every
+        # time it waits on the database. Everything the wrapper does that is
+        # observable is done here: the factory above, the closed check, and the
+        # traceback trim below.
+        # Before the Task exists, not from inside it. The constructor's own
+        # `call_soon` raises the same `RuntimeError` on a closed loop, but only
+        # after building a Task that then reports "Task was destroyed but it is
+        # pending!" when it is collected -- a second, confusing report of one
+        # mistake.
+        self._check_closed()
+        task = asyncio.Task(coro, loop=self, name=name, context=context)
+        if task._source_traceback:  # debug mode only; drop this frame from it
+            del task._source_traceback[-1]
+        return task
 
     # BaseEventLoop.call_soon binds its argument types with a TypeVarTuple
     # (`callback: Callable[[*Ts], object], *args: *Ts`). Reproducing that shape
