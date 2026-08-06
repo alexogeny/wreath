@@ -2376,3 +2376,354 @@ def test_any_part_of_a_client_chain_names_the_receiver() -> None:
         """,
         "outbound-url-from-request",
     )
+
+
+# --- path-from-request -------------------------------------------------------
+
+
+def test_a_path_joined_with_a_caller_supplied_name_is_flagged() -> None:
+    assert_flags(
+        """
+        EXPORT_ROOT = Path("/srv/exports")
+
+        @router.get("/download")
+        async def download(request, name: str):
+            return (EXPORT_ROOT / name).read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+def test_os_path_join_with_a_caller_supplied_name_is_flagged() -> None:
+    """The same defect, and worse in one specific way: an absolute component
+    does not extend the root, it replaces it."""
+    assert_flags(
+        """
+        EXPORT_ROOT = "/srv/exports"
+
+        @router.get("/download")
+        async def download(request, name: str):
+            return Path(os.path.join(EXPORT_ROOT, name)).read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+def test_a_root_named_without_a_root_word_is_still_a_path() -> None:
+    """`catalogue` says nothing about being a directory, so the only thing that
+    makes this a join rather than division is the `Path(...)` it came from."""
+    assert_flags(
+        """
+        catalogue = Path("/srv/exports")
+
+        @router.get("/download")
+        async def download(request, name: str):
+            return (catalogue / name).read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+def test_a_path_joined_with_a_constant_is_clean() -> None:
+    assert_clean(
+        """
+        EXPORT_ROOT = Path("/srv/exports")
+
+        @router.get("/manifest")
+        async def manifest(request):
+            return (EXPORT_ROOT / "manifest.json").read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+def test_a_normalised_key_read_through_storage_is_clean() -> None:
+    assert_clean(
+        """
+        exports = LocalStorage(Path("/srv/exports"))
+
+        @router.get("/download")
+        async def download(request, name: str):
+            return await exports.get(normalize_key(name))
+        """,
+        "path-from-request",
+    )
+
+
+def test_os_path_join_with_constant_components_is_clean() -> None:
+    """Holds the taint condition in `_path_join_call`. Without it every
+    `os.path.join` in the tree is a traversal."""
+    assert_clean(
+        """
+        EXPORT_ROOT = "/srv/exports"
+
+        @router.get("/manifest")
+        async def manifest(request):
+            return Path(os.path.join(EXPORT_ROOT, "manifest.json")).read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+def test_ordinary_division_by_a_caller_supplied_number_is_clean() -> None:
+    """Holds the `_is_pathlike` half of the guard. `/` is division far more
+    often than it is a path join, and the left operand is what says which."""
+    assert_clean(
+        """
+        @router.get("/rate")
+        async def rate(request, count: int):
+            return {"per": total / count}
+        """,
+        "path-from-request",
+    )
+
+
+def test_an_operator_that_is_not_a_join_is_clean() -> None:
+    """Holds the `ast.Div` half. `base_path_total` is path-shaped by name, and
+    subtraction is still arithmetic."""
+    assert_clean(
+        """
+        @router.get("/offset")
+        async def offset(request, index: int):
+            return {"at": base_path_total - index}
+        """,
+        "path-from-request",
+    )
+
+
+def test_a_name_assigned_from_something_other_than_path_is_not_a_path() -> None:
+    """Holds the `Path`/`PurePath` clause on the `path_names` collection.
+    Without it every name assigned from any call is a path."""
+    assert_clean(
+        """
+        catalogue = build_index("/srv/exports")
+
+        @router.get("/rate")
+        async def rate(request, count: int):
+            return {"per": catalogue / count}
+        """,
+        "path-from-request",
+    )
+
+
+def test_a_tuple_assignment_from_path_does_not_break_the_scan() -> None:
+    """Holds the `isinstance(target, ast.Name)` filter on the same collection.
+    Without it a tuple target raises while the module is being read, and the
+    scan reports nothing at all for the file -- which reads exactly like a clean
+    file."""
+    assert_flags(
+        """
+        catalogue = Path("/srv/exports")
+        head, tail = Path("/srv/exports")
+
+        @router.get("/download")
+        async def download(request, name: str):
+            return (catalogue / name).read_bytes()
+        """,
+        "path-from-request",
+    )
+
+
+# --- timing-unsafe-compare, the hand-rolled loop -----------------------------
+
+
+def test_an_elementwise_comparison_returning_early_is_flagged() -> None:
+    """The shape `_timing` cannot see: the operands are `a` and `b`, so no name
+    in the comparison says secret, and the loop is the whole defect."""
+    assert_flags(
+        """
+        def verify(given: str, expected: str) -> bool:
+            for a, b in zip(given, expected, strict=True):
+                if a != b:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_compare_digest_instead_of_a_loop_is_clean() -> None:
+    assert_clean(
+        """
+        def verify(given: str, expected: str) -> bool:
+            return hmac.compare_digest(given, expected)
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_loop_that_is_not_over_a_pair_is_clean() -> None:
+    """Holds the `zip` clause, and holds it with two bound names so that the
+    membership test below cannot be what makes this quiet. `enumerate` pairs an
+    index with a value; stopping early on that leaks a position, not a secret."""
+    assert_clean(
+        """
+        def first_mismatch(rows) -> bool:
+            for index, row in enumerate(rows):
+                if index != row:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_loop_whose_iterable_is_not_a_call_is_clean() -> None:
+    """Holds the `isinstance(node.iter, ast.Call)` clause -- without it the
+    guard reads `.func` off a plain name and raises."""
+    assert_clean(
+        """
+        def check(pairs) -> bool:
+            for a, b in pairs:
+                if a != b:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_with_one_bound_name_is_clean() -> None:
+    """One name cannot be an elementwise comparison of two sequences, and the
+    membership test is what says so -- `sentinel` is not one of the loop's
+    elements."""
+    assert_clean(
+        """
+        def check(rows) -> bool:
+            for row in zip(rows):
+                if row != sentinel:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_whose_body_is_not_a_test_is_clean() -> None:
+    """Holds the `isinstance(statement, ast.If)` clause."""
+    assert_clean(
+        """
+        def merge(left, right) -> list:
+            out = []
+            for a, b in zip(left, right, strict=True):
+                out.append(a + b)
+            return out
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_testing_a_flag_is_clean() -> None:
+    """Holds the `isinstance(statement.test, ast.Compare)` clause: the branch is
+    a truth test, not a comparison of the two elements."""
+    assert_clean(
+        """
+        def check(left, right) -> bool:
+            for a, b in zip(left, right, strict=True):
+                if aborted:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_comparing_something_else_is_clean() -> None:
+    """Holds `operands <= elements`. The loop is over the pair; the branch is
+    about a budget, and stopping early on it leaks nothing about either
+    sequence."""
+    assert_clean(
+        """
+        def check(left, right) -> bool:
+            for a, b in zip(left, right, strict=True):
+                if seen != limit:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_ordering_its_elements_is_clean() -> None:
+    """Holds the `Eq`/`NotEq` clause. `<` is a sort, not an equality check."""
+    assert_clean(
+        """
+        def ordered(left, right) -> bool:
+            for a, b in zip(left, right, strict=True):
+                if a < b:
+                    return False
+            return True
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+def test_a_zip_loop_that_counts_differences_is_clean() -> None:
+    """Holds the `ast.Return` clause, which is the whole defect: a loop that
+    visits every element takes the same time whatever the inputs are."""
+    assert_clean(
+        """
+        def differences(left, right) -> int:
+            count = 0
+            for a, b in zip(left, right, strict=True):
+                if a != b:
+                    count += 1
+            return count
+        """,
+        "timing-unsafe-compare",
+    )
+
+
+# --- weak-randomness, the encoded draw ---------------------------------------
+
+
+def test_a_random_draw_with_an_encoding_on_the_end_is_flagged() -> None:
+    """`.hex()` does not make a Mersenne Twister unpredictable, and the draw is
+    one call further in than the rule's first look."""
+    assert_flags(
+        """
+        def mint() -> str:
+            api_secret = random.randbytes(16).hex()
+            return api_secret
+        """,
+        "weak-randomness",
+    )
+
+
+def test_an_encoded_value_from_elsewhere_is_clean() -> None:
+    """Holds the clause that keeps the walk to `random`. Without it any chained
+    call assigned to a credential name is a weak draw."""
+    assert_clean(
+        """
+        def mint() -> str:
+            api_secret = derive(material).hex()
+            return api_secret
+        """,
+        "weak-randomness",
+    )
+
+
+# --- hardcoded-secret, the development key -----------------------------------
+
+
+def test_a_development_key_with_no_digits_is_flagged() -> None:
+    """The shape a key actually ships in. It carries no digits, so the
+    key-alphabet test reads it as an identifier; it says what it is in words,
+    which is what makes it decidable."""
+    assert_flags(
+        """
+        SESSION_SECRET = "northwind-dev-secret"
+        """,
+        "hardcoded-secret",
+    )
+
+
+def test_the_name_of_the_variable_a_secret_is_read_from_is_clean() -> None:
+    """`SESSION_SECRET_VARIABLE = "APP_SESSION_SECRET"` is the mechanism for
+    keeping a key out of the source, not a key in it."""
+    assert_clean(
+        """
+        SESSION_SECRET_VARIABLE = "APP_SESSION_SECRET"
+        """,
+        "hardcoded-secret",
+    )

@@ -143,6 +143,12 @@ CODE_RULES: tuple[CodeRule, ...] = (
         "an archive extracted without member, size, ratio or symlink limits",
     ),
     CodeRule(
+        "path-from-request", Severity.ERROR, "CWE-22",
+        "normalise the name with wreath.objects.normalize_key and read it through a "
+        "wreath.storage backend, which opens beneath a root descriptor",
+        "a filesystem path joined from a value the caller chose",
+    ),
+    CodeRule(
         "mass-assignment", Severity.ERROR, "CWE-915",
         "declare the body as a dataclass or ORM model; Wreath rejects unknown fields",
         "a request body walked onto an object with setattr",
@@ -278,8 +284,12 @@ _COMPARISON_ROLES = (
 #: Suffixes that make a name an identifier or a tag rather than a secret.
 #: `credential_id` is a primary key; `_TOKEN_VERSION` is a format marker;
 #: `token_uid` is what a resource is called, not what authorises reaching it.
+#: `SESSION_SECRET_VARIABLE = "APP_SESSION_SECRET"` is the *name of the
+#: environment variable* the secret is read from, which is the opposite of a
+#: secret in the source -- it is the mechanism for keeping one out of it.
 _NOT_SECRET_SUFFIXES = (
     "_id", "_ids", "_name", "_version", "_type", "_kind", "_key_id", "_uid", "_uuid",
+    "_variable", "_var", "_env", "_envvar", "_setting", "_field", "_header", "_param",
 )
 #: Deliberately excludes a bare "key" (`for key, value in ...` is everywhere),
 #: and "auth"/"sig", which matched `oauth2` helpers and anything with "signal"
@@ -349,6 +359,14 @@ _INJECTED_ANNOTATIONS = ("Session", "FromORM", "Depends", "Request", "AppScope")
 #: `results.info` is not mistaken for a logger.
 _LOG_LEVELS = frozenset(
     {"debug", "info", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
+)
+
+#: Names that hold a directory the application reads or writes under. The left
+#: half of `path-from-request`: `EXPORT_ROOT / name` is a join, `total / count`
+#: is division, and only the name says which.
+_PATH_ROOT_WORDS = (
+    "root", "dir", "directory", "path", "base", "folder", "store", "home",
+    "media", "uploads", "exports", "storage",
 )
 
 #: The provenance half of `timing-unsafe-compare`. Two secret-named operands
@@ -545,9 +563,44 @@ def _looks_like_a_key(value: str | bytes) -> bool:
     text = value.decode("latin-1") if isinstance(value, bytes) else value
     if len(text) < _DECLARED_SECRET_LENGTH or not set(text) <= _KEY_ALPHABET:
         return False
+    if _looks_like_a_development_key(text):
+        return True
     return any(character.isdigit() for character in text) and any(
         character.isalpha() for character in text
     )
+
+
+#: Words that make a readable literal a *development* key rather than an
+#: identifier. Closing the gap the docstring above declares: a passphrase with
+#: no digit in it, which the alphabet test cannot see.
+_DEVELOPMENT_KEY_WORDS = (
+    "secret", "password", "passphrase", "changeme", "change-me", "change_me",
+    "insecure", "placeholder", "dev-", "-dev", "_dev", "dev_", "test-", "-test",
+    "local-", "-local", "example", "sample", "dummy", "notsecure", "topsecret",
+    "hunter2", "letmein", "unsafe", "donotuse", "do-not-use",
+)
+
+
+def _looks_like_a_development_key(text: str) -> bool:
+    """Whether a readable literal is a key somebody wrote to get going.
+
+    The alphabet test above separates keys from identifiers by looking for the
+    shape of generated material -- hex, base64, letters *and* digits. It has one
+    declared blind spot, and the blind spot is the single most common way a key
+    actually reaches production: somebody types `"northwind-dev-secret"` to make
+    the application start on their laptop, and it ships, because there is
+    nothing about it for a review to catch. It has no digits, so it is not
+    generated material; it is under a credential name, so it is not an
+    identifier either.
+
+    So: a credential-named literal that says in words what it is gets flagged on
+    the strength of those words. The vocabulary is deliberately the vocabulary
+    of *stand-ins* -- a real key does not contain "changeme" -- which is what
+    keeps this off the URNs, state keys and algorithm names the alphabet test
+    was written to exclude.
+    """
+    lowered = text.lower()
+    return any(word in lowered for word in _DEVELOPMENT_KEY_WORDS)
 
 
 def _is_security_flag(name: str) -> bool:
@@ -852,6 +905,18 @@ class _Scanner(ast.NodeVisitor):
         #: shell template and its schema name both live here, and neither is
         #: something a caller chose.
         self.module_constants: set[str] = set()
+        #: Names holding a `Path`, so `x / y` can be read as a join rather than
+        #: as division. Collected from the whole module, because the root is
+        #: almost always a module constant and the join is in a handler.
+        self.path_names: set[str] = {
+            target.id
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and _name_of(node.value.func) in ("Path", "PurePath")
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
 
     # -- emit ----------------------------------------------------------------
 
@@ -1031,6 +1096,12 @@ class _Scanner(ast.NodeVisitor):
             dotted = _dotted(node.func)
             if dotted.startswith("random.") or dotted == "random":
                 return True
+            # `random.randbytes(16).hex()` needs no arm here, though it looks as
+            # though it should: `_dotted` gives up on a chained call and returns
+            # "", but `_draws_on_random` -- which is what decides the finding --
+            # walks every call in the expression and sees `random.randbytes`
+            # one level in. An arm was written here, and a mutant removing it
+            # changed nothing, which is how the redundancy was found.
             root = dotted.split(".")[0] if dotted else ""
             return bool(root) and root in self.random_bound
         return False
@@ -1064,7 +1135,28 @@ class _Scanner(ast.NodeVisitor):
         self._random_use(node)
         self._secret_in_log(node)
         self._outbound_url(node)
+        self._path_join_call(node)
         self.generic_visit(node)
+
+    def _path_join_call(self, node: ast.Call) -> None:
+        """`os.path.join(root, name)` -- the same defect as `root / name`.
+
+        Worse in one specific way, and it is the way that catches people: an
+        absolute component does not append to the root, it *replaces* it, and
+        `os.path.join("/srv/exports", "/etc/passwd")` is `/etc/passwd` with no
+        error and no `..` anywhere in the input.
+        """
+        if _dotted(node.func) not in ("os.path.join", "path.join", "posixpath.join"):
+            return
+        for argument in node.args[1:]:
+            referenced = {n.id for n in ast.walk(argument) if isinstance(n, ast.Name)}
+            if referenced & (self.caller_controlled | self.request_bound):
+                self._flag(
+                    "path-from-request", node,
+                    "a path is joined with a value the caller chose; an absolute "
+                    "component replaces the root rather than extending it",
+                )
+                return
 
     def _secret_in_log(self, node: ast.Call) -> None:
         """A credential, or a caller's own body, formatted into a log record.
@@ -1636,7 +1728,83 @@ class _Scanner(ast.NodeVisitor):
     def visit_For(self, node: ast.For) -> None:
         self._mass_assignment(node)
         self._archive_member_path(node)
+        self._elementwise_compare(node)
         self.generic_visit(node)
+
+    def _elementwise_compare(self, node: ast.For) -> None:
+        """A comparison hand-rolled as a loop that stops at the first difference.
+
+        `_timing` decides an `ast.Compare` between two named operands, and this
+        shape has neither: the operands are `a` and `b`, and the secret is the
+        sequence being iterated. It is the same defect written out longhand, and
+        it is the spelling that survives review -- a loop looks like work, where
+        `==` looks like a comparison somebody might question.
+
+        Matched on structure alone: iterate a pair, compare the two elements,
+        leave the function on the first mismatch. Nothing correct is written
+        that way, because the correct version does not return early.
+        """
+        if not isinstance(node.iter, ast.Call) or _name_of(node.iter.func) != "zip":
+            return
+        # No arity check on `elements`: `operands <= elements` below is stricter
+        # than one. A single-name loop can only satisfy it by comparing an
+        # element with itself, which is not a shape anybody writes -- a mutant
+        # removing the arity check went unnoticed, and that is why it is gone.
+        elements = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        for statement in node.body:
+            if not isinstance(statement, ast.If) or not isinstance(statement.test, ast.Compare):
+                continue
+            test = statement.test
+            operands = {_name_of(operand) for operand in (test.left, *test.comparators)}
+            if not operands <= elements or not any(
+                isinstance(op, (ast.Eq, ast.NotEq)) for op in test.ops
+            ):
+                continue
+            if any(isinstance(inner, ast.Return) for inner in statement.body):
+                self._flag(
+                    "timing-unsafe-compare", test,
+                    "this loop returns at the first difference, so how long it "
+                    "runs says how much of the secret was right",
+                )
+                return
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        self._path_from_request(node)
+        self.generic_visit(node)
+
+    def _path_from_request(self, node: ast.BinOp) -> None:
+        """`root / name`, where the caller chose `name`.
+
+        `Path.__truediv__` is not containment and does not pretend to be: an
+        absolute right-hand side discards the root entirely, and `..` walks out
+        of it. The line reads as though the root bounds the result, which is
+        exactly why it survives -- the containment is *implied by the shape* and
+        implemented nowhere.
+
+        Keyed on the taint sets rather than on the name, so `root / "manifest"`
+        and `root / settings.EXPORT_NAME` stay quiet. Only a component the
+        caller supplied is a traversal.
+        """
+        if not isinstance(node.op, ast.Div) or not self._is_pathlike(node.left):
+            return
+        referenced = {n.id for n in ast.walk(node.right) if isinstance(n, ast.Name)}
+        if not (referenced & (self.caller_controlled | self.request_bound)):
+            return
+        self._flag(
+            "path-from-request", node,
+            "a path is joined with a value the caller chose, which `/` does not contain",
+        )
+
+    def _is_pathlike(self, node: ast.AST) -> bool:
+        """Whether this expression is a path, so `/` means a join rather than division."""
+        if isinstance(node, ast.Call) and _name_of(node.func) in ("Path", "PurePath"):
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return self._is_pathlike(node.left)
+        name = _name_of(node)
+        return bool(name) and (
+            _mentions(name, _PATH_ROOT_WORDS) or name in self.path_names
+        )
 
     def _mass_assignment(self, node: ast.For) -> None:
         # A bound body model is the same value as `await request.json()` with a
