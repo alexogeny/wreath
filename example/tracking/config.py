@@ -41,6 +41,7 @@ SCHEMA = os.environ.get("TRACKING_SCHEMA", DEFAULT_SCHEMA)
 
 #: A development key, published in the source, so ``wreath serve`` works before
 #: anyone has read this file. Using it in a deployment is caught below.
+# wreath-audit: allow hardcoded-secret -- the documented fallback above
 DEVELOPMENT_SESSION_SECRET = "tracking-development-session-secret-not-for-deployment"
 
 #: The conservancy's own calendar. A constant and not configuration: this is one

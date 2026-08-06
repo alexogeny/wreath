@@ -85,6 +85,7 @@ MIN_SECRET_LENGTH = 32
 #: A public constant is not a weaker secret than a shared default; it is the
 #: same thing with the pretence removed. Anything real sets the variable, and
 #: `Settings.session_secret` says so on the way past.
+# wreath-audit: allow hardcoded-secret -- the documented fallback above
 DEVELOPMENT_SECRET = "camera-trap-development-secret-not-for-real-deployments"
 
 #: The presign secret's development fallback. Same reasoning as
@@ -95,6 +96,7 @@ DEVELOPMENT_SECRET = "camera-trap-development-secret-not-for-real-deployments"
 #: One key for both means a leaked presign secret forges sessions, and a rotated
 #: session secret invalidates every URL a field team is holding — two failures
 #: that have nothing to do with each other, welded together to save a variable.
+# wreath-audit: allow hardcoded-secret -- the documented fallback above
 DEVELOPMENT_MEDIA_SECRET = "camera-trap-development-presign-secret-not-for-real-deployments"
 
 #: Where `LocalObjectStore` keeps its bytes when nothing says otherwise.
