@@ -608,6 +608,7 @@ class Wreath:
         "_native_preflight",
         "_auth_handlers",
         "_handler_requirements",
+        "_hardening",
         "_http_clients",
         "_job_runners",
         "_match",
@@ -653,7 +654,18 @@ class Wreath:
         background_timeout: float | None = 30.0,
         middleware: str = "python",
         signatures: Any = None,
+        hardening: str = "warn",
     ) -> None:
+        #: What a `wreath.hardening` finding does at startup: `warn` logs them
+        #: and starts, `block` raises and does not, `off` scans nothing.
+        #: Resolved here rather than at startup so a typo is a construction
+        #: error, in front of whoever wrote it, rather than a lifespan failure
+        #: at deploy time. `WREATH_HARDENING` overrides what is written here,
+        #: because turning this to `block` -- or off -- has to be possible
+        #: without a code change.
+        from .hardening import resolve_policy as _resolve_hardening
+
+        self._hardening = _resolve_hardening(hardening)
         self._routing = routing
         #: Where the global middleware tape runs. See `_middleware_tape`.
         #: `native` is opt-in because it changes what the Python tape sees:
@@ -3866,6 +3878,15 @@ class Wreath:
                 started_databases: list[tuple[str, Any]] = []
                 started_clients: list[tuple[str, Any]] = []
                 try:
+                    # Before any I/O. A refusal here has nothing to unwind, and
+                    # an application that is about to be refused should not have
+                    # opened a connection pool to find that out. Under `warn`
+                    # the findings are logged and startup continues; under
+                    # `block` this raises and the server never binds.
+                    if self._hardening != "off":
+                        from .hardening import check_application
+
+                        check_application(self, self._hardening)
                     for name, database in self._databases.items():
                         await database.start()
                         started_databases.append((name, database))
