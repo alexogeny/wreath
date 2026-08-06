@@ -588,16 +588,19 @@
         "docs/guides/orm.md",
         "docs/guides/jsonb-arrays.md",
         "docs/guides/vector-search.md",
-        "docs/guides/full-text-search.md"
+        "docs/guides/full-text-search.md",
+        "docs/guides/safe-sql.md"
       ],
       "reference": [
-        "docs/reference/orm.md"
+        "docs/reference/orm.md",
+        "docs/reference/sql.md"
       ],
       "sources": [
         "src/wreath/orm/",
         "src/wreath/_native/postgres/model.c",
         "src/wreath/_native/postgres/hydrate.c",
-        "src/wreath/_native/orm_shape.c"
+        "src/wreath/_native/orm_shape.c",
+        "src/wreath/sql.py"
       ],
       "tests": [
         "tests/orm/",
@@ -608,7 +611,9 @@
         "tests/orm/test_sparsevec_live.py",
         "tests/orm/test_bit_codec.py",
         "tests/orm/test_bit_live.py",
-        "tests/orm/test_binary_quantization_queries.py"
+        "tests/orm/test_binary_quantization_queries.py",
+        "tests/test_sql_templates.py",
+        "tests/test_sql_raw_templates.py"
       ]
     },
     {
@@ -900,20 +905,26 @@
     {
       "name": "audit",
       "capability": "An offline auditor in three tiers: accessibility (WCAG 2.1 A/AA) and performance over the HTML your app returns, HTTP compliance and secure headers over a live response, and a source-level security ruleset over the application's own modules",
-      "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion, performance budget or CWE, its severity, and whether --fix can remediate it. Reached through `wreath audit` -- `static`, `runtime`, `code` -- not a public module. **The source tier (`rules/code.py`) is precision-first and its quiet half is the half that has to be proved.** Taint starts at the route boundary, because a handler is identifiable from its decorator alone and its parameters are therefore caller-controlled without an application object; that is what separates a module constant interpolated into SQL (a schema-qualified statement) from a handler parameter (an injection), and the first draft that conflated them reported 103 findings against src/wreath. The same move generalises: a rule decides on *provenance* rather than on shape, so `\"admin\" in roles` over a collection stays quiet while the same line against a value the file declares `str` does not, and `error-detail-leaked` fires only on a broad `except` because a narrow one's message is written by whoever named the type. A finding the project has already declared is not reported again -- an existing ruff noqa for the equivalent flake8-bandit code is honoured, and `# wreath-audit: allow <rule> -- <reason>` covers the rest, with the reason required. Two gates hold this, and an assert_clean alone holds neither: `wreath audit code src/wreath example` must stay at zero, and `wreath mutant --path src/wreath/_audit/rules/code.py --changed <ref>` must kill the precision guards, because a surviving mutant there means the rule can be widened back to noise with nothing going red. Two pre-existing findings stand deliberately unsuppressed: `unsafe-xml-parser` on objects.py (S3 responses parsed with stdlib ElementTree rather than wreath.xml, which the rule's own declared test contract flags) and `hardcoded-secret` on _devtools/complexity_probe.py (a documented example credential in a benchmark fixture).",
+      "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion, performance budget or CWE, its severity, and whether --fix can remediate it. Reached through `wreath audit` -- `static`, `runtime`, `code` -- not a public module. **The source tier (`rules/code.py`) is precision-first and its quiet half is the half that has to be proved.** Taint starts at the route boundary, because a handler is identifiable from its decorator alone and its parameters are therefore caller-controlled without an application object; that is what separates a module constant interpolated into SQL (a schema-qualified statement) from a handler parameter (an injection), and the first draft that conflated them reported 103 findings against src/wreath. The same move generalises: a rule decides on *provenance* rather than on shape, so `\"admin\" in roles` over a collection stays quiet while the same line against a value the file declares `str` does not, and `error-detail-leaked` fires only on a broad `except` because a narrow one's message is written by whoever named the type. A finding the project has already declared is not reported again -- an existing ruff noqa for the equivalent flake8-bandit code is honoured, and `# wreath-audit: allow <rule> -- <reason>` covers the rest, with the reason required. Two gates hold this, and an assert_clean alone holds neither: `wreath audit code src/wreath example` must stay at zero, and `wreath mutant --path src/wreath/_audit/rules/code.py --changed <ref>` must kill the precision guards, because a surviving mutant there means the rule can be widened back to noise with nothing going red. Two pre-existing findings stand deliberately unsuppressed: `unsafe-xml-parser` on objects.py (S3 responses parsed with stdlib ElementTree rather than wreath.xml, which the rule's own declared test contract flags) and `hardcoded-secret` on _devtools/complexity_probe.py (a documented example credential in a benchmark fixture). **The ruleset now also runs at application startup**, through `wreath.hardening`: `Wreath(hardening=...)` resolves `warn` (the default, log and start), `block` (raise and do not start) or `off`, with `WREATH_HARDENING` overriding it so an operator can turn it up without a deploy. That module owns the policy and the scan scope and no rules -- a second copy of a rule is how the gate and the runtime come to disagree. Scope is derived from where handlers were defined: a package root for a packaged handler, the module itself for a top-level one, never wreath's own tree or site-packages. Only ERROR findings block; a WARN rule is one whose correct form is a judgement call, and refusing to boot over one is how `block` stops being a setting anybody turns on. The configuration tier (`audit_configuration`) reads the live object graph instead of the source, which is the only way to see a DestinationPolicy assembled from environment values. `tests/hardening_corpus/` is the whole-handler corpus that found four gaps the per-rule snippets did not: a development key with no digits, a comparison hand-rolled as a loop, a path joined from a caller's text, and a draw from `random` with an encoding on the end.",
       "guides": [
-        "docs/guides/auditing.md"
+        "docs/guides/auditing.md",
+        "docs/guides/hardening.md"
       ],
       "reference": [
-        "docs/reference/audit.md"
+        "docs/reference/audit.md",
+        "docs/reference/hardening.md"
       ],
       "sources": [
         "src/wreath/_audit/",
         "src/wreath/_audit/rules/",
-        "src/wreath/_audit/scan.py"
+        "src/wreath/_audit/scan.py",
+        "src/wreath/hardening.py"
       ],
       "tests": [
-        "tests/audit/"
+        "tests/audit/",
+        "tests/test_hardening_boot.py",
+        "tests/test_hardening_corpus.py",
+        "tests/hardening_corpus/"
       ]
     },
     {
