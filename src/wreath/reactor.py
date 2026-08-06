@@ -538,7 +538,11 @@ if TYPE_CHECKING:
         _selector: selectors.BaseSelector
         _ssock: socket.socket | None
         _write_to_self: Callable[[], None]
+        # `create_task` consults the factory itself and checks the closed flag
+        # itself, because it does not go through `BaseEventLoop.create_task`.
+        _task_factory: Callable[..., Any] | None
 
+        def _check_closed(self) -> None: ...
         def _read_from_self(self) -> None: ...
         def _run_once(self) -> None: ...
         def _process_events(self, event_list: Any) -> None: ...
@@ -581,8 +585,21 @@ if TYPE_CHECKING:
             **kwargs: Any,
         ) -> asyncio.Transport: ...
 
+    class _CPythonTask(asyncio.Task[Any]):
+        """CPython's `Task`, with the one private member `create_task` reads.
+
+        Same bargain as `_LoopBase` above: typeshed declares no private
+        members, and `_source_traceback` is one this module uses on purpose.
+        It is present on every Task -- `None` unless the loop is in debug mode
+        -- because `Future` carries it as a class attribute. At runtime this
+        name *is* `asyncio.Task`.
+        """
+
+        _source_traceback: list[Any] | None
+
 else:
     _LoopBase = asyncio.SelectorEventLoop
+    _CPythonTask = asyncio.Task
 
 
 class EventLoop(_LoopBase):
@@ -792,7 +809,7 @@ class EventLoop(_LoopBase):
         # pending!" when it is collected -- a second, confusing report of one
         # mistake.
         self._check_closed()
-        task = asyncio.Task(coro, loop=self, name=name, context=context)
+        task = _CPythonTask(coro, loop=self, name=name, context=context)
         if task._source_traceback:  # debug mode only; drop this frame from it
             del task._source_traceback[-1]
         return task

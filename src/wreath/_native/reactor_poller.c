@@ -1126,6 +1126,40 @@ rp_poll_token(uint32_t generation, int fd)
            ((uint64_t)generation << 32) | (uint32_t)fd;
 }
 
+/* May this registration be armed multishot -- that is, does every callback it
+ * is about to carry drain the descriptor before returning?
+ *
+ * A multishot poll reports once per readiness *edge*. `add_reader`'s contract
+ * is the opposite: level-triggered, the callback invoked again for as long as
+ * the fd stays readable. Stock asyncio readers are written to that contract and
+ * consume exactly one message per call -- `_SelectorDatagramTransport`
+ * `recvfrom`s once -- so a burst arriving in a single wakeup delivers its head
+ * and strands the tail in the socket queue with no edge left to fetch it. That
+ * is not a slow path; the data is never read at all until some later packet
+ * happens to re-arm the edge, and then it arrives one behind forever.
+ *
+ * `st_read_ready` is the exception this asks about: it loops to EAGAIN in C, so
+ * an edge is all it needs and it keeps the cheaper registration. Everything
+ * else -- any Python callback, ours or a third party's -- gets a one-shot poll
+ * that the completion path re-arms, which is level-triggered by construction:
+ * arming a poll on a descriptor that is still readable completes immediately.
+ *
+ * Found by HTTP/3, which is the only protocol here that answers one datagram
+ * per callback through asyncio's transport rather than through ours. It failed
+ * on the metal tier and nowhere else, and it failed silently: the server was
+ * up, replying to packet one, and invisible from packet two on. */
+static int
+rp_entry_drains(const FdEntry *entry, uint32_t want)
+{
+    if ((want & POLLIN) && entry->reader != NULL && !entry->native_reader) {
+        return 0;
+    }
+    if ((want & POLLOUT) && entry->writer != NULL && !entry->native_writer) {
+        return 0;
+    }
+    return 1;
+}
+
 static int
 rp_apply(ReactorPoller *p, int fd, uint32_t want, int force)
 {
@@ -1146,11 +1180,11 @@ rp_apply(ReactorPoller *p, int fd, uint32_t want, int force)
         generation = 1;
         p->generation_wraps++;
     }
+    int multishot = p->metal.poll_multishot_enabled && rp_entry_drains(entry, want);
     if (want != 0) {
         uint64_t token = rp_poll_token(generation, fd);
         if (metal_uring_queue_poll(
-                &p->metal.uring, fd, want, token,
-                p->metal.poll_multishot_enabled) < 0) {
+                &p->metal.uring, fd, want, token, multishot) < 0) {
             PyErr_SetFromErrno(PyExc_OSError);
             return -1;
         }
@@ -1158,7 +1192,7 @@ rp_apply(ReactorPoller *p, int fd, uint32_t want, int force)
     }
     entry->generation = generation;
     entry->mask = want;
-    entry->poll_multishot = want != 0 && p->metal.poll_multishot_enabled;
+    entry->poll_multishot = want != 0 && multishot;
     return 0;
 }
 

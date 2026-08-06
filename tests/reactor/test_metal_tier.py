@@ -1654,6 +1654,60 @@ def test_metal_serves_http3_over_quic():
         os.unlink(kp)
 
 
+def test_a_burst_of_datagrams_reaches_a_reader_that_takes_one_at_a_time() -> None:
+    """`add_reader` is level-triggered, and every asyncio protocol depends on it.
+
+    A stock reader consumes one message per call and trusts the loop to call it
+    again while the fd stays readable -- `_SelectorDatagramTransport._read_ready`
+    does exactly one `recvfrom`. An io_uring *multishot* poll reports once per
+    readiness *edge* instead, so a burst arriving in a single wakeup delivers
+    its first datagram and strands the rest in the socket queue until some
+    later packet happens to produce another edge.
+
+    Six at once rather than one, because one datagram cannot tell the two
+    contracts apart: both deliver it. The gap only opens when a second arrives
+    before the callback has run.
+
+    This is how HTTP/3 died on this tier while every other protocol looked
+    fine. The native transport drains to EAGAIN in C, so it never noticed;
+    QUIC, which answers one datagram per callback through asyncio's datagram
+    transport, saw packet one and never saw packets two through six. The
+    handshake stalled and curl timed out against a server that was up and
+    replying -- silent, and only on the tier that serves production.
+    """
+    loop = _metal_loop()
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server.setblocking(False)
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    received: list[bytes] = []
+
+    def read_one() -> None:  # exactly one datagram per callback, as asyncio does
+        received.append(server.recvfrom(2048)[0])
+
+    try:
+        loop.add_reader(server.fileno(), read_one)
+
+        async def burst() -> None:
+            for index in range(6):
+                client.sendto(b"packet-%d" % index, server.getsockname())
+            for _ in range(50):  # generous: the whole burst is already queued
+                if len(received) == 6:
+                    return
+                await asyncio.sleep(0.01)
+
+        loop.run_until_complete(burst())
+    finally:
+        loop.close()
+        server.close()
+        client.close()
+
+    assert received == [b"packet-%d" % index for index in range(6)], (
+        f"{len(received)} of 6 datagrams delivered: a reader that takes one "
+        f"message per call was not called again while the socket stayed readable"
+    )
+
+
 def test_metal_call_soon_fast_path_semantics() -> None:
     """The rebound C call_soon: FIFO order (threadsafe Handles interleaved),
     cancellation, context propagation, exception routing, closed-loop error."""
