@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from string.templatelib import Template
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
@@ -27,6 +28,7 @@ from .._nplusone import query_ledger as _query_ledger
 from .._orm_events import has_subscribers as _has_write_subscribers
 from .._orm_events import publish_write as _publish_write
 from ..postgres import _WORKLOADS, Workload
+from ..sql import Statement
 from .compiler import (
     MAX_BIND_PARAMETERS,
     MAX_SELECTIN_KEYS,
@@ -827,9 +829,37 @@ class Session:
         connection = await self._acquire()
         return await connection.fetch(sql, *args)
 
-    def raw(self, sql: str, *args: Any) -> RawQuery:
-        """Run SQL exactly as written on this session's connection."""
+    def raw(self, sql: str | Template, *args: Any) -> RawQuery:
+        """Run SQL exactly as written on this session's connection.
+
+        A **t-string** is the spelling to reach for when any part of the
+        statement is a value. `wreath.sql` compiles it to `$1`-style
+        placeholders and binds what was interpolated, so the value cannot
+        become syntax:
+
+        ```python
+        await db.raw(t"SELECT id FROM shipments WHERE reference = {ref}").fetch()
+        ```
+
+        A plain `str` is still accepted, and still means what it always meant:
+        SQL wreath does not parse, rewrite, or cache, with `$1` placeholders
+        bound from `args`. That is the right tool for a statement written in
+        full at the call site. It is the wrong one for a statement assembled
+        from a caller's text, which is what `wreath.hardening`'s SQL101 exists
+        to say -- one character at the quote turns the wrong one into the right
+        one.
+        """
         self._check_usable()
+        if isinstance(sql, Template):
+            if args:
+                raise SessionError(
+                    "raw() takes either a t-string or SQL text with arguments, "
+                    "not both: a t-string already carries its values"
+                )
+            statement = Statement(sql)
+            if not statement.text:
+                raise SessionError("raw() requires non-empty SQL")
+            return RawQuery(self, statement.text, statement.args)
         if not isinstance(sql, str) or not sql:
             raise SessionError("raw() requires non-empty SQL")
         return RawQuery(self, sql, args)
