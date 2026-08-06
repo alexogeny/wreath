@@ -370,25 +370,44 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   worker curve lives in `benchmarks/results/test_runner_2026-08-03.json`. A first run
   after source changes also builds the mutation candidate catalog; its planning
   and compilation overlap the ordinary workers without collecting the whole
-  suite again. One hundred ninety-two sampled controls are watched by default. After the
-  slow-tail cleanup, three warm 12-control runs averaged 25.899s ± 0.220s and
-  produced nine gold files with one undecided control. Three warm 48-control
+  suite again. One hundred ninety-two sampled controls are watched by default.
+
+  **The curve below does not reproduce, and the sample count is very nearly
+  free.** It reads as though controls dominate the mutation phase; measured as an
+  interleaved A/B against a pristine checkout of this tree — no DSN, three warm
+  rounds per arm, mutation time taken as the same arm's as-typed run minus its
+  `--mutant off` run — 192 controls cost **62.66s** of mutation against 48
+  controls at **59.02s**. Three quarters of the controls for 3.6 seconds. The
+  phase is roughly 55s of fixed cost — catalog build, baseline seal, the live
+  probe window — plus about 0.02s per control.
+
+  That was found by cutting the default to 48 on the strength of the old curve
+  and then failing to measure the predicted saving, so it is written down here
+  rather than left for the next person to rediscover: **to make this phase
+  cheaper, attack the fixed cost, not the sample.** Cutting the sample trades
+  123-124 gold files for 34-40 and buys noise. The historical numbers follow,
+  and should be treated as describing a machine and a tree that no longer exist.
+
+  After the slow-tail cleanup: three warm
+  12-control runs averaged 25.899s ± 0.220s and produced nine gold files with one
+  undecided control. Three warm 48-control
   runs averaged 33.155s ± 1.704s, produced 34 gold files, and decided all 48
   controls. Three warm 96-control requests averaged 45.401s ± 1.030s through
   complete mutation evidence against 29.792s ± 0.210s for the ordinary suite,
   produced 73-75 gold files and 86-88 kills, and left no control undecided.
   Concurrent catalog edits meant those runs contained 94-96 eligible controls.
-  The current 192-control setting was then measured over three clean warm runs:
+  The 192-control setting was measured over three clean warm runs:
   complete mutation evidence averaged 76.142s ± 2.343s against
   32.048s ± 0.629s for the ordinary suite, produced 123-124 gold files and
   186-187 kills, and left no control undecided. Its 50-second post-suite ceiling
   is a ceiling rather than a routine charge; those runs used 42.3-46.4 seconds
   after the ordinary suite sealed.
-  The promoted no-flags default was then verified on the grown 13,231-test
+  192 was verified on the grown 13,231-test
   tree: the ordinary suite took 29.44 seconds and the sample produced 125 gold
   files, 191 kills, no survivors, and one unreached refusal. A focused
   follow-up reached and killed that refusal in 0.11 seconds, adding the 126th
   gold file and leaving all 192 selected controls answered.
+
   Completed green
   tests can drive up to three isolated mutant children throughout the ordinary
   run; that live window does not spend the fifty-second post-suite tail budget.
