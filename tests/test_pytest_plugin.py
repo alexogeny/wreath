@@ -9,7 +9,10 @@ missing, which is the one failure that matters.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -223,3 +226,96 @@ def test_wreath_db_rolls_back_even_when_the_test_raises(pytester: pytest.Pyteste
         """
     )
     pytester.runpytest_subprocess().assert_outcomes(passed=1, failed=1)
+
+
+def _imported_modules(statement: str) -> set[str]:
+    """The `wreath.*` modules a fresh interpreter loads for `statement`."""
+    probe = (
+        f"{statement}\n"
+        "import json, sys\n"
+        "print(json.dumps(sorted(m for m in sys.modules if m.startswith('wreath'))))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    return set(json.loads(result.stdout))
+
+
+def test_loading_the_plugin_does_not_import_the_framework() -> None:
+    """pytest imports this module in every repository that installs Wreath.
+
+    `_pytest_plugin` already keeps every Wreath import inside a function for
+    exactly that reason, and package semantics were quietly undoing it: importing
+    a submodule imports its parent first, and `wreath/__init__.py` reached
+    straight for `wreath.app`. Measured, that was 110ms of framework on every
+    `pytest` process anywhere Wreath is installed -- about 57ms of it marginal
+    once pytest's own imports are discounted.
+
+    Asserting on `sys.modules` rather than on a duration, because a timing
+    threshold on a shared machine is a flake generator.
+    """
+    loaded = _imported_modules("import wreath._pytest_plugin")
+    assert "wreath.app" not in loaded, sorted(loaded)
+    assert "wreath.binding" not in loaded, sorted(loaded)
+
+
+def test_importing_the_package_alone_does_not_import_the_framework() -> None:
+    """`import wreath.pagination` should cost `wreath.pagination`."""
+    assert "wreath.app" not in _imported_modules("import wreath")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "from wreath import Request, Wreath",
+        "from wreath import Request",
+        "from wreath import Depends",
+        "from wreath import Response",
+        "from wreath import Router",
+        "import wreath; wreath.Request",
+    ],
+)
+def test_every_public_name_can_be_the_first_one_asked_for(line: str) -> None:
+    """Each name has to work as the *first* thing imported, from a cold start.
+
+    `from wreath import Request, Wreath` -- the first line of the quickstart --
+    resolves `Request` before `Wreath`, and `wreath.request` reaches
+    `._auth.models` -> `._auth` -> `._auth.cedar`, which asks the half-built
+    `wreath.request` for `Request`. Twenty-four modules import it at runtime and
+    that cycle predates the lazy top level; the eager version hid it by
+    importing `.app` first.
+
+    Parametrised over every export because the failure depends entirely on which
+    door the package is entered through, and a single spelling would only ever
+    have tested one door. A subprocess each, because the cycle exists only on a
+    cold `sys.modules`.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", line], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_public_names_still_resolve_to_their_modules() -> None:
+    """Laziness that changed what a name means would be a worse bug than the cost.
+
+    Identity rather than `hasattr`: a `__getattr__` that built a second class per
+    access would satisfy a truthiness check and break every `isinstance`.
+    """
+    import wreath
+    from wreath.app import Wreath
+    from wreath.binding import Depends
+    from wreath.request import Request
+    from wreath.response import JSONResponse, Response
+    from wreath.router import Router
+
+    assert wreath.Wreath is Wreath
+    assert wreath.Depends is Depends
+    assert wreath.Request is Request
+    assert wreath.Response is Response
+    assert wreath.JSONResponse is JSONResponse
+    assert wreath.Router is Router
+    assert set(wreath.__all__) <= set(dir(wreath))
+    with pytest.raises(AttributeError, match="no attribute 'Nonexistent'"):
+        wreath.Nonexistent  # noqa: B018

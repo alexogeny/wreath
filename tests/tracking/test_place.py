@@ -39,25 +39,60 @@ NDOVU = Coordinate(lat=CENTRE_LAT + LANDMARKS[0][3], lon=CENTRE_LON + LANDMARKS[
 SARARA = 8
 
 
+@pytest.fixture(scope="module")
+def seeded_schema():
+    """Build and seed this worker's schema once for the whole file.
+
+    **Every test below only reads**, which is the precondition for sharing and
+    the reason this is safe here rather than generally. A test that wrote would
+    see its neighbours' rows, and the failure would be order-dependent -- so if
+    one is added, it builds its own schema instead of joining this.
+
+    Rebuilding per test cost far more than the 1.2s it looks like. Measured
+    alone, `DROP SCHEMA` + create + seeding 51,840 rows is 1,183ms; measured in
+    the suite it was **9.18 seconds a test**, sixteen times over, because eight
+    xdist workers were doing it at once against one PostgreSQL. The seed is the
+    load, and there is no reason to apply it sixteen times to a schema nobody
+    modifies.
+
+    Deliberately synchronous, driving its own loop with `asyncio.run`. The tests
+    are function-scoped and async, so each gets its own event loop, and a pool
+    opened on a module-scoped loop would be handed to tests running on a
+    different one. Only the DDL is shared; `Database.start()` costs 4ms and
+    stays per test, where its loop affinity is correct by construction.
+    """
+    import asyncio
+
+    from _tracking import build_schema, drop_schema
+
+    from wreath.postgres import connect
+
+    async def _apply(step):
+        connection = await connect(_DSN)
+        try:
+            await step(connection)
+        finally:
+            await connection.close()
+
+    asyncio.run(_apply(build_schema))
+    try:
+        yield
+    finally:
+        asyncio.run(_apply(drop_schema))
+
+
 @pytest.fixture
-async def session():
-    """A read session on a freshly built and seeded schema.
+async def session(seeded_schema):
+    """A read session on the schema `seeded_schema` built.
 
     No HTTP: these are questions about queries, and putting a router between the
     test and the plan would only make a failure harder to attribute.
     """
-    from _tracking import build_schema, drop_schema
     from tracking.models import MODELS
 
     from wreath.orm.registry import Registry
     from wreath.orm.session import Session
-    from wreath.postgres import Database, connect
-
-    connection = await connect(_DSN)
-    try:
-        await build_schema(connection)
-    finally:
-        await connection.close()
+    from wreath.postgres import Database
 
     database = Database("main", _DSN, pools={"read": {"min_size": 1, "max_size": 2}})
     await database.start()
@@ -65,36 +100,30 @@ async def session():
         yield Session(Registry(database, list(MODELS), validate_schema="off"), "read")
     finally:
         await database.stop()
-        connection = await connect(_DSN)
-        try:
-            await drop_schema(connection)
-        finally:
-            await connection.close()
 
 
 # -- the plan -----------------------------------------------------------------
 
 
 @skip_without_database
-async def test_the_proximity_query_reaches_the_index_as_a_condition() -> None:
+async def test_the_proximity_query_reaches_the_index_as_a_condition(seeded_schema) -> None:
     """**The assertion the rest of this file cannot make.**
 
     The discriminator is `Index Cond`, not the scan node's name. A plan that
     read the whole table and threw rows away would still say "Scan", and a
     bounding box that reached the index only as a `Filter` would be reading the
     whole index -- which is the sequential scan wearing a different plan.
-    """
-    from _tracking import build_schema, drop_schema
 
+    Takes `seeded_schema` rather than building its own, and that is load-bearing
+    now that the schema is shared: this test used to end by dropping it, which
+    would delete the rows every other test in the file is reading. It also needs
+    a *realistic* row count for the planner to prefer the index at all -- on a
+    handful of rows a sequential scan is the correct plan and this would fail
+    for a reason that has nothing to do with the query.
+    """
     from wreath.orm.compiler import compile_select
     from wreath.orm.registry import Registry
-    from wreath.postgres import Database, connect
-
-    connection = await connect(_DSN)
-    try:
-        await build_schema(connection)
-    finally:
-        await connection.close()
+    from wreath.postgres import Database
 
     database = Database("main", _DSN, pools={"read": {"min_size": 1, "max_size": 2}})
     await database.start()
@@ -116,11 +145,6 @@ async def test_the_proximity_query_reaches_the_index_as_a_condition() -> None:
             await database.release("read", connection)
     finally:
         await database.stop()
-        connection = await connect(_DSN)
-        try:
-            await drop_schema(connection)
-        finally:
-            await connection.close()
 
     plan = "\n".join(str(row[0]) for row in rows)
     assert "Index Cond" in plan, plan
