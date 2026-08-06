@@ -213,6 +213,11 @@ markers = [
   # whenever there is a database to run against.
   "database: tests needing a PostgreSQL DSN, but no listening socket of ours",
   "thesis: intentionally red deterministic architecture checklist",
+  # Not in the default deselect list either: these run like any other test. The
+  # mark exists so `tests/conftest.py`'s `_startup_audit_off` can tell the tests
+  # that are *about* the boot audit from the ones that merely start an
+  # application, and leave the former's policy alone.
+  "hardening: tests asserting what the startup hardening policy does",
 ]
 
 [tool.ty.src]
