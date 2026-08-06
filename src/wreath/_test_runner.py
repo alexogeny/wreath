@@ -14,6 +14,7 @@ not inherit the UI merely because their parent is itself running a test.
 from __future__ import annotations
 
 import atexit
+import collections
 import hashlib
 import importlib.util
 import json
@@ -923,8 +924,38 @@ def _historical_weight(
     return file_weights.get(_path_from_nodeid(nodeid), 0.0)
 
 
+#: The weight above which a test is worth placing by hand rather than by chunk.
+#:
+#: Longest-processing-time ordering earns its keep on a heavy tail, and whether
+#: this suite has one depends on the run: with `WREATH_TEST_POSTGRES_DSN` set
+#: there are 116-160 tests over a second, and without it those same tests skip
+#: in microseconds and 91% of the suite finishes inside 10ms. Ordering all
+#: fifteen thousand and handing them out two at a time therefore bought a real
+#: makespan improvement in one regime and, in the other, sorted a flat list at
+#: the price of a controller round trip per test.
+#:
+#: 50ms is roughly three hundred round trips, so above it the placement decision
+#: dominates and below it the dispatch does. Measured on this tree's history the
+#: cut takes 786 tests -- 5.1% of them, carrying 93.7% of the work -- and leaves
+#: the other 14,493 to travel in `LoadScheduling`'s own consecutive chunks,
+#: which is also what keeps a worker's fixtures alive across neighbouring tests.
+_LPT_SECONDS = 0.05
+
+
+def _xdist_group(nodeid: str) -> str | None:
+    """The `xdist_group` name xdist appended to `nodeid`, if any.
+
+    xdist encodes the mark as an `@name` suffix on the nodeid, and checks for a
+    `]` after the last `@` so a parametrised value containing one is not
+    mistaken for a group. Copied rather than imported because it lives on
+    `LoadGroupScheduling`, which is not the class being subclassed here.
+    """
+    at = nodeid.rfind("@")
+    return nodeid[at + 1:] if at > nodeid.rfind("]") else None
+
+
 class HistoricalSchedulerPlugin:
-    """Dispatch longest-known tests first without letting a worker hoard them."""
+    """Place the known-slow tests by weight; let the rest ride in chunks."""
 
     def __init__(self, test_weights: dict[str, float], file_weights: dict[str, float]) -> None:
         self.test_weights = test_weights
@@ -937,7 +968,23 @@ class HistoricalSchedulerPlugin:
         file_weights = self.file_weights
 
         class HistoricalLoadScheduling(LoadScheduling):
-            """Two queued items per worker, refilled from an LPT priority list."""
+            """LPT for the heavy head, `LoadScheduling` verbatim for the tail.
+
+            The head is dispatched a whole *unit* at a time, where a unit is one
+            `xdist_group` or one ungrouped test. Sending a group in a single
+            `_send_tests` call is what keeps its members on one worker, and it
+            is why every group goes in the head whatever it weighs: the tail is
+            then all single tests, so the inherited chunking cannot split one.
+
+            This hook overrides `--dist` outright -- it is `firstresult` and
+            xdist's own implementation is `trylast` -- so honouring the mark is
+            this class's job rather than `LoadGroupScheduling`'s.
+            """
+
+            #: Units still queued at the front of `pending`, longest first. While
+            #: this is non-empty each `check_schedule` hands over exactly one
+            #: unit; once it drains, every decision belongs to `LoadScheduling`.
+            _head: collections.deque[int]
 
             def schedule(self) -> None:
                 if not self.collection_is_completed:
@@ -951,34 +998,60 @@ class HistoricalSchedulerPlugin:
                     return
                 collection = next(iter(self.node2collection.values()))
                 self.collection = collection
-                self.pending[:] = sorted(
-                    range(len(collection)),
-                    key=lambda index: _historical_weight(
-                        collection[index], test_weights, file_weights
-                    ),
-                    reverse=True,
-                )
-                if not self.pending:
+                if not collection:
                     return
-                # One item per worker per pass spreads the heaviest controls
-                # across workers. A second queued item is required by xdist's
-                # worker protocol so it can send the next item before teardown.
+                if self.maxschedchunk is None:
+                    self.maxschedchunk = len(collection)
+
+                weights = [
+                    _historical_weight(nodeid, test_weights, file_weights)
+                    for nodeid in collection
+                ]
+                groups: dict[str, list[int]] = {}
+                singles: list[int] = []
+                for index, nodeid in enumerate(collection):
+                    name = _xdist_group(nodeid)
+                    if name is None:
+                        singles.append(index)
+                    else:
+                        groups.setdefault(name, []).append(index)
+
+                units = [(sum(weights[i] for i in members), members)
+                         for members in groups.values()]
+                units += [(weights[i], [i]) for i in singles if weights[i] >= _LPT_SECONDS]
+                units.sort(key=lambda unit: unit[0], reverse=True)
+                tail = [i for i in singles if weights[i] < _LPT_SECONDS]
+
+                self.pending[:] = [i for _weight, members in units for i in members]
+                self.pending.extend(tail)
+                self._head = collections.deque(len(members) for _weight, members in units)
+
+                # One unit per worker per pass spreads the heaviest work across
+                # workers. A second queued item is required by xdist's worker
+                # protocol so it can send the next item before teardown.
                 for _pass in range(2):
                     for node in self.nodes:
-                        self._send_tests(node, 1)
                         if not self.pending:
                             break
+                        self._send_unit(node)
                     if not self.pending:
                         break
+                if not self.pending:
+                    for node in self.nodes:
+                        node.shutdown()
+
+            def _send_unit(self, node: Any) -> None:
+                """Hand over one whole unit, or one test once the head is gone."""
+                self._send_tests(node, self._head.popleft() if self._head else 1)
 
             def check_schedule(self, node: Any, duration: float = 0) -> None:
                 if node.shutting_down:
                     return
-                node_pending = self.node2pending[node]
-                if self.pending and len(node_pending) < 2:
-                    self._send_tests(node, 2 - len(node_pending))
-                elif not self.pending:
-                    node.shutdown()
+                if self._head and self.pending:
+                    if len(self.node2pending[node]) < 2:
+                        self._send_unit(node)
+                    return
+                super().check_schedule(node, duration)
 
         return HistoricalLoadScheduling(config, log)
 

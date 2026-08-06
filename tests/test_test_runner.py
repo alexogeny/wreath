@@ -387,27 +387,178 @@ def test_duration_history_prioritizes_expensive_tests_for_dynamic_dispatch() -> 
     ]
 
 
-def test_historical_scheduler_refills_a_live_worker(
+class _Node:
+    """Enough of an xdist worker to be dispatched to."""
+
+    shutting_down = False
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.sent: list[list[str]] = []
+
+    def shutdown(self) -> None:
+        self.shutting_down = True
+
+    def __repr__(self) -> str:
+        return f"<node {self.name}>"
+
+
+def _scheduler(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    collection: list[str],
+    *,
+    workers: int = 2,
+    test_weights: dict[str, float] | None = None,
+    file_weights: dict[str, float] | None = None,
+):
+    """The real scheduler over a fake collection, with `_send_tests` recorded."""
     from xdist.scheduler.load import LoadScheduling
 
     monkeypatch.setattr(LoadScheduling, "__init__", lambda self, config, log: None)
-    scheduler = runner.HistoricalSchedulerPlugin({}, {}).pytest_xdist_make_scheduler(
-        object(), lambda _message: None
+    scheduler = runner.HistoricalSchedulerPlugin(
+        test_weights or {}, file_weights or {}
+    ).pytest_xdist_make_scheduler(object(), lambda *_args: None)
+
+    nodes = [_Node(f"gw{index}") for index in range(workers)]
+    # `collection_is_completed` and `nodes` are properties over the two dicts
+    # below rather than attributes, so they are set by populating those.
+    scheduler.numnodes = workers
+    scheduler.log = lambda *_args: None
+    scheduler.collection = None
+    scheduler.maxschedchunk = None
+    scheduler.pending = []
+    scheduler.node2pending = {node: [] for node in nodes}
+    scheduler.node2collection = {node: collection for node in nodes}
+    scheduler._check_nodes_have_same_collection = lambda: True
+
+    def send(node, count):
+        taken = scheduler.pending[:count]
+        del scheduler.pending[:count]
+        scheduler.node2pending[node].extend(taken)
+        node.sent.append([scheduler.collection[index] for index in taken])
+
+    scheduler._send_tests = send
+    return scheduler, nodes
+
+
+def test_the_heavy_head_goes_out_longest_first_and_one_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half of the schedule that is worth deciding by hand."""
+    collection = [
+        "tests/test_a.py::quick_one",
+        "tests/test_a.py::slowest",
+        "tests/test_b.py::middling",
+        "tests/test_a.py::quick_two",
+    ]
+    scheduler, nodes = _scheduler(
+        monkeypatch,
+        collection,
+        test_weights={"tests/test_a.py::slowest": 2.0, "tests/test_b.py::middling": 1.0},
     )
-    class Node:
-        shutting_down = False
+    scheduler.schedule()
 
-    node = Node()
-    scheduler.pending = [1, 2]
-    scheduler.node2pending = {node: []}
-    sent: list[tuple[object, int]] = []
-    scheduler._send_tests = lambda target, count: sent.append((target, count))
+    # The first thing each worker is given is one of the two expensive tests,
+    # heaviest first, so they run side by side instead of queueing behind each
+    # other on one worker.
+    assert nodes[0].sent[0] == ["tests/test_a.py::slowest"]
+    assert nodes[1].sent[0] == ["tests/test_b.py::middling"]
 
+
+def test_the_cheap_tail_keeps_collection_order_and_travels_in_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, and the reason the whole list is not sorted.
+
+    Sorting fifteen thousand sub-millisecond tests by weight reorders them into
+    a sequence that shares no file with itself, and then pays a controller round
+    trip for each one. `LoadScheduling` sends consecutive runs precisely so a
+    worker's fixtures survive into the next test; below the cut that is worth
+    more than the placement.
+    """
+    collection = [f"tests/test_{index // 10}.py::test_{index}" for index in range(200)]
+    scheduler, nodes = _scheduler(monkeypatch, collection, workers=2)
+    scheduler.schedule()
+
+    # Seeding is deliberately thin; the chunking shows up on the first refill,
+    # which is what a worker actually spends the run doing.
+    node = nodes[0]
+    scheduler.node2pending[node].clear()
     scheduler.check_schedule(node)
 
-    assert sent == [(node, 2)]
+    refill = node.sent[-1]
+    assert len(refill) > 2, (
+        "the tail was handed out in ones and twos, which is the cost this avoids"
+    )
+    positions = [collection.index(nodeid) for nodeid in refill]
+    assert positions == list(range(positions[0], positions[0] + len(positions))), (
+        "a refill must be a consecutive run, or neighbouring tests stop sharing fixtures"
+    )
+
+
+def test_an_xdist_group_is_handed_to_one_worker_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--dist loadgroup` never reaches xdist, so the mark is honoured here.
+
+    `pytest_xdist_make_scheduler` is `firstresult` and xdist's own
+    implementation is `trylast`, so this plugin wins and whatever it does *is*
+    the distribution policy. A group that scattered would be silent: the tests
+    would pass, having competed with each other for the machine, which is the
+    thing the mark exists to prevent.
+    """
+    collection = [
+        "tests/test_mutant.py::test_one@mutant_crud",
+        "tests/test_fast.py::test_unrelated",
+        "tests/test_mutant.py::test_two@mutant_crud",
+        "tests/test_mutant.py::test_three@mutant_cedar",
+    ]
+    scheduler, nodes = _scheduler(monkeypatch, collection, workers=2)
+    scheduler.schedule()
+
+    for name in ("mutant_crud", "mutant_cedar"):
+        owners = {
+            node.name
+            for node in nodes
+            for batch in node.sent
+            for nodeid in batch
+            if nodeid.endswith(f"@{name}")
+        }
+        assert len(owners) == 1, f"{name} was split across {owners}"
+    assert nodes[0].sent[0] == [
+        "tests/test_mutant.py::test_one@mutant_crud",
+        "tests/test_mutant.py::test_two@mutant_crud",
+    ], "a group must go out in one send, or it is not on one worker"
+
+
+def test_a_parametrised_id_containing_an_at_sign_is_not_a_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`user@example.com` in a parameter is not an `xdist_group` name."""
+    assert runner._xdist_group("tests/test_mail.py::test_to[a@b.com]") is None
+    assert runner._xdist_group("tests/test_mutant.py::test_x@group") == "group"
+    assert runner._xdist_group("tests/test_plain.py::test_y") is None
+
+
+def test_historical_scheduler_refills_a_live_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that finishes its head unit is given the next one, not starved."""
+    collection = ["tests/test_a.py::one", "tests/test_a.py::two", "tests/test_a.py::three"]
+    scheduler, nodes = _scheduler(
+        monkeypatch,
+        collection,
+        workers=1,
+        file_weights={"tests/test_a.py": 1.0},
+    )
+    scheduler.schedule()
+    node = nodes[0]
+    assert node.sent == [["tests/test_a.py::one"], ["tests/test_a.py::two"]]
+
+    scheduler.node2pending[node].clear()
+    scheduler.check_schedule(node)
+
+    assert node.sent[-1] == ["tests/test_a.py::three"]
 
 
 def test_an_invalid_mutation_report_is_refused_with_runner_context(tmp_path: Path) -> None:
@@ -518,7 +669,7 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
 
     assert result == 17
     assert received[0].workers == "1"
-    assert received[0].mutant_samples == 192
+    assert received[0].mutant_samples == cli_parser._DEFAULT_MUTANT_SAMPLES == 192
     assert received[0].mutant_budget == 50.0
     assert received[0].pytest_args == [
         "-k",
