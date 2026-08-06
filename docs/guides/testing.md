@@ -135,6 +135,56 @@ The async fixtures need an async pytest plugin, which is not Wreath's to install
 `pytest-asyncio` is used when present — including its own decorator, so they work
 under `asyncio_mode = strict` as well as `auto`.
 
+## What a suite of these actually costs
+
+Entering `TestClient` runs the real lifespan, and the lifespan is where a test
+suite's time goes. Three things dominate, in this order.
+
+**Building the application.** Route compilation, signature inspection and the
+middleware tape are cached on the `Wreath` object, so they are paid once per
+object rather than once per lifespan. A `wreath_app` built fresh in a
+function-scoped fixture re-pays all of it for every test; a `session`-scoped one
+does not. This is the single biggest lever and it is one word.
+
+```python
+@pytest.fixture(scope="session")
+def wreath_app():
+    return application
+```
+
+**The boot audit.** `hardening="warn"` is the default, and it AST-scans your
+package on every startup. The findings are cached per file on `(mtime, size)`,
+so the scan is paid once per process and the second and later startups are
+free — a scan of Wreath's own 379 modules falls from seconds to about 20ms on
+the repeat. You do not need to turn it off for speed. If you want it off anyway
+— a test suite is not usually where you want boot warnings — `WREATH_HARDENING`
+outranks the `hardening=` argument:
+
+```python
+@pytest.fixture(autouse=True)
+def _quiet_boot_audit(monkeypatch):
+    monkeypatch.setenv("WREATH_HARDENING", "off")
+```
+
+Wreath's own suite does exactly that, and exempts the tests that assert what the
+policy *does* — set globally it would neuter those, and they would keep passing.
+
+**Schema validation.** Each ORM registry reads `pg_catalog` at startup to check
+your models against the live database, and `validate_schema="error"` is the
+default. It is worth paying once; it is not worth paying per test. Set
+`validate_schema="off"` on the registries a test suite builds repeatedly, and
+keep one test that starts the application with validation on — that is the one
+that would catch a model drifting from its table.
+
+Under `-n`, give every worker its own schema and derive the name from
+`PYTEST_XDIST_WORKER`. **Assign it, never `setdefault` it in a `conftest.py`**:
+the controller imports the conftest during collection and then spawns workers
+with its own environment, so a `setdefault` writes the controller's value, every
+worker inherits it, and all of them share one schema. That failure looks like
+the fix not working rather than like a mistake in the fix, and what PostgreSQL
+reports is a `pg_namespace_nspname_index` unique violation, which reads like
+anything except a test-isolation bug.
+
 ## See the suite while it runs
 
 Once a suite is large enough, a row of dots hides the two things you usually
@@ -197,7 +247,8 @@ tester:
 
 ```bash
 wreath test                                         # 192-control auto sample
-wreath test --mutant sample                         # 192 stable controls
+wreath test --mutant sample                         # the same 192 stable controls
+wreath test --mutant-samples 48                     # a smaller sample; barely faster
 wreath test --mutant sample --mutant-samples 384   # a larger confidence sample
 wreath test --mutant changed --mutant-changed main # controls changed on this branch
 wreath test --mutant full                           # the complete sweep
