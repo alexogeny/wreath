@@ -143,6 +143,41 @@ artifact migrating three tenants into their own schemas, a re-run skipping them
 all, a stopped run finished by re-running, the lock excluding a second runner,
 and the rendered DDL naming no tenant at all.
 
+## Three defect classes the hardening ruleset does not find
+
+[`wreath.hardening`](hardening.md) runs the code ruleset at startup, and the
+ruleset covers most of what an application can still get wrong. Three classes
+are known to be outside it, and they are named here rather than left as an
+absence somebody has to rediscover — a rule set is only worth trusting if what
+it does *not* claim is written down too.
+
+**A missing row-level scope.** A list route filters on `org_id` and the detail
+route beside it looks the row up by primary key, so the authorization decorator
+is satisfied, the route looks guarded, and every other tenant's row is one
+integer away. No shape distinguishes the two handlers; the difference is
+entirely in what the developer meant. The answer is not a rule, it is a
+*surface* — a scope declared on the model, applied by the session, so that
+forgetting it is not expressible. Until that exists, this is the defect class
+that no amount of static analysis will report.
+
+**Check, await, write.** A balance is read, a condition is tested, control
+yields, and the write lands on state that has changed underneath it. The shape
+is visible in principle — a comparison on an attribute, an `await`, a write to
+the same object, outside a transaction — but "outside a transaction" is the
+part a single-module analysis cannot establish, because the transaction is
+usually opened by the caller. A rule that guessed would fire on every correct
+handler that reads before it writes, which is all of them.
+
+**A route that should not be public.** An unauthenticated debug endpoint is
+indistinguishable, at the route table, from an unauthenticated health endpoint;
+both are routes with no `AuthRequirement`. What would make this reportable is
+not a rule but a *declaration*: a mode in which a route with no authentication
+requirement has to say so, so that a new route is public because somebody wrote
+`@public()` rather than because nobody wrote anything. That mode is not built.
+It would be a configuration-tier check rather than a source rule, since the
+route table at startup already holds everything it needs.
+<!-- absent: wreath.hardening.public_routes -->
+
 ## Cross-site request forgery for HTML form posts
 
 `wreath.middleware.CSRFMiddleware` reads the resubmitted token from a request
