@@ -277,6 +277,16 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # changing the rendered document to satisfy a rule about Python source. Scoped
 # deliberately: E501 only, and only here.
 "src/wreath/_admin/pages.py" = ["E501"]
+# The hardening corpus is defective code on purpose: each file reproduces a
+# planted application defect so `wreath.hardening` can be proved to find it, and
+# the `secure_*` twin proves it is not found in the correct spelling. Several of
+# the defects *are* the thing a lint rule objects to -- `"...%s" % value` and
+# `"...".format(value)` are two of the three spellings SQL101 exists to catch,
+# and rewriting them to satisfy UP031/UP032 would delete the test. ASYNC240 is
+# the same: a handler reading a path it built by hand is the a04 defect, and
+# nothing here is ever imported or awaited. Scoped deliberately: these files are
+# read as text by `tests/test_hardening_corpus.py` and executed by nothing.
+"tests/hardening_corpus/*.py" = ["ASYNC240", "UP031", "UP032"]
 "benchmarks/apps.py" = ["E402"]
 "benchmarks/lifecycle_apps.py" = ["E402"]
 "benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]
