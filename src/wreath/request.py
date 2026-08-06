@@ -16,9 +16,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from tempfile import TemporaryFile
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from ._auth.models import Identity
 from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
@@ -28,6 +27,21 @@ from .exceptions import (
     RequestHeaderFieldsTooLarge,
 )
 from .state import State
+
+if TYPE_CHECKING:
+    # **This one import decides whether `wreath` can be entered from any door.**
+    # At runtime it would load `._auth`, whose `__init__` imports `.backends`
+    # and `.cedar`, and both of those import `Request` back from this module --
+    # a cycle through a half-built `wreath.request`. Nothing hit it while
+    # `wreath/__init__` eagerly imported `.app` first, because that finished
+    # this module before anything could ask `._auth` for it; entering through
+    # `from wreath import Request` or `import wreath.request` does not.
+    #
+    # `Identity` appears only in annotations here and this module has postponed
+    # evaluation, so there is nothing to import at runtime. Twenty-four modules
+    # import `Request` from here and the rest of that graph is untouched --
+    # this is the single edge that closed the loop.
+    from ._auth.models import Identity
 
 
 @dataclass(frozen=True, slots=True)
