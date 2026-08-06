@@ -43,9 +43,21 @@ jobs:
       - name: Sync (default 'dev' group; builds the native extension)
         run: uv sync --frozen
       - name: Fast tests
-        # Default marks exclude fuzz/performance/network (~3.5s); AGENTS.md says
-        # run this suite serially — worker startup outweighs the gain here.
-        run: uv run pytest
+        # Default marks exclude fuzz/performance/network. The suite is ~14,500
+        # tests, not the ~3.5 seconds this step was written for, so it runs
+        # parallel: `wreath test` picks min(8, cpu_count) workers, which is 4 on
+        # a public-repo ubuntu-latest. Serial pytest took 119s here on Aug 2 and
+        # 162s on Aug 6, on one of the runner's four cores.
+        #
+        # `--mutant off` is load-bearing. The default is a 192-control mutation
+        # sample with a 50-second post-suite ceiling plus live mutant children
+        # competing for cores; that belongs on a maintainer's machine, not in
+        # front of a pull request. `--no-history` keeps the run from writing
+        # timing history into a workspace that is discarded — until something
+        # caches `.wreath/test-history.json`, nothing reads it, and without it
+        # the history-weighted scheduler stays unregistered and this is xdist
+        # `--dist loadgroup` with a timing report on top.
+        run: uv run wreath test --mutant off --no-history
 
   docs-build:
     runs-on: ubuntu-latest
