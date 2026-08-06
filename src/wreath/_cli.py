@@ -17,6 +17,28 @@ from .server import ASGIApplication, ServerConfig, TLSConfig, run
 
 LoopName = Literal["asyncio", "uvloop", "metal"]
 
+#: Controls sampled by `wreath test` when nobody asks for a number.
+#:
+#: **The sample count is very nearly free; the mutation phase is not.** That is
+#: worth stating because the opposite was assumed once and acted on. Measured
+#: here as an interleaved A/B against a pristine checkout, no DSN, three warm
+#: rounds each, by subtracting the same tree's `--mutant off` time from its
+#: as-typed time:
+#:
+#:     192 controls   101.82s +/- 0.07 total   ->  62.66s of mutation
+#:      48 controls    91.44s +/- 0.15 total   ->  59.02s of mutation
+#:
+#: Three quarters of the controls for 3.6 seconds. The tail is roughly 55s of
+#: fixed cost -- catalog build, baseline seal, the live probe window -- plus
+#: about 0.02s per control, so cutting the sample trades most of the evidence
+#: (123-124 gold files at 192, against 34-40 at 48) for noise.
+#:
+#: An older curve in `AGENTS.md` recorded 76.1s at 192 against 33.2s at 48 and
+#: reads as though the count dominates. It does not reproduce on this tree; the
+#: numbers above are the ones to trust, and the way to move this phase is to
+#: attack the fixed cost rather than the sample.
+_DEFAULT_MUTANT_SAMPLES = 192
+
 
 class CliError(Exception):
     """An expected command-line failure with a stable process exit code."""
@@ -460,9 +482,10 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--mutant-samples",
         type=int,
-        default=192,
+        default=_DEFAULT_MUTANT_SAMPLES,
         metavar="N",
-        help="number of whole-corpus controls in --mutant sample (default: 192)",
+        help=f"number of whole-corpus controls in --mutant sample "
+             f"(default: {_DEFAULT_MUTANT_SAMPLES}; 192 is the deep sweep)",
     )
     test_parser.add_argument(
         "--mutant-workers",
