@@ -492,35 +492,33 @@ def _unquiet(journal: Any) -> None:
 
 
 def _pytest_command() -> list[str]:
-    """`pytest -q`, parallelised to fit the machine.
+    """The suite, through the same runner `wreath test` uses.
 
-    The suite used to run in about 3.5 seconds, where an xdist worker's
-    re-import of the native extensions cost more than it saved. At 4,400 tests
-    the trade had inverted. Measured then (12 cores, best of two runs): serial 30.7s, `-n 2` 16.8s,
-    `-n 4` 9.8s, `-n 6` 8.1s, `-n 8` 8.1s, `-n 12` 9.5s -- so the curve
-    flattens at six and turns back up once workers outnumber the cores they
-    have to share with the extensions they each load.
+    **This gate used to run `pytest -q -n 6` directly, and that cost it twice.**
+    It picked its own worker cap, and -- because the historical scheduler is
+    installed by the runner rather than by the `pytest11` entry point -- it also
+    ran without any scheduling at all. Measured at equal worker counts on the
+    13,297-test tree, `wreath test --grid never --mutant off --slowest 0` took
+    26.404s +/- 0.138 against `pytest -q -n 6` at 29.055s +/- 2.069: 1.10x, and
+    a fifteenfold tighter spread, which for a gate matters as much as the mean.
+    Raw commands and samples in `benchmarks/results/test_runner_2026-08-02.json`.
 
-    The default selection now collects 13,297 tests. The separate `wreath test`
-    controller was remeasured on that tree: three warm, mutation-disabled runs
-    averaged 27.727s at six workers and 25.860s at eight, so that command now
-    caps itself at eight. Those numbers do not move this raw-pytest check cap:
-    its scheduling and reporting path differs, and its own full curve remains
-    to be remeasured off battery power.
+    The worker curve now lives in one place -- `_test_runner._MAX_AUTO_WORKERS`
+    -- instead of being restated here with a different number. The history
+    behind it: at 4,400 tests, on 12 cores, best of two runs, serial was 30.7s,
+    `-n 2` 16.8s, `-n 4` 9.8s, `-n 6` 8.1s, `-n 8` 8.1s and `-n 12` 9.5s, so the
+    curve flattened at six and turned back up once workers outnumbered the cores
+    they share with the extensions each one loads. On the grown tree it moved:
+    three warm mutation-disabled runs averaged 27.727s at six workers and
+    25.860s at eight, and ten workers were unstable and no faster.
 
-    Capped rather than `-n auto` for that last reason: `auto` is the core
-    count, which is past the flat part on any machine this wide. A bare
-    `uv run pytest` stays serial, because that is the one you attach a
-    debugger to.
+    Mutation is off and the grid never animates, because this is a gate: it
+    should answer pass or fail as cheaply as it can, and `wreath test` is where
+    you go for evidence. A bare `uv run pytest` stays serial, because that is
+    the one you attach a debugger to.
     """
-    workers = min(_PYTEST_MAX_WORKERS, os.cpu_count() or 1)
-    command = [sys.executable, "-m", "pytest", "-q"]
-    return command if workers < 2 else [*command, "-n", str(workers)]
-
-
-#: Past this the per-worker cost of importing the native extensions outweighs
-#: the parallelism; see `_pytest_command` for the measurements.
-_PYTEST_MAX_WORKERS = 6
+    return [sys.executable, "-m", "wreath.cli", "test",
+            "--grid", "never", "--mutant", "off", "--slowest", "0"]
 
 
 #: The gates a change has to pass, in the order that fails cheapest first.

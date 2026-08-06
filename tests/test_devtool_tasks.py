@@ -255,3 +255,33 @@ def test_a_failed_sync_stops_the_task(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks.shutil, "which", lambda _name: "/usr/bin/uv")
     with pytest.raises(SystemExit, match="not installed"):
         tasks.ensure_groups("docs")
+
+
+def test_the_check_suite_goes_through_the_runner_not_bare_pytest() -> None:
+    """The gate and `wreath test` schedule the suite the same way.
+
+    `HistoricalSchedulerPlugin` is installed by the runner, not by the `pytest11`
+    entry point, so a gate that shelled `pytest -n 6` ran with no historical
+    scheduling *and* a second, lower worker cap. Measured at equal workers it
+    was 1.10x slower with a fifteenfold wider spread.
+
+    Pinned because the failure is invisible: a raw-pytest gate is perfectly
+    green, just slower and noisier than the command it is meant to mirror.
+    """
+    command = tasks._pytest_command()
+
+    assert command[1:4] == ["-m", "wreath.cli", "test"], command
+    assert "--mutant" in command and command[command.index("--mutant") + 1] == "off"
+    assert "--grid" in command and command[command.index("--grid") + 1] == "never"
+    # No `-n`: the runner owns the worker count, so the curve lives in one place.
+    assert "-n" not in command and "--numprocesses" not in command
+    assert not hasattr(tasks, "_PYTEST_MAX_WORKERS"), (
+        "a second worker cap here is how the two paths drifted apart before"
+    )
+
+
+def test_the_check_suite_is_the_pytest_gate() -> None:
+    """The command above is the one `wreath-check` actually runs."""
+    gates = dict(tasks._CHECKS)
+
+    assert gates["pytest"] == tasks._pytest_command()
