@@ -25,6 +25,24 @@ from tracking.seed import (
 from wreath.geospatial import Coordinate, Trajectory, distance
 
 
+@pytest.fixture(scope="module")
+def rows() -> dict:
+    """One seeded build, shared by every test that only reads it.
+
+    `build_rows()` generates 51,840 fixes and took 0.47s; nine tests calling it
+    for themselves spent 4.2s of the suite regenerating identical data. Module
+    scope rather than session so the cost still lands in this file's timings,
+    where anyone reading the heat map will look for it.
+
+    **Read-only.** Nothing here mutates the tables, and nothing added here may:
+    a test that did would hand the next one a different seed and the failure
+    would land wherever the tests happen to be ordered. The determinism test
+    deliberately does not take this fixture -- its claim is that two *fresh*
+    builds agree, which a shared one cannot make.
+    """
+    return build_rows()
+
+
 def test_two_runs_produce_byte_identical_rows() -> None:
     """One seeded generator and no clock reads, which is the whole claim.
 
@@ -35,29 +53,27 @@ def test_two_runs_produce_byte_identical_rows() -> None:
     assert build_rows() == build_rows()
 
 
-def test_no_timestamp_comes_from_the_clock() -> None:
+def test_no_timestamp_comes_from_the_clock(rows: dict) -> None:
     """Every instant is an offset from `EPOCH`, so nothing moves overnight.
 
     Checked by bound rather than by mocking `datetime`: every `recorded_at` has
     to lie inside the window the constants describe, and a `now()` anywhere in
     the generator lands outside it.
     """
-    rows = build_rows()
     last = EPOCH + datetime.timedelta(days=DAYS)
     for row in rows["fixes"]:
         assert EPOCH <= row[1] < last
 
 
-def test_the_row_counts_are_the_ones_the_documentation_quotes() -> None:
+def test_the_row_counts_are_the_ones_the_documentation_quotes(rows: dict) -> None:
     """18 animals, 18 collars, 6 landmarks, 51,840 fixes."""
-    rows = build_rows()
     assert len(rows["animals"]) == len(ANIMALS) == 18
     assert len(rows["collars"]) == 18
     assert len(rows["landmarks"]) == len(LANDMARKS) == 6
     assert len(rows["fixes"]) == 18 * DAYS * (24 * 60 // FIX_MINUTES) == 51_840
 
 
-def test_the_three_protection_tiers_are_all_populated() -> None:
+def test_the_three_protection_tiers_are_all_populated(rows: dict) -> None:
     """Two restricted, five sensitive, eleven open.
 
     An example whose sensitive tier was empty would pass every policy test in
@@ -65,19 +81,18 @@ def test_the_three_protection_tiers_are_all_populated() -> None:
     ever reach the interesting branch.
     """
     tiers: dict[str, int] = {}
-    for _id, _name, _taxon, protection in build_rows()["animals"]:
+    for _id, _name, _taxon, protection in rows["animals"]:
         tiers[protection] = tiers.get(protection, 0) + 1
     assert tiers == {"restricted": 2, "sensitive": 5, "open": 11}
 
 
-def test_the_silences_are_real_gaps_and_not_a_paragraph() -> None:
+def test_the_silences_are_real_gaps_and_not_a_paragraph(rows: dict) -> None:
     """Two collars go quiet, and their fixes arrive in one dump afterwards.
 
     This is the seed's contribution to the late-data chapter: without it, the
     sealing story would need a test to manufacture its own late data, and the
     example would be describing a case it does not have.
     """
-    rows = build_rows()
     for animal, start, length in SILENCES:
         during = [
             row
@@ -112,7 +127,7 @@ def test_the_silences_are_real_gaps_and_not_a_paragraph() -> None:
         assert max(row[3] - row[1] for row in before) < datetime.timedelta(hours=1)
 
 
-def test_the_stored_legs_are_the_distances_between_consecutive_fixes() -> None:
+def test_the_stored_legs_are_the_distances_between_consecutive_fixes(rows: dict) -> None:
     """The seeded `leg_m` is what `Trajectory` would measure, not an estimate.
 
     The ingest path maintains this column and a test holds it to `Trajectory`
@@ -120,7 +135,6 @@ def test_the_stored_legs_are_the_distances_between_consecutive_fixes() -> None:
     the data -- seeded history and ingested present -- from disagreeing about
     what a leg is.
     """
-    rows = build_rows()
     first = [row for row in rows["fixes"] if row[2] == 8][:200]
     assert first[0][8] is None, "the first fix of an animal has no leg before it"
     path = Trajectory(
@@ -132,14 +146,13 @@ def test_the_stored_legs_are_the_distances_between_consecutive_fixes() -> None:
     assert sum(row[8] for row in first[1:]) == pytest.approx(path.distance, rel=1e-12)
 
 
-def test_the_animals_stay_inside_a_conservancy_sized_area() -> None:
+def test_the_animals_stay_inside_a_conservancy_sized_area(rows: dict) -> None:
     """A pull towards water, so a season does not diffuse a wildebeest into Tanzania.
 
     Without it `within(waterhole, 5 km)` finds nothing after the first week and
     the proximity chapter has no data. The bound is loose because the exact
     extent is the walk's business; what is asserted is that there *is* one.
     """
-    rows = build_rows()
     centre = Coordinate(lat=rows["landmarks"][0][3], lon=rows["landmarks"][0][4])
     furthest = max(
         distance(centre, Coordinate(lat=row[4], lon=row[5])) for row in rows["fixes"]
@@ -147,14 +160,13 @@ def test_the_animals_stay_inside_a_conservancy_sized_area() -> None:
     assert furthest < 40_000.0, f"an animal wandered {furthest / 1000:.0f} km from Ndovu"
 
 
-def test_every_animal_has_a_collar_and_every_fix_has_both() -> None:
+def test_every_animal_has_a_collar_and_every_fix_has_both(rows: dict) -> None:
     """Referential integrity, before the database is asked to enforce it.
 
     A seeder that violated a foreign key fails on the insert with a message
     naming a constraint rather than the row that was wrong, which is a much
     worse place to find out.
     """
-    rows = build_rows()
     animals = {row[0] for row in rows["animals"]}
     collars = {row[0] for row in rows["collars"]}
     assert {row[1] for row in rows["collars"]} <= animals
@@ -163,12 +175,12 @@ def test_every_animal_has_a_collar_and_every_fix_has_both() -> None:
         assert row[2] in animals
 
 
-def test_the_primary_key_is_unique_across_the_whole_seed() -> None:
+def test_the_primary_key_is_unique_across_the_whole_seed(rows: dict) -> None:
     """`(collar_id, recorded_at)` is the identity, so the seed cannot collide.
 
     A duplicate would surface as a unique-violation on the insert, and the
     generator that produced it -- one fix per collar per twenty-minute slot --
     is exactly the shape that goes wrong if the slot arithmetic is off by one.
     """
-    rows = build_rows()["fixes"]
-    assert len({(row[0], row[1]) for row in rows}) == len(rows)
+    fixes = rows["fixes"]
+    assert len({(row[0], row[1]) for row in fixes}) == len(fixes)

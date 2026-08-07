@@ -19,6 +19,28 @@ from camera_trap.seed import COLUMNS, ORDER, build_rows
 #: randomness would show. The full seed is 140,000.
 SAMPLE = 3_000
 
+#: The two seeds every reader in this file wants, built once each.
+#:
+#: `build_rows` is pure and deterministic, so nine tests each calling it for
+#: themselves rebuilt identical tables -- 2.13s of this file, most of it the two
+#: 40,000-sighting builds. Module scope rather than session so the cost still
+#: shows up in this file's timings.
+#:
+#: **Read-only**, like `tests/tracking/test_seed.py`'s equivalent: a test that
+#: mutated one would hand the next a different seed, and the failure would land
+#: wherever the ordering happened to put it. `test_two_builds_are_identical`
+#: takes neither -- its claim is that two *fresh* builds agree.
+
+
+@pytest.fixture(scope="module")
+def rows() -> dict:
+    return build_rows(sightings=SAMPLE)
+
+
+@pytest.fixture(scope="module")
+def big_rows() -> dict:
+    return build_rows(sightings=40_000)
+
 
 def test_two_builds_are_identical() -> None:
     """The whole point. One seeded generator, no clock reads."""
@@ -29,7 +51,7 @@ def test_two_builds_are_identical() -> None:
         assert first[table] == second[table], f"{table} differs between builds"
 
 
-def test_no_timestamp_comes_from_the_clock() -> None:
+def test_no_timestamp_comes_from_the_clock(rows: dict) -> None:
     """Every generated instant is derived from ``EPOCH``.
 
     A ``datetime.now()`` anywhere in the generator would make two runs differ by
@@ -37,7 +59,6 @@ def test_no_timestamp_comes_from_the_clock() -> None:
     also put *today* in the data, so a walkthrough written in July would stop
     matching in August. Assert the range directly.
     """
-    rows = build_rows(sightings=SAMPLE)
     horizon = datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC)
     captured = [row[5] for row in rows["sightings"]]
     assert all(value < horizon for value in captured)
@@ -70,7 +91,7 @@ def test_column_lists_match_the_models() -> None:
         )
 
 
-def test_sightings_are_attributed_to_a_camera_that_was_deployed() -> None:
+def test_sightings_are_attributed_to_a_camera_that_was_deployed(rows: dict) -> None:
     """A sighting names the device that was hanging there at the time.
 
     Getting this wrong is invisible in a row count and fatal to the example's
@@ -78,7 +99,6 @@ def test_sightings_are_attributed_to_a_camera_that_was_deployed() -> None:
     the station-outlives-its-hardware story would be false in the data while
     reading fine in the code. It was wrong once.
     """
-    rows = build_rows(sightings=SAMPLE)
     windows = {
         camera[0]: (camera[4], camera[5]) for camera in rows["cameras"]
     }
@@ -90,9 +110,9 @@ def test_sightings_are_attributed_to_a_camera_that_was_deployed() -> None:
             assert captured < retired, "sighting postdates its camera's retirement"
 
 
-def test_a_replaced_station_has_sightings_on_both_cameras() -> None:
+def test_a_replaced_station_has_sightings_on_both_cameras(big_rows: dict) -> None:
     """The swap is present in the data, not just in the cameras table."""
-    rows = build_rows(sightings=40_000)
+    rows = big_rows
     by_station: dict[int, set[int]] = {}
     for sighting in rows["sightings"]:
         by_station.setdefault(sighting[1], set()).add(sighting[2])
@@ -100,31 +120,29 @@ def test_a_replaced_station_has_sightings_on_both_cameras() -> None:
     assert swapped, "no station's sightings cross a camera replacement"
 
 
-def test_captures_use_the_reserve_wall_clock() -> None:
+def test_captures_use_the_reserve_wall_clock(rows: dict) -> None:
     """A camera records local time, so the stored instant carries a real zone.
 
     Generating in UTC is the shortcut that makes a +09:30 reserve's nocturnal
     species peak at local noon. The zone on the value is the evidence it was not
     taken.
     """
-    rows = build_rows(sightings=SAMPLE)
     zones = {str(row[5].tzinfo) for row in rows["sightings"]}
     assert zones == {
         "Africa/Nairobi", "Europe/Lisbon", "Australia/Adelaide", "America/Belize"
     }
 
 
-def test_review_state_is_the_mess_chapter_two_fixes() -> None:
+def test_review_state_is_the_mess_chapter_two_fixes(rows: dict) -> None:
     """v1 ships the flaw on purpose; the migration chapter needs it to exist."""
-    rows = build_rows(sightings=SAMPLE)
     spellings = {row[11] for row in rows["sightings"]}
     assert {"confirmed", "Confirmed", "ok"} <= spellings, "the casing mess is missing"
     assert "" in spellings, "the empty-string case is missing"
 
 
-def test_some_cards_are_collected_long_after_their_last_image() -> None:
+def test_some_cards_are_collected_long_after_their_last_image(big_rows: dict) -> None:
     """Late data has rows, or the sealing story is a paragraph."""
-    rows = build_rows(sightings=40_000)
+    rows = big_rows
     collected = {row[0]: row[2] for row in rows["deployments"]}
     newest: dict[int, datetime.datetime] = {}
     for sighting in rows["sightings"]:
