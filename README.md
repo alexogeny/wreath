@@ -220,6 +220,8 @@ and compares the total to a baseline checked into the repository.
 
 | Command | Result |
 |---|---|
+| `wreath new shop` | Write a project that already runs and whose own tests are already green. |
+| `wreath capabilities celery` | What already ships that answers a word you know — before you install anything. |
 | `wreath run app:app` | Serve an application in one foreground process. |
 | `wreath dev app:app` | Serve it and reload after source changes. |
 | `wreath docs` | Build a documentation site from markdown — no third-party toolchain. |
@@ -229,7 +231,7 @@ and compares the total to a baseline checked into the repository.
 | `wreath mutant` | Remove one declared control at a time and see whether the tests notice. |
 | `wreath test` | Run pytest behind an animated file heat map, duration profiling, and optional mutation confidence. |
 | `wreath audit` | Audit generated HTML and responses for accessibility and performance. |
-| `wreath doctor` | Diagnose defects a green test suite cannot see. |
+| `wreath doctor` | Diagnose defects a green test suite cannot see — including `preflight`, one report of everything checkable before a deploy. |
 | `wreath inspect` | Query a running server's read-only telemetry inspector. |
 | `wreath flight` | Read a flight recorder ring file left behind by a crash. |
 
