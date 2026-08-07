@@ -3,7 +3,9 @@
 ## A layout that grows with you
 
 Wreath doesn't impose a project structure, but a small amount of convention pays
-off as an application grows. A shape that works well:
+off as an application grows. `wreath new` writes the shape below for you, with
+the parts this page warns about already correct — see
+[Starting a project](new-project.md). Either way, this is the shape:
 
 ```
 myapp/
@@ -19,9 +21,14 @@ you write one. Wreath's dotenv dialect is `KEY=value` and has no comment syntax
 at all: a `#` line is a `ValueError` naming the line number, not a line that is
 skipped. So a template carrying explanatory comments produces a `.env` that
 fails to load on its first line, which is the least helpful moment to discover
-the dialect. Keep the template to the keys — an empty value keeps the default,
-so a copied file is inert until somebody fills it in — and put the explanation
-of what each key does beside the settings dataclass that reads it. See
+the dialect.
+
+**And an empty value does not mean "use the default".** `KEY=` supplies the
+empty string, so a `str` field binds to `""` rather than to its default and an
+`int` field fails to coerce at all — a copied template is *not* inert, it is
+wrong in a way that only shows up where the value is read. Give every key a
+value that works in development, and put the explanation of what each one does
+beside the settings dataclass that reads it. See
 [Configuration and state](../guides/config-state.md).
 
 The idea is to keep related routes together as [`Router`](../reference/router.md)
