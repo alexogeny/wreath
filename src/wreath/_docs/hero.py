@@ -32,6 +32,11 @@ _OPEN = "```hero"
 _MAX_ACTIONS = 4
 
 
+def title_of(tokens: dict[str, str]) -> str:
+    """The headline of the first hero, for the page `<title>`."""
+    return _fenced.title_of(tokens, "hero-title")
+
+
 def extract(text: str) -> tuple[str, dict[str, str]]:
     """Replace each ```hero block with a token; return (token, markup) pairs."""
     return _fenced.extract(text, _OPEN, _render, "HERO")
@@ -85,24 +90,4 @@ def _esc(text: str) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def title_of(tokens: dict[str, str]) -> str:
-    """The headline of the first hero, for the page `<title>`.
 
-    A page that opens with a hero has no markdown `# heading` to take a title
-    from, and falling back to the nav label would put a different name in the
-    browser tab than the one on the page.
-    """
-    for markup in tokens.values():
-        start = markup.find('class="hero-title"')
-        if start < 0:
-            continue
-        opened = markup.find(">", start)
-        closed = markup.find("</h1>", opened)
-        if opened > 0 and closed > opened:
-            return _unescape(markup[opened + 1:closed])
-    return ""
-
-
-def _unescape(text: str) -> str:
-    return (text.replace("&quot;", '"').replace("&gt;", ">")
-            .replace("&lt;", "<").replace("&amp;", "&"))

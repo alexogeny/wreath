@@ -47,6 +47,11 @@ __all__ = ["extract", "restore", "title_of"]
 _OPEN = "```plate"
 
 
+def title_of(tokens: dict[str, str]) -> str:
+    """The headline of the first plate, for the page `<title>`."""
+    return _fenced.title_of(tokens, "plate-title")
+
+
 def extract(
     text: str, source_dir: Path, sink: list[str] | None = None,
 ) -> tuple[str, dict[str, str]]:
@@ -136,29 +141,9 @@ def _names(source_dir: Path, sink: list[str] | None) -> list[str]:
     return found
 
 
-def title_of(tokens: dict[str, str]) -> str:
-    """The headline of the first plate, for the page `<title>`.
-
-    A page that opens with a plate has no markdown `# heading` to take a title
-    from, so without this the browser tab would fall back to the nav label and
-    disagree with the page.
-    """
-    for markup in tokens.values():
-        start = markup.find('class="plate-title"')
-        if start < 0:
-            continue
-        opened = markup.find(">", start)
-        closed = markup.find("</h1>", opened)
-        if opened > 0 and closed > opened:
-            return _unescape(markup[opened + 1:closed])
-    return ""
-
 
 def _esc(text: str) -> str:
     return (text.replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _unescape(text: str) -> str:
-    return (text.replace("&quot;", '"').replace("&gt;", ">")
-            .replace("&lt;", "<").replace("&amp;", "&"))

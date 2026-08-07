@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-__all__ = ["extract", "restore"]
+__all__ = ["extract", "restore", "title_of"]
 
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
 
@@ -76,3 +76,28 @@ def restore(html: str, tokens: dict[str, str]) -> str:
     for token, markup in tokens.items():
         html = html.replace(f"<p>{token}</p>", markup).replace(token, markup)
     return html
+
+
+def _unescape(text: str) -> str:
+    return (text.replace("&quot;", '"').replace("&gt;", ">")
+            .replace("&lt;", "<").replace("&amp;", "&"))
+
+
+def title_of(tokens: dict[str, str], css_class: str) -> str:
+    """The headline of the first block carrying `css_class`, for `<title>`.
+
+    A page that opens with a hero or a plate has no markdown `# heading` to take
+    a title from, so without this the browser tab falls back to the nav label
+    and disagrees with the page. `hero` and `plate` each had this, identical
+    but for the class name they searched for.
+    """
+    opener = f'class="{css_class}"'
+    for markup in tokens.values():
+        start = markup.find(opener)
+        if start < 0:
+            continue
+        opened = markup.find(">", start)
+        closed = markup.find("</h1>", opened)
+        if opened > 0 and closed > opened:
+            return _unescape(markup[opened + 1:closed])
+    return ""
