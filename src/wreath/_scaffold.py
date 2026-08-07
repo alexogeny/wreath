@@ -48,6 +48,7 @@ class Options:
     directory: Path
     frontend: str = "none"
     database: str = "none"
+    tenancy: bool = False
 
     @property
     def prefix(self) -> str:
@@ -81,6 +82,9 @@ def plan(options: Options) -> dict[str, str]:
     if options.database == "postgres":
         files[f"{name}/models.py"] = _models(options)
         files["tests/test_models.py"] = _model_tests(options)
+    if options.tenancy:
+        files[f"{name}/tenants.py"] = _tenants(options)
+        files["tests/test_tenancy.py"] = _tenancy_tests(options)
     if options.frontend == "react":
         files["web/package.json"] = _web_package_json(options)
         files["web/tsconfig.json"] = _web_tsconfig(options)
@@ -97,6 +101,11 @@ def create(options: Options) -> list[str]:
     package name or the target directory holds anything at all.
     """
     _check_name(options.name)
+    if options.tenancy and options.database != "postgres":
+        raise ScaffoldError(
+            "--tenancy needs --database postgres: tenant isolation is a schema and a "
+            "PostgreSQL role per tenant, so there is nothing to isolate without one."
+        )
     target = options.target
     if target.exists() and any(target.iterdir()):
         raise ScaffoldError(
@@ -300,15 +309,39 @@ def _app(options: Options) -> str:
     """'''
     if options.database == "postgres":
         database_imports = "\nfrom .models import MODELS"
-        database_wiring = '''
+        schema_mode = ""
+        tenancy_wiring = ""
+        if options.tenancy:
+            database_imports += "\nfrom .tenants import tenancy"
+            database_imports += (
+                "\nfrom wreath.orm import SchemaMode"
+                "\nfrom wreath.tenancy import TenancyMiddleware"
+            )
+            # `isolated`, not `single`: it is what compiles tenant-template
+            # models to unqualified SQL, so the search path resolves them and a
+            # central-schema model stays qualified.
+            schema_mode = (
+                ",\n            schema_mode=SchemaMode.isolated("
+                'central="central", isolation="role")'
+            )
+            tenancy_wiring = (
+                "\n        # Global, not route middleware: the binding has to exist\n"
+                "        # before a route's own tape runs, or an authorization hook\n"
+                "        # that reads tenant-scoped data runs unbound. Inside the\n"
+                "        # database branch, because a build with no database has no\n"
+                "        # tenant schema to resolve into.\n"
+                "        application.add_global_middleware(TenancyMiddleware(tenancy))\n"
+            )
+        database_wiring = f'''
     if database:
         # The connection is opened by the lifespan, not here. wreath then
         # validates the live schema against the models and refuses to start on
         # a mismatch, which is the one moment that mismatch is cheap to find --
         # and is why `database=False` exists at all.
         application.postgres("main", dsn=SETTINGS.database_url)
-        application.orm(database="main", models=list(MODELS))
-'''
+        application.orm(
+            database="main", models=list(MODELS){schema_mode})
+{tenancy_wiring}'''
     return f'''"""The application: settings in, routers gathered, nothing else.
 
 `build()` exists as well as `app` because a factory is what a test wants -- one
@@ -669,6 +702,147 @@ def test_every_column_is_not_null_because_nothing_asked_for_null():
     """
     assert [column.python_name for column in Item.__wreath_columns__
             if column.nullable] == []
+'''
+
+
+def _tenants(options: Options) -> str:
+    return f'''"""Who this service's tenants are, and where their data lives.
+
+The directory is **the application's own record**, deliberately: wreath never
+invents tenant identity, because a framework that guessed one would be guessing
+which customer's rows to serve. In development it is held in the process; in a
+deployment it is a table in the central schema, read through the same
+`TenantDirectory` protocol.
+
+Provisioning a tenant is three steps that are wrong apart -- a schema, a role,
+and the grants that let the role reach its own schema and read the central one:
+
+```bash
+python -c "..."   # see wreath's tenancy guide; provision_tenant does all three
+{options.name} migrations apply ...    # then apply your artifact to that schema
+```
+
+The tenant is `PROVISIONING` until the artifact has been applied, and
+`require_bindable()` refuses that state -- a half-migrated tenant answering a
+request with a missing-relation error deep in a handler is the thing the status
+exists to prevent.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from wreath.orm import FromORM, Session
+from wreath.tenancy import (
+    FromTenant,
+    InMemoryTenantDirectory,
+    Tenancy,
+    Tenant,
+    TenantHostLabel,
+)
+
+#: The spelling every tenant-scoped route uses.
+#:
+#: `FromTenant()` is what makes the *declarative* path the safe one. Without it
+#: a route against a tenant-isolated registry is refused at compile time, and
+#: the only alternative would be building a `Session` by hand in the handler
+#: body -- which is how a handler ends up querying with no tenant bound at all.
+TenantSession = Annotated[Session, FromORM("main", tenant=FromTenant())]
+
+#: Development tenants. Replace with a directory backed by the central schema
+#: before anything real: this one cannot see a tenant another worker provisioned.
+directory = InMemoryTenantDirectory([
+    Tenant(key="acme", schema="tenant_acme", role="tenant_acme"),
+    Tenant(key="globex", schema="tenant_globex", role="tenant_globex"),
+])
+
+#: `source=` has **no default**. Where the tenant name comes from is a
+#: deployment decision -- guessing at a subdomain is how a service that was never
+#: multi-tenant on its apex starts resolving `www` as a customer. The three
+#: shipped sources are `TenantHostLabel`, `TenantHeader` and
+#: `TenantSessionClaim`; the last is strongest, because the name then comes from
+#: state the server wrote and a caller cannot name a tenant at all.
+tenancy = Tenancy(directory=directory, source=TenantHostLabel("localhost"))
+'''
+
+
+def _tenancy_tests(options: Options) -> str:
+    return f'''"""Tenant resolution, without a database.
+
+The isolation itself is PostgreSQL's -- a role and a grant set per tenant -- and
+`wreath.tenancy`'s own suite proves that against a live server. What is worth
+testing *here* is the part this project owns: which tenants exist, and how a
+request names one.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from wreath.tenancy import TenantSuspended, UnknownTenant
+
+from {options.name}.tenants import directory, tenancy
+
+
+class _Request:
+    """Just enough request to name a tenant.
+
+    `header()` is the accessor and `headers` is the raw ASGI list of byte pairs,
+    because that is what a real `wreath.Request` is. A fake that exposes a dict
+    is easier to use than the thing it stands in for, and a source written
+    against it passes every test here and raises on the first real request.
+    """
+
+    def __init__(self, host):
+        self.headers = [(b"host", host.encode("latin-1"))]
+
+    def header(self, name, default=None):
+        wanted = name.lower().encode("latin-1")
+        for key, value in self.headers:
+            if key == wanted:
+                return value.decode("latin-1")
+        return default
+
+
+def test_a_known_host_resolves_to_its_own_schema():
+    assert tenancy.resolve_request(_Request("acme.localhost")).schema == "tenant_acme"
+
+
+def test_two_tenants_resolve_to_different_schemas():
+    """The property the whole design exists for, stated once here so a directory
+    edit that collapsed two tenants onto one schema fails loudly."""
+    acme = tenancy.resolve_request(_Request("acme.localhost"))
+    globex = tenancy.resolve_request(_Request("globex.localhost"))
+    assert acme.schema != globex.schema
+
+
+def test_an_unknown_host_is_refused_rather_than_falling_back():
+    """There is no default tenant. A fallback here serves a request against
+    whichever schema the pooled connection last held."""
+    with pytest.raises(UnknownTenant):
+        tenancy.resolve_request(_Request("nobody.localhost"))
+
+
+def test_the_apex_names_no_tenant():
+    """`localhost` itself is not a customer, and neither is `www`."""
+    with pytest.raises(UnknownTenant):
+        tenancy.resolve_request(_Request("localhost"))
+
+
+def test_suspending_a_tenant_stops_it_resolving():
+    """Enforced at the bind, so no route can forget to check it."""
+    import dataclasses
+
+    from wreath.tenancy import TenantStatus
+
+    directory.add(dataclasses.replace(
+        directory.resolve("globex"), status=TenantStatus.SUSPENDED))
+    try:
+        with pytest.raises(TenantSuspended):
+            tenancy.resolve_request(_Request("globex.localhost"))
+    finally:
+        directory.add(dataclasses.replace(
+            directory.resolve("globex"), status=TenantStatus.ACTIVE))
 '''
 
 

@@ -365,3 +365,56 @@ def test_the_database_project_also_passes_its_own_tests(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     # ... and green because it ran, not because it collected nothing.
     assert "passed" in result.stdout
+
+
+# --- tenancy -----------------------------------------------------------------
+
+
+def test_tenancy_requires_a_database_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Tenant isolation is a property of a schema and a role, so there is
+    nothing to isolate without one. Refused rather than silently ignored."""
+    assert _new(tmp_path / "notenant", "--tenancy") == 2
+    assert "--database postgres" in capsys.readouterr().err
+
+
+def test_the_tenancy_option_wires_the_middleware_and_the_session_marker(
+    tmp_path: Path,
+) -> None:
+    """The two pieces that make the safe path the ergonomic one.
+
+    Without the middleware nothing resolves a tenant; without `FromTenant()` in
+    the session marker the route would be refused at compile time. A scaffold
+    that emitted one and not the other would not start.
+    """
+    target = tmp_path / "tenanted"
+    assert _new(target, "--database", "postgres", "--tenancy") == 0
+    app_source = (target / "tenanted" / "app.py").read_text(encoding="utf-8")
+    assert "TenancyMiddleware" in app_source
+    tenants = (target / "tenanted" / "tenants.py").read_text(encoding="utf-8")
+    assert "FromTenant()" in tenants
+
+
+def test_the_tenanted_project_passes_its_own_tests(tmp_path: Path) -> None:
+    """Green as delivered, like every other variant."""
+    target = tmp_path / "greentenant"
+    assert _new(target, "--database", "postgres", "--tenancy") == 0
+    result = _run_generated_suite(target)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_tenanted_project_passes_its_own_preflight(
+    tmp_path: Path, importable: list[Path],
+) -> None:
+    """The preflight check for a tenant registry with no middleware is exactly
+    the omission this scaffold exists to avoid making, so the two have to
+    agree about the project one of them wrote."""
+    target = tmp_path / "preflighted"
+    assert _new(target, "--database", "postgres", "--tenancy") == 0
+    (target / ".env").write_text(
+        (target / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+    sys.path.insert(0, str(target))
+    importable.append(target)
+    assert main(["doctor", "preflight", f"{target.name}.app:app", "--env",
+                 str(target / ".env")]) == 0
