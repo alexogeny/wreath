@@ -485,6 +485,51 @@
       ]
     },
     {
+      "name": "sso",
+      "capability": "SAML and OIDC login flows over the assertion verification wreath already owned, with one identity provider per organisation",
+      "replaces": [
+        "python3-saml",
+        "pysaml2",
+        "authlib",
+        "python-social-auth"
+      ],
+      "policy": "The flows, never a second verifier: `SamlServiceProvider.consume` builds the `IdentityProvider`/`ServiceProvider`/`in_response_to` that `saml.verify_response` already takes. **The trust anchor is per organisation and comes from the login that began**, never from the assertion -- verifying against the union of every configured certificate lets one customer's identity provider mint an identity in another's, with no signature check failing anywhere, and reading the organisation out of the assertion is the same defect one indirection along. `PendingLogin` carries it and is single-use, so an assertion answering no request is unsolicited rather than a login as anybody from a captured POST body. Attribute mapping is declared and an undeclared attribute is refused: a heuristic that reads `email` and misses `mail` is confident, wrong, and produces one duplicate account per user per provider. JIT provisioning creates account and membership together, adopts an existing account rather than duplicating it (the choice `scim_router` already makes), refuses a role outside the declared vocabulary at *configuration* time because an IdP attribute is whatever a customer's directory admin typed, and yields a **pending** session where the organisation requires a second factor so it composes with `SessionIdentityBackend` rather than bypassing it. OIDC requires S256 PKCE (`plain` sends the verifier as the challenge), binds state to the session that began the flow (an attacker's code redeemed in a victim's browser signs them into the attacker's account) and checks the id token's nonce. **Nothing is fetched on the request path** -- discovery and JWKS refresh at startup, and an unknown `kid` is simply unverified -- the rule `wreath.signatures` already holds, because a request-driven fetch lets an unauthenticated caller aim an outbound request.",
+      "guides": [
+        "docs/guides/sso.md"
+      ],
+      "reference": [
+        "docs/reference/sso.md"
+      ],
+      "sources": [
+        "src/wreath/sso.py"
+      ],
+      "tests": [
+        "tests/sso/"
+      ]
+    },
+    {
+      "name": "oauth",
+      "capability": "An OAuth 2.1 authorization server for a deployment that issues its own tokens, minting exactly what wreath already verifies",
+      "replaces": [
+        "authlib",
+        "oauthlib",
+        "django-oauth-toolkit"
+      ],
+      "policy": "The first obligation is that what it mints is what `JwtVerifier` and `MCPAuth` verify; an issuer whose output its own verifier rejects is two features rather than one, so the tests drive a minted token through the real verifier. Signing is HS256 over the stdlib, keeping the no-mandatory-dependency rule -- right for an issuer that is also the resource server, wrong for one whose tokens third parties verify, and `jwks()` returning an empty key set says so rather than emitting the shared secret as an `oct` entry. Three replay defences, separate because they fail differently: an authorization code is single-use and a second redemption **revokes the token the first issued** (refusing only the second leaves the attacker's token live if they got there first); a refresh token rotates and reuse revokes the whole chain, since rotation without reuse detection tells you nothing; PKCE is required and `plain` refused. A redirect URI is matched **exactly** -- `https://app.example.evil/cb` has the registered URI as a prefix, and an open redirect on the authorization endpoint is a code exfiltration. Client credentials carry no subject, because a machine token naming a person is a machine that can act as one, and a public client cannot use the grant at all. A token carries its tenant, so it composes with `wreath.tenancy` rather than around it.",
+      "guides": [
+        "docs/guides/sso.md"
+      ],
+      "reference": [
+        "docs/reference/oauth.md"
+      ],
+      "sources": [
+        "src/wreath/oauth.py"
+      ],
+      "tests": [
+        "tests/oauth/"
+      ]
+    },
+    {
       "name": "organizations",
       "capability": "Tenancy at the identity layer: organisations, memberships, roles within them, invitations that survive the invitee having no account, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning as an adapter onto exactly those stores",
       "replaces": [
@@ -686,6 +731,28 @@
       "decisions": [
         "docs/decisions/0014-migrations-are-generated-from-the-catalog.md",
         "docs/decisions/0016-validate-the-schema-at-startup.md"
+      ]
+    },
+    {
+      "name": "tenancy",
+      "capability": "Tenant isolation PostgreSQL enforces: a role and a grant set per tenant, a directory to resolve one from a request, and a central schema every tenant reads and none may write",
+      "replaces": [
+        "django-tenants",
+        "sqlalchemy-multi-tenant",
+        "citus"
+      ],
+      "policy": "`search_path` is ergonomics; the role is the boundary. A search path decides where an *unqualified* name resolves and one qualified identifier walks past it, so isolation by naming cannot be audited -- the thing to audit would be every query ever written. A tenant role holds privileges on its own schema plus SELECT on the central schema and nothing on any other tenant's, so a cross-tenant read is `permission denied` from the server and the audit is a catalog query (`isolation_report`). The application's login role is NOINHERIT and holds membership without inheritance, which is what makes RESET ROLE a dead end rather than an escape hatch; `verify_isolation` refuses a superuser, an inheriting role, or a role that owns tenant schemas, at startup, because none of those can be compensated for by any grant set. Three residuals are stated rather than papered over: a deliberate `SET ROLE other_tenant` still crosses (membership is what lets the pool switch at all), and table *names* leak because pg_catalog is world-readable -- revoking USAGE stops reaching an object, not seeing it exists. `ALTER DEFAULT PRIVILEGES` is what stops the grants drifting as migrations add tables. Resolution is two halves on purpose: a source *names* a tenant, a directory *finds* it -- a header used directly as a schema is a header that can name any schema. `FromORM(tenant=FromTenant())` is the load-bearing seam: before it the only tenant-bound session was hand-built in a handler body, so the declarative spelling produced an unbound session and the safe path was the one you had to remember. An isolated registry bound without a tenant is refused at route-compile time.",
+      "guides": [
+        "docs/guides/tenancy.md"
+      ],
+      "reference": [
+        "docs/reference/tenancy.md"
+      ],
+      "sources": [
+        "src/wreath/tenancy.py"
+      ],
+      "tests": [
+        "tests/tenancy/"
       ]
     },
     {
@@ -1720,6 +1787,28 @@
       ],
       "tests": [
         "tests/admin/"
+      ]
+    },
+    {
+      "name": "platform",
+      "capability": "A cross-tenant operator console: every tenant's migration state, dead letters, stalled passes and quota burn on one page, with impersonation that cannot exceed the user",
+      "replaces": [
+        "django-admin",
+        "retool",
+        "forestadmin"
+      ],
+      "policy": "Composes and never re-implements; `scim_router` is the precedent -- an adapter with no store of its own, so what it shows is what the system has. Three defects the hand-written version of this console always has are what the design is against. It **reads across tenants unbound**: the obvious implementation queries with the application's own role and a schema interpolated from the URL, which is the cross-tenant read `wreath.tenancy` prevents, reintroduced by the tool built to supervise it -- so `inspect()` binds that tenant's own context and a second binding inside one scope is refused. Its **impersonation grants more than the user held**: this is a delegation, so the permitted set is an *intersection* with what the user holds, which makes composition-never-grants arithmetic rather than policy; scope and TTL have no defaults, it cannot nest (a chain nobody can compute), it reaches Cedar as `impersonated_by` so a policy can forbid a destructive action under it, and it audits inside the granting transaction. Its **destructive actions have no confirmation**: deprovisioning wants the tenant name typed back, following `privacy.erase`. The action vocabulary is `platform:`-prefixed and disjoint from crud's, and an organisation-scoped principal is refused whatever roles it holds, because org roles are namespaced `<org>:<role>` exactly so one tenant's admin is never another's. A source that raises costs its column, not the page (as `metrics.collect` already does) and is **named** in `unavailable`, because a missing dead-letter count must not read like a low one. Bulk reports per key with no atomic verdict (`apply_fleet`'s property), is bounded, and converges when re-run. No JavaScript, so the CSP needs no nonce; a write needs `csrf=`, since CSRFMiddleware is header-only and a form cannot carry a header.",
+      "guides": [
+        "docs/guides/platform.md"
+      ],
+      "reference": [
+        "docs/reference/platform.md"
+      ],
+      "sources": [
+        "src/wreath/platform.py"
+      ],
+      "tests": [
+        "tests/operator_console/"
       ]
     },
     {
