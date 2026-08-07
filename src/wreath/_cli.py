@@ -695,6 +695,11 @@ def _add_new_parser(commands: Any) -> None:
         help="also declare an ORM model and register a database (default: none)",
     )
     parser.add_argument(
+        "--tenancy", action="store_true",
+        help="isolate tenants by PostgreSQL role: a directory, the resolving "
+             "middleware, and tenant-bound sessions (needs --database postgres)",
+    )
+    parser.add_argument(
         "--json", action="store_true", dest="as_json",
         help="print the written paths as JSON instead of a report",
     )
@@ -711,6 +716,7 @@ def execute_new(namespace: argparse.Namespace) -> int:
         directory=Path(namespace.directory),
         frontend=namespace.frontend,
         database=namespace.database,
+        tenancy=namespace.tenancy,
     )
     try:
         written = create(options)
