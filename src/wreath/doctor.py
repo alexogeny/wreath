@@ -874,6 +874,8 @@ def preflight(
             )
         )
 
+    findings.extend(_tenancy_findings(app))
+
     public = _public_routes(app)
     if public:
         shown = ", ".join(public[:_ROUTE_SAMPLE])
@@ -897,6 +899,47 @@ def preflight(
         findings=tuple(findings),
         unchecked=_UNCHECKED,
     )
+
+
+def _tenancy_findings(app: Any) -> list[PreflightFinding]:
+    """A tenant-isolated registry with nothing to resolve a tenant from.
+
+    The wiring omission `wreath.tenancy` exists to prevent, and the one that
+    cannot be caught anywhere else: every individual piece is configured
+    correctly, and the application starts and serves every request unbound. It
+    blocks, because there is no reading of it that is fine.
+    """
+    from .tenancy import TENANCY_PREFLIGHT_SOURCE, TenancyMiddleware
+
+    registries = getattr(app, "_orm_registries", None) or {}
+    isolated = [
+        name for name, registry in registries.items()
+        if getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
+    ]
+    if not isolated:
+        return []
+    # `_global_middleware` holds `(priority, order, middleware)`, so the
+    # middleware is the third element rather than the entry.
+    installed = any(
+        isinstance(entry[2], TenancyMiddleware)
+        for entry in getattr(app, "_global_middleware", ())
+    )
+    if installed:
+        return []
+    return [
+        PreflightFinding(
+            source=TENANCY_PREFLIGHT_SOURCE,
+            severity="blocking",
+            subject=f"registry {name!r}",
+            detail=(
+                "this ORM registry is tenant-isolated and no TenancyMiddleware is "
+                "installed, so nothing resolves a tenant for a request. Add "
+                "app.add_global_middleware(TenancyMiddleware(Tenancy(directory=..., "
+                "source=...)))"
+            ),
+        )
+        for name in isolated
+    ]
 
 
 def _public_routes(app: Any) -> list[str]:
