@@ -118,6 +118,7 @@ should have inherited tomorrow's.
 | `WREATH_KEEP_ALIVE_TIMEOUT` | `keep_alive_timeout` | `5.0` seconds |
 | `WREATH_REQUEST_TIMEOUT` | `request_timeout` | `30.0` seconds |
 | `WREATH_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | `10.0` seconds |
+| `WREATH_SSL_SHUTDOWN_TIMEOUT` | `ssl_shutdown_timeout` | `1.0` seconds; asyncio's own default is `30.0` |
 | `WREATH_SERVER_HEADER` | `server_header` | `wreath` |
 | `WREATH_DATE_HEADER` | `date_header` | `true`; `true/false/1/0/yes/no/on/off` |
 | `WREATH_MAX_REQUEST_LINE` | `max_request_line` | `8192` bytes, then 414 |
