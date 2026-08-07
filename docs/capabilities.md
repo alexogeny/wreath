@@ -27,6 +27,51 @@ what the site's own search matches this page on, so if you got here by typing
 `celery` into `Ctrl K`, that is why — and the row it belongs to is the link you
 wanted.
 
+## The same question from a terminal
+
+`Ctrl K` needs this site. The table is also compiled into the package, so the
+lookup works from a shell with nothing open:
+
+```bash
+wreath capabilities celery
+```
+
+```
+celery -- 2 capabilities
+
+jobs  (replaces 'celery')
+  Durable Postgres-backed jobs and schedules, pub/sub messaging, WebSocket
+  rooms, task progress, and supervised background services
+  modules  wreath.jobs, wreath.messaging, wreath.services, wreath.progress, wreath.rooms
+  guides   docs/guides/jobs.md, docs/guides/progress.md
+
+passes  (replaces 'celery')
+  Backfills, rollups, and reindexes as a durable, resumable, paced walk over
+  a big table
+  modules  wreath.passes
+  guides   docs/guides/chunked-passes.md
+```
+
+It takes a package name (`celery`, `alembic`, `redis`), a subsystem or module
+(`jobs`, `wreath.messaging`), or an ordinary word from a capability sentence
+(`csrf`). **Every capability that answers is listed, not the best one** — `redis`
+is four subsystems here, and being handed one of them is how somebody
+reimplements the other three. The `(replaces 'celery')` part is *why* it
+matched, and the list is ordered by that: an exact name before a word in a
+sentence.
+
+Two things it deliberately does not do. It takes no application target and opens
+no socket or database, because the question gets asked before there is a project
+to point at. And a word it cannot answer exits `1` rather than printing an empty
+list, so `wreath capabilities $dependency` over an existing `requirements.txt`
+tells you which lines have an answer here. `--json` gives the same result with
+the match reason on each row.
+
+The index it reads is generated from the same manifest as the table above, and
+`uv run wreath-map-lint` (`MAP015`) fails while the two disagree — a copy that
+ships in the wheel is exactly the kind of map this page has already watched rot
+once.
+
 ## What Wreath does not include
 
 A page that claims everything is read as a page that claims nothing, so here is

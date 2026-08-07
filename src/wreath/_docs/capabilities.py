@@ -49,7 +49,10 @@ import json
 import re
 from pathlib import Path
 
-__all__ = ["MANIFEST", "alias_text", "aliases", "expand", "has_directive", "table"]
+__all__ = [
+    "MANIFEST", "alias_text", "aliases", "expand", "has_directive", "public_modules",
+    "table",
+]
 
 #: The manifest, relative to the docs source directory (it lives under `docs/`
 #: but is excluded from the nav — it is data, not a page).
@@ -176,12 +179,16 @@ def _packages(names: tuple[str, ...] | list[str]) -> str:
     return ", ".join(f"`{_cell(name)}`" for name in names) or _NO_PACKAGES
 
 
-def _modules(sources: tuple[str, ...] | list[str]) -> str:
+def public_modules(sources: tuple[str, ...] | list[str]) -> list[str]:
     """The subsystem's public modules, in the order it lists its sources.
 
     Only top-level public names under `src/wreath`: `orm/` is `wreath.orm`, but
     `_native/postgres/model.c` is how the ORM is built rather than what a reader
     imports, and naming it here would be showing somebody the machine room.
+
+    Both the rendered table and the shipped capability index
+    (`wreath._capability_data`) derive their module column from here, so the two
+    cannot disagree about what a subsystem exposes.
     """
     seen: list[str] = []
     for source in sources:
@@ -193,10 +200,14 @@ def _modules(sources: tuple[str, ...] | list[str]) -> str:
         name = trimmed.removesuffix(".py")
         if not name or name.startswith("_"):
             continue
-        rendered = f"`wreath.{name}`"
+        rendered = f"wreath.{name}"
         if rendered not in seen:
             seen.append(rendered)
-    return ", ".join(seen) or _NO_MODULES
+    return seen
+
+
+def _modules(sources: tuple[str, ...] | list[str]) -> str:
+    return ", ".join(f"`{name}`" for name in public_modules(sources)) or _NO_MODULES
 
 
 def _links(
