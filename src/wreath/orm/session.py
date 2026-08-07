@@ -34,6 +34,7 @@ from .compiler import (
     MAX_SELECTIN_KEYS,
     CompiledQuery,
     JoinedStep,
+    LoadPlan,
     SelectinStep,
     _count_write_sql_builds,
     compile_count,
@@ -145,11 +146,11 @@ class RawQuery:
         order = _validate_raw_result(connection, self._sql, spec)
         if not rows:
             return []
-        offsets = _pk_offsets(spec, order)     # once, not once per row
+        plan = _row_plan(spec, order)          # once, not once per row
         return [
             item
             for item in (
-                session._hydrate(spec, order, row, 0, offsets) for row in rows
+                session._hydrate(spec, plan, row, 0) for row in rows
             )
             if item is not None
         ]
@@ -264,20 +265,63 @@ def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, 
 
 
 @dataclass(frozen=True, slots=True)
+class _RowPlan:
+    """Everything `_hydrate` needs that a row cannot change.
+
+    The key offsets were lifted out of the per-row loop once already; the cell
+    loop beside them kept reading `ColumnSpec.index` -- a `@property` returning
+    `self.column.index` -- twice per column per row, and calling
+    `PgType.from_wire`, which for most types returns its argument unchanged.
+    Both are settled by the compiled projection, so both were O(rows x columns)
+    Python frames spent re-deriving constants.
+
+    `decode` is `PgType._from_wire` itself rather than the `from_wire` wrapper,
+    so a column whose wire value is already its Python value carries `None` here
+    and the row loop skips the call entirely instead of making it and being
+    handed its argument back.
+    """
+
+    #: (offset of this key column within the row, decoder or None), in key order.
+    key: tuple[tuple[int, Any], ...]
+    #: (storage cell index, decoder or None), in projection order.
+    cells: tuple[tuple[int, Any], ...]
+
+
+def _row_plan(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> _RowPlan:
+    """Resolve one model's per-row constants, once per query.
+
+    `_pk_offsets` is called rather than inlined, so the projection-missing-its-
+    primary-key refusal and its call counter keep firing exactly where they did.
+    """
+    offsets = _pk_offsets(spec, columns)
+    # `tuple([...])` rather than `tuple(genexpr)`: this runs once per query, and
+    # a `fetch_one` amortises it over a single row, so its own cost decides
+    # whether the hoist pays at all on the commonest shape. Measured on this
+    # model, the two comprehensions are 0.84us against the generators' 1.31us.
+    return _RowPlan(
+        key=tuple([
+            (offset, item.pg_type._from_wire)
+            for offset, item in zip(offsets, spec.primary_key, strict=True)
+        ]),
+        cells=tuple([(item.column.index, item.pg_type._from_wire) for item in columns]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _JoinCursor:
-    """A joined step with its primary-key offsets already resolved."""
+    """A joined step with its per-row constants already resolved."""
 
     step: JoinedStep
-    pk_offsets: tuple[int, ...]
+    plan: _RowPlan
     nested: tuple[_JoinCursor, ...]
 
 
 def _join_cursors(steps: tuple[JoinedStep, ...]) -> tuple[_JoinCursor, ...]:
-    """Resolve the whole joined tree's key offsets once, before any row."""
+    """Resolve the whole joined tree's row plans once, before any row."""
     return tuple(
         _JoinCursor(
             step,
-            _pk_offsets(step.relationship.target, step.columns),
+            _row_plan(step.relationship.target, step.columns),
             _join_cursors(step.nested),
         )
         for step in steps
@@ -907,13 +951,12 @@ class Session:
             # missing its primary key even when nothing matched; an empty
             # result has never done that, so stay out of the way.
             return objects
-        # Once per query, not once per row -- and once for the whole joined
-        # tree, not once per step per row.
-        pk_offsets = _pk_offsets(spec, plan.columns)
-        cursors = _join_cursors(plan.joined)
+        # Once per *shape*, not once per query and emphatically not once per
+        # row -- see `_record_plan`.
+        row_plan, cursors = self._record_plan(compiled, spec, plan)
         seen: set[int] = set()
         for row in rows:
-            root = self._hydrate(spec, plan.columns, row, 0, pk_offsets)
+            root = self._hydrate(spec, row_plan, row, 0)
             if root is None:
                 continue
             if id(root) not in seen:
@@ -928,31 +971,45 @@ class Session:
         for cursor in cursors:
             step = cursor.step
             child = self._hydrate(
-                step.relationship.target,
-                step.columns,
-                row,
-                step.offset,
-                cursor.pk_offsets,
+                step.relationship.target, cursor.plan, row, step.offset
             )
             parent._orm_set_relation(step.relationship.index, child)
             if child is not None:
                 self._assemble_joins(cursor.nested, child, row)
 
-    def _hydrate(
-        self,
-        spec: ModelSpec,
-        columns: tuple[ColumnSpec, ...],
-        row: Any,
-        offset: int,
-        pk_offsets: tuple[int, ...],
-    ) -> Any:
+    def _record_plan(
+        self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
+    ) -> tuple[_RowPlan, tuple[_JoinCursor, ...]]:
+        """The Record path's per-row constants, resolved once per shape.
+
+        Building these per query is enough work to lose on a small result: a
+        `fetch_one` spreads the build over one row, and measured against not
+        hoisting at all it ran 0.85-0.90x below five rows while winning
+        1.37-1.42x above fifty. A shape's plan cannot change between queries, so
+        the honest fix is to build it once rather than to pick a row count.
+
+        A shape with no cache line -- the cache is bounded and an entry can be
+        evicted -- rebuilds rather than failing, which is the same contract
+        `_hydrate_plan` keeps beside it. `_row_plan` still raises for a
+        projection missing its primary key, and still raises on every attempt,
+        because nothing is stored until it has returned.
+        """
+        cached = self._registry.cached_plan(compiled.shape_key)
+        if cached is not None and cached.record_plan is not None:
+            return cached.record_plan
+        built = (_row_plan(spec, plan.columns), _join_cursors(plan.joined))
+        if cached is not None:
+            cached.record_plan = built
+        return built
+
+    def _hydrate(self, spec: ModelSpec, plan: _RowPlan, row: Any, offset: int) -> Any:
         key: list[Any] = []
-        for item, index in zip(spec.primary_key, pk_offsets, strict=True):
+        for index, decode in plan.key:
             value = row[offset + index]
             if value is None:
                 # A LEFT JOIN that matched nothing; not an object.
                 return None
-            key.append(item.pg_type.from_wire(value))
+            key.append(value if decode is None else decode(value))
         identity = (spec, tuple(key))
         instance = self._identity.get(identity)
         if instance is None:
@@ -960,14 +1017,13 @@ class Session:
             instance._orm_owner = self
             instance._orm_state = PERSISTENT
             self._identity[identity] = instance
-        for index, item in enumerate(columns):
+        for index, (cell, decode) in enumerate(plan.cells):
             # A dirty field is the session's pending change; a later row must
             # not silently revert it.
-            if instance._orm_is_dirty(item.index):
+            if instance._orm_is_dirty(cell):
                 continue
-            instance._orm_set_loaded(
-                item.index, item.pg_type.from_wire(row[offset + index])
-            )
+            value = row[offset + index]
+            instance._orm_set_loaded(cell, value if decode is None else decode(value))
         return instance
 
     # -- relationship loading ------------------------------------------------
@@ -1008,7 +1064,7 @@ class Session:
         children: list[Any] = []
         # The projection is the target's own column tuple for every batch and
         # every row, so its key offsets resolve once for the whole load.
-        child_offsets = _pk_offsets(target, target.columns)
+        child_plan = _row_plan(target, target.columns)
         batch_limit = _batch_limit(len(remote))
         for batch in _batches(tuple(keys), len(remote)):
             sql, values = _selectin_sql(
@@ -1017,7 +1073,7 @@ class Session:
             connection = await self._acquire()
             rows = await connection.fetch(sql, *values)
             for row in rows:
-                child = self._hydrate(target, target.columns, row, 0, child_offsets)
+                child = self._hydrate(target, child_plan, row, 0)
                 if child is None:
                     continue
                 children.append(child)
