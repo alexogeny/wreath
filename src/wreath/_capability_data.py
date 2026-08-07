@@ -96,6 +96,20 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
         'replaces': ('fastapi-users', 'flask-login', 'django-allauth', 'passlib', 'pyotp', 'django-otp', 'webauthn', 'fido2'),
     },
     {
+        'name': 'sso',
+        'capability': 'SAML and OIDC login flows over the assertion verification wreath already owned, with one identity provider per organisation',
+        'modules': ('wreath.sso',),
+        'guides': ('docs/guides/sso.md',),
+        'replaces': ('python3-saml', 'pysaml2', 'authlib', 'python-social-auth'),
+    },
+    {
+        'name': 'oauth',
+        'capability': 'An OAuth 2.1 authorization server for a deployment that issues its own tokens, minting exactly what wreath already verifies',
+        'modules': ('wreath.oauth',),
+        'guides': ('docs/guides/sso.md',),
+        'replaces': ('authlib', 'oauthlib', 'django-oauth-toolkit'),
+    },
+    {
         'name': 'organizations',
         'capability': 'Tenancy at the identity layer: organisations, memberships, roles within them, invitations that survive the invitee having no account, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning as an adapter onto exactly those stores',
         'modules': ('wreath.organizations',),
@@ -143,6 +157,13 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
         'modules': ('wreath.migrations',),
         'guides': ('docs/guides/migrations.md',),
         'replaces': ('alembic', 'yoyo-migrations'),
+    },
+    {
+        'name': 'tenancy',
+        'capability': 'Tenant isolation PostgreSQL enforces: a role and a grant set per tenant, a directory to resolve one from a request, and a central schema every tenant reads and none may write',
+        'modules': ('wreath.tenancy',),
+        'guides': ('docs/guides/tenancy.md',),
+        'replaces': ('django-tenants', 'sqlalchemy-multi-tenant', 'citus'),
     },
     {
         'name': 'jobs',
@@ -395,6 +416,13 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
         'modules': ('wreath.admin',),
         'guides': ('docs/guides/admin.md',),
         'replaces': ('django-admin', 'sqladmin', 'flask-admin', 'starlette-admin'),
+    },
+    {
+        'name': 'platform',
+        'capability': "A cross-tenant operator console: every tenant's migration state, dead letters, stalled passes and quota burn on one page, with impersonation that cannot exceed the user",
+        'modules': ('wreath.platform',),
+        'guides': ('docs/guides/platform.md',),
+        'replaces': ('django-admin', 'retool', 'forestadmin'),
     },
     {
         'name': 'sync',
