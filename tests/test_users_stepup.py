@@ -45,6 +45,12 @@ from wreath.users import (
 
 PASSWORD = "correct horse battery staple"
 
+#: One scrypt for the whole file rather than one per seeded user; see the same
+#: constant in `test_users_totp.py` for why that is safe. `hash_password` costs
+#: 60 ms measured and the password never varies, so the repeats bought nothing.
+#: The login path still verifies against this hash for real.
+PASSWORD_HASH = hash_password(PASSWORD)
+
 
 class _Clock:
     def __init__(self, now: float = 1_700_000_000.0) -> None:
@@ -309,7 +315,7 @@ async def _seeded(
     client: Any, users: InMemoryUserStore, clock: _Clock
 ) -> tuple[str, str, Any]:
     """A signed-in, enrolled user; returns (base32 secret, cookie, user)."""
-    user = await users.create("ann@example.test", hash_password(PASSWORD))
+    user = await users.create("ann@example.test", PASSWORD_HASH)
     secret_b32, _, cookie = await _enrol(client, clock, _cookie(await _login(client)))
     return secret_b32, cookie, user
 
@@ -412,7 +418,7 @@ async def test_step_up_is_throttled_per_user() -> None:
 async def test_step_up_without_a_session_is_refused() -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
-        await users.create("ann@example.test", hash_password(PASSWORD))
+        await users.create("ann@example.test", PASSWORD_HASH)
         response = await client.post("/auth/2fa/verify", json={"code": "000000"})
         assert response.status == 401
 
@@ -421,7 +427,7 @@ async def test_step_up_with_nothing_enrolled_says_so(
 ) -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
-        await users.create("ann@example.test", hash_password(PASSWORD))
+        await users.create("ann@example.test", PASSWORD_HASH)
         cookie = _cookie(await _login(client))
         response = await client.post(
             "/auth/2fa/verify", json={"code": "000000"}, headers={"cookie": cookie}
@@ -489,7 +495,7 @@ async def test_removal_is_scoped_to_the_owner() -> None:
             await client.get("/auth/2fa", headers={"cookie": victim_cookie})
         ).json()["factors"][0]["id"]
 
-        await users.create("bob@example.test", hash_password(PASSWORD))
+        await users.create("bob@example.test", PASSWORD_HASH)
         attacker_cookie = _cookie(await _login(client, "bob@example.test"))
         _, _, attacker_cookie = await _enrol(client, clock, attacker_cookie)
 

@@ -69,6 +69,17 @@ RFC6238_SHA1_VECTORS = (
 SECRET = b"a-twenty-byte-secret"
 PASSWORD = "correct horse battery staple"
 
+#: One scrypt, not one per seeded user. `hash_password` is deliberately slow --
+#: 60 ms measured, and it is the same `PASSWORD` every time -- so re-deriving it
+#: per test spent 1.3s of this file on a value that never varies. What the tests
+#: exercise is `verify_password` on the login path, which still runs for real
+#: against this hash; only the setup is memoised.
+#:
+#: Sharing one salt across seeded users is safe *here* because nothing in this
+#: file reads a stored hash. A test that asserted two users hash differently
+#: would have to call `hash_password` itself, which is what it is asserting about.
+PASSWORD_HASH = hash_password(PASSWORD)
+
 
 def _at(moment: float) -> str:
     """The 6-digit code a phone would show at `moment`."""
@@ -534,7 +545,7 @@ def _cookie(response: Any) -> str:
 
 
 async def _seed(users: InMemoryUserStore, email: str = "ann@example.test") -> Any:
-    return await users.create(email, hash_password(PASSWORD))
+    return await users.create(email, PASSWORD_HASH)
 
 
 def _app(
