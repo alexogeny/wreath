@@ -351,6 +351,68 @@ def test_history_is_atomic_bounded_run_data_and_updates_file_average(tmp_path: P
     assert len(history["runs"]) == 2
 
 
+def _history_after(path: Path, samples: list[tuple[str, float]]) -> None:
+    """Drive `_update_history` once per (outcome, seconds) pair, in order."""
+    nodeid = "tests/test_one.py::test_timing"
+    for outcome, seconds in samples:
+        activity = runner.RunActivity(workers=1)
+        activity.collect((nodeid,))
+        activity.start_test(nodeid)
+        activity.add_report(_report(nodeid, outcome, "call", seconds))
+        activity.finish_test(nodeid)
+        activity.finish(0)
+        runner._update_history(path, activity.report(slowest=0))
+
+
+def test_a_test_that_stops_running_stops_carrying_its_old_weight(tmp_path: Path) -> None:
+    """A skip is a regime change, and a cumulative mean cannot follow one.
+
+    The Postgres-gated suites cost seconds against a real server and skip in
+    microseconds without `WREATH_TEST_POSTGRES_DSN`. `mean_seconds` averaged
+    every sample ever taken, so after 244 runs with a DSN those tests kept a
+    ~3.3s weight through every DSN-less run afterwards and would have needed
+    hundreds more to decay. Measured on the real history file: 446 skipped
+    tests carried 160.6s of scheduler weight against 0.383s of actual cost --
+    44% of everything the LPT scheduler was balancing on.
+
+    The dispatch weight is what this asserts, not the stored mean: the record
+    is history and stays honest about what those runs cost.
+    """
+    path = tmp_path / "history.json"
+    _history_after(path, [("passed", 3.3)] * 30 + [("skipped", 0.0004)])
+
+    test_weights, _ = runner._history_weights(path)
+    assert test_weights["tests/test_one.py::test_timing"] == 0.0, (
+        "a test that skipped last run is still being scheduled as expensive"
+    )
+
+
+def test_a_weight_follows_a_lasting_change_in_what_a_test_costs(tmp_path: Path) -> None:
+    """The window is bounded, so a test that gets slower is believed.
+
+    An unbounded cumulative mean is not just wrong across a skip boundary; it
+    is unreachable in general. After 200 samples one new observation moves the
+    mean by 1/200th of the difference, so a test that doubles in cost is
+    scheduled at its old weight for the rest of the tree's life.
+
+    Stated against `_MEAN_WINDOW` rather than a fixed count, because the claim
+    is about the window existing and not about its size: one window's worth of
+    samples at a new cost must carry the weight more than halfway there. It
+    lands at 64% of the way (`1 - (1 - 1/20) ** 20`), so the margin is real
+    rather than a threshold fitted to the answer. Under the unbounded mean the
+    same 220 samples reach 0.27 -- 9% of the way, and falling with every run.
+    """
+    path = tmp_path / "history.json"
+    old, new = 0.1, 2.0
+    _history_after(
+        path, [("passed", old)] * 200 + [("passed", new)] * runner._MEAN_WINDOW
+    )
+
+    test_weights, _ = runner._history_weights(path)
+    weight = test_weights["tests/test_one.py::test_timing"]
+    assert weight > (old + new) / 2, f"weight {weight:.3f} still anchored to {old}"
+
+
 def test_duration_history_prioritizes_expensive_tests_for_dynamic_dispatch() -> None:
     nodeids = [
         "tests/test_fast.py::test_unknown_one",

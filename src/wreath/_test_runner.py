@@ -38,6 +38,17 @@ _PLUGIN_NAME = "wreath-test-activity"
 _HISTORY_RUNS = 20
 _MAX_HISTORY_FILES = 50_000
 _MAX_HISTORY_TESTS = 200_000
+
+#: Runs of memory in `mean_seconds`, which exists to predict the *next* run.
+#:
+#: The divisor used to be the lifetime sample count, which makes the mean
+#: unreachable rather than merely slow: at 200 samples one new observation moves
+#: it by half a percent of the difference, so a test whose cost genuinely changed
+#: was scheduled at its old weight indefinitely. Capping the divisor turns it into
+#: a rolling mean with a ~20-run time constant -- still steady enough that one
+#: noisy run does not reorder the head, and now able to follow a real change.
+#: `samples` keeps counting for the record; only the weighting is bounded.
+_MEAN_WINDOW = 20
 _DEFAULT_HISTORY = ".wreath/test-history.json"
 _MAX_AUTO_WORKERS = 8
 _MAX_AUTO_MUTANT_WORKERS = 3
@@ -849,7 +860,7 @@ def _update_history(path: Path, report: dict[str, Any]) -> None:
         seconds = float(row["seconds"])
         files[row["path"]] = {
             "samples": samples,
-            "mean_seconds": old_mean + (seconds - old_mean) / samples,
+            "mean_seconds": old_mean + (seconds - old_mean) / min(samples, _MEAN_WINDOW),
             "last_seconds": seconds,
             "last_outcome": row["outcome"],
             "last_seen": report["finished_at"],
@@ -873,7 +884,7 @@ def _update_history(path: Path, report: dict[str, Any]) -> None:
         seconds = float(row["seconds"])
         tests[row["nodeid"]] = {
             "samples": samples,
-            "mean_seconds": old_mean + (seconds - old_mean) / samples,
+            "mean_seconds": old_mean + (seconds - old_mean) / min(samples, _MEAN_WINDOW),
             "last_seconds": seconds,
             "last_outcome": row["outcome"],
             "last_seen": report["finished_at"],
@@ -906,8 +917,16 @@ def _history_weights(path: Path) -> tuple[dict[str, float], dict[str, float]]:
             if not isinstance(name, str) or not isinstance(row, dict):
                 continue
             seconds = row.get("mean_seconds")
-            if isinstance(seconds, int | float) and seconds >= 0.0:
-                result[name] = float(seconds)
+            if not isinstance(seconds, int | float) or seconds < 0.0:
+                continue
+            # A skip is a step change, not a slow drift, and even a bounded mean
+            # spends its whole window catching up to one. What decides it is
+            # environmental and stable across a run -- a DSN, a built extension,
+            # a free-threaded interpreter -- so last run's answer is the best
+            # prediction available and a rolling mean is strictly worse than it.
+            # Without this, 446 skipped tests carried 160.6s of weight against
+            # 0.383s of real cost: 44% of everything the scheduler balanced on.
+            result[name] = 0.0 if row.get("last_outcome") == "skipped" else float(seconds)
         return result
 
     return means(history.get("tests")), means(history.get("files"))
