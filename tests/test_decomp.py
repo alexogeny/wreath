@@ -106,3 +106,27 @@ def test_a_frame_chain_actually_costs_frames() -> None:
 
 def test_every_named_suite_is_reachable() -> None:
     assert set(decomp.SUITES) == {"request", "orm", "calibrate"}
+
+
+def test_the_orm_arms_name_the_hydration_path_they_measured() -> None:
+    """The ORM arms must not report the fallback as if it were the read.
+
+    `Session._hydrate_plan` returns a native plan only for a connection that
+    installs `_decode_dest`, and no scripted double does. So `full fetch_one`
+    measures `Session._hydrate` -- a Python pass per column per row -- while a
+    deployment decodes straight into the model's cells. Measured on 10,000 real
+    rows the gap is ~3.7x, which is far too large for the suite to leave
+    unsaid: every ratio printed against that arm inherits the error.
+    """
+    from wreath._devtools.sample_app import _ScriptedDatabase
+
+    assert decomp._hydration_path(_ScriptedDatabase()) == "record"
+
+
+def test_a_connection_that_decodes_natively_is_named_as_such() -> None:
+    """The probe reads the same hook the session gates on, not a hard-coded answer."""
+
+    class _Nativeish:
+        connection = type("C", (), {"_decode_dest": object()})()
+
+    assert decomp._hydration_path(_Nativeish()) == "native"

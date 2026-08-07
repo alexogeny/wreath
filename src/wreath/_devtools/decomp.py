@@ -134,6 +134,35 @@ def suite_request(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
 # -- inside one ORM read -------------------------------------------------------
 
 
+#: Measured on 10,000 real rows through `benchmarks/postgres/bench_orm_hydrate.py`
+#: against PostgreSQL 17: 1,943,738 rows/s direct-native against 530,053 rows/s
+#: through Records. Quoted rather than re-measured because this suite has no
+#: database; re-derive it there if the hydrators change. It was 4.7x before the
+#: Record path stopped re-deriving per-row constants; closing it further means
+#: making that path faster, not making this note smaller.
+_RECORD_PATH_PENALTY = 3.7
+
+
+def _hydration_path(database: Any) -> str:
+    """Which of the two hydrators these arms will actually exercise.
+
+    `Session._hydrate_plan` hands back a native plan only when the connection
+    exposes `_decode_dest`, and only a real `wreath._native._postgres`
+    connection installs that hook. A scripted double therefore takes the
+    Record path -- one Python pass per column per row -- while production takes
+    neither of those steps.
+
+    This is asked and printed rather than assumed, because the difference is
+    large and silent: an arm labelled "full fetch_one" that quietly measures
+    the fallback reports a number no deployment ever sees, and every ratio
+    taken against it inherits the error.
+    """
+    connection = getattr(database, "connection", None)
+    if getattr(connection, "_decode_dest", None) is not None:
+        return "native"
+    return "record"
+
+
 def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     """Inside one ORM read, timed outside the request pipeline.
 
@@ -141,6 +170,9 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     rebuilt per call -- but `shape_of` derives that cache key from the query
     object every time, and the query object is itself rebuilt per request.
     These arms separate the two.
+
+    **These arms measure the Record hydration path, not the native one.** See
+    `_hydration_path`; the suite says so at the top of its own output.
     """
     from wreath.orm.compiler import compile_select, shape_of
     from wreath.orm.registry import Registry
@@ -209,12 +241,30 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     medians = {arm.label: arm.median for arm in arms}
     full = medians["full fetch_one"]
     prep = medians["build Select+where"] + medians["compile_select (prebuilt)"]
+    path = _hydration_path(database)
+    result["hydration_path"] = path
     print(
         f"\n  Building the query and deriving its cache key is {prep:.2f}us of a "
         f"{full:.2f}us read ({prep / full * 100:.0f}%).\n"
         f"  The compiled SQL is cached; `shape_of` re-derives the key that finds it,\n"
         f"  per request, because the query object is rebuilt per request."
     )
+    if path != "native":
+        print(
+            f"\n  HYDRATION PATH: {path.upper()} -- these arms do NOT measure what a\n"
+            f"  deployment runs. A scripted connection installs no `_decode_dest`, so\n"
+            f"  `fetch_one` falls back to `Session._hydrate`, a Python pass per column\n"
+            f"  per row; a real connection decodes straight into the model's cells.\n"
+            f"  Measured on 10,000 rows, the fallback is ~{_RECORD_PATH_PENALTY:.1f}x "
+            f"slower, so\n"
+            f"  `full fetch_one` above is an upper bound and every percentage taken\n"
+            f"  against it -- including the one printed just now -- has an inflated\n"
+            f"  denominator. The fallback is still what joined loads and the reference\n"
+            f"  driver run, which is what these arms legitimately describe.\n\n"
+            f"  For the production path:\n"
+            f"    uv run python -m benchmarks.postgres.bench_orm_hydrate \\\n"
+            f"      --dsn $WREATH_TEST_POSTGRES_DSN"
+        )
     return result
 
 
