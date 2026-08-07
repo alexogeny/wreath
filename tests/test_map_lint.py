@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wreath._devtools import map_lint
+from wreath._devtools import capability_index, map_lint
 from wreath._devtools.native_lint import repo_root
 
 
@@ -73,9 +73,18 @@ def _reference_page(root: Path, module: str) -> None:
 
 
 def _write_manifest(root: Path, manifest: dict) -> None:
+    """Write the manifest, and the file derived from it.
+
+    `src/wreath/_capability_data.py` is generated from the manifest and `MAP015`
+    fails while the two disagree, so a fixture that wrote only one of them would
+    add that finding to every test in this file -- none of which is about it.
+    Writing both here is what `wreath-map-lint --fix` does for the real tree;
+    `tests/test_map_lint_capability_index.py` is where the rule itself is proved.
+    """
     path = root / map_lint.MANIFEST
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest))
+    capability_index.write_module(root, manifest)
 
 
 def test_clean_repository_has_no_findings(fake_repo: Path) -> None:
@@ -437,9 +446,13 @@ def test_adopt_adds_the_source_and_brings_its_tests(fake_repo: Path) -> None:
     changes, refusals = map_lint.repair(fake_repo, [("widgets", "src/wreath/gadgets.py")])
 
     assert refusals == []
+    # The third line is the derived half: adopting a source changes which modules
+    # a subsystem exposes, so the shipped capability index moves with it and says
+    # so. A silent regeneration would be a file changing under the reader.
     assert changes == [
         "widgets.sources += src/wreath/gadgets.py",
         "widgets.tests += tests/test_gadgets.py",
+        f"{capability_index.DATA_MODULE} regenerated from {map_lint.MANIFEST}",
     ]
     assert map_lint.scan(fake_repo) == []
 

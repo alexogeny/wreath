@@ -65,6 +65,12 @@ Findings:
   the requirement attached to each other. The generated table's *links* need no
   check of their own -- they are the `guides` and `reference` paths `MAP002`
   already resolves.
+* `MAP015` -- `src/wreath/_capability_data.py` no longer matches the manifest,
+  or is missing. `wreath capabilities` answers from that file rather than from
+  `docs/agents/manifest.json`, because the wheel carries the package and not the
+  docs; the copy is generated, and a generated copy with no staleness check is
+  the same rot every other rule here is about. Compared byte for byte, so a hand
+  edit fails exactly where a missed regeneration does, and `--fix` regenerates.
 * `MAP009` -- a map cites a path `.gitignore` excludes. This is the one that
   hides best: the file is on disk, every other check resolves it, and the map is
   wrong only for someone who clones the repository. `.gitignore` excluded
@@ -570,7 +576,7 @@ def _listed(values: list[str]) -> set[str]:
 def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
     """Apply the mechanically-derivable manifest repairs.
 
-    Two of them, and no more. Both have exactly one right answer, which is what
+    Three of them, and no more. Each has exactly one right answer, which is what
     separates them from the findings a person has to resolve -- `MAP002` cannot
     know where a moved file went, and `MAP003` cannot know which subsystem a new
     module belongs to. Guessing at either would produce a manifest that lints
@@ -583,6 +589,8 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
       `tests/test_<module>.py` / `tests/<module>/` when it exists on disk and
       is not listed yet. This is the half that silently rots: the module gets
       mapped when it lands, and the test file added a week later does not.
+    * **the capability index** -- rewrite `src/wreath/_capability_data.py` from
+      the manifest (`MAP015`). Wholly derived, so there is nothing to judge.
 
     Returns `(changes, refusals)`.
     """
@@ -624,6 +632,14 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
 
     if changes:
         path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    # After the manifest is written, never before: the index is derived from it,
+    # and regenerating from the pre-repair copy would leave MAP015 standing on
+    # the very run that was asked to clear it.
+    from .capability_index import DATA_MODULE, write_module
+
+    if write_module(root, manifest):
+        changes.append(f"{DATA_MODULE} regenerated from {MANIFEST}")
     return changes, refusals
 
 
@@ -657,7 +673,19 @@ def _budget_sites(root: Path) -> list[tuple[str, int, str]]:
         if relative in BUDGET_EXEMPT or "/_devtools/" in f"/{relative}":
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # A site is a *call* to a name imported from BUDGET_SOURCES, so the name
+        # has to be spelled in this file for one to exist -- skipping the files
+        # that spell none of them skips only provable non-matches. Reading the
+        # tree costs 22 ms against 1.9 s to parse it, so the cheap test goes
+        # first; this scan runs on every `wreath-map-lint` and in the test that
+        # drives it.
+        if not any(name in source for name in BUDGETED):
+            continue
+        try:
+            tree = ast.parse(source)
         except (SyntaxError, UnicodeDecodeError):
             # A fixture of deliberately invalid source is not a module.
             continue
@@ -716,10 +744,44 @@ def check_memory_budgets(root: Path) -> list[Finding]:
     return findings
 
 
+def check_capability_index(root: Path) -> list[Finding]:
+    """MAP015 -- `src/wreath/_capability_data.py` still matches the manifest.
+
+    The index ships inside the wheel because `docs/` does not, so `wreath
+    capabilities` answers from a copy. A copy with no staleness check is the
+    drift this file exists to catch, one directory over.
+
+    Byte for byte, and **a missing file is a finding rather than a skip**: a
+    check that reads nothing and reports nothing clean is indistinguishable
+    from one that agreed.
+    """
+    from .capability_index import DATA_MODULE, render_module
+
+    path = root / DATA_MODULE
+    try:
+        manifest = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # MAP001 already reports an unreadable manifest; a second voice saying
+        # the same thing is noise, and there is nothing to compare against.
+        return []
+    expected = render_module(manifest)
+    try:
+        actual = path.read_text(encoding="utf-8")
+    except OSError:
+        return [Finding("MAP015", DATA_MODULE, "the shipped capability index is "
+                        "missing; generate it with `uv run wreath-map-lint --fix`")]
+    if actual != expected:
+        return [Finding("MAP015", DATA_MODULE, f"no longer matches {MANIFEST}; "
+                        "regenerate it with `uv run wreath-map-lint --fix` (do not "
+                        "edit it by hand -- the manifest is the map)")]
+    return []
+
+
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
     findings.extend(check_reference_pages(root))
     findings.extend(check_capability_page(root))
+    findings.extend(check_capability_index(root))
     for relative in PROSE_MAPS:
         findings.extend(check_prose(root, relative))
     findings.extend(check_llms_txt(root))
@@ -738,7 +800,8 @@ def main(argv: list[str] | None = None) -> int:
         "--fix", action="store_true",
         help="apply the mechanical manifest repairs: attach each source's "
              "conventional test paths (tests/test_<module>.py, tests/<module>/) "
-             "when they exist on disk and are not listed yet",
+             "when they exist on disk and are not listed yet, and regenerate "
+             "the shipped capability index (MAP015)",
     )
     parser.add_argument(
         "--adopt", action="append", metavar="SUBSYSTEM=PATH", default=[],
