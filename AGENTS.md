@@ -489,9 +489,24 @@ None is discoverable by reading the code you are changing.
   reports BUILD001 for any artifact older than its sources, and the surest
   check is a sentinel -- add a distinctive string literal, rebuild, and confirm
   `strings` finds it in the `.so`. The lint is deliberately not in
-  `wreath-check` (`_http3` is genuinely stale and cannot be rebuilt here), so
-  nothing runs it for you. Run it yourself before believing any native
-  measurement.
+  `wreath-check`, because a default build does not include `_http3` at all and
+  a stale one left over from an earlier `WREATH_BUILD_HTTP3=1` build is not a
+  finding about the change you are making. So nothing runs it for you. Run it
+  yourself before believing any native measurement.
+
+  **`_http3` is buildable wherever its libraries are.** This paragraph used to
+  say it "cannot be rebuilt here", which was read as a property of the
+  repository and is not one -- it is a property of a machine. Where
+  `pkg-config --exists libngtcp2 libnghttp3` succeeds, so does
+
+      WREATH_BUILD_HTTP3=1 uv run python setup.py build_ext --inplace
+
+  and this machine is one of them. The cost of believing otherwise is
+  particular: an edit to `http3_asgi.c` or `http3_connection.c` compiles
+  nowhere, every other gate stays green because nothing imports a module that
+  was never rebuilt, and the change ships unverified. If `pkg-config` does not
+  find them, say so and leave BUILD001 standing rather than treating it as
+  scenery.
 - **A new `.c` file must be registered in two places, and only the first fails
   loudly.** `setup.py` builds the extension; `tools/sanitizers/setup_core.py` has
   its own source list. Miss the second and the sanitized `_core.so` has an
