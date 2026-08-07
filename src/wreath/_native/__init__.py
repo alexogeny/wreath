@@ -16,35 +16,49 @@ from typing import Any
 # import_module avoids ``from . import _core`` resolving to this attribute
 # instead of the compiled submodule.
 _core: Any = None
-_client: Any = None
 if not os.environ.get("WREATH_PURE"):
     try:
         _core = importlib.import_module("wreath._native._core")
     except ImportError:
         _core = None
-    try:
-        _client = importlib.import_module("wreath._native._client")
-    except ImportError:
-        _client = None
 
-# Loaded regardless of WREATH_PURE, unlike the two above: it backs the metal
-# tier, which is native by definition and has no pure twin to fall back to, so
-# gating it here would turn `timers="wheel"` into a failure under WREATH_PURE=1
-# rather than leaving that choice to the caller. `wreath.reactor` raises a clear
-# error when it is absent. Any-typed for the same reason as `_core`.
-_reactor: Any = None
-try:
-    _reactor = importlib.import_module("wreath._native._reactor")
-except ImportError:
-    _reactor = None
+#: The extensions loaded on first use rather than on import, mapped to whether
+#: WREATH_PURE=1 suppresses them.
+#:
+#: `_core` above stays eager because nearly every facade wants it and it costs a
+#: dlopen. These three do not: `_client`'s module init imports `asyncio`, which
+#: brings `ssl`, `subprocess`, `logging`, `inspect` and `dataclasses` with it and
+#: measured at 74 ms of the 118 ms `import wreath._native._core` used to cost --
+#: charged to every subprocess and every xdist worker, for a client most of them
+#: never open. A module `__getattr__` keeps `from wreath._native import _client`
+#: working unchanged and defers the cost to the first caller that means it.
+#:
+#: `_reactor` and `_edge` load regardless of WREATH_PURE, unlike `_core` and
+#: `_client`: they back the metal tier and the reverse proxy, both native by
+#: definition with no pure twin to fall back to (AGENTS.md), so gating them would
+#: turn `timers="wheel"` and `import wreath.edge` into failures in a mode that has
+#: nothing else to offer them. `wreath.reactor` and `wreath.edge.headers` each
+#: raise a named error when their extension is absent.
+_LAZY: dict[str, bool] = {"_client": True, "_reactor": False, "_edge": False}
 
-# Same rule as `_reactor` directly above, for the same reason: `wreath.edge` is
-# native-only by design (AGENTS.md), so there is no pure twin for WREATH_PURE=1
-# to select and gating it here would only make the module unimportable in a mode
-# that has nothing else to offer it. `wreath.edge.headers` raises a named error
-# when it is absent.
-_edge: Any = None
-try:
-    _edge = importlib.import_module("wreath._native._edge")
-except ImportError:
-    _edge = None
+
+def __getattr__(name: str) -> Any:
+    """Load one optional extension on first reference, then cache it.
+
+    Caching by assignment into the module globals is what makes this a one-time
+    cost: `__getattr__` runs only when normal attribute lookup fails, so the
+    second reference never reaches here. It also means a test may assign
+    `wreath._native._client = None` and have that stick, the way it did when
+    these were plain module-level names.
+    """
+    honours_pure = _LAZY.get(name)
+    if honours_pure is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module: Any = None
+    if not (honours_pure and os.environ.get("WREATH_PURE")):
+        try:
+            module = importlib.import_module(f"wreath._native.{name}")
+        except ImportError:
+            module = None
+    globals()[name] = module
+    return module

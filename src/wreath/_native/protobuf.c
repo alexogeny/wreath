@@ -26,6 +26,7 @@
  *     numbers exist to provide.
  */
 #include "wreathcore.h"
+#include "bytes_writer.h"
 
 #include <math.h>
 #include <string.h>
@@ -120,40 +121,10 @@ pb_err(const char *fmt, ...)
  * Appends into a growable PyBytes so finishing a message is a shrinking resize
  * rather than an extra buffer copy -- the same strategy as json.c and msgpack.c.
  */
-typedef struct {
-    PyObject *bytes;
-    char *buf;
-    Py_ssize_t len;
-    Py_ssize_t cap;
-} PbWriter;
-
-static int
-pb_grow(PbWriter *w, Py_ssize_t need)
-{
-    Py_ssize_t cap = w->cap;
-    /* Geometric, never additive: additive growth on a per-element append is one
-     * of the patterns wreath-native-lint exists to catch. */
-    while (cap - w->len < need) {
-        cap += (cap >> 1) + 64;
-    }
-    if (_PyBytes_Resize(&w->bytes, cap) < 0) {
-        return -1; /* w->bytes is cleared by _PyBytes_Resize */
-    }
-    w->buf = PyBytes_AS_STRING(w->bytes);
-    w->cap = cap;
-    return 0;
-}
-
 static inline int
-pb_reserve(PbWriter *w, Py_ssize_t need)
+pb_byte(WreathBytesWriter *w, unsigned char c)
 {
-    return (w->cap - w->len >= need) ? 0 : pb_grow(w, need);
-}
-
-static inline int
-pb_byte(PbWriter *w, unsigned char c)
-{
-    if (pb_reserve(w, 1) < 0) {
+    if (wreath_writer_reserve(w, 1) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)c;
@@ -161,12 +132,12 @@ pb_byte(PbWriter *w, unsigned char c)
 }
 
 static int
-pb_write(PbWriter *w, const char *data, Py_ssize_t n)
+pb_write(WreathBytesWriter *w, const char *data, Py_ssize_t n)
 {
     if (n == 0) {
         return 0;
     }
-    if (pb_reserve(w, n) < 0) {
+    if (wreath_writer_reserve(w, n) < 0) {
         return -1;
     }
     memcpy(w->buf + w->len, data, (size_t)n);
@@ -175,31 +146,7 @@ pb_write(PbWriter *w, const char *data, Py_ssize_t n)
 }
 
 static int
-pb_writer_init(PbWriter *w)
-{
-    w->bytes = PyBytes_FromStringAndSize(NULL, 256);
-    if (w->bytes == NULL) {
-        return -1;
-    }
-    w->buf = PyBytes_AS_STRING(w->bytes);
-    w->len = 0;
-    w->cap = 256;
-    return 0;
-}
-
-static PyObject *
-pb_writer_finish(PbWriter *w)
-{
-    if (_PyBytes_Resize(&w->bytes, w->len) < 0) {
-        return NULL;
-    }
-    PyObject *out = w->bytes;
-    w->bytes = NULL;
-    return out;
-}
-
-static int
-pb_put_varint(PbWriter *w, uint64_t value)
+pb_put_varint(WreathBytesWriter *w, uint64_t value)
 {
     while (value > 0x7FU) {
         if (pb_byte(w, (unsigned char)((value & 0x7FU) | 0x80U)) < 0) {
@@ -211,7 +158,7 @@ pb_put_varint(PbWriter *w, uint64_t value)
 }
 
 static inline int
-pb_put_tag(PbWriter *w, uint64_t number, int wire)
+pb_put_tag(WreathBytesWriter *w, uint64_t number, int wire)
 {
     return pb_put_varint(w, (number << 3) | (uint64_t)wire);
 }
@@ -358,9 +305,9 @@ pb_zigzag(uint64_t raw, int kind)
  * process each, min over rounds, against an A/A floor of 0.05%. Decode is
  * untouched (284.0us both ways). */
 static int
-pb_put_u32(PbWriter *w, uint32_t v)
+pb_put_u32(WreathBytesWriter *w, uint32_t v)
 {
-    if (pb_reserve(w, 4) < 0) {
+    if (wreath_writer_reserve(w, 4) < 0) {
         return -1;
     }
     wreath_store_u32_le((uint8_t *)w->buf + w->len, v);
@@ -369,9 +316,9 @@ pb_put_u32(PbWriter *w, uint32_t v)
 }
 
 static int
-pb_put_u64(PbWriter *w, uint64_t v)
+pb_put_u64(WreathBytesWriter *w, uint64_t v)
 {
-    if (pb_reserve(w, 8) < 0) {
+    if (wreath_writer_reserve(w, 8) < 0) {
         return -1;
     }
     wreath_store_u64_le((uint8_t *)w->buf + w->len, v);
@@ -382,7 +329,7 @@ pb_put_u64(PbWriter *w, uint64_t v)
 /* Appends one scalar body, no tag. Explicit byte assembly rather than a memcpy
  * of the host representation, so the wire stays little-endian on any host. */
 static int
-pb_put_scalar(PbWriter *w, int kind, PyObject *value)
+pb_put_scalar(WreathBytesWriter *w, int kind, PyObject *value)
 {
     if (kind == PB_KIND_BOOL) {
         int truth = PyObject_IsTrue(value);
@@ -472,11 +419,11 @@ pb_is_default(int kind, PyObject *value)
     return truth < 0 ? -1 : (truth == 0);
 }
 
-static int pb_encode_values(PbWriter *w, PyObject *plan, PyObject *values,
+static int pb_encode_values(WreathBytesWriter *w, PyObject *plan, PyObject *values,
                             PyObject *unknown, int depth);
 
 static int
-pb_encode_single(PbWriter *w, uint64_t number, int kind, PyObject *value)
+pb_encode_single(WreathBytesWriter *w, uint64_t number, int kind, PyObject *value)
 {
     if (kind == PB_KIND_STRING) {
         Py_ssize_t size = 0;
@@ -512,15 +459,15 @@ pb_encode_single(PbWriter *w, uint64_t number, int kind, PyObject *value)
  * body. The body is built into its own writer because its length has to precede
  * it and is not known until it is complete. */
 static int
-pb_encode_delimited(PbWriter *w, PyObject *subplan, PyObject *pair, int depth)
+pb_encode_delimited(WreathBytesWriter *w, PyObject *subplan, PyObject *pair, int depth)
 {
     if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2) {
         PyErr_SetString(PyExc_TypeError,
                         "a nested protobuf message must be a (values, unknown) pair");
         return -1;
     }
-    PbWriter body;
-    if (pb_writer_init(&body) < 0) {
+    WreathBytesWriter body;
+    if (wreath_writer_init(&body, 256) < 0) {
         return -1;
     }
     if (pb_encode_values(&body, subplan, PyTuple_GET_ITEM(pair, 0),
@@ -529,7 +476,7 @@ pb_encode_delimited(PbWriter *w, PyObject *subplan, PyObject *pair, int depth)
         Py_XDECREF(body.bytes);
         return -1;
     }
-    PyObject *encoded = pb_writer_finish(&body);
+    PyObject *encoded = wreath_writer_finish(&body);
     if (encoded == NULL) {
         return -1;
     }
@@ -542,7 +489,7 @@ pb_encode_delimited(PbWriter *w, PyObject *subplan, PyObject *pair, int depth)
 }
 
 static int
-pb_encode_repeated(PbWriter *w, uint64_t number, int kind, int flags,
+pb_encode_repeated(WreathBytesWriter *w, uint64_t number, int kind, int flags,
                    PyObject *subplan, PyObject *items, int depth)
 {
     Py_ssize_t count = PySequence_Size(items);
@@ -594,8 +541,8 @@ pb_encode_repeated(PbWriter *w, uint64_t number, int kind, int flags,
     }
     if ((flags & PB_FLAG_PACKED) && kind != PB_KIND_STRING
         && kind != PB_KIND_BYTES) {
-        PbWriter body;
-        if (pb_writer_init(&body) < 0) {
+        WreathBytesWriter body;
+        if (wreath_writer_init(&body, 256) < 0) {
             goto done;
         }
         for (Py_ssize_t i = 0; i < count; i++) {
@@ -610,7 +557,7 @@ pb_encode_repeated(PbWriter *w, uint64_t number, int kind, int flags,
                 goto done;
             }
         }
-        PyObject *encoded = pb_writer_finish(&body);
+        PyObject *encoded = wreath_writer_finish(&body);
         if (encoded == NULL) {
             goto done;
         }
@@ -645,7 +592,7 @@ done:
  * sugar-free form is what makes a wreath map wire-identical to a declared
  * `map<k, v>`. */
 static int
-pb_encode_map(PbWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping,
+pb_encode_map(WreathBytesWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping,
               int depth)
 {
     PyObject *key_row = PyTuple_GET_ITEM(subplan, 0);
@@ -667,8 +614,8 @@ pb_encode_map(PbWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping
         PyObject *key = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
 
-        PbWriter entry;
-        if (pb_writer_init(&entry) < 0) {
+        WreathBytesWriter entry;
+        if (wreath_writer_init(&entry, 256) < 0) {
             Py_DECREF(items);
             return -1;
         }
@@ -700,7 +647,7 @@ pb_encode_map(PbWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping
             Py_DECREF(items);
             return -1;
         }
-        PyObject *encoded = pb_writer_finish(&entry);
+        PyObject *encoded = wreath_writer_finish(&entry);
         if (encoded == NULL) {
             Py_DECREF(items);
             return -1;
@@ -721,7 +668,7 @@ pb_encode_map(PbWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping
 }
 
 static int
-pb_encode_values(PbWriter *w, PyObject *plan, PyObject *values, PyObject *unknown,
+pb_encode_values(WreathBytesWriter *w, PyObject *plan, PyObject *values, PyObject *unknown,
                  int depth)
 {
     if (depth > PB_MAX_DEPTH) {
@@ -1133,8 +1080,8 @@ pb_decode_values(PyObject *plan, const uint8_t *data, Py_ssize_t len, int depth)
     if (values == NULL) {
         return NULL;
     }
-    PbWriter unknown;
-    if (pb_writer_init(&unknown) < 0) {
+    WreathBytesWriter unknown;
+    if (wreath_writer_init(&unknown, 256) < 0) {
         Py_DECREF(values);
         return NULL;
     }
@@ -1181,7 +1128,7 @@ pb_decode_values(PyObject *plan, const uint8_t *data, Py_ssize_t len, int depth)
         }
     }
 
-    PyObject *unknown_bytes = pb_writer_finish(&unknown);
+    PyObject *unknown_bytes = wreath_writer_finish(&unknown);
     if (unknown_bytes == NULL) {
         Py_DECREF(values);
         return NULL;
@@ -1221,15 +1168,15 @@ wreath_protobuf_encode(PyObject *Py_UNUSED(self), PyObject *args)
                         "protobuf plan and value list differ in length");
         return NULL;
     }
-    PbWriter w;
-    if (pb_writer_init(&w) < 0) {
+    WreathBytesWriter w;
+    if (wreath_writer_init(&w, 256) < 0) {
         return NULL;
     }
     if (pb_encode_values(&w, plan, values, unknown, 0) < 0) {
         Py_XDECREF(w.bytes);
         return NULL;
     }
-    return pb_writer_finish(&w);
+    return wreath_writer_finish(&w);
 }
 
 PyObject *

@@ -6,6 +6,7 @@
  * under bounded acknowledgement-driven credit while ngtcp2 may retransmit them.
  */
 #include "http3.h"
+#include "ascii.h"
 
 #include <string.h>
 
@@ -545,19 +546,6 @@ h3_release_acked(WreathH3Stream *s, uint64_t datalen)
     }
 }
 
-static int
-h3_response_header_is(const char *name, Py_ssize_t size, const char *expected,
-                      Py_ssize_t expected_size)
-{
-    if (size != expected_size) return 0;
-    for (Py_ssize_t i = 0; i < size; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
-        if (c != (unsigned char)expected[i]) return 0;
-    }
-    return 1;
-}
-
 
 /* Build the nghttp3 header vector and submit the response. Idempotent. */
 static int
@@ -615,8 +603,8 @@ submit_response(WreathH3Stream *s, int default_status)
         if (PyBytes_AsStringAndSize(name, &np, &nl) == 0 &&
             PyBytes_AsStringAndSize(value, &vp, &vl) == 0 &&
             !(nl > 0 && np[0] == ':')) {
-            if (h3_response_header_is(np, nl, "date", 4)) has_date = 1;
-            if (h3_response_header_is(np, nl, "server", 6)) has_server = 1;
+            if (wreath_ascii_equal_ci(np, nl, "date", 4)) has_date = 1;
+            if (wreath_ascii_equal_ci(np, nl, "server", 6)) has_server = 1;
             nva[n].name = (uint8_t *)np;
             nva[n].namelen = (size_t)nl;
             nva[n].value = (uint8_t *)vp;
@@ -638,8 +626,8 @@ submit_response(WreathH3Stream *s, int default_status)
             PyErr_Clear();
             continue;
         }
-        if ((has_date && h3_response_header_is(np, nl, "date", 4)) ||
-            (has_server && h3_response_header_is(np, nl, "server", 6))) continue;
+        if ((has_date && wreath_ascii_equal_ci(np, nl, "date", 4)) ||
+            (has_server && wreath_ascii_equal_ci(np, nl, "server", 6))) continue;
         nva[n].name = (uint8_t *)np;
         nva[n].namelen = (size_t)nl;
         nva[n].value = (uint8_t *)vp;

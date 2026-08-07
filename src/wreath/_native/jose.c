@@ -1,3 +1,4 @@
+#include "hmac_sha256.h"
 #include "wreathcore.h"
 
 #include "simd.h"
@@ -34,6 +35,8 @@
 #include <string.h>
 
 static PyObject *jose_hmac_digest_fn = NULL;   /* _hashlib.hmac_digest */
+/* The HS256 signing key's block states; see hmac_sha256.h. */
+static WreathHmacKey jose_hs256_key = {NULL};
 
 /* Hard ceilings. A JWT header/payload/signature segment is base64url; these cap
  * the *decoded* byte length to keep a hostile token from allocating unbounded or
@@ -248,17 +251,38 @@ wreath_jose_verify_hs(PyObject *Py_UNUSED(self), PyObject *args)
                           &digestmod, &key, &signing_input, &sig, &sig_len)) {
         return NULL;
     }
-    call_args[0] = key;
-    call_args[1] = signing_input;
-    call_args[2] = digestmod;
-    digest = PyObject_Vectorcall(jose_hmac_digest_fn, call_args, 3, NULL);
-    if (digest == NULL) {
-        return NULL;
+    /* HS256 is the overwhelming majority of JWTs in this framework, and it is
+     * the one digest whose key schedule is cached (`hmac_sha256.h`: SHA-384 and
+     * SHA-512 use a 128-byte HMAC block, which that helper does not model). The
+     * other two keep the general path -- same digest, same comparison, one
+     * `hmac.digest` call. Nothing degrades silently: both arms answer from the
+     * same definition, and `tests/test_jose_native_parity.py` holds them to
+     * `hmac.digest` for every algorithm. */
+    unsigned char cached[32];
+    if (PyUnicode_CompareWithASCIIString(digestmod, "sha256") == 0) {
+        if (wreath_hmac_sha256(&jose_hs256_key, key,
+                               PyBytes_AS_STRING(signing_input),
+                               PyBytes_GET_SIZE(signing_input), cached) < 0) {
+            return NULL;
+        }
+        digest = PyBytes_FromStringAndSize((const char *)cached, 32);
+        if (digest == NULL) {
+            return NULL;
+        }
     }
-    if (!PyBytes_Check(digest)) {
-        Py_DECREF(digest);
-        PyErr_SetString(PyExc_RuntimeError, "hmac_digest did not return bytes");
-        return NULL;
+    else {
+        call_args[0] = key;
+        call_args[1] = signing_input;
+        call_args[2] = digestmod;
+        digest = PyObject_Vectorcall(jose_hmac_digest_fn, call_args, 3, NULL);
+        if (digest == NULL) {
+            return NULL;
+        }
+        if (!PyBytes_Check(digest)) {
+            Py_DECREF(digest);
+            PyErr_SetString(PyExc_RuntimeError, "hmac_digest did not return bytes");
+            return NULL;
+        }
     }
     /* Length mismatch is a definitive non-match; still compare in constant time
      * over the expected digest length to avoid leaking which arm failed. */
@@ -439,6 +463,9 @@ wreath_jose_ready(void)
     jose_hmac_digest_fn = PyObject_GetAttrString(module, "hmac_digest");
     Py_DECREF(module);
     if (jose_hmac_digest_fn == NULL) {
+        return -1;
+    }
+    if (wreath_hmac_sha256_ready() < 0) {
         return -1;
     }
     return 0;

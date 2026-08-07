@@ -21,6 +21,7 @@
  *     is representable at all.
  */
 #include "wreathcore.h"
+#include "bytes_writer.h"
 
 /* Matches WREATH_JSON_MAX_DEPTH: the recursion bound is a property of the
  * encoder's stack use, not of the format. */
@@ -28,62 +29,21 @@
 
 /* Appends into a growable PyBytes so finishing a document is a shrinking
  * resize rather than an extra buffer copy -- the same strategy as json.c. */
-typedef struct {
-    PyObject *bytes;
-    char *buf;
-    Py_ssize_t len;
-    Py_ssize_t cap;
-} MpWriter;
-
-static int
-mp_grow(MpWriter *w, Py_ssize_t need)
-{
-    Py_ssize_t cap = w->cap;
-    /* Geometric, never additive: additive growth on a per-element append is
-     * one of the patterns wreath-native-lint exists to catch. */
-    while (cap - w->len < need) {
-        cap += (cap >> 1) + 64;
-    }
-    if (_PyBytes_Resize(&w->bytes, cap) < 0) {
-        return -1; /* w->bytes is cleared by _PyBytes_Resize */
-    }
-    w->buf = PyBytes_AS_STRING(w->bytes);
-    w->cap = cap;
-    return 0;
-}
-
 static inline int
-mp_reserve(MpWriter *w, Py_ssize_t need)
+mp_byte(WreathBytesWriter *w, unsigned char c)
 {
-    return (w->cap - w->len >= need) ? 0 : mp_grow(w, need);
-}
-
-static inline int
-mp_byte(MpWriter *w, unsigned char c)
-{
-    if (mp_reserve(w, 1) < 0) {
+    if (wreath_writer_reserve(w, 1) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)c;
     return 0;
 }
 
-static inline int
-mp_write(MpWriter *w, const char *data, Py_ssize_t len)
-{
-    if (mp_reserve(w, len) < 0) {
-        return -1;
-    }
-    memcpy(w->buf + w->len, data, (size_t)len);
-    w->len += len;
-    return 0;
-}
-
 /* Big-endian stores. MessagePack is network byte order throughout. */
 static inline int
-mp_tag_u8(MpWriter *w, unsigned char tag, unsigned char value)
+mp_tag_u8(WreathBytesWriter *w, unsigned char tag, unsigned char value)
 {
-    if (mp_reserve(w, 2) < 0) {
+    if (wreath_writer_reserve(w, 2) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)tag;
@@ -92,9 +52,9 @@ mp_tag_u8(MpWriter *w, unsigned char tag, unsigned char value)
 }
 
 static inline int
-mp_tag_u16(MpWriter *w, unsigned char tag, uint16_t value)
+mp_tag_u16(WreathBytesWriter *w, unsigned char tag, uint16_t value)
 {
-    if (mp_reserve(w, 3) < 0) {
+    if (wreath_writer_reserve(w, 3) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)tag;
@@ -104,9 +64,9 @@ mp_tag_u16(MpWriter *w, unsigned char tag, uint16_t value)
 }
 
 static inline int
-mp_tag_u32(MpWriter *w, unsigned char tag, uint32_t value)
+mp_tag_u32(WreathBytesWriter *w, unsigned char tag, uint32_t value)
 {
-    if (mp_reserve(w, 5) < 0) {
+    if (wreath_writer_reserve(w, 5) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)tag;
@@ -116,9 +76,9 @@ mp_tag_u32(MpWriter *w, unsigned char tag, uint32_t value)
 }
 
 static inline int
-mp_tag_u64(MpWriter *w, unsigned char tag, uint64_t value)
+mp_tag_u64(WreathBytesWriter *w, unsigned char tag, uint64_t value)
 {
-    if (mp_reserve(w, 9) < 0) {
+    if (wreath_writer_reserve(w, 9) < 0) {
         return -1;
     }
     w->buf[w->len++] = (char)tag;
@@ -128,7 +88,7 @@ mp_tag_u64(MpWriter *w, unsigned char tag, uint64_t value)
 }
 
 static int
-mp_encode_int(MpWriter *w, PyObject *obj)
+mp_encode_int(WreathBytesWriter *w, PyObject *obj)
 {
     int overflow = 0;
     long long signed_value = PyLong_AsLongLongAndOverflow(obj, &overflow);
@@ -183,7 +143,7 @@ mp_encode_int(MpWriter *w, PyObject *obj)
 }
 
 static int
-mp_encode_str(MpWriter *w, PyObject *obj)
+mp_encode_str(WreathBytesWriter *w, PyObject *obj)
 {
     Py_ssize_t size = 0;
     const char *data = PyUnicode_AsUTF8AndSize(obj, &size);
@@ -214,11 +174,11 @@ mp_encode_str(MpWriter *w, PyObject *obj)
         PyErr_SetString(PyExc_ValueError, "string too long for MessagePack");
         return -1;
     }
-    return mp_write(w, data, size);
+    return wreath_writer_write(w, data, size);
 }
 
 static int
-mp_encode_bin(MpWriter *w, const char *data, Py_ssize_t size)
+mp_encode_bin(WreathBytesWriter *w, const char *data, Py_ssize_t size)
 {
     if (size <= 0xFF) {
         if (mp_tag_u8(w, 0xC4, (unsigned char)size) < 0) {
@@ -239,11 +199,11 @@ mp_encode_bin(MpWriter *w, const char *data, Py_ssize_t size)
         PyErr_SetString(PyExc_ValueError, "bytes too long for MessagePack");
         return -1;
     }
-    return mp_write(w, data, size);
+    return wreath_writer_write(w, data, size);
 }
 
 static int
-mp_encode_header(MpWriter *w, Py_ssize_t n, unsigned char fix, unsigned char tag16,
+mp_encode_header(WreathBytesWriter *w, Py_ssize_t n, unsigned char fix, unsigned char tag16,
                  unsigned char tag32, const char *what)
 {
     if (n <= 0xF) {
@@ -259,7 +219,7 @@ mp_encode_header(MpWriter *w, Py_ssize_t n, unsigned char fix, unsigned char tag
     return -1;
 }
 
-static int mp_encode_value(MpWriter *w, PyObject *obj, int depth);
+static int mp_encode_value(WreathBytesWriter *w, PyObject *obj, int depth);
 
 /* A map key has to survive the round trip through a decoder, and a decoder
  * targeting a mapping cannot rebuild a key that is itself a container: an array
@@ -276,7 +236,7 @@ mp_key_ok(PyObject *key)
 }
 
 static int
-mp_encode_value(MpWriter *w, PyObject *obj, int depth)
+mp_encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
 {
     if (obj == Py_None) {
         return mp_byte(w, 0xC0);
@@ -385,20 +345,13 @@ mp_encode_value(MpWriter *w, PyObject *obj, int depth)
 PyObject *
 wreath_msgpack_dumps(PyObject *Py_UNUSED(self), PyObject *obj)
 {
-    MpWriter w;
-    w.cap = 256;
-    w.len = 0;
-    w.bytes = PyBytes_FromStringAndSize(NULL, w.cap);
-    if (w.bytes == NULL) {
+    WreathBytesWriter w;
+    if (wreath_writer_init(&w, 256) < 0) {
         return NULL;
     }
-    w.buf = PyBytes_AS_STRING(w.bytes);
     if (mp_encode_value(&w, obj, 0) < 0) {
         Py_XDECREF(w.bytes);
         return NULL;
     }
-    if (_PyBytes_Resize(&w.bytes, w.len) < 0) {
-        return NULL;
-    }
-    return w.bytes;
+    return wreath_writer_finish(&w);
 }

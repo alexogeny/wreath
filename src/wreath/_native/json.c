@@ -9,6 +9,7 @@
  * compatible.
  */
 #include "wreathcore.h"
+#include "bytes_writer.h"
 
 #include "simd.h"
 
@@ -23,49 +24,10 @@
 
 /* The writer appends straight into a growable PyBytes object so finishing a
  * document is a shrinking resize instead of an extra buffer copy. */
-typedef struct {
-    PyObject *bytes;
-    char *buf;
-    Py_ssize_t len;
-    Py_ssize_t cap;
-} Writer;
-
-static int
-writer_grow(Writer *w, Py_ssize_t need)
-{
-    Py_ssize_t cap = w->cap;
-    while (cap - w->len < need) {
-        cap += (cap >> 1) + 64;
-    }
-    if (_PyBytes_Resize(&w->bytes, cap) < 0) {
-        return -1; /* w->bytes is cleared by _PyBytes_Resize */
-    }
-    w->buf = PyBytes_AS_STRING(w->bytes);
-    w->cap = cap;
-    return 0;
-}
-
 static inline int
-writer_reserve(Writer *w, Py_ssize_t need)
+write_char(WreathBytesWriter *w, char c)
 {
-    return (w->cap - w->len >= need) ? 0 : writer_grow(w, need);
-}
-
-static inline int
-write_bytes(Writer *w, const char *data, Py_ssize_t len)
-{
-    if (writer_reserve(w, len) < 0) {
-        return -1;
-    }
-    memcpy(w->buf + w->len, data, (size_t)len);
-    w->len += len;
-    return 0;
-}
-
-static inline int
-write_char(Writer *w, char c)
-{
-    if (writer_reserve(w, 1) < 0) {
+    if (wreath_writer_reserve(w, 1) < 0) {
         return -1;
     }
     w->buf[w->len++] = c;
@@ -81,7 +43,7 @@ static const char HEX[] = "0123456789abcdef";
  * fallback and the vector code was never compiled at all. */
 
 static int
-write_json_string(Writer *w, PyObject *str)
+write_json_string(WreathBytesWriter *w, PyObject *str)
 {
     Py_ssize_t len;
     const char *utf8 = PyUnicode_AsUTF8AndSize(str, &len);
@@ -94,7 +56,7 @@ write_json_string(Writer *w, PyObject *str)
      * capacity checks and a call per string, which is most of the cost at the
      * lengths a JSON document is actually made of: keys and short values.
      * Escaped strings fall through to the general loop below unchanged. */
-    if (writer_reserve(w, len + 2) < 0) {
+    if (wreath_writer_reserve(w, len + 2) < 0) {
         return -1;
     }
     {
@@ -117,14 +79,14 @@ write_json_string(Writer *w, PyObject *str)
         Py_ssize_t run_start = i;
         unsigned unused_high = 0;
         i += (Py_ssize_t)wreath_json_run(utf8 + i, (ptrdiff_t)(len - i), &unused_high);
-        if (i > run_start && write_bytes(w, utf8 + run_start, i - run_start) < 0) {
+        if (i > run_start && wreath_writer_write(w, utf8 + run_start, i - run_start) < 0) {
             return -1;
         }
         if (i == len) {
             break;
         }
         uint8_t c = (uint8_t)utf8[i++];
-        if (writer_reserve(w, 6) < 0) {
+        if (wreath_writer_reserve(w, 6) < 0) {
             return -1;
         }
         char *out = w->buf + w->len;
@@ -191,7 +153,7 @@ static const char DIGIT_PAIRS[201] =
     "90919293949596979899";
 
 static inline int
-write_ll(Writer *w, long long value)
+write_ll(WreathBytesWriter *w, long long value)
 {
     /* Write directly into the reserved buffer tail: itoa emits backwards
      * into a scratch, then one small copy lands it. */
@@ -218,11 +180,11 @@ write_ll(Writer *w, long long value)
     if (negative) {
         *--p = '-';
     }
-    return write_bytes(w, p, tmp + sizeof(tmp) - p);
+    return wreath_writer_write(w, p, tmp + sizeof(tmp) - p);
 }
 
 static int
-write_long(Writer *w, PyObject *obj)
+write_long(WreathBytesWriter *w, PyObject *obj)
 {
     /* Compact ints (single internal digit, the overwhelmingly common case)
      * expose their value without the general conversion machinery. */
@@ -243,13 +205,13 @@ write_long(Writer *w, PyObject *obj)
     }
     Py_ssize_t len;
     const char *utf8 = PyUnicode_AsUTF8AndSize(text, &len);
-    int rc = (utf8 != NULL) ? write_bytes(w, utf8, len) : -1;
+    int rc = (utf8 != NULL) ? wreath_writer_write(w, utf8, len) : -1;
     Py_DECREF(text);
     return rc;
 }
 
 static int
-write_double(Writer *w, double value)
+write_double(WreathBytesWriter *w, double value)
 {
     if (!isfinite(value)) {
         PyErr_SetString(PyExc_ValueError, "JSON values must be finite numbers");
@@ -259,7 +221,7 @@ write_double(Writer *w, double value)
     if (text == NULL) {
         return -1;
     }
-    int rc = write_bytes(w, text, (Py_ssize_t)strlen(text));
+    int rc = wreath_writer_write(w, text, (Py_ssize_t)strlen(text));
     PyMem_Free(text);
     return rc;
 }
@@ -270,16 +232,16 @@ static PyObject *temporal_types = NULL;  /* tuple of date/time/datetime/timedelt
 static PyObject *format_iso = NULL;      /* wreath.temporal.format_iso */
 
 static int
-encode_value(Writer *w, PyObject *obj, int depth)
+encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
 {
     if (obj == Py_None) {
-        return write_bytes(w, "null", 4);
+        return wreath_writer_write(w, "null", 4);
     }
     if (obj == Py_True) {
-        return write_bytes(w, "true", 4);
+        return wreath_writer_write(w, "true", 4);
     }
     if (obj == Py_False) {
-        return write_bytes(w, "false", 5);
+        return wreath_writer_write(w, "false", 5);
     }
 
     PyTypeObject *type = Py_TYPE(obj);
@@ -420,22 +382,15 @@ wreath_json_configure(PyObject *Py_UNUSED(self), PyObject *args)
 PyObject *
 wreath_json_dumps(PyObject *Py_UNUSED(self), PyObject *obj)
 {
-    Writer w;
-    w.cap = 256;
-    w.len = 0;
-    w.bytes = PyBytes_FromStringAndSize(NULL, w.cap);
-    if (w.bytes == NULL) {
+    WreathBytesWriter w;
+    if (wreath_writer_init(&w, 256) < 0) {
         return NULL;
     }
-    w.buf = PyBytes_AS_STRING(w.bytes);
     if (encode_value(&w, obj, 0) < 0) {
         Py_XDECREF(w.bytes);
         return NULL;
     }
-    if (_PyBytes_Resize(&w.bytes, w.len) < 0) {
-        return NULL;
-    }
-    return w.bytes;
+    return wreath_writer_finish(&w);
 }
 
 /* ------------------------------------------------------------------ */

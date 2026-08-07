@@ -1,8 +1,8 @@
 /* No `simd.h` here, and that is a decision rather than an oversight.
  *
  * Every scalar loop below walks either one header token or one header list.
- * `ascii_equal_ci` compares against a literal like "gzip" or "no-store" and
- * returns on the first length mismatch; `trim_ows` walks the whitespace at
+ * `wreath_ascii_equal_ci_str` compares against a literal like "gzip" or
+ * "no-store" and returns on the first length mismatch; `trim_ows` walks the whitespace at
  * each end, which is nearly always zero or one byte; `parse_quality` reads at
  * most five characters and refuses anything longer. The list walks are over
  * tens of headers, not thousands.
@@ -16,26 +16,12 @@
 
 #include "wreathcore.h"
 
-#include <ctype.h>
 #include <string.h>
 
 #define WREATH_NO_TRANSFORM 1
 #define WREATH_NO_STORE 2
 #define WREATH_PRIVATE 4
 #define WREATH_PUBLIC 8
-
-static int
-ascii_equal_ci(const char *data, Py_ssize_t length, const char *literal)
-{
-    Py_ssize_t expected = (Py_ssize_t)strlen(literal);
-    if (length != expected) return 0;
-    for (Py_ssize_t i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)data[i];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
-        if (c != (unsigned char)literal[i]) return 0;
-    }
-    return 1;
-}
 
 static void
 trim_ows(const char **data, Py_ssize_t *length)
@@ -107,17 +93,17 @@ wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
             const char *name = part;
             Py_ssize_t name_len = equals;
             trim_ows(&name, &name_len);
-            if (ascii_equal_ci(name, name_len, "q")) {
+            if (wreath_ascii_equal_ci_str(name, name_len, "q")) {
                 quality = equals < part_len
                     ? parse_quality(part + equals + 1, part_len - equals - 1)
                     : 0;
             }
             parameter = end;
         }
-        if (ascii_equal_ci(coding, coding_len, "gzip")) {
+        if (wreath_ascii_equal_ci_str(coding, coding_len, "gzip")) {
             gzip_named = 1;
             gzip_q = quality;
-        } else if (ascii_equal_ci(coding, coding_len, "zstd")) {
+        } else if (wreath_ascii_equal_ci_str(coding, coding_len, "zstd")) {
             zstd_q = quality;
         } else if (coding_len == 1 && coding[0] == '*') {
             wildcard_q = quality;
@@ -144,19 +130,19 @@ wreath_is_compressible_content_type(PyObject *Py_UNUSED(self), PyObject *arg)
     const char *media = data;
     trim_ows(&media, &length);
     int result = 0;
-    if (length >= 5 && ascii_equal_ci(media, 5, "text/")) result = 1;
+    if (length >= 5 && wreath_ascii_equal_ci_str(media, 5, "text/")) result = 1;
     if (!result) {
         static const char *exact[] = {
             "application/json", "application/problem+json", "application/javascript",
             "application/xml", "image/svg+xml"
         };
         for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++) {
-            if (ascii_equal_ci(media, length, exact[i])) { result = 1; break; }
+            if (wreath_ascii_equal_ci_str(media, length, exact[i])) { result = 1; break; }
         }
     }
-    if (!result && length > 12 && ascii_equal_ci(media, 12, "application/")) {
-        if ((length >= 5 && ascii_equal_ci(media + length - 5, 5, "+json")) ||
-            (length >= 4 && ascii_equal_ci(media + length - 4, 4, "+xml"))) result = 1;
+    if (!result && length > 12 && wreath_ascii_equal_ci_str(media, 12, "application/")) {
+        if ((length >= 5 && wreath_ascii_equal_ci_str(media + length - 5, 5, "+json")) ||
+            (length >= 4 && wreath_ascii_equal_ci_str(media + length - 4, 4, "+xml"))) result = 1;
     }
     PyBuffer_Release(&view);
     if (result) Py_RETURN_TRUE;
@@ -181,10 +167,10 @@ wreath_cache_control_flags(PyObject *Py_UNUSED(self), PyObject *arg)
         while (equals < length && part[equals] != '=') equals++;
         length = equals;
         trim_ows(&part, &length);
-        if (ascii_equal_ci(part, length, "no-transform")) flags |= WREATH_NO_TRANSFORM;
-        else if (ascii_equal_ci(part, length, "no-store")) flags |= WREATH_NO_STORE;
-        else if (ascii_equal_ci(part, length, "private")) flags |= WREATH_PRIVATE;
-        else if (ascii_equal_ci(part, length, "public")) flags |= WREATH_PUBLIC;
+        if (wreath_ascii_equal_ci_str(part, length, "no-transform")) flags |= WREATH_NO_TRANSFORM;
+        else if (wreath_ascii_equal_ci_str(part, length, "no-store")) flags |= WREATH_NO_STORE;
+        else if (wreath_ascii_equal_ci_str(part, length, "private")) flags |= WREATH_PRIVATE;
+        else if (wreath_ascii_equal_ci_str(part, length, "public")) flags |= WREATH_PUBLIC;
     }
     PyBuffer_Release(&view);
     return PyLong_FromLong(flags);
@@ -201,9 +187,9 @@ normalize_origin(const char *data, Py_ssize_t length)
     }
     Py_ssize_t scheme_len;
     int default_port;
-    if (length >= 7 && ascii_equal_ci(data, 7, "http://")) {
+    if (length >= 7 && wreath_ascii_equal_ci_str(data, 7, "http://")) {
         scheme_len = 4; default_port = 80;
-    } else if (length >= 8 && ascii_equal_ci(data, 8, "https://")) {
+    } else if (length >= 8 && wreath_ascii_equal_ci_str(data, 8, "https://")) {
         scheme_len = 5; default_port = 443;
     } else return NULL;
     Py_ssize_t authority_start = scheme_len + 3;
@@ -251,11 +237,14 @@ normalize_origin(const char *data, Py_ssize_t length)
     PyObject *result = PyBytes_FromStringAndSize(NULL, output_length);
     if (result == NULL) return NULL;
     char *out = PyBytes_AS_STRING(result);
-    for (Py_ssize_t i = 0; i < scheme_len; i++) out[i] = (char)tolower((unsigned char)data[i]);
+    /* ASCII by construction, not `<ctype.h>`, which folds by locale: a scheme
+     * or host must normalise the same way whatever locale the process began in. */
+    for (Py_ssize_t i = 0; i < scheme_len; i++)
+        out[i] = (char)wreath_ascii_lower((uint8_t)data[i]);
     memcpy(out + scheme_len, "://", 3);
     Py_ssize_t at = scheme_len + 3;
     for (Py_ssize_t i = authority_start; i < host_end; i++)
-        out[at++] = (char)tolower((unsigned char)data[i]);
+        out[at++] = (char)wreath_ascii_lower((uint8_t)data[i]);
     if (port_length > 0) memcpy(out + at, port_buffer, (size_t)port_length);
     return result;
 }
@@ -325,26 +314,17 @@ validate_headers(PyObject *headers)
 }
 
 static int
-header_name_is(PyObject *pair, const char *name)
+header_keys_equal_ci(PyObject *left, PyObject *right)
 {
-    PyObject *key = PyTuple_GET_ITEM(pair, 0);
-    return ascii_equal_ci(PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key), name);
+    return wreath_ascii_equal_ci(PyBytes_AS_STRING(left), PyBytes_GET_SIZE(left),
+                                 PyBytes_AS_STRING(right), PyBytes_GET_SIZE(right));
 }
 
 static int
-header_keys_equal_ci(PyObject *left, PyObject *right)
+header_name_is(PyObject *pair, const char *name)
 {
-    Py_ssize_t length = PyBytes_GET_SIZE(left);
-    if (length != PyBytes_GET_SIZE(right)) return 0;
-    const unsigned char *a = (const unsigned char *)PyBytes_AS_STRING(left);
-    const unsigned char *b = (const unsigned char *)PyBytes_AS_STRING(right);
-    for (Py_ssize_t i = 0; i < length; i++) {
-        unsigned char ca = a[i], cb = b[i];
-        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
-        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
-        if (ca != cb) return 0;
-    }
-    return 1;
+    PyObject *key = PyTuple_GET_ITEM(pair, 0);
+    return wreath_ascii_equal_ci_str(PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key), name);
 }
 
 static PyObject *

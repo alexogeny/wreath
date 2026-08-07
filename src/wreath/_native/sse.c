@@ -18,40 +18,7 @@
  * there would let caller text append arbitrary frames to the stream.
  */
 #include "wreathcore.h"
-
-typedef struct {
-    PyObject *bytes;
-    char *buf;
-    Py_ssize_t len;
-    Py_ssize_t cap;
-} SseWriter;
-
-static int
-sse_grow(SseWriter *w, Py_ssize_t need)
-{
-    Py_ssize_t cap = w->cap;
-    /* Geometric, never additive. */
-    while (cap - w->len < need) {
-        cap += (cap >> 1) + 64;
-    }
-    if (_PyBytes_Resize(&w->bytes, cap) < 0) {
-        return -1; /* w->bytes is cleared by _PyBytes_Resize */
-    }
-    w->buf = PyBytes_AS_STRING(w->bytes);
-    w->cap = cap;
-    return 0;
-}
-
-static inline int
-sse_write(SseWriter *w, const char *data, Py_ssize_t len)
-{
-    if (w->cap - w->len < len && sse_grow(w, len) < 0) {
-        return -1;
-    }
-    memcpy(w->buf + w->len, data, (size_t)len);
-    w->len += len;
-    return 0;
-}
+#include "bytes_writer.h"
 
 /* Emit `text` as one `field: segment` line per line of text, normalising CRLF
  * and bare CR to LF on the fly. An empty segment emits `field:` with no space,
@@ -61,7 +28,7 @@ sse_write(SseWriter *w, const char *data, Py_ssize_t len)
  * CR and LF cannot occur inside a multi-byte UTF-8 sequence, so scanning bytes
  * is safe on UTF-8 input. */
 static int
-sse_emit_lines(SseWriter *w, const char *field, Py_ssize_t field_len,
+sse_emit_lines(WreathBytesWriter *w, const char *field, Py_ssize_t field_len,
                const char *text, Py_ssize_t text_len, int *emitted)
 {
     Py_ssize_t start = 0;
@@ -75,19 +42,19 @@ sse_emit_lines(SseWriter *w, const char *field, Py_ssize_t field_len,
             continue;
         }
         Py_ssize_t seg_len = i - start;
-        if (sse_write(w, field, field_len) < 0) {
+        if (wreath_writer_write(w, field, field_len) < 0) {
             return -1;
         }
         if (seg_len > 0) {
-            if (sse_write(w, ": ", 2) < 0 ||
-                sse_write(w, text + start, seg_len) < 0) {
+            if (wreath_writer_write(w, ": ", 2) < 0 ||
+                wreath_writer_write(w, text + start, seg_len) < 0) {
                 return -1;
             }
         }
-        else if (sse_write(w, ":", 1) < 0) {
+        else if (wreath_writer_write(w, ":", 1) < 0) {
             return -1;
         }
-        if (sse_write(w, "\n", 1) < 0) {
+        if (wreath_writer_write(w, "\n", 1) < 0) {
             return -1;
         }
         *emitted = 1;
@@ -125,7 +92,7 @@ sse_optional_utf8(PyObject *obj, const char *what, Py_ssize_t *size)
 
 /* A single-line field: refused rather than normalised if it holds CR or LF. */
 static int
-sse_emit_single(SseWriter *w, const char *field, Py_ssize_t field_len,
+sse_emit_single(WreathBytesWriter *w, const char *field, Py_ssize_t field_len,
                 PyObject *value, int *emitted)
 {
     Py_ssize_t size = 0;
@@ -138,8 +105,8 @@ sse_emit_single(SseWriter *w, const char *field, Py_ssize_t field_len,
         PyErr_Format(PyExc_ValueError, "SSE %s must not contain a newline", field);
         return -1;
     }
-    if (sse_write(w, field, field_len) < 0 || sse_write(w, ": ", 2) < 0 ||
-        sse_write(w, data, size) < 0 || sse_write(w, "\n", 1) < 0) {
+    if (wreath_writer_write(w, field, field_len) < 0 || wreath_writer_write(w, ": ", 2) < 0 ||
+        wreath_writer_write(w, data, size) < 0 || wreath_writer_write(w, "\n", 1) < 0) {
         return -1;
     }
     *emitted = 1;
@@ -155,7 +122,7 @@ wreath_sse_frame(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *ident;
     PyObject *retry;
     PyObject *data;
-    SseWriter w;
+    WreathBytesWriter w;
     int emitted = 0;
 
     if (!PyArg_ParseTuple(args, "OOOOO:sse_frame", &comment, &name, &ident, &retry,
@@ -163,13 +130,9 @@ wreath_sse_frame(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
 
-    w.cap = 128;
-    w.len = 0;
-    w.bytes = PyBytes_FromStringAndSize(NULL, w.cap);
-    if (w.bytes == NULL) {
+    if (wreath_writer_init(&w, 128) < 0) {
         return NULL;
     }
-    w.buf = PyBytes_AS_STRING(w.bytes);
 
     if (comment != Py_None) {
         Py_ssize_t size = 0;
@@ -195,8 +158,8 @@ wreath_sse_frame(PyObject *Py_UNUSED(self), PyObject *args)
         }
         Py_ssize_t size = 0;
         const char *chars = PyUnicode_AsUTF8AndSize(text, &size);
-        int failed = chars == NULL || sse_write(&w, "retry: ", 7) < 0 ||
-                     sse_write(&w, chars, size) < 0 || sse_write(&w, "\n", 1) < 0;
+        int failed = chars == NULL || wreath_writer_write(&w, "retry: ", 7) < 0 ||
+                     wreath_writer_write(&w, chars, size) < 0 || wreath_writer_write(&w, "\n", 1) < 0;
         Py_DECREF(text);
         if (failed) {
             goto error;
@@ -215,18 +178,15 @@ wreath_sse_frame(PyObject *Py_UNUSED(self), PyObject *args)
     }
     if (!emitted) {
         /* A bare keep-alive comment. */
-        if (sse_write(&w, ":\n", 2) < 0) {
+        if (wreath_writer_write(&w, ":\n", 2) < 0) {
             goto error;
         }
     }
     /* The blank line that terminates the event. */
-    if (sse_write(&w, "\n", 1) < 0) {
+    if (wreath_writer_write(&w, "\n", 1) < 0) {
         goto error;
     }
-    if (_PyBytes_Resize(&w.bytes, w.len) < 0) {
-        return NULL;
-    }
-    return w.bytes;
+    return wreath_writer_finish(&w);
 
 error:
     Py_XDECREF(w.bytes);
