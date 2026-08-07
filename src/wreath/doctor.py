@@ -50,6 +50,8 @@ __all__ = [
     "NPlusOneDetected",
     "NPlusOneGuard",
     "Origin",
+    "Preflight",
+    "PreflightFinding",
     "Repetition",
     "TraceLookup",
     "TracedRequest",
@@ -58,6 +60,8 @@ __all__ = [
     "find_n_plus_one",
     "find_requests_with_trace",
     "find_work_with_trace",
+    "preflight",
+    "render_preflight",
 ]
 
 _STATE_TOKEN = "_wreath_nplusone_token"
@@ -703,3 +707,260 @@ def _dmarc_policy(record: str) -> str | None:
         if name.strip().lower() == "p":
             return value.strip().lower()
     return None
+
+
+# --- preflight ---------------------------------------------------------------
+#
+# The wiring omission is the failure mode wreath is most exposed to, because it
+# ships fifty-seven subsystems and most of them refuse loudly *somewhere*: at
+# startup, at configuration time, or in a plan a separate command prints. Loudly
+# somewhere is not the same as loudly in one place, and the answers were spread
+# across `wreath infra infer`, the hardening ruleset, and the route table.
+#
+# `preflight` asks all of them at once and prints one report. It aggregates and
+# does not invent: every finding here is one another part of wreath already
+# knows how to produce, which is what keeps it from becoming a fourth opinion
+# that disagrees with the three.
+#
+# It also prints what it could **not** ask, which is the half that makes the
+# rest safe to read. `wreath doctor trace` established the shape: a report that
+# lists three findings and stops is read as "there are three", so every source
+# that needs a database, a socket or a DNS answer is named with the command that
+# does reach it.
+
+
+#: How much a preflight finding costs you. Two values, deliberately: a scale
+#: with a middle invites a middle, and the only question this report answers is
+#: whether to deploy.
+PreflightSeverity = str
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightFinding:
+    """One thing to resolve before this application is deployed."""
+
+    #: Which of wreath's own checks produced it: `infra`, `hardening`, `routes`.
+    source: str
+    #: `blocking` or `advisory`.
+    severity: PreflightSeverity
+    subject: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class Preflight:
+    """Everything preflight asked, and everything it could not."""
+
+    application: str
+    findings: tuple[PreflightFinding, ...] = ()
+    #: Each entry names a check preflight cannot make and the command that can.
+    unchecked: tuple[str, ...] = ()
+
+    @property
+    def blocking(self) -> tuple[PreflightFinding, ...]:
+        return tuple(f for f in self.findings if f.severity == "blocking")
+
+    @property
+    def advisory(self) -> tuple[PreflightFinding, ...]:
+        return tuple(f for f in self.findings if f.severity == "advisory")
+
+
+#: What preflight cannot see from a built application, and what does see it.
+#: Written out rather than derived, because each line is a judgment about why
+#: the answer is somewhere else -- and a list that maintains itself would have
+#: nowhere to put that.
+_UNCHECKED: tuple[str, ...] = (
+    "wreath's own tables exist in the target database -- `wreath schema check "
+    "<target>` (needs a database)",
+    "your models match the live schema -- `wreath migrations detect <target>` "
+    "(needs a database)",
+    "source-level security defects -- `wreath audit code` (a separate ruleset "
+    "over your files, and the other half of what `hardening` runs at startup)",
+    "N+1 queries under real traffic -- `wreath doctor n-plus-one <socket>` "
+    "(needs a running server)",
+    "mail will actually be delivered -- `wreath.doctor.check_email_deliverability` "
+    "(needs DNS)",
+    "whether a per-worker default is safe for your fleet -- preflight cannot see "
+    "it. Sessions, idempotency, quotas and second-factor challenges all default "
+    "to an in-process store, which is correct for one worker and wrong for four; "
+    "each guide names the PostgreSQL-backed alternative",
+)
+
+#: A `GapKind` that means the deployment will start and then fail, rather than
+#: start and be worth a second look.
+_BLOCKING_GAPS = frozenset({"settings-key", "capacity"})
+
+#: How many public routes a single finding lists before it stops naming them.
+#: A finding that prints two hundred paths is one nobody reads to the end of.
+_ROUTE_SAMPLE = 12
+
+#: Why the route finding says *declared* and not *open*, in the finding itself.
+#:
+#: `access_level == 0` is the framework's own definition of "asks nothing of the
+#: caller", and it is what the tape enforces -- but it is a statement about the
+#: declaration, not about what the handler does. `crud`'s `Access.deny()` is the
+#: case that proves it: the rule attaches nothing to the requirement and the
+#: handler answers 403 regardless of identity, so a route that admits *nobody*
+#: reads as level 0 here. Reporting that as "open" would be a preflight
+#: confidently naming the safest route in the application as the risk.
+_ROUTE_CAVEAT = (
+    " -- this is the declaration and not the enforcement: a handler may still "
+    "refuse from inside, as crud's Access.deny() does"
+)
+
+
+def preflight(
+    app: Any,
+    *,
+    application: str = "",
+    settings: Any = (),
+    supplied: dict[str, str] | None = None,
+    dotenv_keys: dict[str, str] | None = None,
+) -> Preflight:
+    """Ask every check wreath can answer from a built application.
+
+    Three sources, none of them new:
+
+    * **infra** -- `wreath.infra.infer`'s gaps. A settings key nothing supplies
+      and a pool whose long-lived holders leave nothing for requests both block;
+      a supplied key nothing reads, and something the stage cannot derive, are
+      worth knowing and are not reasons to stop.
+    * **hardening** -- `hardening.audit_configuration`, the tier read off the
+      live object graph. Deliberately not the source tier: `wreath audit code`
+      owns that, it reads files rather than objects, and two spellings of one
+      gate is how they drift. It is named in `unchecked` instead.
+    * **routes** -- how many endpoints declare nothing of the caller. A fact
+      rather than a defect, so it is advisory however many there are: a login
+      route and a health check are supposed to be there, and a check that fails
+      on them is one that gets turned off in week one. It reports the
+      *declaration* and says so -- see `_ROUTE_CAVEAT`.
+
+    Opens nothing. The application is imported and read; no socket, no database,
+    no DNS -- which is why the list of what that leaves out is part of the
+    return value rather than a footnote.
+    """
+    from .hardening import audit_configuration
+    from .infra import infer
+
+    findings: list[PreflightFinding] = []
+
+    plan = infer(
+        app,
+        application=application or "application",
+        settings=settings,
+        supplied=supplied or {},
+        dotenv_keys=dotenv_keys or {},
+    )
+    for gap in plan.gaps:
+        findings.append(
+            PreflightFinding(
+                source="infra",
+                severity=("blocking" if str(gap.kind) in _BLOCKING_GAPS else "advisory"),
+                subject=gap.subject,
+                detail=gap.detail,
+            )
+        )
+
+    for finding in audit_configuration(app):
+        findings.append(
+            PreflightFinding(
+                source="hardening",
+                # `Severity.ERROR` is the ruleset's own word for "this would be
+                # refused under `hardening='block'`", so the translation is a
+                # rename rather than a judgment made here.
+                severity=("blocking" if finding.severity.value == "error" else "advisory"),
+                subject=finding.rule_id,
+                detail=f"{finding.surface}: {finding.message}",
+            )
+        )
+
+    public = _public_routes(app)
+    if public:
+        shown = ", ".join(public[:_ROUTE_SAMPLE])
+        rest = len(public) - _ROUTE_SAMPLE
+        findings.append(
+            PreflightFinding(
+                source="routes",
+                severity="advisory",
+                subject="routes with no declared requirement",
+                detail=(
+                    f"{len(public)} route(s) declare no authentication or "
+                    f"authorization: {shown}"
+                    + (f", and {rest} more" if rest > 0 else "")
+                    + _ROUTE_CAVEAT
+                ),
+            )
+        )
+
+    return Preflight(
+        application=application or "application",
+        findings=tuple(findings),
+        unchecked=_UNCHECKED,
+    )
+
+
+def _public_routes(app: Any) -> list[str]:
+    """`METHOD /path` for every route that asks nothing of the caller.
+
+    Through the same merge `wreath.openapi` and `wreath.signatures` use, and for
+    the same reason: `RouteDefinition.requirement` holds only what the *router*
+    contributed, so reading it alone reports every decorator-protected route as
+    public -- which here would be a preflight that says an application is wide
+    open when it is not.
+    """
+    from ._auth.requirements import merge_requirements, requirement_for
+
+    image = getattr(app, "_application_image", None)
+    if image is None:
+        return []
+    public: list[str] = []
+    for route in image.routes():
+        requirement = merge_requirements(route.requirement, requirement_for(route.endpoint))
+        if requirement.access_level == 0:
+            methods = "/".join(sorted(route.methods)) or "ANY"
+            public.append(f"{methods} {route.path}")
+    return public
+
+
+def render_preflight(report: Preflight) -> str:
+    """The report as text, worst first, with what was not checked at the end."""
+    lines = [f"preflight: {report.application}", ""]
+    blocking = report.blocking
+    advisory = report.advisory
+    if blocking:
+        lines.append(f"blocking ({len(blocking)})")
+        lines.extend(_render_finding(finding) for finding in blocking)
+        lines.append("")
+    if advisory:
+        lines.append(f"advisory ({len(advisory)})")
+        lines.extend(_render_finding(finding) for finding in advisory)
+        lines.append("")
+    if not blocking:
+        lines.append("nothing blocking.")
+        lines.append("")
+    lines.append("not checked here -- each needs something preflight does not open:")
+    lines.extend(f"  - {entry}" for entry in report.unchecked)
+    return "\n".join(lines) + "\n"
+
+
+def _render_finding(finding: PreflightFinding) -> str:
+    return f"  {finding.source:<10} {finding.subject}\n             {finding.detail}"
+
+
+def preflight_as_dict(report: Preflight) -> dict[str, Any]:
+    """The report as plain JSON-compatible data."""
+    return {
+        "version": 1,
+        "application": report.application,
+        "blocking": len(report.blocking),
+        "findings": [
+            {
+                "source": finding.source,
+                "severity": finding.severity,
+                "subject": finding.subject,
+                "detail": finding.detail,
+            }
+            for finding in report.findings
+        ],
+        "unchecked": list(report.unchecked),
+    }
