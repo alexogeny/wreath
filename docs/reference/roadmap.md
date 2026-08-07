@@ -193,17 +193,6 @@ middleware reads when the request carries a form content type, alongside the
 header it reads today. When that lands, the admin's `csrf=` becomes a one-line
 pointer at it and this row leaves the page.
 
-## Bulk actions in the admin
-
-The generated admin deletes one row at a time, behind a confirmation page. A
-"delete selected" affordance is the feature every generated admin eventually
-grows, and the reason it is not here yet is that the invariant it has to satisfy
-is the interesting part: a bulk action must be audited as **one attributable
-event**, not N row events, and `wreath.audit_log` records per row from the ORM's
-own write path. Reconciling those two is a design question about the audit trail
-rather than a screen to draw, so it waits for someone to answer it deliberately.
-<!-- absent: wreath.admin.bulk_action -->
-
 ## `series` charts in the admin
 
 The generated admin renders lists, detail pages and forms, and draws no charts.
@@ -211,18 +200,6 @@ An application that already declares a [`wreath.series`](series.md) query has
 nowhere to put its result inside the admin, and reads it from a route of its own
 instead. Nothing here is blocked on a decision; it is simply unbuilt.
 <!-- absent: wreath.admin.chart -->
-
-## OAuth issuance
-
-Wreath *verifies* OAuth bearer tokens — `MCPAuth` publishes protected-resource
-metadata, answers with the RFC 6750 challenge naming it, and refuses a token
-minted for another audience — and it mints none. There is no authorization
-server: no authorization-code or client-credentials endpoint, no token or
-introspection endpoint, and no client registry. That is the same division the
-MCP row states for dynamic client registration: issuance belongs to the
-deployment's identity provider, and taking it on is a decision nobody has made
-rather than a gap in an existing surface.
-<!-- absent: wreath.oauth -->
 
 ## Quota usage as a recorded event
 
