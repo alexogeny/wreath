@@ -2588,13 +2588,16 @@ def compile_binder(
     # One session per distinct (registry, workload), however many parameters
     # ask for it: two parameters naming the same pair share one unit of work.
     registries = orm_registries or {}
-    sessions: list[tuple[str, tuple[str, str], Any, Any]] = []
+    sessions: list[tuple[str, tuple[str, str], Any, Any, Any]] = []
     if spec is not None and spec.sessions:
         from .orm.session import compile_session_binding
 
         for name, marker in spec.sessions:
             registry_name, registry = compile_session_binding(registries, marker)
-            sessions.append((name, (registry_name, marker.workload), registry, marker.workload))
+            sessions.append(
+                (name, (registry_name, marker.workload), registry, marker.workload,
+                 marker.tenant)
+            )
 
     # Which machinery this handler actually needs is known here, not per
     # request. A handler that asks for no connection, session, or dependency
@@ -2771,12 +2774,19 @@ def compile_binder(
                 from .orm.session import Session
 
                 by_key: dict[tuple[str, str], Any] = {}
-                for name, key, registry, workload in sessions:
+                for name, key, registry, workload, tenant_marker in sessions:
                     session = by_key.get(key)
                     if session is None:
                         # Lazy: no connection is leased until the handler
-                        # actually runs a statement.
-                        session = Session(registry, workload)
+                        # actually runs a statement. The tenant is *not* lazy:
+                        # resolving it later would mean a session that exists
+                        # without one, which is the state the whole binding
+                        # exists to make unreachable.
+                        context = (
+                            None if tenant_marker is None
+                            else tenant_marker.resolve(request)
+                        )
+                        session = Session(registry, workload, tenant=context)
                         by_key[key] = session
                         opened.append(session)
                     kwargs[name] = session
