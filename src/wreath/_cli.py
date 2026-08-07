@@ -656,6 +656,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json",
         help="print versioned JSON instead of tables",
     )
+    _add_new_parser(commands)
+    _add_capabilities_parser(commands)
     _add_mcp_parser(commands)
     _add_doctor_parser(commands)
     _add_capture_parser(commands)
@@ -665,6 +667,96 @@ def build_parser() -> argparse.ArgumentParser:
     _add_schema_parser(commands)
     _add_flight_parser(commands)
     return parser
+
+
+def _add_new_parser(commands: Any) -> None:
+    """`wreath new NAME` -- a project that runs, tests green, and is wired right."""
+    parser = commands.add_parser(
+        "new",
+        help="write a new wreath project that already runs and tests green",
+        description=(
+            "Generate a project laid out the documented way, with the dotenv "
+            "dialect, the router/config split, the app factory and a working "
+            "test suite already correct. Refuses a directory that has anything "
+            "in it; there is no --force."
+        ),
+    )
+    parser.add_argument("name", help="the project and package name (an importable one)")
+    parser.add_argument(
+        "--directory", default=".", metavar="PATH",
+        help="where to create it (default: the working directory)",
+    )
+    parser.add_argument(
+        "--frontend", choices=("none", "react"), default="none",
+        help="also write a React app wired to `wreath typegen` (default: none)",
+    )
+    parser.add_argument(
+        "--database", choices=("none", "postgres"), default="none",
+        help="also declare an ORM model and register a database (default: none)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print the written paths as JSON instead of a report",
+    )
+
+
+def execute_new(namespace: argparse.Namespace) -> int:
+    """Write a new project. A refusal is exit 2, as for any other usage error."""
+    import json as _json
+
+    from ._scaffold import Options, ScaffoldError, create
+
+    options = Options(
+        name=namespace.name,
+        directory=Path(namespace.directory),
+        frontend=namespace.frontend,
+        database=namespace.database,
+    )
+    try:
+        written = create(options)
+    except ScaffoldError as error:
+        raise CliError(str(error), exit_code=2) from error
+    if namespace.as_json:
+        print(_json.dumps({
+            "version": 1, "project": options.name,
+            "directory": str(options.target), "files": written,
+        }))
+        return 0
+    print(f"wrote {len(written)} file(s) to {options.target}\n")
+    for relative in written:
+        print(f"  {relative}")
+    print(f"\nnext:\n  cd {options.target}\n  cp .env.example .env\n  pytest"
+          f"\n  wreath dev {options.name}.app:app")
+    return 0
+
+
+def _add_capabilities_parser(commands: Any) -> None:
+    """`wreath capabilities [TERM]` -- what already ships that answers a word.
+
+    Deliberately takes no application target and opens nothing. It reads an
+    index compiled into the package, so it answers before a project exists,
+    which is when the question is actually asked.
+    """
+    parser = commands.add_parser(
+        "capabilities",
+        help="what wreath already ships that answers a word you know",
+        description=(
+            "Look a capability up by the name you would otherwise install "
+            "(`celery`), by subsystem or module (`jobs`, `wreath.messaging`), or "
+            "by a word in its description. Every capability that answers is "
+            "listed, strongest match first -- one word is often several "
+            "subsystems, and stopping at the first is how the others get "
+            "reimplemented. With no term, prints all of them."
+        ),
+    )
+    parser.add_argument(
+        "term", nargs="?", default=None,
+        help="the package, module, subsystem or word to look up",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print JSON instead of a report",
+    )
 
 
 def _add_flight_parser(commands: Any) -> None:
@@ -990,6 +1082,34 @@ def _add_doctor_parser(commands: Any) -> None:
         "--strict", action="store_true",
         help="exit non-zero when anything is found, for a CI gate",
     )
+
+    pre = actions.add_parser(
+        "preflight",
+        help="every refusal wreath already knows, asked at once before you deploy",
+        description=(
+            "Load an application and report what would stop it: the gaps "
+            "`wreath infra infer` derives, the configuration defects the "
+            "hardening ruleset reads off the object graph, and which routes ask "
+            "nothing of the caller. Opens no socket, database or DNS resolver -- "
+            "and prints what that leaves unchecked, with the command for each."
+        ),
+    )
+    pre.add_argument("target", help="application target as module:attribute")
+    pre.add_argument("--factory", action="store_true")
+    pre.add_argument(
+        "--settings", action="append", default=[], metavar="SPEC",
+        help="a settings dataclass whose environment contract to check, as "
+             "module:Class or module:Class=PREFIX (repeatable)",
+    )
+    pre.add_argument(
+        "--env", action="append", default=[], metavar="PATH",
+        help="a dotenv file supplying keys (repeatable)",
+    )
+    pre.add_argument(
+        "--environ", action="store_true",
+        help="treat this process's environment as a supplier too",
+    )
+    pre.add_argument("--json", action="store_true", dest="as_json")
 
     trace = actions.add_parser(
         "trace",
@@ -2018,10 +2138,118 @@ def execute_inspect(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def execute_capabilities(namespace: argparse.Namespace) -> int:
+    """Answer `wreath capabilities [TERM]`. Exit 1 when a term reaches nothing.
+
+    The non-zero exit is for the caller doing this in a loop over a dependency
+    list. It is not a failure of the command, so the report goes to stderr and
+    says which word came back empty -- a bare exit code in a build log is a
+    question, not an answer.
+    """
+    import json as _json
+
+    from ._capabilities import index, lookup
+
+    term = namespace.term
+    if term is None:
+        rows = index()
+        if namespace.as_json:
+            print(_json.dumps({"version": 1, "term": None,
+                               "matches": [_capability_json(row) for row in rows]}))
+            return 0
+        for row in rows:
+            print(f"{row.name:<16} {', '.join(row.modules) or 'built in'}")
+        print(f"\n{len(rows)} capabilities. Pass one of these names, a package you "
+              "would otherwise install, or a word, for the detail.")
+        return 0
+
+    matches = lookup(term)
+    if namespace.as_json:
+        print(_json.dumps({
+            "version": 1,
+            "term": term,
+            "matches": [_capability_json(match.capability, match) for match in matches],
+        }))
+        return 0 if matches else 1
+    if not matches:
+        print(
+            f"wreath: nothing here answers {term!r}. Try `wreath capabilities` for "
+            "the whole list, or read docs/capabilities.md, which closes with what "
+            "wreath deliberately does not include.",
+            file=sys.stderr,
+        )
+        return 1
+    plural = "capability" if len(matches) == 1 else "capabilities"
+    print(f"{term} -- {len(matches)} {plural}\n")
+    for match in matches:
+        print(_render_capability(match))
+    return 0
+
+
+def _capability_json(capability: Any, match: Any = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": capability.name,
+        "capability": capability.sentence,
+        "modules": list(capability.modules),
+        "guides": list(capability.guides),
+        "replaces": list(capability.replaces),
+    }
+    if match is not None:
+        payload["reason"] = match.reason
+        payload["matched"] = match.matched
+    return payload
+
+
+def _render_capability(match: Any) -> str:
+    """One capability as a paragraph: what it is, where it is, where to read."""
+    import textwrap
+
+    capability = match.capability
+    lines = [f"{capability.name}  ({match.reason} {match.matched!r})"]
+    lines.extend(textwrap.wrap(capability.sentence, width=76,
+                               initial_indent="  ", subsequent_indent="  "))
+    lines.append(f"  modules  {', '.join(capability.modules) or 'built in'}")
+    if capability.guides:
+        lines.append(f"  guides   {', '.join(capability.guides)}")
+    return "\n".join(lines) + "\n"
+
+
 def execute_doctor(namespace: argparse.Namespace) -> int:
-    if getattr(namespace, "action", None) == "trace":
+    action = getattr(namespace, "action", None)
+    if action == "trace":
         return execute_doctor_trace(namespace)
+    if action == "preflight":
+        return execute_doctor_preflight(namespace)
     return execute_doctor_n_plus_one(namespace)
+
+
+def execute_doctor_preflight(namespace: argparse.Namespace) -> int:
+    """Report every check wreath can make on a built application. 1 if any block.
+
+    The `--settings`/`--env`/`--environ` vocabulary is `wreath infra infer`'s,
+    parsed by that command's own helpers rather than a second copy: they are the
+    same three questions, and two spellings would eventually answer differently.
+    """
+    import json as _json
+
+    from ._infra_cli import _settings_models, _suppliers
+    from .doctor import preflight, preflight_as_dict, render_preflight
+
+    models = _settings_models(namespace.settings)
+    supplied, dotenv = _suppliers(namespace.env, environ=namespace.environ)
+    app = load_application(namespace.target, factory=namespace.factory)
+    report = preflight(
+        app,
+        application=namespace.target,
+        settings=models,
+        supplied=supplied,
+        dotenv_keys=dotenv,
+    )
+    if namespace.as_json:
+        print(_json.dumps(preflight_as_dict(report)))
+    else:
+        print(render_preflight(report), end="")
+    return 1 if report.blocking else 0
 
 
 def execute_doctor_trace(namespace: argparse.Namespace) -> int:
@@ -2905,8 +3133,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_typegen(namespace)
         if namespace.command == "inspect":
             return execute_inspect(namespace)
+        if namespace.command == "capabilities":
+            return execute_capabilities(namespace)
+        if namespace.command == "new":
+            return execute_new(namespace)
         if namespace.command == "doctor":
-            return execute_doctor(namespace)
+            # `preflight` resolves `--settings`/`--env` through `wreath infra
+            # infer`'s own helpers, which report a typo as a ValueError. That is
+            # a usage error and has to read like one here too, or the same
+            # mistake gives a clean message from one command and a traceback
+            # from the other.
+            try:
+                return execute_doctor(namespace)
+            except (OSError, TypeError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
         if namespace.command == "mcp":
             return execute_mcp(namespace)
         if namespace.command == "capture":
