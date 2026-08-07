@@ -42,6 +42,7 @@ SOURCES = (
     "dtrouter.c",
     "dtbitset.c",
     "security.c",
+    "hmac_sha256.c",
     "jose.c",
     "webpolicy.c",
     "observability.c",
