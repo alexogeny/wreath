@@ -258,3 +258,95 @@ def test_a_self_referential_dataclass_compiles_and_still_converts() -> None:
     """The compiled walk cannot be finite here, so that node is interpreted."""
     deep = Node(1, Node(2, Node(3, Node(4))))
     assert _compile_jsonable(Node)(deep) == _jsonable(Node, deep)
+
+
+# -- the exact-type fast path must not change what any subclass does ----------
+
+
+class _DictSubclass(dict):
+    """A Mapping that is not exactly a `dict`, so it must take the old path."""
+
+
+class _ListSubclass(list):
+    """Likewise for the sequence arm."""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"id": 42, "ok": True},
+        {"n": None, "f": 1.5, "s": "x"},
+        {"nested": {"deep": [1, {"x": 2}]}},
+        [],
+        [1, 2, 3],
+        [{"a": 1}, [2], "3"],
+        {"u": uuid.UUID(int=1)},
+        {"d": Decimal("1.5")},
+        {"when": datetime.datetime(2024, 1, 1, 12, 30)},
+        {"raw": b"bytes"},
+        _DictSubclass(a=1, b={"c": 2}),
+        _ListSubclass([1, {"a": 2}]),
+        {"mixed": _DictSubclass(x=1)},
+        (1, 2, 3),
+        {"1", "2"},
+        frozenset({"a"}),
+    ],
+)
+def test_the_fast_path_agrees_with_the_full_ladder(value: object) -> None:
+    """Every shape must serialise to what the unreordered ladder produced.
+
+    The oracle is the ladder itself, run with the fast path disabled, so this
+    compares the two orderings rather than trusting a hand-written expectation.
+    """
+    from wreath import binding
+
+    fast = binding._jsonable_any(value)
+    slow = _ladder_without_fast_path(value)
+
+    assert fast == slow
+    assert type(fast) is type(slow)
+
+
+def _ladder_without_fast_path(value: object) -> object:
+    """`_jsonable_any` as it stood before the exact-type checks were added."""
+    from collections.abc import Mapping
+
+    from wreath import binding
+
+    if type(value) in binding._JSON_SCALARS:
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, bytes):
+        return binding._b64encode_str(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_ladder_without_fast_path(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _ladder_without_fast_path(item) for key, item in value.items()}
+    return value
+
+
+def test_a_subclass_never_takes_the_fast_path() -> None:
+    """Why the guard is `type(value) is dict` and not `isinstance`.
+
+    A subclass may match an *earlier* rung of the ladder than its container
+    shape suggests -- a `str`-backed enum is a `str`, a dict subclass could be
+    anything -- and the ladder's order encodes which rung wins. Keying the fast
+    path on the exact type means only a plain `dict` or `list` can take it, so
+    no subclass's resolution can move. These assert that directly.
+    """
+    from wreath import binding
+
+    assert binding._jsonable_any(Colour.RED) == Colour.RED.value
+    assert binding._jsonable_any(_DictSubclass(a=1)) == {"a": 1}
+    assert binding._jsonable_any(_ListSubclass([1])) == [1]
+    # And a plain dict/list is unchanged in value by taking it.
+    assert binding._jsonable_any({"a": 1}) == {"a": 1}
+    assert binding._jsonable_any([1]) == [1]
