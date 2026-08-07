@@ -282,6 +282,15 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # changing the rendered document to satisfy a rule about Python source. Scoped
 # deliberately: E501 only, and only here.
 "src/wreath/_admin/pages.py" = ["E501"]
+# Generated, and generated from prose. `_capability_data.py` is compiled out of
+# `docs/agents/manifest.json` by `wreath-map-lint --fix`, and each row carries
+# that subsystem's capability sentence verbatim -- several run past 100
+# characters, and the sentence is the manifest's wording rather than this file's.
+# Wrapping them would mean the generator choosing line breaks inside somebody
+# else's prose, and MAP015 compares this file byte for byte, so those breaks
+# would then have to be reproduced exactly on every regeneration. Scoped
+# deliberately: E501 only, and only in the generated file.
+"src/wreath/_capability_data.py" = ["E501"]
 # The hardening corpus is defective code on purpose: each file reproduces a
 # planted application defect so `wreath.hardening` can be proved to find it, and
 # the `secure_*` twin proves it is not found in the correct spelling. Several of
