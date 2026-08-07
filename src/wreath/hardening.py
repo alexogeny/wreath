@@ -103,6 +103,7 @@ __all__ = [
     "apply_policy",
     "application_sources",
     "audit_application",
+    "audit_source_for_tenancy",
     "check_application",
     "resolve_policy",
 ]
@@ -304,6 +305,39 @@ def audit_configuration(app: Any) -> list[Finding]:
                 )
             )
     return findings
+
+
+def audit_source_for_tenancy(source: str, *, surface: str = "app") -> list[Finding]:
+    """Find tenant-schema literals written out in application source.
+
+    The one shape that walks past a `SET LOCAL search_path`: a name that is
+    already qualified. The GRANTs make it fail *closed* -- the server refuses --
+    but that refusal happens in production, and this makes it fail *early*,
+    where the person who wrote it is still looking at it.
+
+    An `ERROR` rather than a warning, because there is no legitimate reason for
+    an application to name another tenant's schema: its own is what the search
+    path resolves, and the central schema is named by its own name.
+    """
+    from .tenancy import find_schema_literals
+
+    return [
+        Finding(
+            rule_id="tenant-schema-literal",
+            severity=Severity.ERROR,
+            surface=surface,
+            message=(
+                f"this query names the tenant schema {name!r} explicitly, which resolves "
+                "past the request's own search_path"
+            ),
+            reference="CWE-639",
+            suggestion=(
+                "drop the schema qualifier and let the tenant binding resolve it; if the "
+                "table really is another tenant's, that is the finding"
+            ),
+        )
+        for name in find_schema_literals(source)
+    ]
 
 
 def audit_application(app: Any) -> Report:
