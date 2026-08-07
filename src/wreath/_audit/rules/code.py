@@ -235,7 +235,7 @@ _BY_ID = {rule.rule_id: rule for rule in CODE_RULES}
 #: Ruff's `flake8-bandit` codes that mean the same thing as one of these rules.
 #:
 #: **A finding the project has already declared and justified is not reported
-#: again.** Wreath's own ORM compiler carries `# noqa: S102` on three `exec`
+#: again.** Wreath's own ORM compiler carries a reviewed `S102` waiver on `exec`
 #: calls with a written reason, and re-raising those under a second name is how
 #: the second tool gets switched off. `AGENTS.md` asks for suppressions to be
 #: declared, scoped and reasoned; honouring the declaration is the other half
