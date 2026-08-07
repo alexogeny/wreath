@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 126,
+        "c": 129,
         "python": 2
       },
       "pre_activation": {
@@ -25,7 +25,7 @@
           "python": 0
         },
         "handler": {
-          "c": 58,
+          "c": 61,
           "python": 1
         },
         "egress": {
@@ -46,6 +46,9 @@
         "str.lower": 2,
         "bytes.lower": 2,
         "time.perf_counter": 2,
+        "lock.__enter__": 2,
+        "KV.get": 2,
+        "lock.__exit__": 2,
         "builtins.id": 2,
         "dict.clear": 2,
         "TrustedNetworks.contains": 1,
@@ -65,9 +68,6 @@
         "BitsetRouteTable.resolve": 1,
         "frozenset.issubset": 1,
         "wreath._native._core.orm_shape": 1,
-        "lock.__enter__": 1,
-        "KV.get": 1,
-        "lock.__exit__": 1,
         "str.rpartition": 1,
         "builtins.hasattr": 1,
         "TracedUser._orm_new": 1,
