@@ -28,12 +28,18 @@ than hidden -- the summary always says how many were dismissed and why.
     uv run wreath-sanitize postgres --tests tests/migrations
     uv run wreath-sanitize --all
 
-Three test failures are *expected* under a sanitized run and are reported as
-"known artifact" rather than as findings: `wreath-native-lint`,
-`wreath-map-lint`, and `wreath-request-trace` resolve the repository root from
-the imported package, which under `PYTHONPATH` points into the sanitized copy
-where no C sources live and no baseline was measured. They say nothing about
-memory safety.
+Some test failures are *expected* under a sanitized run and are reported as
+"known artifact" rather than as findings. Every one of them belongs to a tool
+that reads *the repository* -- `wreath-native-lint`, `wreath-map-lint`,
+`wreath-request-trace`, `wreath-dup-scan`, `wreath-port-golden` -- and each
+resolves the repository root from the imported package, which under
+`PYTHONPATH` points into the sanitized copy: no C sources live there, no
+baseline was measured there, and no golden files were emitted there. They say
+nothing about memory safety.
+
+The shape to check before adding to the list: the test must pass in an ordinary
+run and fail only because the tree under it is not the repository. Anything
+else is a finding.
 """
 
 from __future__ import annotations
@@ -105,6 +111,13 @@ _KNOWN_ARTIFACTS = (
     "test_map_lint",
     "test_request_trace",
     "test_complexity_probe",
+    # Both scan the repository and so find an empty tree in the sanitized copy.
+    # Neither is new: `test_dup_scan`'s repo-wide case has always collected zero
+    # files from the copy's absent `src/wreath`, and `test_port_golden` reads
+    # `tests/port/golden/`, which is not copied either. They were simply never
+    # added, so every sanitized run has ended on two failures nobody read.
+    "test_dup_scan",
+    "test_port_golden",
 )
 
 _SANITIZER_ERROR = re.compile(
