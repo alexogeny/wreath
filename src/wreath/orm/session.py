@@ -78,10 +78,19 @@ class FromORM:
 
     `database` names an `app.orm()` registry; it may be omitted when the
     application has exactly one.
+
+    `tenant` says where the tenant binding comes from for an *isolated*
+    registry, and `wreath.tenancy.FromTenant()` is the usual answer -- the
+    tenant this request resolved to. It exists because without it the only route
+    to a tenant-bound session was constructing `Session(registry, workload,
+    tenant=...)` by hand in the handler body, which made the framework's own
+    convenience the unsafe spelling and hand-rolling the safe one. An isolated
+    registry with no `tenant` here is refused at route-compile time.
     """
 
     database: str | None = None
     workload: Workload = "read"
+    tenant: Any = None
 
     def __post_init__(self) -> None:
         if self.workload not in _WORKLOADS:
@@ -1798,6 +1807,17 @@ def compile_session_binding(
         registry = registries[name]
     except KeyError:
         raise TypeError(f"unknown ORM registry: {name}") from None
+    # Refused where a person is looking, not on the first request. A route that
+    # binds a bare `FromORM` against an isolated registry is the mistake this
+    # whole seam exists to prevent, and `Session` would refuse it per request
+    # anyway -- at which point the application is already serving.
+    if registry.schema_mode.kind == "isolated" and marker.tenant is None:
+        raise TypeError(
+            f"ORM registry {name!r} is tenant-isolated, so a session bound from it needs "
+            "a tenant: write Annotated[Session, FromORM(tenant=FromTenant())]. Without "
+            "one there is no schema for its statements to resolve in, and the pooled "
+            "connection's last binding is another tenant's."
+        )
     return name, registry
 
 
