@@ -80,6 +80,7 @@ def plan(options: Options) -> dict[str, str]:
     }
     if options.database == "postgres":
         files[f"{name}/models.py"] = _models(options)
+        files["tests/test_models.py"] = _model_tests(options)
     if options.frontend == "react":
         files["web/package.json"] = _web_package_json(options)
         files["web/tsconfig.json"] = _web_tsconfig(options)
@@ -282,15 +283,31 @@ SETTINGS = _environment().bind(Settings, prefix=PREFIX)
 def _app(options: Options) -> str:
     database_imports = ""
     database_wiring = ""
+    signature = "build() -> Wreath:"
+    build_doc = '"""Assemble the application."""'
+    if options.database == "postgres":
+        signature = "build(*, database: bool = True) -> Wreath:"
+        build_doc = '''"""Assemble the application.
+
+    `database=False` builds everything except the database registration. The
+    routes below hold their data in memory, so the test suite uses it: a suite
+    that needs PostgreSQL running is a suite nobody runs on a laptop, and one
+    that skips itself instead is indistinguishable from one that passed.
+
+    Everything the database *does* reach is exercised by `tests/test_models.py`
+    and by `wreath migrations detect`, which compares the declaration to a live
+    schema. Serving always uses the default.
+    """'''
     if options.database == "postgres":
         database_imports = "\nfrom .models import MODELS"
         database_wiring = '''
-    # The connection is opened by the lifespan, not here, so importing this
-    # module needs no database. `validate_schema` is the framework default:
-    # the application refuses to start against a schema its models do not
-    # match, which is the one moment that mismatch is cheap to find.
-    application.postgres("main", dsn=SETTINGS.database_url)
-    application.orm(database="main", models=list(MODELS))
+    if database:
+        # The connection is opened by the lifespan, not here. wreath then
+        # validates the live schema against the models and refuses to start on
+        # a mismatch, which is the one moment that mismatch is cheap to find --
+        # and is why `database=False` exists at all.
+        application.postgres("main", dsn=SETTINGS.database_url)
+        application.orm(database="main", models=list(MODELS))
 '''
     return f'''"""The application: settings in, routers gathered, nothing else.
 
@@ -308,8 +325,8 @@ from .config import SETTINGS{database_imports}
 from .routers.items import items
 
 
-def build() -> Wreath:
-    """Assemble the application."""
+def {signature}
+    {build_doc}
     application = Wreath()
 {database_wiring}    application.include_router(items)
     return application
@@ -523,11 +540,21 @@ MODELS = (Item,)
 
 
 def _tests(options: Options) -> str:
+    build_call = "build(database=False)" if options.database == "postgres" else "build()"
+    build_note = (
+        """
+
+`database=False`, because these routes hold their data in memory and a suite
+that needs PostgreSQL running is a suite nobody runs. `test_models.py` covers
+the declaration that does reach the database."""
+        if options.database == "postgres"
+        else ""
+    )
     return f'''"""The project's own suite, green as delivered.
 
 `asyncio.run` rather than an async test, deliberately: async tests need an async
 pytest plugin, and wreath does not install one for you. This needs nothing but
-pytest.
+pytest.{build_note}
 """
 
 from __future__ import annotations
@@ -543,7 +570,7 @@ def _drive(scenario):
     """Run one async scenario against a fresh application and its lifespan."""
 
     async def run():
-        async with TestClient(build()) as client:
+        async with TestClient({build_call}) as client:
             await scenario(client)
 
     asyncio.run(run())
@@ -600,6 +627,48 @@ def test_an_unknown_body_field_is_refused_rather_than_ignored():
         assert response.status == 422
 
     _drive(scenario)
+'''
+
+
+def _model_tests(options: Options) -> str:
+    return f'''"""What the model declares, checked without a database.
+
+A declaration test is not a substitute for running against PostgreSQL -- it
+cannot tell you the table exists. `wreath migrations detect {options.name}.app:app`
+is what answers that, and it needs a live schema. What this catches is the half
+that is cheap to get wrong and expensive to find later: a column quietly renamed,
+or a table that stopped being mapped where the migration puts it.
+"""
+
+from __future__ import annotations
+
+from {options.name}.models import SCHEMA, MODELS, Item
+
+
+def test_the_registry_lists_every_model_the_app_compiles():
+    assert MODELS == (Item,)
+
+
+def test_the_item_table_lands_in_this_service_s_schema():
+    """wreath's own tables live elsewhere and it creates them itself."""
+    assert Item.__wreath_schema__ == SCHEMA
+    assert Item.__wreath_table__ == "item"
+
+
+def test_the_declared_columns_are_the_ones_a_migration_will_write():
+    declared = {{column.python_name for column in Item.__wreath_columns__}}
+    assert declared == {{"id", "name", "price"}}
+
+
+def test_every_column_is_not_null_because_nothing_asked_for_null():
+    """The opposite of the usual default, and the reason to state it once.
+
+    A nullable column nobody chose is a query with an edge case nobody wrote.
+    When you do want one, `column(Text, nullable=True)` says so and this test is
+    where you record that you meant it.
+    """
+    assert [column.python_name for column in Item.__wreath_columns__
+            if column.nullable] == []
 '''
 
 

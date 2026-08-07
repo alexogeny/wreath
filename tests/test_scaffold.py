@@ -138,15 +138,49 @@ def test_the_generated_env_example_parses_under_wreath_s_own_dialect(
     assert parse_dotenv(raw)
 
 
+def _run_generated_suite(target: Path) -> subprocess.CompletedProcess[str]:
+    """Do exactly what the generated README's quickstart says, in that order.
+
+    `cp .env.example .env` first, because that is step one everywhere the
+    scaffold documents itself -- in the README, and in the `next:` block the
+    command prints. Running the suite without it would be testing a sequence
+    nobody is told to follow.
+    """
+    (target / ".env").write_text(
+        (target / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"],
+        cwd=target, capture_output=True, text=True, check=False, timeout=300,
+    )
+
+
 def test_the_generated_project_passes_its_own_tests(tmp_path: Path) -> None:
     """Delivered green, or the scaffold is just a pile of files to debug."""
     target = tmp_path / "green"
     assert _new(target) == 0
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"],
-        cwd=target, capture_output=True, text=True, check=False, timeout=300,
-    )
+    result = _run_generated_suite(target)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_printed_next_steps_are_the_order_that_actually_works(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`cp .env.example .env` has to come before `pytest`, and be said.
+
+    With `--database postgres` the settings have no default DSN, so importing
+    the application without the copied file refuses by name -- correct, and
+    confusing as the first thing you meet. The instruction is what makes the
+    refusal never happen; a reordering here silently breaks the first minute.
+    """
+    target = tmp_path / "ordered"
+    assert _new(target, "--database", "postgres") == 0
+    # Compared as whole lines rather than string offsets: the `cd` line echoes
+    # the target path, and under pytest that path contains the word "pytest".
+    steps = [line.strip() for line in
+             capsys.readouterr().out.partition("next:")[2].splitlines() if line.strip()]
+    assert steps.index("cp .env.example .env") < steps.index("pytest")
+    readme = (target / "README.md").read_text(encoding="utf-8")
+    assert readme.index("cp .env.example .env") < readme.index("pytest")
 
 
 def test_the_frontend_option_wires_typegen_to_the_route_table(
@@ -314,3 +348,20 @@ def test_the_generated_react_app_typechecks_against_its_generated_client(
         cwd=target / "web", capture_output=True, text=True, check=False, timeout=180,
     )
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+
+
+def test_the_database_project_also_passes_its_own_tests(tmp_path: Path) -> None:
+    """`--database postgres` must be green too, with nothing started.
+
+    This was not covered when the option landed, and it was not green: the
+    generated application registered a database, so `TestClient` ran a lifespan
+    that read the catalog and raised `SchemaMismatchError` for a table no
+    migration had created yet. "Already green" has to mean every variant, or the
+    promise is worth nothing on the one somebody actually wanted.
+    """
+    target = tmp_path / "greendb"
+    assert _new(target, "--database", "postgres") == 0
+    result = _run_generated_suite(target)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # ... and green because it ran, not because it collected nothing.
+    assert "passed" in result.stdout
