@@ -38,6 +38,7 @@ Two more flags:
 ```bash
 wreath new shop --database postgres    # an ORM model, and the migration loop in the README
 wreath new shop --frontend react       # a React app wired to `wreath typegen`
+wreath new shop --database postgres --tenancy   # ... isolated by PostgreSQL role
 ```
 
 **It refuses a directory that has anything in it**, and there is no `--force`.
@@ -118,6 +119,27 @@ credentials.
 `shop/config.py` has **no default** for the DSN. Guessing at `localhost` and
 connecting to the wrong database is worse than refusing to start, so importing
 the application without one fails immediately, naming the variable.
+
+## With tenants
+
+```bash
+wreath new shop --database postgres --tenancy
+```
+
+Adds `shop/tenants.py` — the directory, the resolving `Tenancy`, and the
+`TenantSession` alias every tenant-scoped route binds — and installs
+`TenancyMiddleware` in `build()`. The registry becomes
+`SchemaMode.isolated(isolation="role")`, which is what makes tenant-local SQL
+resolve through the search path while the boundary is a role and a grant set.
+
+It needs `--database postgres` and refuses without it: tenant isolation *is* a
+schema and a role per tenant, so there is nothing to isolate without one.
+
+The generated `TenantSession` is the point of the option. A tenant-isolated
+registry bound with a bare `FromORM` is refused at route-compile time, so the
+declarative spelling is the safe one and there is no way to reach the data
+without a tenant. See [Multi-tenancy](../guides/tenancy.md) for what the
+boundary does and does not stop.
 
 ## Then what
 
