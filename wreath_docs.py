@@ -20,6 +20,7 @@ nav = Nav(
     Section(
         "Getting started",
         Page("Installation and first app", "getting-started/index.md"),
+        Page("Starting a project (wreath new)", "getting-started/new-project.md"),
         Page("Project structure and deployment", "getting-started/deployment.md"),
     ),
     Section(
@@ -76,6 +77,7 @@ nav = Nav(
             Page("Hybrid search", "guides/hybrid-search.md"),
             Page("Pagination, filtering, and sorting", "guides/pagination.md"),
             Page("Calculated views", "guides/calculated-views.md"),
+            Page("From one model to a working stack", "guides/model-first.md"),
             Page("Generating CRUD", "guides/crud.md"),
             Page("The admin", "guides/admin.md"),
             Page("Distributed locks", "guides/distributed-locks.md"),
@@ -146,6 +148,7 @@ nav = Nav(
             "Testing and quality",
             Page("Testing", "guides/testing.md"),
             Page("Would your tests notice?", "guides/mutant.md"),
+            Page("Before you deploy", "guides/preflight.md"),
             Page("Finding the N+1 query", "guides/n-plus-one.md"),
             Page("Auditing (a11y & performance)", "guides/auditing.md"),
             Page("Hardening", "guides/hardening.md"),
