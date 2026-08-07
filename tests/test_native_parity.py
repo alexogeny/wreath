@@ -10,6 +10,7 @@ from __future__ import annotations
 import json as stdlib_json
 import math
 import random
+import sys
 import threading
 from collections.abc import Callable
 
@@ -658,3 +659,49 @@ def test_text_encoding_of_a_string_agrees_for_every_declared_oid(
     assert _pg_outcome(native._encode_text, value, oid) == _pg_outcome(
         pure._encode_text, value, oid
     )
+
+
+def test_loading_the_native_package_does_not_drag_in_asyncio() -> None:
+    """`wreath._native` is a loader, and a loader should cost a dlopen.
+
+    It eagerly imported `_client`, whose module init imports `asyncio` -- and
+    with it `ssl`, `subprocess`, `logging`, `inspect` and `dataclasses`.
+    Measured before this test existed: `import wreath._native._core` cost
+    118 ms against 34 ms for `import wreath`, and 74 ms of the difference was
+    that one transitive `asyncio`. Every child process the test suite spawns
+    paid it, as does every xdist worker, for a module most of them never touch.
+
+    Asserted in a subprocess because `sys.modules` in this one is already
+    populated by every other test in the file, so the question cannot be asked
+    here at all. `_core` is the module under test rather than the package: it
+    is what the facades actually import, and importing it is what pulls the
+    package `__init__` in behind it.
+    """
+    import subprocess
+
+    code = (
+        "import sys, wreath._native._core;"
+        "print('asyncio' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False", (
+        "wreath._native imported asyncio for a caller that only wanted _core"
+    )
+
+
+def test_the_lazily_loaded_extensions_are_still_reachable_by_name() -> None:
+    """Laziness that loses a module is worse than the eager import it replaced.
+
+    `_client`, `_reactor` and `_edge` moved behind a module `__getattr__`, and
+    the three ways callers reach them -- `from ... import`, attribute access,
+    and `getattr` with a default -- all have to keep working, including the
+    `None` that means "this build has no such extension".
+    """
+    import wreath._native as native_package
+    from wreath._native import _client, _edge, _reactor
+
+    for name, value in (("_client", _client), ("_reactor", _reactor), ("_edge", _edge)):
+        assert value is getattr(native_package, name)
+        assert value is None or value.__name__ == f"wreath._native.{name}"

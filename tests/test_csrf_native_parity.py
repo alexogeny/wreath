@@ -256,3 +256,78 @@ def test_wildcard_host_matching_agrees_with_the_pure_twin(
     assert _core is not None
     assert _core.host_allowed(host, patterns) is expected
     assert pure.host_allowed(host, patterns) is expected
+
+
+# -- the key schedule is cached; these hold that cache to HMAC's definition ----
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        b"",                    # empty: still a key, still zero-padded
+        b"k",
+        b"k" * 31,
+        b"k" * 63,
+        b"k" * 64,              # exactly one block, no padding and no hashing
+        b"k" * 65,              # over a block: HMAC replaces it with its digest
+        b"k" * 200,
+        bytes(range(256)),      # every byte value, and longer than a block
+    ],
+)
+def test_the_signature_is_hmac_for_any_key_length(secret: bytes) -> None:
+    """The digest must be HMAC's, not something close to it.
+
+    `csrf_sign` absorbs the key's ipad/opad blocks once and copies the state per
+    call instead of letting `hmac.digest` re-derive them. That is HMAC's own
+    definition, so it has to agree with `hmac.digest` exactly -- including on
+    the two branches the optimisation introduces: a key longer than the 64-byte
+    block, which HMAC replaces with its own digest, and a shorter one, which it
+    zero-pads.
+    """
+    sign, _new, _validate = _native()
+    nonce = _nonce()
+    token = sign(secret, NOW, nonce)
+    message = f"v1.{NOW}.{nonce}".encode("ascii")
+    expected = base64.urlsafe_b64encode(
+        hmac.digest(secret, message, "sha256")
+    ).rstrip(b"=").decode("ascii")
+
+    assert token == f"v1.{NOW}.{nonce}.{expected}"
+
+
+def test_switching_secrets_does_not_reuse_the_previous_key() -> None:
+    """The failure mode a cached key schedule introduces, and the only new one.
+
+    Signing with one secret and then another must not sign the second message
+    with the first key's state. Interleaved and repeated, because a cache that
+    is merely *stale* passes a single alternation.
+    """
+    sign, _new, _validate = _native()
+    nonce = _nonce()
+    message = f"v1.{NOW}.{nonce}".encode("ascii")
+    secrets = [b"a" * 32, b"b" * 32, b"a" * 32, b"c" * 99, b"b" * 32, b"a" * 32]
+
+    for secret in secrets:
+        expected = base64.urlsafe_b64encode(
+            hmac.digest(secret, message, "sha256")
+        ).rstrip(b"=").decode("ascii")
+        assert sign(secret, NOW, nonce).rsplit(".", 1)[1] == expected, secret
+
+
+def test_two_equal_secrets_that_are_not_the_same_object_agree() -> None:
+    """The cache compares key *bytes*, not identity: a fresh equal key hits it."""
+    sign, _new, _validate = _native()
+    nonce = _nonce()
+    first = sign(b"s" * 32, NOW, nonce)
+    second = sign(bytes(b"s" * 32), NOW, nonce)
+
+    assert first == second
+
+
+def test_a_token_minted_under_one_secret_is_refused_under_another() -> None:
+    """End to end: the cache must not make a foreign token validate."""
+    _sign, new_token, validate = _native()
+    token = new_token(b"a" * 32, NOW)
+
+    assert validate(b"a" * 32, token, NOW, MAX_AGE)[0] is True
+    assert validate(b"b" * 32, token, NOW, MAX_AGE)[0] is False

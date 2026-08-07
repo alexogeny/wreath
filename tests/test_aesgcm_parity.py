@@ -115,6 +115,27 @@ def test_native_and_pure_agree_on_additional_data(aad_length: int) -> None:
         )
 
 
+#: Length ceilings for the fuzz, chosen so the loop's *iterations* pay for the
+#: coverage and its *bytes* do not.
+#:
+#: The pure twin is CPython doing AES, and it was measured at 0.13 MB/s and
+#: 8.1 ms per iteration -- 400 iterations of encrypt-plus-decrypt cost 6.2s,
+#: which the model predicts to within 5% (400 * 8.1ms * 2 = 6.5s). Both halves
+#: of that loop matter, and only one of them buys anything here: what this test
+#: adds over `test_both_agree_across_the_block_boundaries` is random
+#: *combinations* of key, nonce, length and AAD, which is the iteration count.
+#:
+#: The lengths are not where the structure lives. The C path steps four blocks
+#: (64 bytes) at a time, then one, then a zero-padded tail, so 512 bytes runs
+#: eight four-block steps and every remainder class; nothing new happens at
+#: 2000. The sizes that *are* structurally interesting at the top end -- 1000,
+#: 4000, 4079, 4096 against AAD up to 1000 -- are covered exhaustively and
+#: deterministically by `LENGTHS` and `AAD_LENGTHS` above, which is the right
+#: place for them: a fuzz that reaches a case one run in ten is not coverage.
+MAX_FUZZ_PLAINTEXT = 512
+MAX_FUZZ_AAD = 96
+
+
 @needs_hardware
 def test_native_and_pure_agree_under_a_seeded_fuzz() -> None:
     """Random keys, nonces, lengths and AAD, from a seed so a failure repeats."""
@@ -122,8 +143,10 @@ def test_native_and_pure_agree_under_a_seeded_fuzz() -> None:
     for _ in range(400):
         key = bytes(rng.randrange(256) for _ in range(16))
         nonce = bytes(rng.randrange(256) for _ in range(12))
-        plaintext = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 2000)))
-        aad = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 200)))
+        plaintext = bytes(
+            rng.randrange(256) for _ in range(rng.randrange(0, MAX_FUZZ_PLAINTEXT))
+        )
+        aad = bytes(rng.randrange(256) for _ in range(rng.randrange(0, MAX_FUZZ_AAD)))
         native = _native_encrypt(key, nonce, plaintext, aad)
         pure = _aes128gcm_encrypt_pure(key, nonce, plaintext, aad)
         assert native == pure, (
