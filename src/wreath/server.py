@@ -443,6 +443,7 @@ _SERVER_ENV_REGISTRY: tuple[_EnvSpec, ...] = (
     _EnvSpec("WREATH_KEEP_ALIVE_TIMEOUT", "keep_alive_timeout", float),
     _EnvSpec("WREATH_REQUEST_TIMEOUT", "request_timeout", float),
     _EnvSpec("WREATH_SHUTDOWN_TIMEOUT", "shutdown_timeout", float),
+    _EnvSpec("WREATH_SSL_SHUTDOWN_TIMEOUT", "ssl_shutdown_timeout", float),
     _EnvSpec("WREATH_SERVER_HEADER", "server_header", str),
     _EnvSpec("WREATH_DATE_HEADER", "date_header", _env_bool),
     _EnvSpec("WREATH_MAX_REQUEST_LINE", "max_request_line", int),
@@ -482,6 +483,7 @@ class ServerConfig:
         keep_alive_timeout: Seconds an idle connection is held between requests.
         request_timeout: Seconds one request may take before the connection is closed.
         shutdown_timeout: Seconds in-flight responses get to drain during a graceful close.
+        ssl_shutdown_timeout: Seconds a TLS close waits for the peer's `close_notify`.
         server_header: Value for the `Server` header. Printable ASCII, or None to send none.
         date_header: Send a `Date` header, refreshed once a second by the running server.
         max_request_line: Bytes in the request line before 414.
@@ -516,6 +518,15 @@ class ServerConfig:
     keep_alive_timeout: float = 5.0
     request_timeout: float = 30.0
     shutdown_timeout: float = 10.0
+    #: asyncio defaults this to 30 seconds (`asyncio.constants.SSL_SHUTDOWN_TIMEOUT`),
+    #: which is a client's patience rather than a server's. It bounds the unwrap on
+    #: *every* TLS close, so a peer that goes quiet without answering `close_notify`
+    #: keeps its transport -- and therefore its protocol object, and therefore a
+    #: graceful shutdown -- alive for half a minute. Measured before this field
+    #: existed: a served-and-answered HTTPS request left `server.close()` taking
+    #: 30.02s against a 0.01s request. One second is several round trips to any
+    #: peer close enough to have completed a handshake.
+    ssl_shutdown_timeout: float = 1.0
     server_header: str | None = "wreath"
     date_header: bool = True
     max_request_line: int = 8 * 1024
@@ -636,6 +647,11 @@ class ServerConfig:
                 raise ValueError(f"{low} must be non-negative")
             if getattr(self, low) >= getattr(self, high):
                 raise ValueError(f"{low} must be less than {high}")
+        # asyncio rejects a non-positive ssl_shutdown_timeout when the *listener*
+        # is created, which is far enough from the mistake to read as a bug in
+        # the server. Refuse it here, where the value was written.
+        if self.ssl_shutdown_timeout <= 0:
+            raise ValueError("ssl_shutdown_timeout must be positive")
         if self.lifespan not in ("auto", "on", "off"):
             raise ValueError("lifespan must be 'auto', 'on', or 'off'")
         if self.prearm < 0:
@@ -1146,6 +1162,14 @@ class Server:
                     port=config.port,
                     backlog=config.backlog,
                     ssl=ssl,
+                    # `None` is the "unset" spelling asyncio wants: it rejects a
+                    # number outright on a plaintext listener ("only meaningful
+                    # with ssl") and otherwise falls back to its own 30-second
+                    # SSL_SHUTDOWN_TIMEOUT, which is what this field exists to
+                    # replace.
+                    ssl_shutdown_timeout=(
+                        None if ssl is None else config.ssl_shutdown_timeout
+                    ),
                     reuse_address=True,
                     reuse_port=bool(getattr(self._loop, "_wreath_reuse_port", False)),
                 )

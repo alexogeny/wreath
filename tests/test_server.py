@@ -9,10 +9,12 @@ checked in an isolated subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import ssl
 import subprocess
 import sys
+import time
 from typing import Any
 
 import pytest
@@ -403,6 +405,89 @@ async def test_malformed_does_not_call_app() -> None:
         assert not called
     finally:
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_connection_reports_no_work_to_drain() -> None:
+    """The drain predicate must read a number, not fail to find one.
+
+    `_has_work_to_drain` treats a protocol with no readable `active_requests`
+    as busy, because it cannot tell. That fallback is meant for a foreign
+    protocol object, and every protocol Wreath ships has to stay out of it: a
+    shipped protocol that lands there makes every graceful close spend the
+    whole `shutdown_timeout` draining a connection that owes nothing.
+
+    Asserted on the attribute *and* the predicate, because reading zero from
+    one idle connection would also pass if the counter were hard-wired.
+    """
+    server = await _serve(make_wreath_app())
+    try:
+        port = _port(server)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"hello"), timeout=3.0)
+        protocol = next(iter(server._protocols))
+        assert protocol.active_requests == 0, "an answered request is not still in flight"
+        assert server._has_work_to_drain() is False
+        writer.close()
+        with contextlib.suppress(ConnectionResetError, BrokenPipeError):
+            await writer.wait_closed()
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tls_connection_owing_nothing_does_not_hold_the_close() -> None:
+    """A peer that never answers `close_notify` must not detain shutdown.
+
+    `loop.create_server` defaults `ssl_shutdown_timeout` to asyncio's 30
+    seconds, and the TLS unwrap it bounds runs on *every* connection close --
+    so a client that vanishes without a close_notify keeps its transport, and
+    therefore the protocol, alive for half a minute. During a graceful close
+    that is the whole cost: the drain window, the teardown wait and
+    `Server.wait_closed()` all queue behind one unwrap nobody will complete.
+
+    Measured before this test existed: 30.01s of teardown for a gRPC call
+    whose `call` phase was 0.01s. The bound asserted here is deliberately
+    loose -- the defect is a 30-second stall, and a threshold near the real
+    cost would make this flaky on a loaded machine for no extra evidence.
+
+    The client here is a **raw blocking socket that stops being serviced**, not
+    an asyncio one. Two shapes look like they should reproduce this and do not:
+    `transport.abort()` sends a TCP RST, which kills the transport instantly,
+    and an idle `open_connection(ssl=...)` peer answers the server's
+    close_notify by itself because asyncio's own SSL protocol is still running.
+    The stall needs a peer that is connected and simply never replies.
+    """
+    cert, key = _make_self_signed()
+    server = await serve(
+        make_wreath_app(),
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+        tls=TLSConfig(certfile=cert, keyfile=key),
+    )
+    port = _port(server)
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = ssl.CERT_NONE
+
+    def one_request() -> ssl.SSLSocket:
+        sock = client_ctx.wrap_socket(
+            socket.create_connection(("127.0.0.1", port)), server_hostname="localhost"
+        )
+        sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert b"200 OK" in sock.recv(4096)
+        return sock  # left open and unread: nothing will answer a close_notify
+
+    sock = await asyncio.to_thread(one_request)
+    started = time.monotonic()
+    try:
+        await server.close()
+        await server.wait_closed()
+        elapsed = time.monotonic() - started
+    finally:
+        sock.close()
+    assert elapsed < 5.0, f"shutdown waited out a TLS unwrap ({elapsed:.1f}s)"
 
 
 @pytest.mark.asyncio

@@ -1370,6 +1370,19 @@ class HttpProtocol(asyncio.Protocol):
 
     # --- graceful shutdown hook (called by the facade) ----------------------
 
+    @property
+    def active_requests(self) -> int:
+        """Requests this connection still owes a response for: 0 or 1.
+
+        HTTP/1.1 carries one at a time, so the condition is the same one
+        `stop_accepting` closes on. `Server._has_work_to_drain` reads this with
+        `getattr(..., None)` and treats a missing attribute as *busy*, so a
+        shipped protocol without it makes every graceful close spend the whole
+        `shutdown_timeout` draining a connection that owes nothing. The native
+        twin publishes the same name from `server_http1.c`.
+        """
+        return 0 if self.state == READING_HEAD and self._task is None else 1
+
     def stop_accepting(self) -> None:
         self._accepting = False
         if self.state == READING_HEAD and self._task is None:

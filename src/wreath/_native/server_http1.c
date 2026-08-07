@@ -3881,6 +3881,32 @@ http_shutdown(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
 }
 
 
+/* What the facade's graceful close polls to decide whether this connection
+ * still owes a response.
+ *
+ * HTTP/1.1 carries one request at a time, so the count is 0 or 1 and the
+ * condition is the same one `http_stop_accepting` closes on: parked in
+ * ST_READING_HEAD with no application task is idle, anything else is in
+ * flight. Published because `Server._has_work_to_drain` reads this attribute
+ * with `getattr(..., None)` and treats a missing one as *busy* -- a shipped
+ * protocol falling into that fallback makes every graceful close spend the
+ * whole shutdown_timeout draining a connection that owes nothing. */
+static PyObject *
+http_get_active_requests(PyObject *op, void *Py_UNUSED(closure))
+{
+    WreathHttpProtocol *self = (WreathHttpProtocol *)op;
+    int idle = (self->state == ST_READING_HEAD && self->task == NULL);
+    return PyLong_FromLong(idle ? 0 : 1);
+}
+
+
+static PyGetSetDef http_protocol_getset[] = {
+    {"active_requests", http_get_active_requests, NULL,
+     "Requests this connection still owes a response for (0 or 1).", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+
 /* --- timeouts ------------------------------------------------------------ */
 
 /* The owned enforcement for the currently-armed deadline: a keep-alive deadline
@@ -4468,6 +4494,7 @@ static PyType_Slot http_protocol_slots[] = {
     {Py_tp_traverse, (void *)http_protocol_traverse},
     {Py_tp_clear, (void *)http_protocol_clear},
     {Py_tp_methods, (void *)http_protocol_methods},
+    {Py_tp_getset, (void *)http_protocol_getset},
     {Py_bf_getbuffer, (void *)http_protocol_getbuffer},
     {Py_bf_releasebuffer, (void *)http_protocol_releasebuffer},
     {0, NULL},

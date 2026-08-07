@@ -576,18 +576,6 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
     return fut;  /* awaiting the future */
 }
 
-static int
-response_header_is(const char *name, Py_ssize_t size, const char *expected, Py_ssize_t expected_size)
-{
-    if (size != expected_size) return 0;
-    for (Py_ssize_t i = 0; i < size; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
-        if (c != (unsigned char)expected[i]) return 0;
-    }
-    return 1;
-}
-
 
 /* Encode a header list into HPACK literals appended to `block`. */
 static int
@@ -632,9 +620,9 @@ encode_header_block(PyObject *block, int status, PyObject *headers, PyObject *co
         }
         /* Skip connection-specific and pseudo headers in responses. */
         int skip = (nlen > 0 && nptr[0] == ':');
-        if (response_header_is(nptr, nlen, "date", 4)) has_date = 1;
-        if (response_header_is(nptr, nlen, "server", 6)) has_server = 1;
-        if (!skip && response_header_is(nptr, nlen, "connection", 10)) skip = 1;
+        if (wreath_ascii_equal_ci(nptr, nlen, "date", 4)) has_date = 1;
+        if (wreath_ascii_equal_ci(nptr, nlen, "server", 6)) has_server = 1;
+        if (!skip && wreath_ascii_equal_ci(nptr, nlen, "connection", 10)) skip = 1;
         if (!skip) {
             if (wreath_hpack_encode_literal(block, (const uint8_t *)nptr, nlen,
                                          (const uint8_t *)vptr, vlen) < 0) {
@@ -666,8 +654,8 @@ encode_header_block(PyObject *block, int status, PyObject *headers, PyObject *co
             Py_DECREF(items);
             return -1;
         }
-        if ((has_date && response_header_is(nptr, nlen, "date", 4)) ||
-            (has_server && response_header_is(nptr, nlen, "server", 6))) continue;
+        if ((has_date && wreath_ascii_equal_ci(nptr, nlen, "date", 4)) ||
+            (has_server && wreath_ascii_equal_ci(nptr, nlen, "server", 6))) continue;
         if (wreath_hpack_encode_literal(block, (const uint8_t *)nptr, nlen,
                                      (const uint8_t *)vptr, vlen) < 0) {
             Py_DECREF(items);
@@ -2978,6 +2966,21 @@ h2_shutdown(PyObject *op, PyObject *Py_UNUSED(ignored))
     Py_RETURN_NONE;
 }
 
+/* The count the facade's graceful close polls; see the twin in server_http1.c
+ * for why a missing attribute here is worse than a wrong one. Unlike HTTP/1.1
+ * this is a real concurrent count: streams not yet closed. */
+static PyObject *
+h2_get_active_requests(PyObject *op, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(((Http2Protocol *)op)->active_requests);
+}
+
+static PyGetSetDef h2_getset[] = {
+    {"active_requests", h2_get_active_requests, NULL,
+     "Streams this connection still owes a response for.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
 static PyMethodDef h2_methods[] = {
     {"connection_made", h2_connection_made, METH_O, NULL},
     {"data_received", h2_data_received, METH_O, NULL},
@@ -3186,6 +3189,7 @@ static PyType_Slot h2_slots[] = {
     {Py_tp_traverse, h2_traverse},
     {Py_tp_clear, h2_clear},
     {Py_tp_methods, h2_methods},
+    {Py_tp_getset, h2_getset},
     {0, NULL},
 };
 
