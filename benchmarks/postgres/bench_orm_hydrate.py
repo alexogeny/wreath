@@ -185,6 +185,14 @@ async def run(args: argparse.Namespace) -> int:
     native = importlib.import_module("wreath._native._postgres")
     connection = await native.connect(args.dsn)
     try:
+        # The compiled SQL below names `"public"."orm_bench_items"` explicitly,
+        # so the table has to land there. It does not by default: the stock
+        # `search_path` is `"$user", public`, and the DSN in AGENTS.md connects
+        # as `wreath` -- a role whose own schema exists as soon as any test run
+        # has created one. Unpinned, setup writes into `wreath` and the
+        # benchmark fails with `relation "public.orm_bench_items" does not
+        # exist`, which reads like a missing table rather than a search path.
+        await connection.execute("SET search_path TO public")
         await connection.execute(SETUP.split(";")[0])
         await connection.execute(SETUP.split(";")[1])
         await connection.execute(FILL.replace("$1", str(args.rows)))

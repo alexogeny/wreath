@@ -2,6 +2,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdint.h>
+
+#include "../byteorder.h"
 #include <string.h>
 
 #include "migration_artifact.h"
@@ -44,48 +46,6 @@ rotate_right(uint32_t value, uint32_t count)
     return (value >> count) | (value << (32U - count));
 }
 
-static uint32_t
-read_u32_be(const unsigned char *value)
-{
-    return ((uint32_t)value[0] << 24) |
-           ((uint32_t)value[1] << 16) |
-           ((uint32_t)value[2] << 8) |
-           (uint32_t)value[3];
-}
-
-static uint16_t
-read_u16_le(const unsigned char *value)
-{
-    return (uint16_t)((uint16_t)value[0] | ((uint16_t)value[1] << 8));
-}
-
-static uint32_t
-read_u32_le(const unsigned char *value)
-{
-    return ((uint32_t)value[0]) |
-           ((uint32_t)value[1] << 8) |
-           ((uint32_t)value[2] << 16) |
-           ((uint32_t)value[3] << 24);
-}
-
-static void
-write_u32_be(unsigned char *target, uint32_t value)
-{
-    target[0] = (unsigned char)(value >> 24);
-    target[1] = (unsigned char)(value >> 16);
-    target[2] = (unsigned char)(value >> 8);
-    target[3] = (unsigned char)value;
-}
-
-static void
-write_u32_le(unsigned char *target, uint32_t value)
-{
-    target[0] = (unsigned char)value;
-    target[1] = (unsigned char)(value >> 8);
-    target[2] = (unsigned char)(value >> 16);
-    target[3] = (unsigned char)(value >> 24);
-}
-
 static void
 sha256_transform(WreathSha256 *context, const unsigned char *block)
 {
@@ -94,7 +54,7 @@ sha256_transform(WreathSha256 *context, const unsigned char *block)
     uint32_t index;
 
     for (index = 0; index < 16; index++) {
-        schedule[index] = read_u32_be(block + index * 4);
+        schedule[index] = wreath_load_u32_be(block + index * 4);
     }
     for (; index < 64; index++) {
         const uint32_t left = schedule[index - 15];
@@ -169,7 +129,7 @@ sha256_final(WreathSha256 *context, unsigned char digest[32])
     }
     sha256_transform(context, context->block);
     for (index = 0; index < 8; index++) {
-        write_u32_be(digest + index * 4, context->state[index]);
+        wreath_store_u32_be(digest + index * 4, context->state[index]);
     }
 }
 
@@ -179,11 +139,11 @@ validate_tape(const unsigned char *tape, Py_ssize_t length)
     uint32_t count;
     Py_ssize_t expected;
     if (length < TAPE_HEADER_SIZE || memcmp(tape, "WMO1", 4) != 0 ||
-        read_u32_le(tape + 4) != 1U) {
+        wreath_load_u32_le(tape + 4) != 1U) {
         PyErr_SetString(PyExc_ValueError, "operation_tape is not a supported WMO1 tape");
         return -1;
     }
-    count = read_u32_le(tape + 8);
+    count = wreath_load_u32_le(tape + 8);
     if (count > (uint32_t)((PY_SSIZE_T_MAX - TAPE_HEADER_SIZE) / TAPE_RECORD_SIZE)) {
         PyErr_SetString(PyExc_ValueError, "operation_tape is too large");
         return -1;
@@ -205,14 +165,14 @@ validate_named_plan(
 {
     Py_ssize_t offset = 12;
     uint32_t count;
-    if (length < 12 || memcmp(tape, "WMP1", 4) != 0 || read_u32_le(tape + 4) != 1) {
+    if (length < 12 || memcmp(tape, "WMP1", 4) != 0 || wreath_load_u32_le(tape + 4) != 1) {
         PyErr_SetString(PyExc_ValueError, "named_plan is not a supported WMP1 tape");
         return -1;
     }
-    count = read_u32_le(tape + 8);
+    count = wreath_load_u32_le(tape + 8);
     for (uint32_t index = 0; index < count; index++) {
         Py_ssize_t payload = 0;
-        if (length - offset < 20 || read_u16_le(tape + offset + 18) != 0) {
+        if (length - offset < 20 || wreath_load_u16_le(tape + offset + 18) != 0) {
             PyErr_Format(
                 PyExc_ValueError,
                 "invalid WMP1 named plan: operation %u lacks its 20-byte header or has nonzero reserved flags",
@@ -220,7 +180,7 @@ validate_named_plan(
             return -1;
         }
         for (Py_ssize_t field = 0; field < 5; field++)
-            payload += read_u16_le(tape + offset + 8 + field * 2);
+            payload += wreath_load_u16_le(tape + offset + 8 + field * 2);
         offset += 20;
         if (payload > length - offset) {
             PyErr_SetString(PyExc_ValueError, "named_plan is truncated");
@@ -242,19 +202,19 @@ validate_sql_tape(
 {
     Py_ssize_t offset = 12;
     uint32_t count;
-    if (length < 12 || memcmp(tape, "WMS1", 4) != 0 || read_u32_le(tape + 4) != 1) {
+    if (length < 12 || memcmp(tape, "WMS1", 4) != 0 || wreath_load_u32_le(tape + 4) != 1) {
         PyErr_SetString(PyExc_ValueError, "sql_tape is not a supported WMS1 tape");
         return -1;
     }
-    count = read_u32_le(tape + 8);
+    count = wreath_load_u32_le(tape + 8);
     for (uint32_t index = 0; index < count; index++) {
         uint32_t flags, sql_length;
         if (length - offset < 8) {
             PyErr_SetString(PyExc_ValueError, "sql_tape is truncated");
             return -1;
         }
-        flags = read_u32_le(tape + offset);
-        sql_length = read_u32_le(tape + offset + 4);
+        flags = wreath_load_u32_le(tape + offset);
+        sql_length = wreath_load_u32_le(tape + offset + 4);
         offset += 8;
         if ((flags & ~3U) != 0 || sql_length > (uint32_t)(length - offset) ||
             ((flags & 2U) != 0 && sql_length != 0)) {
@@ -333,7 +293,7 @@ migration_build_artifact(PyObject *self, PyObject *args)
         validate_tape(operations, operations_length) < 0 ||
         validate_named_plan(named_plan, named_length, &named_count) < 0 ||
         validate_sql_tape(sql_tape, sql_length, &sql_count) < 0) return NULL;
-    if (named_count != read_u32_le(operations + 8) || sql_count != named_count) {
+    if (named_count != wreath_load_u32_le(operations + 8) || sql_count != named_count) {
         PyErr_SetString(PyExc_ValueError, "artifact operation representations disagree");
         return NULL;
     }
@@ -379,11 +339,11 @@ migration_build_artifact(PyObject *self, PyObject *args)
     data = (unsigned char *)PyBytes_AS_STRING(artifact);
     memset(data, 0, ARTIFACT_HEADER_SIZE);
     memcpy(data, "WMA1", 4);
-    write_u32_le(data + 4, ARTIFACT_VERSION);
-    write_u32_le(data + 8, (uint32_t)total);
-    write_u32_le(data + 12, (uint32_t)operations_length);
-    write_u32_le(data + 16, (uint32_t)named_length);
-    write_u32_le(data + 20, (uint32_t)sql_length);
+    wreath_store_u32_le(data + 4, ARTIFACT_VERSION);
+    wreath_store_u32_le(data + 8, (uint32_t)total);
+    wreath_store_u32_le(data + 12, (uint32_t)operations_length);
+    wreath_store_u32_le(data + 16, (uint32_t)named_length);
+    wreath_store_u32_le(data + 20, (uint32_t)sql_length);
     memcpy(data + 24, migration_id, 16);
     memcpy(data + 40, parent, 32);
     memcpy(data + 72, source, 32);
@@ -425,23 +385,23 @@ verify_artifact_data(
             "invalid migration artifact: expected WMA1 magic in the first four bytes");
         return -1;
     }
-    if (read_u32_le(data + 4) != ARTIFACT_VERSION) {
+    if (wreath_load_u32_le(data + 4) != ARTIFACT_VERSION) {
         PyErr_Format(
             PyExc_ValueError,
             "invalid WMA1 artifact: format field is %u; expected %u",
-            read_u32_le(data + 4), ARTIFACT_VERSION);
+            wreath_load_u32_le(data + 4), ARTIFACT_VERSION);
         return -1;
     }
-    if (length > UINT32_MAX || read_u32_le(data + 8) != (uint32_t)length) {
+    if (length > UINT32_MAX || wreath_load_u32_le(data + 8) != (uint32_t)length) {
         PyErr_Format(
             PyExc_ValueError,
             "invalid WMA1 artifact: declared total length is %u bytes, actual length is %zd",
-            read_u32_le(data + 8), length);
+            wreath_load_u32_le(data + 8), length);
         return -1;
     }
-    operations_length = read_u32_le(data + 12);
-    named_length = read_u32_le(data + 16);
-    sql_length = read_u32_le(data + 20);
+    operations_length = wreath_load_u32_le(data + 12);
+    named_length = wreath_load_u32_le(data + 16);
+    sql_length = wreath_load_u32_le(data + 20);
     if ((uint64_t)ARTIFACT_HEADER_SIZE + operations_length + named_length + sql_length !=
         (uint64_t)length) {
         PyErr_Format(
@@ -465,7 +425,7 @@ verify_artifact_data(
     if (validate_tape(operations, operations_length) < 0 ||
         validate_named_plan(named_plan, named_length, &named_count) < 0 ||
         validate_sql_tape(sql_tape, sql_length, &sql_count) < 0) return -1;
-    if (named_count != read_u32_le(operations + 8) || sql_count != named_count) {
+    if (named_count != wreath_load_u32_le(operations + 8) || sql_count != named_count) {
         PyErr_SetString(PyExc_ValueError, "artifact operation representations disagree");
         return -1;
     }
@@ -539,13 +499,13 @@ migration_verify_chain(PyObject *self, PyObject *args)
     if (require_length("expected_parent", parent_length, 32) < 0 ||
         require_length("expected_source", source_length, 32) < 0) return NULL;
     if (chain_length < 12 || memcmp(chain, "WMC1", 4) != 0 ||
-        read_u32_le(chain + 4) != 1) {
+        wreath_load_u32_le(chain + 4) != 1) {
         PyErr_SetString(
             PyExc_ValueError,
             "invalid WMC1 migration chain: expected WMC1 magic, format 1, and a 12-byte header");
         return NULL;
     }
-    count = read_u32_le(chain + 8);
+    count = wreath_load_u32_le(chain + 8);
     parent = expected_parent;
     source = expected_source;
     for (uint32_t index = 0; index < count; index++) {
@@ -555,7 +515,7 @@ migration_verify_chain(PyObject *self, PyObject *args)
             PyErr_SetString(PyExc_ValueError, "migration chain is truncated");
             return NULL;
         }
-        artifact_length = read_u32_le(chain + offset);
+        artifact_length = wreath_load_u32_le(chain + offset);
         offset += 4;
         if (artifact_length > (uint32_t)(chain_length - offset)) {
             PyErr_SetString(PyExc_ValueError, "migration chain is truncated");

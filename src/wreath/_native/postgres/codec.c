@@ -1,6 +1,7 @@
 #include "codec.h"
 
 #include "../simd.h"
+#include "../byteorder.h"
 
 #include "buffer.h"
 
@@ -656,22 +657,6 @@ decode_halfvec(const unsigned char *raw, Py_ssize_t length)
  * two chances to disagree about what pgvector accepts. */
 static PyObject *sparsevec_type = NULL;
 
-static void
-write_be_uint32(unsigned char *out, uint32_t value)
-{
-    out[0] = (unsigned char)(value >> 24);
-    out[1] = (unsigned char)(value >> 16);
-    out[2] = (unsigned char)(value >> 8);
-    out[3] = (unsigned char)value;
-}
-
-static uint32_t
-read_be_uint32(const unsigned char *raw)
-{
-    return ((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
-           ((uint32_t)raw[2] << 8) | (uint32_t)raw[3];
-}
-
 static int
 check_sparsevec(PyObject *value)
 {
@@ -725,9 +710,9 @@ encode_sparsevec(PyObject *value)
     result = PyBytes_FromStringAndSize(NULL, 12 + count * 8);
     if (result == NULL) goto done;
     out = (unsigned char *)PyBytes_AS_STRING(result);
-    write_be_uint32(out, (uint32_t)dim);
-    write_be_uint32(out + 4, (uint32_t)count);
-    write_be_uint32(out + 8, 0);
+    wreath_store_u32_be(out, (uint32_t)dim);
+    wreath_store_u32_be(out + 4, (uint32_t)count);
+    wreath_store_u32_be(out + 8, 0);
     for (Py_ssize_t index = 0; index < count; index++) {
         long position = PyLong_AsLong(PySequence_Fast_GET_ITEM(index_seq, index));
         double number;
@@ -735,7 +720,7 @@ encode_sparsevec(PyObject *value)
             Py_CLEAR(result);
             goto done;
         }
-        write_be_uint32(out + 12 + index * 4, (uint32_t)(position - 1));
+        wreath_store_u32_be(out + 12 + index * 4, (uint32_t)(position - 1));
         number = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(value_seq, index));
         if (number == -1.0 && PyErr_Occurred()) {
             Py_CLEAR(result);
@@ -769,9 +754,9 @@ decode_sparsevec(const unsigned char *raw, Py_ssize_t length)
         PyErr_SetString(PyExc_ValueError, "binary sparsevec header is truncated");
         return NULL;
     }
-    dim = read_be_uint32(raw);
-    count = read_be_uint32(raw + 4);
-    unused = read_be_uint32(raw + 8);
+    dim = wreath_load_u32_be(raw);
+    count = wreath_load_u32_be(raw + 4);
+    unused = wreath_load_u32_be(raw + 8);
     if (unused != 0) {
         PyErr_Format(PyExc_ValueError, "unsupported binary sparsevec flags %u", unused);
         return NULL;
@@ -798,7 +783,7 @@ decode_sparsevec(const unsigned char *raw, Py_ssize_t length)
     mapping = PyDict_New();
     if (mapping == NULL) return NULL;
     for (uint32_t index = 0; index < count; index++) {
-        int32_t position = (int32_t)read_be_uint32(raw + 12 + index * 4);
+        int32_t position = (int32_t)wreath_load_u32_be(raw + 12 + index * 4);
         const unsigned char *cell = raw + 12 + count * 4 + index * 4;
         PyObject *key, *item;
         int stored;
@@ -1120,7 +1105,7 @@ encode_bit(PyObject *value)
     result = PyBytes_FromStringAndSize(NULL, 4 + width);
     if (result == NULL) return NULL;
     out = (unsigned char *)PyBytes_AS_STRING(result);
-    write_be_uint32(out, (uint32_t)length);
+    wreath_store_u32_be(out, (uint32_t)length);
     memset(out + 4, 0, (size_t)width);
     for (Py_ssize_t index = 0; index < length; index++) {
         if (bits[index] == '1') {
@@ -1149,7 +1134,7 @@ decode_bit(const unsigned char *raw, Py_ssize_t length)
         PyErr_SetString(PyExc_ValueError, "binary bit header is truncated");
         return NULL;
     }
-    bits = (int32_t)read_be_uint32(raw);
+    bits = (int32_t)wreath_load_u32_be(raw);
     if (bits < 0) {
         PyErr_Format(PyExc_ValueError, "binary bit length %d is negative", (int)bits);
         return NULL;

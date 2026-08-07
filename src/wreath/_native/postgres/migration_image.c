@@ -2,6 +2,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdint.h>
+
+#include "../byteorder.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,58 +42,13 @@ typedef struct {
     uint32_t count;
 } WreathMigrationImage;
 
-static uint16_t
-read_u16_le(const unsigned char *value)
-{
-    return (uint16_t)(((uint16_t)value[0]) | ((uint16_t)value[1] << 8));
-}
-
-static uint32_t
-read_u32_le(const unsigned char *value)
-{
-    return ((uint32_t)value[0]) |
-           ((uint32_t)value[1] << 8) |
-           ((uint32_t)value[2] << 16) |
-           ((uint32_t)value[3] << 24);
-}
-
-static uint64_t
-read_u64_le(const unsigned char *value)
-{
-    return ((uint64_t)read_u32_le(value)) |
-           ((uint64_t)read_u32_le(value + 4) << 32);
-}
-
-static void
-write_u16_le(unsigned char *target, uint16_t value)
-{
-    target[0] = (unsigned char)value;
-    target[1] = (unsigned char)(value >> 8);
-}
-
-static void
-write_u32_le(unsigned char *target, uint32_t value)
-{
-    target[0] = (unsigned char)value;
-    target[1] = (unsigned char)(value >> 8);
-    target[2] = (unsigned char)(value >> 16);
-    target[3] = (unsigned char)(value >> 24);
-}
-
-static void
-write_u64_le(unsigned char *target, uint64_t value)
-{
-    write_u32_le(target, (uint32_t)value);
-    write_u32_le(target + 4, (uint32_t)(value >> 32));
-}
-
 static int
 record_compare(const unsigned char *left, const unsigned char *right)
 {
-    const uint32_t left_kind = read_u32_le(left + 16);
-    const uint32_t right_kind = read_u32_le(right + 16);
-    const uint64_t left_id = read_u64_le(left);
-    const uint64_t right_id = read_u64_le(right);
+    const uint32_t left_kind = wreath_load_u32_le(left + 16);
+    const uint32_t right_kind = wreath_load_u32_le(right + 16);
+    const uint64_t left_id = wreath_load_u64_le(left);
+    const uint64_t right_id = wreath_load_u64_le(right);
 
     if (left_kind != right_kind) {
         return left_kind < right_kind ? -1 : 1;
@@ -121,15 +78,15 @@ image_open(PyObject *object, const char *name, WreathMigrationImage *image)
         goto error;
     }
     if (memcmp(image->view.buf, "WMI1", 4) != 0 ||
-        read_u32_le((const unsigned char *)image->view.buf + 4) != IMAGE_VERSION ||
-        read_u32_le((const unsigned char *)image->view.buf + 8) != IMAGE_RECORD_SIZE) {
+        wreath_load_u32_le((const unsigned char *)image->view.buf + 4) != IMAGE_VERSION ||
+        wreath_load_u32_le((const unsigned char *)image->view.buf + 8) != IMAGE_RECORD_SIZE) {
         PyErr_Format(
             PyExc_ValueError,
             "invalid %s WMI1 image: expected WMI1 magic, format 1, and 24-byte records",
             name);
         goto error;
     }
-    image->count = read_u32_le((const unsigned char *)image->view.buf + 12);
+    image->count = wreath_load_u32_le((const unsigned char *)image->view.buf + 12);
     if (image->count > (uint32_t)((PY_SSIZE_T_MAX - IMAGE_HEADER_SIZE) / IMAGE_RECORD_SIZE)) {
         PyErr_Format(PyExc_ValueError, "%s migration image is too large", name);
         goto error;
@@ -179,8 +136,8 @@ diff_count(const WreathMigrationImage *desired, const WreathMigrationImage *actu
             count++;
         }
         else {
-            if (read_u32_le(wanted + 20) != read_u32_le(found + 20) ||
-                read_u64_le(wanted + 8) != read_u64_le(found + 8)) {
+            if (wreath_load_u32_le(wanted + 20) != wreath_load_u32_le(found + 20) ||
+                wreath_load_u64_le(wanted + 8) != wreath_load_u64_le(found + 8)) {
                 count++;
             }
             left++;
@@ -198,11 +155,11 @@ write_operation(
     uint32_t before,
     uint32_t after)
 {
-    write_u32_le(target, operation);
-    write_u32_le(target + 4, read_u32_le(record + 16));
-    write_u64_le(target + 8, read_u64_le(record));
-    write_u32_le(target + 16, before);
-    write_u32_le(target + 20, after);
+    wreath_store_u32_le(target, operation);
+    wreath_store_u32_le(target + 4, wreath_load_u32_le(record + 16));
+    wreath_store_u64_le(target + 8, wreath_load_u64_le(record));
+    wreath_store_u32_le(target + 16, before);
+    wreath_store_u32_le(target + 20, after);
 }
 
 static PyObject *
@@ -244,8 +201,8 @@ migration_diff_images(PyObject *self, PyObject *args)
     }
     output = (unsigned char *)PyBytes_AS_STRING(result);
     memcpy(output, "WMO1", 4);
-    write_u32_le(output + 4, IMAGE_VERSION);
-    write_u32_le(output + 8, operation_count);
+    wreath_store_u32_le(output + 4, IMAGE_VERSION);
+    wreath_store_u32_le(output + 8, operation_count);
     output += TAPE_HEADER_SIZE;
 
     while (left < desired.count && right < actual.count) {
@@ -254,18 +211,18 @@ migration_diff_images(PyObject *self, PyObject *args)
         const int compared = record_compare(wanted, found);
         if (compared < 0) {
             write_operation(output + written++ * TAPE_RECORD_SIZE, OP_ADD, wanted, 0,
-                            read_u32_le(wanted + 20));
+                            wreath_load_u32_le(wanted + 20));
             left++;
         }
         else if (compared > 0) {
             write_operation(output + written++ * TAPE_RECORD_SIZE, OP_DROP, found,
-                            read_u32_le(found + 20), 0);
+                            wreath_load_u32_le(found + 20), 0);
             right++;
         }
         else {
-            const uint32_t before = read_u32_le(found + 20);
-            const uint32_t after = read_u32_le(wanted + 20);
-            if (before != after || read_u64_le(wanted + 8) != read_u64_le(found + 8)) {
+            const uint32_t before = wreath_load_u32_le(found + 20);
+            const uint32_t after = wreath_load_u32_le(wanted + 20);
+            if (before != after || wreath_load_u64_le(wanted + 8) != wreath_load_u64_le(found + 8)) {
                 write_operation(output + written++ * TAPE_RECORD_SIZE, OP_ALTER, wanted,
                                 before, after);
             }
@@ -276,12 +233,12 @@ migration_diff_images(PyObject *self, PyObject *args)
     while (left < desired.count) {
         const unsigned char *wanted = desired.records + left++ * IMAGE_RECORD_SIZE;
         write_operation(output + written++ * TAPE_RECORD_SIZE, OP_ADD, wanted, 0,
-                        read_u32_le(wanted + 20));
+                        wreath_load_u32_le(wanted + 20));
     }
     while (right < actual.count) {
         const unsigned char *found = actual.records + right++ * IMAGE_RECORD_SIZE;
         write_operation(output + written++ * TAPE_RECORD_SIZE, OP_DROP, found,
-                        read_u32_le(found + 20), 0);
+                        wreath_load_u32_le(found + 20), 0);
     }
 
  done:
@@ -428,7 +385,7 @@ wreath_pg_migration_object_id(
 {
     uint64_t hash = UINT64_C(14695981039346656037);
     unsigned char kind_bytes[4];
-    write_u32_le(kind_bytes, kind);
+    wreath_store_u32_le(kind_bytes, kind);
     hash = catalog_hash_part(hash, kind_bytes, 4);
     hash = catalog_hash_part(hash, schema, schema_length);
     hash = catalog_hash_part(hash, table, table_length);
@@ -461,10 +418,10 @@ catalog_decode_numeric_row(
     if (object_id == NULL || parent_id == NULL || kind == NULL || signature == NULL)
         return -1;
     record = catalog->records + catalog->count * IMAGE_RECORD_SIZE;
-    write_u64_le(record, read_u64_be(object_id));
-    write_u64_le(record + 8, read_u64_be(parent_id));
-    write_u32_le(record + 16, read_u32_be(kind));
-    write_u32_le(record + 20, read_u32_be(signature));
+    wreath_store_u64_le(record, read_u64_be(object_id));
+    wreath_store_u64_le(record + 8, read_u64_be(parent_id));
+    wreath_store_u32_le(record + 16, read_u32_be(kind));
+    wreath_store_u32_le(record + 20, read_u32_be(signature));
     if (catalog->count > 0 &&
         record_compare(record - IMAGE_RECORD_SIZE, record) >= 0) {
         PyErr_SetString(
@@ -513,11 +470,11 @@ catalog_append_descriptor(
         name_length + signature_length;
     if (migration_catalog_descriptor_reserve(catalog, required) < 0) return -1;
     target = catalog->descriptor + catalog->descriptor_length;
-    write_u16_le(target, (uint16_t)schema_length);
-    write_u16_le(target + 2, (uint16_t)table_length);
-    write_u16_le(target + 4, (uint16_t)name_length);
-    write_u16_le(target + 6, (uint16_t)signature_length);
-    write_u32_le(target + 8, kind);
+    wreath_store_u16_le(target, (uint16_t)schema_length);
+    wreath_store_u16_le(target + 2, (uint16_t)table_length);
+    wreath_store_u16_le(target + 4, (uint16_t)name_length);
+    wreath_store_u16_le(target + 6, (uint16_t)signature_length);
+    wreath_store_u32_le(target + 8, kind);
     target += 12;
     memcpy(target, schema, (size_t)schema_length);
     target += schema_length;
@@ -571,10 +528,10 @@ catalog_decode_named_row(
             catalog, schema, schema_length, table, table_length,
             name, name_length, kind, signature_data, signature_length) < 0) return -1;
     record = catalog->records + catalog->count * IMAGE_RECORD_SIZE;
-    write_u64_le(record, object_id);
-    write_u64_le(record + 8, kind == 1 ? 0 : table_id);
-    write_u32_le(record + 16, kind);
-    write_u32_le(record + 20, signature);
+    wreath_store_u64_le(record, object_id);
+    wreath_store_u64_le(record + 8, kind == 1 ? 0 : table_id);
+    wreath_store_u32_le(record + 16, kind);
+    wreath_store_u32_le(record + 20, signature);
     catalog->count++;
     catalog->needs_sort = 1;
     return 0;
@@ -704,9 +661,9 @@ migration_catalog_finish(PyObject *object, PyObject *ignored)
     if (image == NULL) return NULL;
     data = (unsigned char *)PyBytes_AS_STRING(image);
     memcpy(data, "WMI1", 4);
-    write_u32_le(data + 4, IMAGE_VERSION);
-    write_u32_le(data + 8, IMAGE_RECORD_SIZE);
-    write_u32_le(data + 12, (uint32_t)self->count);
+    wreath_store_u32_le(data + 4, IMAGE_VERSION);
+    wreath_store_u32_le(data + 8, IMAGE_RECORD_SIZE);
+    wreath_store_u32_le(data + 12, (uint32_t)self->count);
     if (self->count > 0)
         memcpy(data + IMAGE_HEADER_SIZE, self->records,
                (size_t)self->count * IMAGE_RECORD_SIZE);
@@ -740,8 +697,8 @@ migration_catalog_descriptor(PyObject *object, PyObject *ignored)
     if (result == NULL) return NULL;
     data = (unsigned char *)PyBytes_AS_STRING(result);
     memcpy(data, "WMD1", 4);
-    write_u32_le(data + 4, 1);
-    write_u32_le(data + 8, (uint32_t)self->count);
+    wreath_store_u32_le(data + 4, 1);
+    wreath_store_u32_le(data + 8, (uint32_t)self->count);
     if (self->descriptor_length > 0)
         memcpy(data + 12, self->descriptor, (size_t)self->descriptor_length);
     return result;
@@ -810,13 +767,13 @@ migration_compile_desired(PyObject *module, PyObject *args)
     if (!PyArg_ParseTuple(
             args, "y#:_migration_compile_desired", &descriptor, &length)) return NULL;
     if (length < 12 || memcmp(descriptor, "WMD1", 4) != 0 ||
-        read_u32_le(descriptor + 4) != 1) {
+        wreath_load_u32_le(descriptor + 4) != 1) {
         PyErr_SetString(
             PyExc_ValueError,
             "invalid desired WMD1 descriptor: expected WMD1 magic, format 1, and a 12-byte header");
         return NULL;
     }
-    count = read_u32_le(descriptor + 8);
+    count = wreath_load_u32_le(descriptor + 8);
     if (count > (uint32_t)((PY_SSIZE_T_MAX - IMAGE_HEADER_SIZE) / IMAGE_RECORD_SIZE)) {
         PyErr_SetString(PyExc_OverflowError, "desired descriptor is too large");
         return NULL;
@@ -837,11 +794,11 @@ migration_compile_desired(PyObject *module, PyObject *args)
             PyErr_SetString(PyExc_ValueError, "desired descriptor is truncated");
             goto done;
         }
-        schema_length = read_u16_le(descriptor + offset);
-        table_length = read_u16_le(descriptor + offset + 2);
-        name_length = read_u16_le(descriptor + offset + 4);
-        signature_length = read_u16_le(descriptor + offset + 6);
-        kind = read_u32_le(descriptor + offset + 8);
+        schema_length = wreath_load_u16_le(descriptor + offset);
+        table_length = wreath_load_u16_le(descriptor + offset + 2);
+        name_length = wreath_load_u16_le(descriptor + offset + 4);
+        signature_length = wreath_load_u16_le(descriptor + offset + 6);
+        kind = wreath_load_u32_le(descriptor + offset + 8);
         offset += 12;
         payload_length = (Py_ssize_t)schema_length + table_length +
             name_length + signature_length;
@@ -865,13 +822,13 @@ migration_compile_desired(PyObject *module, PyObject *args)
             1, schema, schema_length, table, table_length,
             (const unsigned char *)"", 0);
         record = records + (Py_ssize_t)index * IMAGE_RECORD_SIZE;
-        write_u64_le(
+        wreath_store_u64_le(
             record,
             kind == 1 ? table_id : wreath_pg_migration_object_id(
                 kind, schema, schema_length, table, table_length, name, name_length));
-        write_u64_le(record + 8, kind == 1 ? 0 : table_id);
-        write_u32_le(record + 16, kind);
-        write_u32_le(record + 20, wreath_pg_migration_signature(signature, signature_length));
+        wreath_store_u64_le(record + 8, kind == 1 ? 0 : table_id);
+        wreath_store_u32_le(record + 16, kind);
+        wreath_store_u32_le(record + 20, wreath_pg_migration_signature(signature, signature_length));
     }
     if (offset != length) {
         PyErr_SetString(PyExc_ValueError, "desired descriptor has trailing bytes");
@@ -895,9 +852,9 @@ migration_compile_desired(PyObject *module, PyObject *args)
     if (image == NULL) goto done;
     output = (unsigned char *)PyBytes_AS_STRING(image);
     memcpy(output, "WMI1", 4);
-    write_u32_le(output + 4, IMAGE_VERSION);
-    write_u32_le(output + 8, IMAGE_RECORD_SIZE);
-    write_u32_le(output + 12, count);
+    wreath_store_u32_le(output + 4, IMAGE_VERSION);
+    wreath_store_u32_le(output + 8, IMAGE_RECORD_SIZE);
+    wreath_store_u32_le(output + 12, count);
     if (count > 0)
         memcpy(output + IMAGE_HEADER_SIZE, records, (size_t)count * IMAGE_RECORD_SIZE);
 
@@ -941,14 +898,14 @@ open_named_descriptor(
     uint32_t count;
     Py_ssize_t offset = 12;
     WreathNamedMigrationRecord *records;
-    if (length < 12 || memcmp(data, "WMD1", 4) != 0 || read_u32_le(data + 4) != 1) {
+    if (length < 12 || memcmp(data, "WMD1", 4) != 0 || wreath_load_u32_le(data + 4) != 1) {
         PyErr_Format(
             PyExc_ValueError,
             "invalid %s WMD1 descriptor: expected WMD1 magic, format 1, and a 12-byte header",
             label);
         return -1;
     }
-    count = read_u32_le(data + 8);
+    count = wreath_load_u32_le(data + 8);
     if (count > (uint32_t)(PY_SSIZE_T_MAX / sizeof(*records))) {
         PyErr_Format(PyExc_OverflowError, "%s descriptor is too large", label);
         return -1;
@@ -966,11 +923,11 @@ open_named_descriptor(
             PyErr_Format(PyExc_ValueError, "%s descriptor is truncated", label);
             goto error;
         }
-        record->schema_length = read_u16_le(data + offset);
-        record->table_length = read_u16_le(data + offset + 2);
-        record->name_length = read_u16_le(data + offset + 4);
-        record->signature_length = read_u16_le(data + offset + 6);
-        record->kind = read_u32_le(data + offset + 8);
+        record->schema_length = wreath_load_u16_le(data + offset);
+        record->table_length = wreath_load_u16_le(data + offset + 2);
+        record->name_length = wreath_load_u16_le(data + offset + 4);
+        record->signature_length = wreath_load_u16_le(data + offset + 6);
+        record->kind = wreath_load_u32_le(data + offset + 8);
         offset += 12;
         payload_length = (Py_ssize_t)record->schema_length + record->table_length +
             record->name_length + record->signature_length;
@@ -1036,14 +993,14 @@ write_named_operation(
     const unsigned char *before, uint16_t before_length,
     const unsigned char *after, uint16_t after_length)
 {
-    write_u32_le(target, operation);
-    write_u32_le(target + 4, record->kind);
-    write_u16_le(target + 8, record->schema_length);
-    write_u16_le(target + 10, record->table_length);
-    write_u16_le(target + 12, record->name_length);
-    write_u16_le(target + 14, before_length);
-    write_u16_le(target + 16, after_length);
-    write_u16_le(target + 18, 0);
+    wreath_store_u32_le(target, operation);
+    wreath_store_u32_le(target + 4, record->kind);
+    wreath_store_u16_le(target + 8, record->schema_length);
+    wreath_store_u16_le(target + 10, record->table_length);
+    wreath_store_u16_le(target + 12, record->name_length);
+    wreath_store_u16_le(target + 14, before_length);
+    wreath_store_u16_le(target + 16, after_length);
+    wreath_store_u16_le(target + 18, 0);
     target += 20;
     memcpy(target, record->schema, record->schema_length);
     target += record->schema_length;
@@ -1111,8 +1068,8 @@ migration_plan_descriptors(PyObject *module, PyObject *args)
     if (result == NULL) goto done;
     output = (unsigned char *)PyBytes_AS_STRING(result);
     memcpy(output, "WMP1", 4);
-    write_u32_le(output + 4, 1);
-    write_u32_le(output + 8, operation_count);
+    wreath_store_u32_le(output + 4, 1);
+    wreath_store_u32_le(output + 8, operation_count);
     cursor = output + 12;
     left = right = 0;
     while (left < desired_count || right < actual_count) {

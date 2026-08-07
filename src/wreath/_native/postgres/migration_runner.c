@@ -2,6 +2,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdint.h>
+
+#include "../byteorder.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -11,15 +13,6 @@
 #define SQL_FLAG_DESTRUCTIVE 1U
 #define SQL_FLAG_MANUAL 2U
 
-
-static uint32_t
-read_u32_le(const unsigned char *value)
-{
-    return (uint32_t)value[0] |
-           ((uint32_t)value[1] << 8) |
-           ((uint32_t)value[2] << 16) |
-           ((uint32_t)value[3] << 24);
-}
 
 
 static int
@@ -100,14 +93,14 @@ migration_build_ddl_block(PyObject *module, PyObject *args)
             "invalid SQL tape: expected WMS1 magic in the first four bytes");
         return NULL;
     }
-    if (read_u32_le(tape + 4) != 1) {
+    if (wreath_load_u32_le(tape + 4) != 1) {
         PyErr_Format(
             PyExc_ValueError,
             "invalid WMS1 SQL tape: format field is %u; expected 1",
-            read_u32_le(tape + 4));
+            wreath_load_u32_le(tape + 4));
         return NULL;
     }
-    count = read_u32_le(tape + 8);
+    count = wreath_load_u32_le(tape + 8);
     if (select_delimiter(tape, length, delimiter, &delimiter_length) < 0) return NULL;
     if (append_literal(&output, "DO ") < 0 ||
         wreath_pg_buffer_append(&output, delimiter, delimiter_length) < 0 ||
@@ -121,8 +114,8 @@ migration_build_ddl_block(PyObject *module, PyObject *args)
                 index);
             goto done;
         }
-        flags = read_u32_le(tape + offset);
-        sql_length = read_u32_le(tape + offset + 4);
+        flags = wreath_load_u32_le(tape + offset);
+        sql_length = wreath_load_u32_le(tape + offset + 4);
         offset += 8;
         if ((flags & ~3U) != 0 || sql_length > (uint32_t)(length - offset)) {
             PyErr_Format(

@@ -2,6 +2,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdint.h>
+
+#include "../byteorder.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,21 +45,6 @@ typedef struct {
 } WreathSqlPart;
 
 
-static uint16_t
-read_u16_le(const unsigned char *value)
-{
-    return (uint16_t)((uint16_t)value[0] | ((uint16_t)value[1] << 8));
-}
-
-
-static uint32_t
-read_u32_le(const unsigned char *value)
-{
-    return (uint32_t)value[0] |
-           ((uint32_t)value[1] << 8) |
-           ((uint32_t)value[2] << 16) |
-           ((uint32_t)value[3] << 24);
-}
 
 
 static uint64_t
@@ -264,13 +251,13 @@ parse_plan(
     Py_ssize_t offset = 12;
     uint32_t count;
     WreathSqlOperation *operations;
-    if (length < 12 || memcmp(data, "WMP1", 4) != 0 || read_u32_le(data + 4) != 1) {
+    if (length < 12 || memcmp(data, "WMP1", 4) != 0 || wreath_load_u32_le(data + 4) != 1) {
         PyErr_SetString(
             PyExc_ValueError,
             "invalid WMP1 named plan: expected WMP1 magic, format 1, and a 12-byte header");
         return -1;
     }
-    count = read_u32_le(data + 8);
+    count = wreath_load_u32_le(data + 8);
     if (count > (uint32_t)(PY_SSIZE_T_MAX / sizeof(*operations))) {
         PyErr_SetString(PyExc_OverflowError, "named migration plan is too large");
         return -1;
@@ -287,15 +274,15 @@ parse_plan(
             PyErr_SetString(PyExc_ValueError, "named migration plan is truncated");
             goto error;
         }
-        operation->action = read_u32_le(data + offset);
-        operation->kind = read_u32_le(data + offset + 4);
-        operation->schema_length = read_u16_le(data + offset + 8);
-        operation->table_length = read_u16_le(data + offset + 10);
-        operation->name_length = read_u16_le(data + offset + 12);
-        operation->before_length = read_u16_le(data + offset + 14);
-        operation->after_length = read_u16_le(data + offset + 16);
+        operation->action = wreath_load_u32_le(data + offset);
+        operation->kind = wreath_load_u32_le(data + offset + 4);
+        operation->schema_length = wreath_load_u16_le(data + offset + 8);
+        operation->table_length = wreath_load_u16_le(data + offset + 10);
+        operation->name_length = wreath_load_u16_le(data + offset + 12);
+        operation->before_length = wreath_load_u16_le(data + offset + 14);
+        operation->after_length = wreath_load_u16_le(data + offset + 16);
         operation->ordinal = index;
-        if (read_u16_le(data + offset + 18) != 0 ||
+        if (wreath_load_u16_le(data + offset + 18) != 0 ||
             operation->action < OP_ADD || operation->action > OP_ALTER ||
             operation->kind < KIND_TABLE || operation->kind > 4U) {
             PyErr_Format(
@@ -1236,7 +1223,7 @@ image_lookup(
     while (low < high) {
         const uint32_t mid = low + (high - low) / 2;
         const unsigned char *record = records + (Py_ssize_t)mid * 24;
-        const uint32_t record_kind = read_u32_le(record + 16);
+        const uint32_t record_kind = wreath_load_u32_le(record + 16);
         const uint64_t record_id = read_u64_le(record);
         if (record_kind < kind || (record_kind == kind && record_id < object_id)) {
             low = mid + 1;
@@ -1245,7 +1232,7 @@ image_lookup(
             high = mid;
         }
         else {
-            *signature_out = read_u32_le(record + 20);
+            *signature_out = wreath_load_u32_le(record + 20);
             return 1;
         }
     }
@@ -1266,13 +1253,13 @@ wreath_pg_migration_downgrade_hazards(
     uint32_t count, image_count;
     PyObject *result = NULL;
     if (image_length < 16 || memcmp(image, "WMI1", 4) != 0 ||
-        read_u32_le(image + 4) != 1 || read_u32_le(image + 8) != 24) {
+        wreath_load_u32_le(image + 4) != 1 || wreath_load_u32_le(image + 8) != 24) {
         PyErr_SetString(
             PyExc_ValueError,
             "invalid desired WMI1 image: expected WMI1 magic, format 1, and 24-byte records");
         return NULL;
     }
-    image_count = read_u32_le(image + 12);
+    image_count = wreath_load_u32_le(image + 12);
     if (image_count > (uint32_t)((image_length - 16) / 24) ||
         16 + (Py_ssize_t)image_count * 24 != image_length) {
         PyErr_SetString(
