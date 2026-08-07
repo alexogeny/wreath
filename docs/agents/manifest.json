@@ -893,7 +893,8 @@
       ],
       "policy": "Generate REST routes from an ORM model, off by default: enabled at the app level (Wreath.enable_crud) and opted into per model (Wreath.crud / crud_router). Sensitive columns (password, *_hash, token, ...) are hidden from output and rejected from input unless named in expose=. Retrieval columns (Vector, TsVector -- `crud.retrieval_fields`, typed rather than name-guessed) are likewise withheld both ways unless named in expose=: an embedding in a response is ~30k floats per default page and a tsvector is derived from columns already in it, while an embedding on input lets anyone who may edit a row top every semantic search without changing visible content. Generated columns (every TsVector) are dropped from input unconditionally, like the primary key, rather than reaching the ORM and answering 422; expose= makes one readable and nothing makes one writable. fields= names what may leave and never widens what may be written. Authorization is per operation via authorize={op|group|'*': Access.*}: Access.roles/permissions/cedar attach AuthRequirement metadata the app enforces in its single-pass pipeline; Access.deny() 403s unconditionally; object_authorizer=(request, op, instance) covers row-level checks that need the loaded row. Single-column primary key only.",
       "guides": [
-        "docs/guides/crud.md"
+        "docs/guides/crud.md",
+        "docs/guides/model-first.md"
       ],
       "sources": [
         "src/wreath/crud.py"
@@ -1068,7 +1069,8 @@
         "tests/test_trace_propagation.py",
         "tests/test_trace_queue.py",
         "tests/test_trace_saga.py",
-        "tests/test_workflow_step_recording.py"
+        "tests/test_workflow_step_recording.py",
+        "tests/test_doctor.py"
       ],
       "decisions": [
         "docs/decisions/0005-c-first-with-a-pure-twin.md",
@@ -1087,7 +1089,8 @@
       ],
       "policy": "Framework and server layers stay separable: Wreath must remain usable on any conforming ASGI server. ASGI semantics come before implementation speed.",
       "guides": [
-        "docs/guides/server.md"
+        "docs/guides/server.md",
+        "docs/getting-started/new-project.md"
       ],
       "reference": [
         "docs/reference/server.md",
@@ -1105,7 +1108,8 @@
         "src/wreath/_pure/server.py",
         "src/wreath/_native/server_http1.c",
         "src/wreath/_native/server_http2.c",
-        "src/wreath/_native/http3_asgi.c"
+        "src/wreath/_native/http3_asgi.c",
+        "src/wreath/_scaffold.py"
       ],
       "tests": [
         "tests/test_server.py",
@@ -1122,7 +1126,8 @@
         "tests/test_cli.py",
         "tests/test_devserver.py",
         "tests/http2/",
-        "tests/http3/"
+        "tests/http3/",
+        "tests/test_scaffold.py"
       ],
       "decisions": [
         "docs/decisions/0006-optional-extensions-and-tiers.md",
@@ -1240,13 +1245,14 @@
     },
     {
       "name": "doctor",
-      "capability": "Runtime diagnostics for your own handlers, including the N+1 query you did not know you had",
+      "capability": "Runtime diagnostics for your own handlers -- the N+1 query you did not know you had, and one preflight report of every refusal wreath already knows",
       "replaces": [
         "nplusone"
       ],
       "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. Scopes: a request is not the only one, and is not the worst. `_nplusone.watching(origin, limit)` binds a ledger for any execution scope; `_nplusone.scope_for(origin, budget=...)` holds the three-state rule in one place -- a declared `query_budget` fails at the ceiling, no budget but a guard already in the process observes and reports, neither binds nothing at all. `wreath.jobs` binds one per job *attempt* (a retry starts from zero, or a task that legitimately queries ninety times dead-letters itself on the second try), `wreath.workflows` one per step plus a separate one per compensation, `wreath.passes` one per shift rather than per chunk -- an N+1 inside a hundred-row chunk is under any per-chunk ceiling a person would write, and it is the product of queries-per-chunk and chunks-per-shift that turns a backfill into an outage. Failing is opt-in everywhere outside a request: a guard that raises inside a durable job turns a slow job into a failed one and then into a retry storm. `NPlusOneGuard` deliberately does *not* use `watching` -- the middleware protocol splits bind and reset across two calls, and a suspended `@contextmanager` held on `request.state` is finalized when the request object becomes unreachable, which unbinds the ledger mid-request rather than at the end of it. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1.",
       "guides": [
-        "docs/guides/n-plus-one.md"
+        "docs/guides/n-plus-one.md",
+        "docs/guides/preflight.md"
       ],
       "reference": [
         "docs/reference/doctor.md"
@@ -1257,7 +1263,8 @@
       ],
       "tests": [
         "tests/test_doctor.py",
-        "tests/test_nplusone_scopes.py"
+        "tests/test_nplusone_scopes.py",
+        "tests/test_doctor_preflight.py"
       ]
     },
     {
@@ -1414,7 +1421,8 @@
         "tests/test_tape_decomp.py",
         "tests/test_complexity_probe.py",
         "tests/test_port_golden.py",
-        "tests/test_dup_scan.py"
+        "tests/test_dup_scan.py",
+        "tests/test_map_lint_capability_index.py"
       ]
     },
     {
@@ -1495,10 +1503,13 @@
       "sources": [
         "src/wreath/_docs/",
         "src/wreath/_docs_cli.py",
-        "wreath_docs.py"
+        "wreath_docs.py",
+        "src/wreath/_capabilities.py",
+        "src/wreath/_capability_data.py"
       ],
       "tests": [
-        "tests/test_docs_ssg.py"
+        "tests/test_docs_ssg.py",
+        "tests/test_capabilities.py"
       ]
     },
     {
