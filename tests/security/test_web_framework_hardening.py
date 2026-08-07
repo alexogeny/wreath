@@ -133,13 +133,25 @@ def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> Non
     tooling = {"_cli.py", "_devserver.py", "_infra_cli.py"}
     excluded_directories = {"_devtools", "_docs", "_mutant", "_port", "typegen"}
     dangerous_imports = {"dill", "marshal", "pickle", "shelve"}
+    # Every finding below names one of these in source, so a file containing
+    # none of them cannot produce one. Reading the tree costs 22 ms and parsing
+    # it 1.9 s, so the cheap half answers first for the files it can settle --
+    # and it settles most of them. Sound rather than heuristic: an `ast.Import`
+    # of `pickle`, a call to `os.popen`, or a `shell=True` keyword each require
+    # their own spelling to be present, so nothing skipped here could have been
+    # a finding. Over-eager the harmless way: the word in a comment buys one
+    # needless parse, never a missed sink.
+    tokens = (*dangerous_imports, "popen", "system", "shell")
     findings: list[str] = []
 
     for path in source_root.rglob("*.py"):
         relative = path.relative_to(source_root)
         if path.name in tooling or any(part in excluded_directories for part in relative.parts):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
+        source = path.read_text(encoding="utf-8")
+        if not any(token in source for token in tokens):
+            continue
+        tree = ast.parse(source, filename=str(relative))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:

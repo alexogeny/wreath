@@ -1,18 +1,22 @@
 #include "wreathcore.h"
+#include "hmac_sha256.h"
 
 /* ---- signed double-submit CSRF tokens (see ADR 0018) --------------------
  *
  * Token: "v1.<issued>.<nonce>.<signature>", where nonce and signature are each
  * 32 bytes in unpadded URL-safe base64 (43 characters).
  *
- * The HMAC itself is *not* reimplemented here. `hmac.digest(..., "sha256")` is
- * already a C routine inside CPython, and it measured at ~2.5us of CSRF's ~11us
- * per request; the rest was Python glue -- an f-string, `.encode()`, and two
- * `_b64encode` frames each running b64encode/rstrip/decode. So this owns the
- * glue and calls the existing primitive once for the digest. Linking libcrypto
- * would make the default build depend on OpenSSL, which `_core` deliberately
- * does not, and hand-rolling SHA-256 in an auth path buys ~1us for a much worse
- * trade.
+ * SHA-256 is *not* reimplemented here, and that decision still stands: the one
+ * inside CPython is OpenSSL's, it uses the CPU's SHA extensions, and a scalar C
+ * version measured slower than the call it would have replaced. Linking
+ * libcrypto directly would also make the default build depend on OpenSSL, which
+ * `_core` deliberately does not.
+ *
+ * What *was* wasted is narrower and was invisible at that altitude: HMAC
+ * re-derives the key's two padded blocks on every call, and this framework signs
+ * every token with the same key. `hmac_sha256.h` absorbs them once, which took
+ * signing from 1377ns to 888ns. See it for the measurement and the ADR 0007
+ * argument for caching them.
  */
 
 #include <errno.h>
@@ -27,6 +31,8 @@ static PyObject *hmac_digest_fn = NULL;   /* _hashlib.hmac_digest */
 static PyObject *sha256_name = NULL;      /* "sha256" */
 static PyObject *urandom_fn = NULL;       /* os.urandom */
 static PyObject *nonce_size = NULL;       /* 32 */
+/* The signing key's block states, cached here; see hmac_sha256.h. */
+static WreathHmacKey csrf_key = {NULL};
 
 static const char B64URL[65] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -95,24 +101,11 @@ constant_time_equal(const char *a, const char *b, Py_ssize_t len)
 static int
 sign_message(PyObject *secret, const char *message, Py_ssize_t message_len, char *out43)
 {
-    PyObject *payload = PyBytes_FromStringAndSize(message, message_len);
-    PyObject *digest;
-    PyObject *args[3];
-
-    if (payload == NULL) return -1;
-    args[0] = secret;
-    args[1] = payload;
-    args[2] = sha256_name;
-    digest = PyObject_Vectorcall(hmac_digest_fn, args, 3, NULL);
-    Py_DECREF(payload);
-    if (digest == NULL) return -1;
-    if (!PyBytes_Check(digest) || PyBytes_GET_SIZE(digest) != 32) {
-        Py_DECREF(digest);
-        PyErr_SetString(PyExc_RuntimeError, "hmac_digest did not return 32 bytes");
+    unsigned char digest[32];
+    if (wreath_hmac_sha256(&csrf_key, secret, message, message_len, digest) < 0) {
         return -1;
     }
-    b64url_32((const unsigned char *)PyBytes_AS_STRING(digest), out43);
-    Py_DECREF(digest);
+    b64url_32(digest, out43);
     return 0;
 }
 
@@ -379,6 +372,7 @@ wreath_security_ready(void)
     if (hmac_digest_fn == NULL) return -1;
     sha256_name = PyUnicode_InternFromString("sha256");
     if (sha256_name == NULL) return -1;
+    if (wreath_hmac_sha256_ready() < 0) return -1;
 
     module = PyImport_ImportModule("os");
     if (module == NULL) return -1;
