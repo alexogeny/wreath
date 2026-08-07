@@ -4,6 +4,11 @@ The scan is only worth reading if it sees the duplication this repository
 actually produces — the same body under different names, with different locals
 and different literals — and stays quiet about bodies that merely share a
 statement count.
+
+Half of that duplication is in C, and for a long time nothing looked at it. The
+native half of the tests below pins the C extractor, because a regex that
+mistakes an initialiser for a function, or misses a definition whose return type
+sits on its own line, reports a clean scan over a file it never read.
 """
 
 from __future__ import annotations
@@ -63,6 +68,88 @@ def gather(source):
     _emit(out)
     return out
 '''
+
+
+#: The shape the native tree produces most: a grow-the-buffer helper, copied
+#: into every module that needed one and renamed on arrival.
+RENAMED_C_TWINS = r"""
+static int
+writer_grow(Writer *writer, size_t need)
+{
+    size_t want = writer->len + need;
+    if (want <= writer->cap) {
+        return 0;
+    }
+    size_t next = writer->cap ? writer->cap * 2 : 64;
+    while (next < want) {
+        next *= 2;
+    }
+    char *block = PyMem_Realloc(writer->data, next);
+    if (block == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    writer->data = block;
+    writer->cap = next;
+    return 0;
+}
+
+static int
+sink_reserve(Sink *sink, size_t extra)
+{
+    /* A comment the other copy does not have. */
+    size_t target = sink->used + extra;
+    if (target <= sink->size) {
+        return 0;
+    }
+    size_t grown = sink->size ? sink->size * 4 : 256;
+    while (grown < target) {
+        grown *= 4;
+    }
+    char *fresh = PyMem_Realloc(sink->bytes, grown);
+    if (fresh == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    sink->bytes = fresh;
+    sink->size = grown;
+    return 0;
+}
+"""
+
+#: Same length, same brace count, different control structure.
+NOT_C_TWINS = r"""
+static int
+tally(const uint8_t *data, Py_ssize_t len)
+{
+    int total = 0;
+    for (Py_ssize_t i = 0; i < len; i++) {
+        total += data[i];
+    }
+    if (total > 255) {
+        total = 255;
+    }
+    wreath_record(total);
+    wreath_emit(total);
+    return total;
+}
+
+static int
+drain(Queue *queue, PyObject **out)
+{
+    PyObject *item = NULL;
+    while ((item = queue_pop(queue)) != NULL) {
+        *out++ = item;
+    }
+    switch (queue->state) {
+        case 1:
+            return -1;
+        default:
+            break;
+    }
+    return 0;
+}
+"""
 
 
 @pytest.fixture
@@ -345,6 +432,157 @@ def test_ranking_is_by_the_lines_a_collapse_would_remove(tree: Path) -> None:
         dup_scan.Site("c.py", "three", 1, 10),
     ))
     assert group.redundant_lines == 20  # the copies after the first, not all three
+
+
+def test_a_renamed_c_copy_is_found(tree: Path) -> None:
+    """The native half of the same finding, and half of this tree is C."""
+    _write(tree, "writer.c", RENAMED_C_TWINS)
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert scanned == 2
+    assert len(groups) == 1
+    assert [site.name for site in groups[0].sites] == ["writer_grow", "sink_reserve"]
+
+
+def test_a_c_copy_is_found_across_files_and_suffixes(tree: Path) -> None:
+    """A `static inline` in a header is as copyable as one in a `.c`."""
+    half = RENAMED_C_TWINS.index("static int\nsink_reserve")
+    _write(tree, "writer.c", RENAMED_C_TWINS[:half])
+    _write(tree, "sink.h", RENAMED_C_TWINS[half:])
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert len(groups) == 1
+    assert {site.path for site in groups[0].sites} == {
+        "src/wreath/sink.h", "src/wreath/writer.c",
+    }
+
+
+def test_same_size_different_shape_is_not_a_c_finding(tree: Path) -> None:
+    _write(tree, "unrelated.c", NOT_C_TWINS)
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert scanned == 2
+    assert groups == []
+
+
+def test_c_comments_and_literals_are_not_structure(tree: Path) -> None:
+    """One copy carries a comment and different constants; they are one body."""
+    _write(tree, "writer.c", RENAMED_C_TWINS)
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert len(groups) == 1
+
+
+def test_only_definitions_are_scanned(tree: Path) -> None:
+    """Everything at file scope that is not a function must be ignored.
+
+    A prototype, a macro, a designated initialiser and a type declaration all
+    end in something that looks enough like a header to fool a lazy regex, and
+    counting them would put noise at the top of a report nobody then reads.
+    """
+    _write(tree, "decls.c", r"""
+#include "wreathcore.h"
+
+#define WREATH_ROUND_UP(value, to) (((value) + (to) - 1) & ~((to) - 1))
+
+static int writer_grow(Writer *writer, size_t need);
+
+typedef struct {
+    PyObject_HEAD
+    char *data;
+} Writer;
+
+static PyMethodDef writer_methods[] = {
+    {"grow", (PyCFunction)writer_grow, METH_VARARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+PyDoc_STRVAR(writer_doc, "A writer.");
+""")
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert (groups, scanned) == ([], 0)
+
+
+def test_a_short_c_body_is_trivia(tree: Path) -> None:
+    _write(tree, "small.c", r"""
+static int
+one(int a)
+{
+    return a + 1;
+}
+
+static int
+two(int b)
+{
+    return b + 2;
+}
+""")
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert (groups, scanned) == ([], 0)
+
+
+def test_a_language_can_be_selected(tree: Path) -> None:
+    """`--lang` exists so a native session is not made to read the Python half."""
+    _write(tree, "writer.c", RENAMED_C_TWINS)
+    _write(tree, "settle.py", RENAMED_TWINS)
+
+    both, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+    native, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES,
+                              ("native",))
+    python, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES,
+                              ("python",))
+
+    assert len(both) == 2
+    assert [s.name for s in native[0].sites] == ["writer_grow", "sink_reserve"]
+    assert [s.name for s in python[0].sites] == ["insert_settled", "replace_settled"]
+
+
+def test_a_near_copy_is_reported_as_near_and_not_as_exact(tree: Path) -> None:
+    """The finding an exact-shape hash cannot make.
+
+    Two bodies that differ by one statement hash differently and so are invisible
+    to the group scan, which is how six hand-rolled re-implementations of
+    `wreath_load_u32_le` sat beside the real one without anything noticing.
+    """
+    drifted = RENAMED_C_TWINS.replace(
+        "    sink->bytes = fresh;",
+        "    memset(fresh + sink->size, 0, grown - sink->size);\n    sink->bytes = fresh;",
+    )
+    _write(tree, "writer.c", drifted)
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+    pairs = dup_scan.near_clones(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert groups == [], "one added statement is a different shape"
+    assert [(p.left.name, p.right.name) for p in pairs] == [
+        ("writer_grow", "sink_reserve"),
+    ]
+    assert 0.7 <= pairs[0].similarity < 1.0
+
+
+def test_an_exact_copy_is_not_also_reported_as_near(tree: Path) -> None:
+    """Reporting a pair twice is how a report stops being read."""
+    _write(tree, "writer.c", RENAMED_C_TWINS)
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+    pairs = dup_scan.near_clones(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert len(groups) == 1
+    assert pairs == []
+
+
+def test_unrelated_bodies_are_not_near(tree: Path) -> None:
+    _write(tree, "unrelated.c", NOT_C_TWINS)
+
+    assert dup_scan.near_clones(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES) == []
 
 
 def test_it_runs_on_this_repository_and_stays_a_report(

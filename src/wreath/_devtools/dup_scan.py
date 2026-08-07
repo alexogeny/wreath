@@ -1,4 +1,4 @@
-"""Find duplicated *structure* in the Python sources, not duplicated text.
+"""Find duplicated *structure* in the sources, not duplicated text.
 
 Copy-paste in this repository does not survive as copy-paste. It gets renamed:
 the same nine-line body appears as `insert_settled` and `replace_settled`, as
@@ -13,17 +13,32 @@ is what found four byte-identical `main()` functions across the native lints
 after a shared `_waivers` helper had already been hoisted out of the same four
 files -- the second half of a de-duplication nobody finished.
 
+**Both languages, because both halves are copied from.** Python is normalised
+through its AST; C through a token stream, where identifiers, literals and every
+comment collapse the same way. Nothing looked at the native tree for a long
+time, and it turned out to hold *more* redundancy than the Python tree, not less
+-- a four-copy `*_grow`, a five-copy `*_write`, and `read_u32_le` hand-rolled in
+four migration modules beside the `wreath_load_u32_le` that already exists in
+`wreathcore.h`.
+
     uv run wreath-dup-scan                       # the default report
+    uv run wreath-dup-scan --lang native --near  # the C half, near-copies too
     uv run wreath-dup-scan --min-lines 12        # only bigger bodies
     uv run wreath-dup-scan --top 40 --format json
     uv run wreath-dup-scan --path src/wreath/_devtools
 
+`--near` adds a second pass over pairs that are *almost* the same shape, which
+an exact hash cannot see at all: one added statement changes the digest and the
+pair disappears. That is how those four `read_u32_le` copies stayed invisible.
+It is off by default because it costs a second pass and reads noisier.
+
 **This is a report, and deliberately not a gate.** Plenty of its findings are
 legitimate near-twins -- `query`/`mutation`, `insert_settled`/
-`upsert_correction` -- where the shared shape is the point and collapsing them
-would cost more clarity than it saves. Wiring it into `wreath-check` would
-train everyone to ignore it. Read it when a subsystem feels repetitive, and when
-it names something you did not know was duplicated, that is the finding.
+`upsert_correction`, an SSE2 arm beside its AVX2 twin -- where the shared shape
+is the point and collapsing them would cost more clarity than it saves. Wiring
+it into `wreath-check` would train everyone to ignore it. Read it when a
+subsystem feels repetitive, and when it names something you did not know was
+duplicated, that is the finding.
 
 Ranked by *redundant* lines (the copies after the first), because that is what
 collapsing the group would actually remove.
@@ -35,6 +50,7 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +68,27 @@ DEFAULT_MIN_LINES = 8
 
 #: How many groups the text report prints before it stops being read.
 DEFAULT_TOP = 25
+
+#: The languages, and the suffixes each owns.
+LANGS: tuple[str, ...] = ("python", "native")
+SUFFIXES: dict[str, tuple[str, ...]] = {"python": (".py",), "native": (".c", ".h")}
+
+#: How similar two shapes must be before `--near` calls them a pair. Tuned on
+#: this repository: at 0.75 the report is every genuine near-twin and little
+#: else, and by 0.62 it is mostly `tp_traverse` stubs agreeing that they visit
+#: two fields.
+DEFAULT_SIMILARITY = 0.80
+
+#: Shingle width for the near pass. Long enough that a shared `if (x == NULL) {
+#: return -1; }` is not a match on its own.
+_GRAM = 12
+
+#: Shingles kept per body for candidate lookup. Taking the numerically smallest
+#: is a bottom-k sketch: two bodies that share many shingles are overwhelmingly
+#: likely to share one of their smallest, so this bounds the pairing to O(n*k)
+#: without needing every pair compared. The similarity itself is then computed
+#: exactly, on the full shingle sets, so the sketch only ever costs recall.
+_SKETCH = 64
 
 
 def _word(out: bytearray, value: str) -> None:
@@ -108,6 +145,117 @@ def _structure(value: object, out: bytearray) -> None:
     _word(out, repr(value))
 
 
+#: One C token. Comments and preprocessor lines are matched so they can be
+#: dropped; a `#define` is a declaration, and its body is not this function's.
+_C_TOKEN = re.compile(
+    r"""(?P<skip>\s+|//[^\n]*|/\*.*?\*/|\#(?:\\\n|[^\n])*)
+      | (?P<literal>"(?:\\.|[^"\\])*" | '(?:\\.|[^'\\])*' | \d[\w.]*)
+      | (?P<name>[A-Za-z_]\w*)
+      | (?P<op><<=|>>=|\.\.\.|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||[-+*/%&|^!~<>=?:;,.(){}\[\]])
+    """,
+    re.X | re.S,
+)
+
+#: C keywords are structure; every other identifier is a name, and a name is
+#: exactly what a copy changes.
+_C_KEYWORDS = frozenset("""
+auto break case char const continue default do double else enum extern float
+for goto if inline int long register restrict return short signed sizeof static
+struct switch typedef union unsigned void volatile while
+""".split())
+
+#: A definition header. The prevailing style here puts the return type on its
+#: own line and the name in column one, so both that and the one-line form have
+#: to match -- and neither may match an indented `if (...) {`, which is why the
+#: pattern is anchored to the start of a line with no leading whitespace.
+_C_HEAD = re.compile(
+    r"^(?:[A-Za-z_][\w \t*]*[ \t*])?(?P<name>[A-Za-z_]\w*)[ \t]*\((?P<args>[^;{}]*?)\)"
+    r"[ \t]*\n?[ \t]*\{",
+    re.M | re.S,
+)
+
+#: Control keywords cannot begin a definition, and `#define FOO(x) { ... }` is
+#: not one either; the token pattern above has already removed the directive,
+#: but a macro *body* left in column one would otherwise read as a header.
+_C_NOT_A_DEFINITION = frozenset({"if", "for", "while", "switch", "do", "return",
+                                 "else", "sizeof"})
+
+
+def _c_skip_string(src: str, index: int) -> int:
+    """Index just past the quoted run starting at *index*."""
+    quote = src[index]
+    index += 1
+    while index < len(src) and src[index] != quote:
+        index += 2 if src[index] == "\\" else 1
+    return index
+
+
+def _c_body(src: str, brace: int) -> tuple[str, int]:
+    """The text between *brace* and its match, and the index of that match.
+
+    Braces inside strings, character constants and comments are not braces, and
+    a scanner that thinks they are walks off the end of the first file holding a
+    `"}"`.
+    """
+    depth = 0
+    index = brace
+    end = len(src)
+    while index < end:
+        char = src[index]
+        if char in "\"'":
+            index = _c_skip_string(src, index)
+        elif src.startswith("/*", index):
+            found = src.find("*/", index)
+            index = end if found < 0 else found + 1
+        elif src.startswith("//", index):
+            found = src.find("\n", index)
+            index = end if found < 0 else found
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace + 1:index], index
+        index += 1
+    return src[brace + 1:], end
+
+
+def _c_shape(body: str) -> tuple[bytearray, int]:
+    """The anonymised token shape of a C body, and its significant line count.
+
+    Significant lines are those carrying at least one token, so a body's weight
+    is its code rather than its comments -- the same ruler `_body_lines` applies
+    to Python, and for the same reason.
+    """
+    shape = bytearray()
+    lines = 0
+    # Walking the newline count forward with the match position keeps this
+    # linear; recounting from the start of the body per token made it quadratic,
+    # which on a 4,484-line module is the difference between a report and a wait.
+    scanned = 0
+    for match in _C_TOKEN.finditer(body):
+        kind = match.lastgroup
+        if kind == "skip":
+            continue
+        text = match.group()
+        if kind == "name":
+            if text in _C_KEYWORDS:
+                shape.extend(b"K")
+                _word(shape, text)
+            else:
+                shape.extend(b"I")
+        elif kind == "literal":
+            shape.extend(b"C")
+        else:
+            shape.extend(b"O")
+            _word(shape, text)
+        start = match.start()
+        if body.count("\n", scanned, start) or not lines:
+            lines += 1
+        scanned = start
+    return shape, lines
+
+
 @dataclass(frozen=True)
 class Site:
     """One function body, and where to find it."""
@@ -142,8 +290,8 @@ class Group:
         }
 
 
-def _shape(body: list[ast.stmt]) -> str:
-    """A structural digest of a function body.
+def _digest(shape: bytes | bytearray) -> str:
+    """A structural digest of a normalised body.
 
     The immutable tuple walk does not rewrite the parsed tree. An earlier form
     round-tripped through ``ast.parse(ast.unparse(...))`` to get a fresh tree,
@@ -151,8 +299,6 @@ def _shape(body: list[ast.stmt]) -> str:
     module -- a bare ``return`` -- and swallowed it in a blanket ``except``.
     Those functions were silently absent from every scan.
     """
-    shape = bytearray()
-    _structure(body, shape)
     return hashlib.blake2s(shape, digest_size=12).hexdigest()
 
 
@@ -213,39 +359,116 @@ def _is_stub(body: list[ast.stmt]) -> bool:
     return False
 
 
-def scan(root: Path, relatives: tuple[str, ...], min_lines: int) -> tuple[list[Group], int]:
-    """Group every function body by shape. Returns (groups, functions scanned)."""
-    groups: dict[str, list[Site]] = defaultdict(list)
-    scanned = 0
+@dataclass(frozen=True)
+class Pair:
+    """Two bodies that are *almost* the same shape."""
 
-    files: list[Path] = []
+    left: Site
+    right: Site
+    similarity: float
+
+    def as_dict(self) -> dict:
+        return {
+            "similarity": round(self.similarity, 3),
+            "left": {"path": self.left.path, "name": self.left.name,
+                     "line": self.left.line, "lines": self.left.lines},
+            "right": {"path": self.right.path, "name": self.right.name,
+                      "line": self.right.line, "lines": self.right.lines},
+        }
+
+
+@dataclass(frozen=True)
+class Body:
+    """A scanned body: where it is, what shape it has, and that shape's bytes."""
+
+    site: Site
+    digest: str
+    shape: bytes
+
+
+def _sources(root: Path, relatives: tuple[str, ...],
+             langs: tuple[str, ...]) -> list[tuple[Path, str]]:
+    """Every file the scan will read, paired with the language that owns it."""
+    wanted = {suffix: lang for lang in langs for suffix in SUFFIXES[lang]}
+    files: list[tuple[Path, str]] = []
     for relative in relatives:
         target = root / relative
         if target.is_file():
-            files.append(target)
+            if target.suffix in wanted:
+                files.append((target, wanted[target.suffix]))
         else:
-            files.extend(sorted(target.rglob("*.py")))
+            files.extend(
+                (path, wanted[path.suffix])
+                for path in sorted(target.rglob("*"))
+                if path.suffix in wanted and path.is_file()
+            )
+    return files
 
-    for path in files:
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, ValueError):
-            # A file that cannot be read or parsed contributes no functions. It
-            # is not a duplication finding, and failing the scan over one would
-            # make the tool unusable on a tree mid-edit.
+
+def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        # A file that cannot be read or parsed contributes no functions. It is
+        # not a duplication finding, and failing the scan over one would make the
+        # tool unusable on a tree mid-edit.
+        return []
+    bodies = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            body = _significant_body(node)
-            if not body or _is_stub(body):
-                continue
-            span = _body_lines(body)
-            if span < min_lines:
-                continue
-            scanned += 1
-            relative_path = str(path.relative_to(root))
-            groups[_shape(body)].append(Site(relative_path, node.name, node.lineno, span))
+        body = _significant_body(node)
+        if not body or _is_stub(body):
+            continue
+        span = _body_lines(body)
+        if span < min_lines:
+            continue
+        shape = bytearray()
+        _structure(body, shape)
+        bodies.append(Body(Site(relative, node.name, node.lineno, span),
+                           _digest(shape), bytes(shape)))
+    return bodies
+
+
+def _native_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    bodies = []
+    for match in _C_HEAD.finditer(source):
+        name = match.group("name")
+        if name in _C_NOT_A_DEFINITION:
+            continue
+        brace = source.index("{", match.end() - 1)
+        body, _ = _c_body(source, brace)
+        shape, lines = _c_shape(body)
+        if lines < min_lines:
+            continue
+        line = source.count("\n", 0, match.start()) + 1
+        bodies.append(Body(Site(relative, name, line, lines),
+                           _digest(shape), bytes(shape)))
+    return bodies
+
+
+def collect(root: Path, relatives: tuple[str, ...], min_lines: int,
+            langs: tuple[str, ...] = LANGS) -> list[Body]:
+    """Every body worth comparing, in both languages."""
+    read = {"python": _python_bodies, "native": _native_bodies}
+    return [
+        body
+        for path, lang in _sources(root, relatives, langs)
+        for body in read[lang](path, str(path.relative_to(root)), min_lines)
+    ]
+
+
+def scan(root: Path, relatives: tuple[str, ...], min_lines: int,
+         langs: tuple[str, ...] = LANGS) -> tuple[list[Group], int]:
+    """Group every function body by shape. Returns (groups, functions scanned)."""
+    bodies = collect(root, relatives, min_lines, langs)
+    groups: dict[str, list[Site]] = defaultdict(list)
+    for body in bodies:
+        groups[body.digest].append(body.site)
 
     found = [
         Group(digest, tuple(sorted(sites, key=lambda s: (s.path, s.line))))
@@ -253,7 +476,100 @@ def scan(root: Path, relatives: tuple[str, ...], min_lines: int) -> tuple[list[G
         if len(sites) > 1
     ]
     found.sort(key=lambda g: (-g.redundant_lines, g.sites[0].path, g.sites[0].line))
-    return found, scanned
+    return found, len(bodies)
+
+
+def _sketch(shape: bytes) -> tuple[int, ...]:
+    """The `_SKETCH` numerically smallest shingle hashes of a shape.
+
+    Shingles are sliding *byte* windows over the normal form rather than token
+    windows, which needs no second normaliser and costs nothing: a window inside
+    an unchanged run still matches exactly however much shifted around it, which
+    is the whole property the near pass rests on.
+
+    The hash is a rolling polynomial rather than `hash()`, because `hash(bytes)`
+    is salted per process -- which would make the sketch, and so the report,
+    different on every run of the same tree.
+    """
+    if len(shape) <= _GRAM:
+        return ()
+    mask = (1 << 64) - 1
+    base = 1000003
+    drop = pow(base, _GRAM, 1 << 64)
+    rolling = 0
+    for byte in shape[:_GRAM]:
+        rolling = (rolling * base + byte) & mask
+    shingles = {rolling}
+    for index in range(_GRAM, len(shape)):
+        rolling = (rolling * base - shape[index - _GRAM] * drop + shape[index]) & mask
+        shingles.add(rolling)
+    return tuple(sorted(shingles)[:_SKETCH])
+
+
+def _similarity(left: tuple[int, ...], right: tuple[int, ...]) -> float:
+    """Jaccard, estimated from two bottom-k sketches.
+
+    The smallest `k` hashes of the union are a uniform sample of the union, so
+    the share of them present in both sketches estimates the share of the union
+    present in both sets. When a body is small enough that its sketch is its
+    whole shingle set, this is not an estimate but the exact answer.
+    """
+    union = sorted(set(left) | set(right))[:_SKETCH]
+    if not union:
+        return 0.0
+    both = set(left) & set(right)
+    return sum(1 for shingle in union if shingle in both) / len(union)
+
+
+def near_clones(root: Path, relatives: tuple[str, ...], min_lines: int,
+                langs: tuple[str, ...] = LANGS,
+                similarity: float = DEFAULT_SIMILARITY) -> list[Pair]:
+    """Bodies that are almost, but not exactly, the same shape.
+
+    Exact grouping cannot see these at all -- one added statement changes the
+    digest and the pair vanishes -- and they are where the tree's most useful
+    findings have been: a primitive re-implemented beside the real one, with a
+    line of local adaptation on top.
+
+    Pairs already grouped as exact copies are excluded, because reporting a
+    finding twice is how a report stops being read.
+    """
+    bodies = collect(root, relatives, min_lines, langs)
+    sketches = [_sketch(body.shape) for body in bodies]
+
+    # Two bodies sharing many shingles are overwhelmingly likely to share one of
+    # their smallest, so an index over the sketches finds the candidates without
+    # comparing every pair.
+    index: dict[int, list[int]] = defaultdict(list)
+    for position, sketch in enumerate(sketches):
+        for shingle in sketch:
+            index[shingle].append(position)
+
+    candidates: set[tuple[int, int]] = set()
+    for sharing in index.values():
+        if len(sharing) > _SKETCH:
+            # A shingle common to more shapes than a sketch holds is boilerplate
+            # -- a prologue every body in a module opens with -- and pairing on
+            # it alone would cost a quadratic blow-up for no finding.
+            continue
+        candidates.update(
+            (sharing[i], sharing[j])
+            for i in range(len(sharing))
+            for j in range(i + 1, len(sharing))
+        )
+
+    pairs = []
+    for left, right in candidates:
+        if bodies[left].digest == bodies[right].digest:
+            continue
+        score = _similarity(sketches[left], sketches[right])
+        if score >= similarity:
+            first, second = sorted((bodies[left].site, bodies[right].site),
+                                   key=lambda s: (s.path, s.line))
+            pairs.append(Pair(first, second, score))
+    pairs.sort(key=lambda p: (-min(p.left.lines, p.right.lines), -p.similarity,
+                              p.left.path, p.left.line))
+    return pairs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -269,19 +585,32 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"ignore bodies shorter than this (default {DEFAULT_MIN_LINES})")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP,
                         help=f"groups to print (default {DEFAULT_TOP}; 0 for all)")
+    parser.add_argument("--lang", choices=("all", *LANGS), default="all",
+                        help="which half of the tree to scan (default all)")
+    parser.add_argument("--near", action="store_true",
+                        help="also report pairs that are almost the same shape, "
+                             "which exact grouping cannot see")
+    parser.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
+                        help=f"how alike a --near pair must be "
+                             f"(default {DEFAULT_SIMILARITY})")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
 
     root = repo_root()
     relatives = tuple(args.path) if args.path else DEFAULT_ROOTS
-    groups, scanned = scan(root, relatives, args.min_lines)
+    langs = LANGS if args.lang == "all" else (args.lang,)
+    groups, scanned = scan(root, relatives, args.min_lines, langs)
+    pairs = (near_clones(root, relatives, args.min_lines, langs, args.similarity)
+             if args.near else [])
     shown = groups if args.top <= 0 else groups[: args.top]
 
     if args.format == "json":
         print(json.dumps({
             "scanned_functions": scanned,
             "min_lines": args.min_lines,
+            "langs": list(langs),
             "groups": [g.as_dict() for g in groups],
+            "near": [p.as_dict() for p in pairs],
         }, indent=2))
         return 0
 
@@ -289,18 +618,30 @@ def main(argv: list[str] | None = None) -> int:
           f"{', '.join(relatives)}\n")
     if not groups:
         print("no shared structure found.")
-        return 0
-    print("redundant  copies  group")
-    for group in shown:
-        first = group.sites[0]
-        print(f"{group.redundant_lines:>9}  {len(group.sites):>6}  "
-              f"{first.lines} lines each")
-        for site in group.sites:
-            print(f"{'':>19}{site.path}:{site.line} {site.name}")
-    if len(groups) > len(shown):
-        print(f"\n... and {len(groups) - len(shown)} more group(s); --top 0 for all.")
-    total = sum(g.redundant_lines for g in groups)
-    print(f"\nwreath-dup-scan: {len(groups)} group(s), {total} redundant line(s).")
+    else:
+        print("redundant  copies  group")
+        for group in shown:
+            first = group.sites[0]
+            print(f"{group.redundant_lines:>9}  {len(group.sites):>6}  "
+                  f"{first.lines} lines each")
+            for site in group.sites:
+                print(f"{'':>19}{site.path}:{site.line} {site.name}")
+        if len(groups) > len(shown):
+            print(f"\n... and {len(groups) - len(shown)} more group(s); --top 0 for all.")
+        total = sum(g.redundant_lines for g in groups)
+        print(f"\nwreath-dup-scan: {len(groups)} group(s), {total} redundant line(s).")
+
+    if args.near:
+        near_shown = pairs if args.top <= 0 else pairs[: args.top]
+        print(f"\nnear copies (>= {args.similarity:.2f} alike, not exact)")
+        for pair in near_shown:
+            print(f"{pair.similarity:>9.2f}  {pair.left.path}:{pair.left.line} "
+                  f"{pair.left.name}  <->  {pair.right.path}:{pair.right.line} "
+                  f"{pair.right.name}")
+        if len(pairs) > len(near_shown):
+            print(f"\n... and {len(pairs) - len(near_shown)} more pair(s); "
+                  f"--top 0 for all.")
+        print(f"\nwreath-dup-scan: {len(pairs)} near pair(s).")
     return 0
 
 
