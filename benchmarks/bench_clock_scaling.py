@@ -189,6 +189,96 @@ def _middleware(tick: Any) -> tuple[Wreath, bytes]:
     return app, _request("/plain")
 
 
+class _EmptyHook:
+    """A global hook whose halves return immediately.
+
+    Installed to separate two costs the `middleware` arm charges together: what
+    the shipped hooks *do*, and what having a global tape costs before any of
+    them does anything. The seven shipped hooks measured +15,000 instructions
+    over no middleware; seven of these measured +15,000 minus what they do,
+    which turns out to be most of it -- the first hook alone costs ~6,600
+    because it moves the application off `_handle_http_plain` and onto the
+    general dispatcher, and each hook after it costs ~1,400.
+    """
+
+    __slots__ = ()
+    global_scope = True
+
+    def before_sync(self, request: Any) -> None:
+        return None
+
+    async def before(self, request: Any) -> None:
+        return None
+
+    def after_inplace(self, request: Any, response: Any) -> None:
+        return None
+
+    def after_sync(self, request: Any, response: Any) -> Any:
+        return response
+
+    async def after(self, request: Any, response: Any) -> Any:
+        return response
+
+
+class _RouteEmptyHook(_EmptyHook):
+    """The same hook registered as *route* middleware rather than global.
+
+    `add_middleware` routes by `global_scope`, and the two pipelines do not cost
+    the same: a route-scoped hook measured ~31% dearer than a global one, which
+    is the opposite of what "runs only after a route matched" suggests.
+    """
+
+    __slots__ = ()
+    global_scope = False
+
+
+def _empty_hooks(count: int, kind: type = _EmptyHook) -> Any:
+    """The static arm carrying `count` hooks that do nothing at all."""
+
+    def build(tick: Any) -> tuple[Wreath, bytes]:
+        app = Wreath()
+        body = Response(_BODY)
+        for _ in range(count):
+            app.add_middleware(kind())
+
+        @app.get("/plain")
+        async def plain(request: Any) -> Response:
+            tick()
+            return body
+
+        return app, _request("/plain")
+
+    return build
+
+
+def _sized_headers(count: int, value_bytes: int) -> Any:
+    """`count` extra headers whose values are `value_bytes` long.
+
+    Pairs with `_with_headers` to split the per-header cost in two: what is paid
+    once per header whatever it carries (a name object, a value object, the
+    pair tuple, the list slot) and what is paid per *byte* of value (the
+    validating scan and the copy). A flat slope across value length means the
+    cost is the objects, and objects are what a lazy sink would not build.
+    """
+
+    def build(tick: Any) -> tuple[Wreath, bytes]:
+        app = Wreath()
+        body = Response(_BODY)
+
+        @app.get("/plain")
+        async def plain(request: Any) -> Response:
+            tick()
+            return body
+
+        extra = "".join(
+            f"x-pad-{i}: {'v' * value_bytes}\r\n" for i in range(count)
+        )
+        raw = f"GET /plain HTTP/1.1\r\nhost: localhost\r\n{extra}\r\n".encode()
+        return app, raw
+
+    return build
+
+
 def _with_headers(count: int) -> Any:
     """The static arm carrying `count` extra request headers.
 
@@ -344,6 +434,15 @@ ARMS: dict[str, Any] = {
     "bound": _bound,
     "validated": _validated,
     "middleware": _middleware,
+    # The tape's own cost, separated from what the shipped hooks do.
+    "hooks-0": _empty_hooks(0),
+    "hooks-1": _empty_hooks(1),
+    "hooks-7": _empty_hooks(7),
+    "hooks-7-route": _empty_hooks(7, _RouteEmptyHook),
+    # Per-header cost split into per-object and per-byte.
+    "hdr8-val1": _sized_headers(8, 1),
+    "hdr8-val24": _sized_headers(8, 24),
+    "hdr8-val200": _sized_headers(8, 200),
 }
 
 
