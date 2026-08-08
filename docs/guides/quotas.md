@@ -12,17 +12,17 @@ Wreath decides both in a single hook. Whichever refuses, exactly one refusal is
 built.
 
 ```python
-from wreath.middleware import TieredRateLimitMiddleware
+from wreath.policy import HttpPolicy, TieredRateLimitPolicy
 from wreath.quota import Quotas
 
 quotas = Quotas()
 api_calls = quotas.declare("api_calls", limit=10_000, period=30 * 86400.0)
 
-app.add_middleware(TieredRateLimitMiddleware(
+app.configure_http_policy(HttpPolicy(principal_rate_limit=TieredRateLimitPolicy(
     tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
     default=(60, 60.0),
     quota=api_calls,
-))
+)))
 ```
 
 The tier decides how fast; the quota decides how much. There is one meter across

@@ -1,7 +1,7 @@
 """Metered allowances: counted at the boundary, refused there, explained by policy.
 
 A rate limit and a quota answer different questions. *How fast* is a token
-bucket, refilling continuously, and `wreath.middleware.ratelimit` already owns
+bucket, refilling continuously, and `wreath.policy.ratelimit` already owns
 it. *How much, this month* is a counter against a period that resets on a
 calendar edge and not before -- and the two must be decided in **one hook**,
 because two independent limiters on one request is how a 429 comes back
@@ -14,10 +14,10 @@ existing tape hook:
 quotas = Quotas(store=MemoryQuotaStore())
 quotas.declare("api_calls", limit=10_000, period=30 * 86400.0)
 
-app.add_middleware(TieredRateLimitMiddleware(
+app.configure_http_policy(HttpPolicy(principal_rate_limit=TieredRateLimitPolicy(
     tiers={"pro": (600, 60.0)}, default=(60, 60.0),
     quota=quotas.meter("api_calls"),
-))
+)))
 ```
 
 Two halves, deliberately separated, because they are not the same kind of
@@ -530,7 +530,9 @@ class Quotas:
     quotas = Quotas(store_factory=MemoryQuotaStore, states=billing_states)
     quotas.declare("api_calls", limit=10_000, period=30 * 86400.0)
 
-    app.add_middleware(TieredRateLimitMiddleware(..., quota=quotas.meter("api_calls")))
+    app.configure_http_policy(HttpPolicy(principal_rate_limit=TieredRateLimitPolicy(
+        ..., quota=quotas.meter("api_calls")
+    )))
     CedarAuthorizer(engine=engine, quota=quotas)
     ```
 

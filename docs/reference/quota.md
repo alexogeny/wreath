@@ -2,7 +2,7 @@
 
 A rate limit says how *fast*; a quota says how *much*, this month. Reach for
 this when an allowance has to hold across a billing period and reconcile with an
-invoice — and reach for `wreath.middleware.ratelimit` when the question is
+invoice — and reach for `wreath.policy.ratelimit` when the question is
 bursts per second. The two are decided in one hook, so a caller never receives a
 429 that contradicts a 402.
 

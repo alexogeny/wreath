@@ -21,8 +21,8 @@ from wreath._auth.principal import human
 from wreath._auth.requirements import add_authenticated
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, authorize
-from wreath.middleware import RateLimitMiddleware, TieredRateLimitMiddleware
-from wreath.middleware.ratelimit import MemoryRateLimitStore
+from wreath.policy import HttpPolicy, RateLimitPolicy, TieredRateLimitPolicy
+from wreath.policy.ratelimit import MemoryRateLimitStore
 from wreath.quota import MemoryQuotaStore, PostgresQuotaStore, Quota, Quotas
 from wreath.testing import TestClient
 
@@ -336,8 +336,7 @@ def test_the_purge_pass_waits_two_periods() -> None:
 
 
 def _app(middleware: Any) -> Wreath:
-    app = Wreath()
-    app.add_middleware(middleware)
+    app = Wreath(http_policy=HttpPolicy(principal_rate_limit=middleware))
 
     @app.get("/llamas")
     @add_authenticated
@@ -351,7 +350,7 @@ def _metered(limit: float, *, rate: int = 1000) -> tuple[Wreath, Any]:
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=limit, period=3600.0)
     app = _app(
-        TieredRateLimitMiddleware(
+        TieredRateLimitPolicy(
             tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter
         )
     )
@@ -434,7 +433,7 @@ async def test_an_anonymous_request_is_not_metered() -> None:
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     app = _app(
-        TieredRateLimitMiddleware(tiers={"pro": (99, 60.0)}, default=(99, 60.0),
+        TieredRateLimitPolicy(tiers={"pro": (99, 60.0)}, default=(99, 60.0),
                                   quota=meter)
     )
     async with TestClient(app) as client:
@@ -450,7 +449,7 @@ async def test_the_global_limiter_refuses_a_quota() -> None:
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     with pytest.raises(ValueError, match="no principal to meter a quota"):
-        RateLimitMiddleware(limit=10, quota=meter)
+        RateLimitPolicy(limit=10, quota=meter)
 
 
 def test_an_unidentified_request_spends_nothing() -> None:
@@ -498,7 +497,7 @@ def _awaiting_metered(limit: float, *, rate: int = 1000) -> tuple[Wreath, Any]:
     quotas = Quotas(store_factory=_AwaitingQuotaStore)
     meter = quotas.declare("api_calls", limit=limit, period=3600.0)
     app = _app(
-        TieredRateLimitMiddleware(
+        TieredRateLimitPolicy(
             tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter
         )
     )
@@ -510,11 +509,11 @@ def test_an_awaiting_quota_forces_the_awaiting_hook() -> None:
     beside a remote meter still has to await."""
     quotas = Quotas(store_factory=_AwaitingQuotaStore)
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
-    limiter = RateLimitMiddleware(limit=10, quota=meter, _route_scoped=True)
+    limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
 
     assert meter.awaits
-    assert limiter.before is not None
-    assert limiter.before_sync is None
+    assert limiter._ingress is not None
+    assert limiter._ingress_sync is None
 
 
 def test_two_local_stores_keep_the_synchronous_hook() -> None:
@@ -522,11 +521,11 @@ def test_two_local_stores_keep_the_synchronous_hook() -> None:
     an admitted request costs no coroutine at all."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
-    limiter = RateLimitMiddleware(limit=10, quota=meter, _route_scoped=True)
+    limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
 
     assert not meter.awaits
-    assert limiter.before is None
-    assert limiter.before_sync is not None
+    assert limiter._ingress is None
+    assert limiter._ingress_sync is not None
 
 
 async def test_an_awaiting_quota_is_charged_and_refuses() -> None:
@@ -556,7 +555,7 @@ async def test_an_awaiting_quota_is_not_charged_for_a_throttled_request() -> Non
 
 async def test_the_awaiting_hook_without_a_quota_still_limits() -> None:
     """A remote bucket and no quota at all: the branch that returns early."""
-    limiter = RateLimitMiddleware(limit=1, store=_AwaitingRateStore(), _route_scoped=True)
+    limiter = RateLimitPolicy(limit=1, store=_AwaitingRateStore(), _route_scoped=True)
     app = _app(limiter)
     async with TestClient(app) as client:
         ada = client.acting_as("ada")
@@ -581,7 +580,7 @@ class _AwaitingRateStore:
 
 
 def test_a_limiter_without_a_quota_offers_only_its_own_store() -> None:
-    limiter = RateLimitMiddleware(limit=10)
+    limiter = RateLimitPolicy(limit=10)
 
     assert len(limiter.schema_owners) == 1
 
@@ -591,7 +590,7 @@ async def test_the_quota_store_is_collected_for_the_schema() -> None:
     defect `schema_owners` exists to prevent."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
-    limiter = RateLimitMiddleware(limit=10, quota=meter, _route_scoped=True)
+    limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
 
     assert meter.store in limiter.schema_owners
 
