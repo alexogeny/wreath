@@ -12,10 +12,18 @@ from typing import Any
 
 from .._webpolicy import origin_matches as _native_origin_matches
 from .._webpolicy import replace_cookie as _native_replace_cookie
+from .cache import CachePolicy
+from .compression import CompressionPolicy, gzip_compress, zstd_compress
 from .cors import CorsPolicy
 from .csrf import CsrfPolicy, csrf_token
 from .csrf import _csrf_new_token as _native_csrf_new_token
 from .csrf import _csrf_validate as _native_csrf_validate
+from .idempotency import (
+    IdempotencyPolicy,
+    IdempotencyStore,
+    MemoryIdempotencyStore,
+    PostgresIdempotencyStore,
+)
 from .proxy import ProxyPolicy
 from .ratelimit import (
     MemoryRateLimitStore,
@@ -27,6 +35,7 @@ from .ratelimit import (
 )
 from .request_id import RequestIdPolicy, request_id
 from .security import SecurityHeadersPolicy, TrustedHostPolicy, WebSocketOriginPolicy
+from .sessions import SessionPolicy, rotate_session
 from .timing import ServerTimingPolicy, elapsed
 
 _PROXY = 1 << 0
@@ -50,15 +59,22 @@ class HttpPolicy:
 
     __slots__ = (
         "_components",
+        "_dynamic_always",
+        "_has_activation",
+        "_has_post_auth",
         "_native_descriptor",
         "cors",
         "csrf",
+        "cache_control",
+        "compression",
+        "idempotency",
         "proxy",
         "rate_limit",
         "principal_rate_limit",
         "request_id",
         "security_headers",
         "server_timing",
+        "session",
         "trusted_host",
         "websocket_origin",
     )
@@ -76,6 +92,10 @@ class HttpPolicy:
         csrf: CsrfPolicy | None = None,
         security_headers: SecurityHeadersPolicy | None = None,
         websocket_origin: WebSocketOriginPolicy | None = None,
+        session: SessionPolicy | None = None,
+        idempotency: IdempotencyPolicy | None = None,
+        cache_control: CachePolicy | None = None,
+        compression: CompressionPolicy | None = None,
     ) -> None:
         values = (
             ("proxy", proxy, ProxyPolicy),
@@ -92,6 +112,10 @@ class HttpPolicy:
             ("csrf", csrf, CsrfPolicy),
             ("security_headers", security_headers, SecurityHeadersPolicy),
             ("websocket_origin", websocket_origin, WebSocketOriginPolicy),
+            ("session", session, SessionPolicy),
+            ("idempotency", idempotency, IdempotencyPolicy),
+            ("cache_control", cache_control, CachePolicy),
+            ("compression", compression, CompressionPolicy),
         )
         for name, value, expected in values:
             expected_types = expected if isinstance(expected, tuple) else (expected,)
@@ -111,6 +135,17 @@ class HttpPolicy:
         self.csrf = csrf
         self.security_headers = security_headers
         self.websocket_origin = websocket_origin
+        self.session = session
+        self.idempotency = idempotency
+        self.cache_control = cache_control
+        self.compression = compression
+        self._has_activation = session is not None
+        self._has_post_auth = principal_rate_limit is not None or idempotency is not None
+        self._dynamic_always = (
+            session is not None
+            or idempotency is not None
+            or (cache_control is not None and cache_control.policy is not None)
+        )
         self._components = tuple(value for _name, value, _expected in values if value is not None)
         self._native_descriptor = self._freeze_native()
 
@@ -133,6 +168,10 @@ class HttpPolicy:
             "csrf",
             "security_headers",
             "websocket_origin",
+            "session",
+            "idempotency",
+            "cache_control",
+            "compression",
         ):
             current = getattr(self, name)
             incoming = getattr(other, name)
@@ -206,16 +245,44 @@ class HttpPolicy:
             if isinstance(limiter, RateLimitPolicy):
                 sync_ingress = limiter._ingress_sync
                 if sync_ingress is not None:
-                    return sync_ingress(request)
-                ingress = limiter._ingress
-                if ingress is None:
-                    raise RuntimeError("principal rate-limit policy has no ingress stage")
-                return await ingress(request)
-            return await limiter._ingress(request)
-        return None
+                    candidate = sync_ingress(request)
+                else:
+                    ingress = limiter._ingress
+                    if ingress is None:
+                        raise RuntimeError("principal rate-limit policy has no ingress stage")
+                    candidate = await ingress(request)
+            else:
+                candidate = await limiter._ingress(request)
+            if candidate is not None:
+                return candidate
+        idempotency = self.idempotency
+        return None if idempotency is None else await idempotency.action(request)
+
+    async def _reference_activation(self, request: Any) -> None:
+        """Load request state whose semantics begin after native ingress."""
+        session = self.session
+        if session is not None:
+            await session.before(request)
+
+    async def _reference_dynamic_egress(
+        self, request: Any, response: Any, *, native_one_shot: bool = False
+    ) -> Any:
+        """Run stateful/payload policy around the fixed native egress program."""
+        if self.idempotency is not None:
+            response = await self.idempotency.after(request, response)
+        if self.session is not None:
+            response = await self.session.after(request, response)
+        if self.cache_control is not None and (
+            not native_one_shot or self.cache_control.policy is not None
+        ):
+            response = await self.cache_control.after(request, response)
+        if self.compression is not None and not native_one_shot:
+            response = await self.compression.after(request, response)
+        return response
 
     async def _reference_egress(self, request: Any, response: Any) -> Any:
         """Independent readable definition of the compiled egress program."""
+        response = await self._reference_dynamic_egress(request, response)
         mask = request._policy_mask
         if mask & _SECURITY:
             component = self.security_headers
@@ -341,8 +408,27 @@ class HttpPolicy:
                 _native_origin_matches,
             )
 
+        cache = self.cache_control
+        if cache is not None:
+            cache = (
+                None
+                if cache.default is None or cache.policy is not None
+                else (cache.default.to_header(), cache.default.public)
+            )
+
+        compression = self.compression
+        if compression is not None:
+            compression = (
+                compression.minimum_size,
+                compression.gzip_level,
+                compression.zstd_level,
+                compression.compress_authenticated,
+                gzip_compress,
+                zstd_compress,
+            )
+
         return (
-            "wreath.http-policy.v1",
+            "wreath.http-policy.v2",
             proxy,
             trusted,
             rate,
@@ -352,19 +438,25 @@ class HttpPolicy:
             csrf,
             security,
             websocket_origin,
+            cache,
+            compression,
         )
 
 
 _POLICY_TYPES = frozenset(
     {
         CorsPolicy,
+        CachePolicy,
+        CompressionPolicy,
         CsrfPolicy,
         HttpPolicy,
+        IdempotencyPolicy,
         ProxyPolicy,
         RateLimitPolicy,
         RequestIdPolicy,
         SecurityHeadersPolicy,
         ServerTimingPolicy,
+        SessionPolicy,
         TieredRateLimitPolicy,
         TrustedHostPolicy,
         WebSocketOriginPolicy,
@@ -378,9 +470,15 @@ def is_policy_component(value: Any) -> bool:
 
 
 __all__ = [
+    "CachePolicy",
+    "CompressionPolicy",
     "CorsPolicy",
     "CsrfPolicy",
     "HttpPolicy",
+    "IdempotencyPolicy",
+    "IdempotencyStore",
+    "MemoryIdempotencyStore",
+    "PostgresIdempotencyStore",
     "MemoryRateLimitStore",
     "PostgresRateLimitStore",
     "ProxyPolicy",
@@ -389,11 +487,13 @@ __all__ = [
     "RequestIdPolicy",
     "SecurityHeadersPolicy",
     "ServerTimingPolicy",
+    "SessionPolicy",
     "TieredRateLimitPolicy",
     "TrustedHostPolicy",
     "WebSocketOriginPolicy",
     "csrf_token",
     "elapsed",
     "principal_key",
+    "rotate_session",
     "request_id",
 ]

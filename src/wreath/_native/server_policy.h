@@ -3,6 +3,7 @@
 
 #include <Python.h>
 #include <stdint.h>
+#include "header_block.h"
 
 /* Frozen descriptor indexes; mirrored by policy.HttpPolicy._freeze_native. */
 enum {
@@ -16,7 +17,9 @@ enum {
     WREATH_POLICY_CSRF = 7,
     WREATH_POLICY_SECURITY = 8,
     WREATH_POLICY_WEBSOCKET_ORIGIN = 9,
-    WREATH_POLICY_SIZE = 10,
+    WREATH_POLICY_CACHE = 10,
+    WREATH_POLICY_COMPRESSION = 11,
+    WREATH_POLICY_SIZE = 12,
 };
 
 enum {
@@ -32,6 +35,7 @@ enum {
 
 typedef struct {
     PyObject *descriptor;  /* owned immutable tuple, NULL means no native policy */
+    unsigned char response_transform;
 } WreathPolicyProgram;
 
 typedef struct {
@@ -47,6 +51,8 @@ typedef struct {
     unsigned char csrf_issue;
     unsigned char csrf_minter;
     unsigned char native;
+    unsigned char compression_coding; /* 0 none, 1 gzip, 2 zstd */
+    unsigned char method_is_head;
 } WreathPolicyState;
 
 typedef struct {
@@ -69,6 +75,10 @@ int wreath_policy_ingress(WreathPolicyProgram *, WreathPolicyState *,
 /* Mutates the response header list in C immediately before serialization. */
 int wreath_policy_egress(WreathPolicyProgram *, WreathPolicyState *,
                          PyObject *headers);
+/* Static cache/compression policy over a complete in-memory response. */
+int wreath_policy_response(WreathPolicyProgram *, WreathPolicyState *,
+                           PyObject *status, PyObject *headers, PyObject **body,
+                           int authenticated);
 int wreath_policy_websocket_origin(WreathPolicyProgram *, PyObject *headers,
                                    WreathPolicyReply *reply);
 

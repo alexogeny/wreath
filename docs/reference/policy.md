@@ -9,14 +9,22 @@ and cannot be installed with `add_middleware()`.
 
 ::: wreath.policy.cors
 
+::: wreath.policy.cache
+
+::: wreath.policy.compression
+
 ::: wreath.policy.csrf
 
 ::: wreath.policy.proxy
+
+::: wreath.policy.idempotency
 
 ::: wreath.policy.ratelimit
 
 ::: wreath.policy.request_id
 
 ::: wreath.policy.security
+
+::: wreath.policy.sessions
 
 ::: wreath.policy.timing
