@@ -204,7 +204,7 @@ difference between them is a security property:
 
 Both the RFC 7239 `Forwarded` form and the `X-Forwarded-*` family are emitted,
 because the latter is what almost everything actually reads — including wreath's
-own [`ProxyHeadersMiddleware`](middleware.md), so wreath can sit behind itself.
+own [`ProxyPolicy`](../reference/policy.md), so wreath can sit behind itself.
 
 `Host` and `Content-Length` are recomputed rather than relayed. The first
 because the outbound `Host` is the upstream's authority, and relaying the

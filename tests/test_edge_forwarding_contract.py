@@ -272,7 +272,7 @@ async def test_the_proxy_signs_the_hop_it_added() -> None:
 
     Neither oracle sends `Forwarded` at all, so there is nothing to compare
     against; it is asserted from the RFC. Without it an origin cannot tell it is
-    behind a proxy, which is what `ProxyHeadersMiddleware` reads on the far side.
+    behind a proxy, which is what `ProxyPolicy` reads on the far side.
     """
     edge = _Edge()
     await edge.start()

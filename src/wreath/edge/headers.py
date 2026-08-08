@@ -113,7 +113,7 @@ def append_forwarded(
 
     Both, because RFC 7239 `Forwarded` is the standard and `X-Forwarded-*` is
     what almost everything actually reads -- including `wreath`'s own
-    `ProxyHeadersMiddleware`, which is the thing behind this proxy. Emitting
+    `ProxyPolicy`, which is the thing behind this proxy. Emitting
     only the standard one would mean wreath could not sit behind itself.
     """
     if client:
