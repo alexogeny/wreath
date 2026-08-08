@@ -82,6 +82,26 @@ unless { context.signature_verified == false && resource.paid };
 `context.signature_agent` is present only when a signature verified, so a policy
 that tests it with `has` fails closed rather than matching an empty string.
 
+### What the signature covered
+
+A signature covers the components the caller listed, and nothing else. Wreath
+demands `@method`, `@authority`, `@path` and `@query` of every signature, and
+`content-digest` of any request that carries a body — a signature that omits the
+query is a signature over an *endpoint*, replayable with whatever parameters the
+observer likes, and an uncovered body is a body anyone may swap. The digest is
+recomputed from the bytes when your handler reads them, so a mismatch is a 400
+before the handler sees a thing. Covering the *header* would prove only that the
+sender typed it.
+
+`context.signature_covered` is the component list, present whenever a signature
+verified, so a policy that needs the strong form can ask for it rather than
+assume it:
+
+```cedar
+permit (principal, action == Action::"write", resource is Order)
+when { context.signature_covered.contains("content-digest") };
+```
+
 ### What it will not do
 
 **It never fetches a key while serving a request.** Keys come from the
@@ -121,6 +141,18 @@ key = SigningKey(key_id="prod-2026", sign=my_ed25519_signer, agent=MY_DIRECTORY)
 
 headers = sign_request(key, method="GET", url="https://api.example.com/v1/items")
 response = await client.get("/v1/items", headers=headers)
+```
+
+**Pass `body=` when there is one.** It is hashed into a `Content-Digest` header,
+added to the returned headers and to the covered set, and it is the only thing
+that makes the signature a signature over your payload:
+
+```python
+payload = json.dumps({"quantity": 1}).encode()
+headers = sign_request(
+    key, method="POST", url="https://api.example.com/v1/orders", body=payload
+)
+response = await client.post("/v1/orders", content=payload, headers=headers)
 ```
 
 `sign` is a callable you supply rather than a key wreath holds, because wreath's

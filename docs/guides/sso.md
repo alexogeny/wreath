@@ -119,8 +119,22 @@ one:
 
 ```python
 server = AuthorizationServer(issuer="https://app.example", secret=SETTINGS.oauth_secret)
-token = server.redeem(code, verifier=verifier)
+token = server.redeem(
+    code,
+    verifier=verifier,
+    client_id=client_id,
+    redirect_uri=redirect_uri,
+)
 ```
+
+**Every parameter is required, and each is a check RFC 6749 §4.1.3 asks of the
+token endpoint.** The code is bound to the client it was issued to, the URI it
+was issued for, and the PKCE challenge it was issued against, and it expires
+after `code_ttl` (60 seconds by default) — an authorization code travels through
+a browser redirect, so it reaches referrer headers, proxy logs and history, and
+one that never goes stale is a password in a log file. `issue_code` likewise
+takes `challenge` and `redirect_uri` with no defaults: an optional security
+parameter is an optional security control.
 
 The first obligation is that what it mints is what wreath already verifies —
 an issuer whose output its own verifier rejects is two features rather than one
