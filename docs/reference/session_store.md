@@ -1,7 +1,7 @@
 # `wreath.session_store`
 
 Server-side session storage, so a session can be revoked and can outgrow a
-cookie. Pass a store to `SessionMiddleware`.
+cookie. Pass a store to `SessionPolicy`.
 
 `delete_for` is the one method that reads *inside* a session payload, so it is
 the one that has to know which key holds the principal. Set `session_key=` to

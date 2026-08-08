@@ -7,7 +7,8 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.middleware.sessions import SessionMiddleware, rotate_session
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy, rotate_session
 from wreath.session_store import PostgresSessionStore
 from wreath.testing import TestClient
 
@@ -36,7 +37,7 @@ class MemoryStore:
 
 def _app(store: Any) -> tuple[Wreath, MemoryStore]:
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store)))
 
     @app.get("/login")
     async def login(request: Any) -> dict:
@@ -78,7 +79,7 @@ async def test_the_cookie_carries_only_an_id_and_contents_live_in_the_store() ->
     token = _cookie(login)
 
     # The signed payload is the opaque session id, not the session content.
-    middleware = SessionMiddleware(secret="s" * 32, store=store)
+    middleware = SessionPolicy(secret="s" * 32, store=store)
     sid = middleware._load_sid(token)
     assert sid is not None and sid in store.rows
     assert len(store.rows) == 1
@@ -165,7 +166,7 @@ async def test_rotation_replaces_the_id_on_a_privilege_change() -> None:
 
 async def test_rotation_is_a_no_op_for_cookie_backed_sessions() -> None:
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32)))
 
     @app.get("/login")
     async def login(request: Any) -> dict:
@@ -182,7 +183,7 @@ async def test_rotation_is_a_no_op_for_cookie_backed_sessions() -> None:
 
 async def test_without_a_store_the_session_still_travels_in_the_cookie() -> None:
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32)))
 
     @app.get("/set")
     async def set_value(request: Any) -> dict:
@@ -306,7 +307,7 @@ async def test_after_degrades_when_before_did_not_publish_a_baseline() -> None:
     and asymmetries come back.
     """
     store = MemoryStore()
-    middleware = SessionMiddleware(secret="s" * 32, store=store)
+    middleware = SessionPolicy(secret="s" * 32, store=store)
 
     class Response:
         def __init__(self) -> None:
@@ -334,7 +335,7 @@ async def test_after_degrades_when_before_did_not_publish_a_baseline() -> None:
     assert store.saves == 0, "nothing written from half-initialised state"
 
     # And the cookie-only path, which had the same asymmetry.
-    plain = SessionMiddleware(secret="s" * 32)
+    plain = SessionPolicy(secret="s" * 32)
     request2 = Req()
     request2.state.session = {"user": "ada"}
     response2 = Response()
@@ -351,7 +352,7 @@ async def test_a_session_that_cannot_be_serialized_publishes_no_state() -> None:
     """
     store = MemoryStore()
     store.rows["sid"] = {"bad": object()}  # not JSON-serializable
-    middleware = SessionMiddleware(secret="s" * 32, store=store)
+    middleware = SessionPolicy(secret="s" * 32, store=store)
 
     class Req:
         def __init__(self) -> None:
@@ -459,7 +460,9 @@ async def test_a_correctly_signed_but_expired_cookie_is_rejected() -> None:
 
     store = MemoryStore()
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=60))
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store, max_age=60))
+    )
 
     @app.get("/whoami")
     async def whoami(request: Any) -> dict:
@@ -481,11 +484,11 @@ async def test_a_correctly_signed_but_expired_cookie_is_rejected() -> None:
 
 async def test_a_session_secret_that_is_too_short_is_refused() -> None:
     """A short HMAC key is a forgeable cookie, so it fails at startup."""
-    from wreath.middleware.sessions import MIN_SECRET_BYTES
+    from wreath.policy.sessions import MIN_SECRET_BYTES
 
     with pytest.raises(ValueError, match="at least"):
-        SessionMiddleware(secret="s" * (MIN_SECRET_BYTES - 1))
-    assert SessionMiddleware(secret="s" * MIN_SECRET_BYTES) is not None
+        SessionPolicy(secret="s" * (MIN_SECRET_BYTES - 1))
+    assert SessionPolicy(secret="s" * MIN_SECRET_BYTES) is not None
 
 
 class TouchableStore(MemoryStore):
@@ -510,7 +513,9 @@ async def test_an_unchanged_session_in_use_has_its_expiry_extended() -> None:
     """
     store = TouchableStore()
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=600))
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store, max_age=600))
+    )
 
     @app.get("/read")
     async def read(request: Any) -> dict:
@@ -533,7 +538,9 @@ async def test_a_changed_session_is_saved_rather_than_touched() -> None:
     """`touch` is the no-write path only. A write already resets the expiry."""
     store = TouchableStore()
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=600))
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store, max_age=600))
+    )
 
     @app.get("/write")
     async def write(request: Any) -> dict:

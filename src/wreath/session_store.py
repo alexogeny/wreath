@@ -1,13 +1,13 @@
 """Server-side session storage.
 
-The default `SessionMiddleware` keeps the whole
+The default `SessionPolicy` keeps the whole
 session in a signed cookie: nothing on the server, but nothing revocable
-either, and a 4 KiB ceiling. Hand the middleware a store and the cookie carries
+either, and a 4 KiB ceiling. Hand the policy a store and the cookie carries
 only a signed session id, while the contents live in PostgreSQL:
 
 ```python
 store = PostgresSessionStore(app.postgres("main"))
-app.add_middleware(SessionMiddleware(secret="…", store=store))
+app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="…", store=store)))
 ```
 
 Then a session can be revoked (delete the row), inspected, and grown past what a
@@ -136,7 +136,7 @@ class PostgresSessionStore:
         """The database `component()`'s tables belong to.
 
         The application never saw this store constructed -- a caller builds it
-        and hands it to `SessionMiddleware` -- so it cannot know which
+        and hands it to `SessionPolicy` -- so it cannot know which
         `app.postgres()` the tables go to unless the store says. This is that
         contract, and it is one name rather than a list of plausible ones:
         `Wreath._schema_database` reads exactly `schema_database`.

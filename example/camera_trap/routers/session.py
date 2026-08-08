@@ -114,7 +114,7 @@ async def whoami(request: Request) -> dict:
 
     Reading the session directly is not a workaround for that. It is the
     narrower question: this route reports whether a session cookie is present
-    and valid, which is precisely what the console needs, and `SessionMiddleware`
+    and valid, which is precisely what the console needs, and `SessionPolicy`
     is global so the session is on every request whether or not anyone was
     authenticated. What this route deliberately does *not* answer is what the
     observer may do — that is `permissions_router`'s job, derived from the same
