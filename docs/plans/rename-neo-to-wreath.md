@@ -37,7 +37,7 @@ Inspection overturned several assumptions in the brief:
 - **Middleware already exists as a proper subpackage.** `neo/middleware/`:
   `base` (`Middleware`, `MiddlewareRoute`, `compile_middleware`), `cors`,
   `security`, `compression`, `cache`, `ratelimit`, `request_id`, `timing`,
-  `proxy`, plus `CsrfPolicy`, `SessionMiddleware`, `TrustedHostPolicy`.
+  `proxy`, plus `CsrfPolicy`, `SessionPolicy`, `TrustedHostPolicy`.
 - **`router` vs `routing` is a real public/private split, not an alias.**
   `router.py` = public composition (`Router`, `RouteDefinition`, `.get/.post/…`
   decorators, inclusion into the app). `routing.py` = the low-level `Router`
@@ -52,7 +52,7 @@ Inspection overturned several assumptions in the brief:
   generations, atomic snapshot publication).
 - **`compression`** has a reusable **codec** (`GzipCompressor`, `gzip_compress`)
   plus negotiation (`select_content_encoding` in `webpolicy`), distinct from the
-  single `CompressionMiddleware` — so a public codec module is justified.
+  single `CompressionPolicy` — so a public codec module is justified.
 - **`config` vs `state` are already distinct.** `config.py` = env/dotenv
   (`Environment`, `load_env`, `parse_dotenv`, `read_osenv`). `state.py` =
   `State` (runtime app/request state). Typed server settings (`ServerConfig`)
@@ -78,7 +78,7 @@ Legend — Action: **keep** (same file, renamed pkg), **rename**, **move**,
 | `wreath.request` | `neo/request.py` | keep | `Request`, `FormData`, `UploadedFile`, `RequestLimits`. |
 | `wreath.response` | `neo/response.py` | keep | `Response`, `JSONResponse`, `HTMLResponse`, `TextResponse`, `StreamingResponse`, `FileResponse`, `RedirectResponse`, `ProblemResponse`, `ProblemDetail`, `PreparedResponse`. |
 | `wreath.binding` | `neo/binding.py` | keep | Binding + validation + DI (`Depends`) unified — no separate DI module (§7). |
-| `wreath.middleware` | `neo/middleware/` | keep | All built-ins + protocol. `CompressionMiddleware`/`CacheControlMiddleware` live here. |
+| `wreath.middleware` | `neo/middleware/` | keep | All built-ins + protocol. `CompressionPolicy`/`CachePolicy` live here. |
 | `wreath.auth` | `neo/auth/` | keep+merge | Authentication **and** authorization (344 LOC, shared `Identity`/decorators). See §6. |
 | `wreath.websocket` | `neo/websocket.py` | keep | Public connection API. |
 | `wreath.postgres` | `neo/postgres.py` | keep | Connections, pools, transactions, codecs, results. No ORM concepts. |
