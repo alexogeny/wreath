@@ -431,6 +431,14 @@ class CSRFMiddleware:
                 request.state.__setattr__(_STATE_MINTER, self)
                 return None
             if site in _TRUSTED_SITES:
+                # The same record the safe branch makes, for the same reason. A
+                # `POST` that re-renders its own form calls `csrf_token`, and
+                # this request passed no token check -- so without a minter here
+                # that handler raised `RuntimeError` and answered 500 on every
+                # browser that sends `Sec-Fetch-Site`, which is every browser
+                # since 2023. Nothing is minted unless a handler asks, so the
+                # saving this path exists for is unchanged.
+                request.state.__setattr__(_STATE_MINTER, self)
                 return None
             self.cross_site_refusals += 1
             return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")

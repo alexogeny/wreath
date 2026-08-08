@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 
 from wreath import Response, Wreath
-from wreath._middleware_tape import compile_tape
 from wreath.middleware.cors import CORSMiddleware
+from wreath.middleware.tape import compile_tape
 from wreath.server import ServerConfig
 
 _server = importlib.import_module("wreath._native._server")

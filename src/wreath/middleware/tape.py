@@ -95,7 +95,7 @@ def _ask(middleware: Any, origin: str, method: str) -> Any:
     counter, the path -- must not be compiled, and is not: the probes below run
     twice and a middleware whose two answers differ is declined.
     """
-    from .request import Request
+    from ..request import Request
 
     scope = {
         "type": "http",
