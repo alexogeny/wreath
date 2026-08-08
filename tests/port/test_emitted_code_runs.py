@@ -92,7 +92,7 @@ def test_a_non_cors_fastapi_middleware_import_does_not_invent_cors() -> None:
     )
 
     assert "from fastapi.middleware.gzip import GZipMiddleware" in emitted
-    assert "CORSMiddleware" not in emitted
+    assert "CorsPolicy" not in emitted
 
 
 @pytest.mark.parametrize(

@@ -120,12 +120,13 @@ _RETAINED_MODULE = {
 }
 
 # A rewritten wreath name -> the module it is actually imported from. Markers live in
-# `wreath.binding` and CORSMiddleware/TrustedHostMiddleware in `wreath.middleware`;
+# `wreath.binding` and first-class HTTP controls in `wreath.policy`;
 # everything else (Wreath, Router, Depends, Request) is top-level `wreath`.
 _WREATH_MODULE = {
     "Query": "wreath.binding", "Path": "wreath.binding", "Header": "wreath.binding",
     "Cookie": "wreath.binding", "Form": "wreath.binding", "File": "wreath.binding",
-    "CORSMiddleware": "wreath.middleware", "TrustedHostMiddleware": "wreath.middleware",
+    "HttpPolicy": "wreath.policy", "CorsPolicy": "wreath.policy",
+    "TrustedHostPolicy": "wreath.policy",
     "WebSocket": "wreath.websocket", "WebSocketDisconnect": "wreath.websocket",
     # `wreath` re-exports JSONResponse and Response; the rest live in wreath.response.
     "TextResponse": "wreath.response", "HTMLResponse": "wreath.response",
@@ -597,13 +598,22 @@ class _Emitter(ast.NodeVisitor):
             elif (
                 isinstance(node, ast.ImportFrom)
                 and (module := node.module) is not None
-                and module.startswith("fastapi.middleware")
-                and any(a.name == "CORSMiddleware" for a in node.names)
+                and module.startswith(("fastapi.middleware", "starlette.middleware"))
+                and any(
+                    a.name in {"CORSMiddleware", "TrustedHostMiddleware"}
+                    for a in node.names
+                )
             ):
-                self.needs.add("CORSMiddleware")
+                imported = {a.name for a in node.names}
+                drop = imported & {"CORSMiddleware", "TrustedHostMiddleware"}
+                self.needs.add("HttpPolicy")
+                if "CORSMiddleware" in drop:
+                    self.needs.add("CorsPolicy")
+                if "TrustedHostMiddleware" in drop:
+                    self.needs.add("TrustedHostPolicy")
                 self.buf.replace(
                     node,
-                    self._keep_leftover(node, drop={"CORSMiddleware"}, module=module),
+                    self._keep_leftover(node, drop=drop, module=module),
                 )
             elif isinstance(node, ast.ImportFrom) and node.module in _RESPONSE_MODULES:
                 self._swap_import(node, _RESPONSE_RENAME)
@@ -1868,17 +1878,29 @@ class _Emitter(ast.NodeVisitor):
             )
 
     def _rewrite_add_middleware(self, node: ast.Call) -> None:
+        function = node.func
+        if not isinstance(function, ast.Attribute):
+            raise RuntimeError("add_middleware rewrite requires an attribute call")
         if not node.args:
             return
         first = node.args[0]
         tail = self.imports.origin(first).split(".")[-1]
-        if tail not in ("CORSMiddleware", "TrustedHostMiddleware"):
+        policy = {
+            "CORSMiddleware": ("cors", "CorsPolicy"),
+            "TrustedHostMiddleware": ("trusted_host", "TrustedHostPolicy"),
+        }.get(tail)
+        if policy is None:
             self._annotate(node.lineno, "mw.custom")
             return
-        kwargs = ", ".join(f"{kw.arg}={self._seg(kw.value)}" for kw in node.keywords)
-        # add_middleware(CORSMiddleware, a=1) -> add_middleware(CORSMiddleware(a=1))
-        last = node.keywords[-1] if node.keywords else first
-        self.buf.replace_span(first, last, f"{self._seg(first)}({kwargs})")
+        field, class_name = policy
+        arguments = [self._seg(argument) for argument in node.args[1:]]
+        arguments.extend(f"{kw.arg}={self._seg(kw.value)}" for kw in node.keywords)
+        receiver = self._seg(function.value)
+        configured = f"{class_name}({', '.join(arguments)})"
+        self.buf.replace(
+            node,
+            f"{receiver}.configure_http_policy(HttpPolicy({field}={configured}))",
+        )
 
 
 # --------------------------------------------------------------------------- module predicates

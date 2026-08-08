@@ -61,7 +61,8 @@ Translated automatically:
 - `fastapi.responses.<X>` → `wreath.response.<X>`, with `content=` and `status_code=` renamed to what wreath calls them; `status.HTTP_404_NOT_FOUND` → `404`; `jsonable_encoder(x)` → `x`; `arrow.utcnow()` → `temporal.now()`; `TTLCache(maxsize=…)` → `BoundedCache(max_entries=…)`. Each dead import goes with the last use of it.
 - A `.objects.` chain inside a route handler, when every lookup carries across: `Llama.objects.filter(herd=h).order_by("-age").all()` → `await session.fetch(Llama.select().where(Llama.herd == h).order_by(Llama.age.desc()))`, with the session parameter added to the handler. Outside a handler this needs `--opinionated` (see below).
 - `class X(ormar.Model)` → `class X(Model, table="…")` with per-column type mapping; a `ForeignKey` splits into a `column(<pk-type>, references=…)` plus a `relationship(…)`, with the FK type **inferred from the referenced model's primary key**.
-- `HTTPException(status_code=404, …)` → `raise NotFound(…)`; `add_middleware(CORSMiddleware, …)` → the instance form.
+- `HTTPException(status_code=404, …)` → `raise NotFound(…)`; FastAPI's
+  `add_middleware(CORSMiddleware, …)` → first-class `HttpPolicy(cors=CorsPolicy(…))`.
 - A model bound from a form (`as_form`) → `Annotated[Model, Form()]`.
 
 Annotated for you (a real wreath target exists, but the rewrite isn't statically safe):
