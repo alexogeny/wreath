@@ -197,6 +197,17 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             return Py_NewRef(value);
         }
         PyObject *value_plan = PyTuple_GET_ITEM(plan, 1);
+        /* ``dict[str, Any]`` has already proved the only property its plan can
+         * enforce once the outer value is a dict.  Rebuilding every key/value
+         * pair into an identical dict was work whose answer cannot differ;
+         * response projection and JSON conversion remain separate stages. */
+        long value_opcode = PyLong_AsLong(PyTuple_GET_ITEM(value_plan, 0));
+        if (value_opcode == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (value_opcode == OP_ANY) {
+            return Py_NewRef(value);
+        }
         PyObject *result = PyDict_New();
         if (result == NULL) {
             return NULL;
@@ -476,5 +487,84 @@ wreath_run_validation(PyObject *self, PyObject *args)
     PyObject *pair = PyTuple_Pack(2, result, errors);
     Py_DECREF(result);
     Py_DECREF(errors);
+    return pair;
+}
+
+/* run_validation_json(plan, value, loc) -> (body | None, errors)
+ *
+ * Response validation used to return a Python object, rebuild that object in
+ * ``_compile_jsonable``, and only then enter the native JSON encoder.  The
+ * overwhelmingly common response contract is ``dict[str, Any]``: once the
+ * outer object check succeeds its child plan cannot reject or transform a
+ * value, so validation and emission are one JSON traversal here.  Other flat
+ * native plans still benefit by keeping their validated result and JSON
+ * emission inside one C entry; their validator may transform values (notably
+ * int -> float), so they deliberately retain the validation walk.
+ *
+ * A TypeError from the JSON encoder is not swallowed.  It tells the compiled
+ * wrapper to take the full jsonable conversion path for values such as UUID,
+ * Decimal, bytes and sets. */
+PyObject *
+wreath_run_validation_json(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *plan, *value, *loc_seq;
+    if (!PyArg_UnpackTuple(
+            args, "run_validation_json", 3, 3, &plan, &value, &loc_seq)) {
+        return NULL;
+    }
+
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    if (opcode == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (opcode == OP_DICT && PyDict_Check(value)) {
+        PyObject *value_plan = PyTuple_GET_ITEM(plan, 1);
+        long value_opcode = PyLong_AsLong(PyTuple_GET_ITEM(value_plan, 0));
+        if (value_opcode == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (value_opcode == OP_ANY) {
+            PyObject *body = wreath_json_dumps(NULL, value);
+            if (body == NULL) {
+                return NULL;
+            }
+            PyObject *errors = PyList_New(0);
+            if (errors == NULL) {
+                Py_DECREF(body);
+                return NULL;
+            }
+            PyObject *pair = PyTuple_Pack(2, body, errors);
+            Py_DECREF(body);
+            Py_DECREF(errors);
+            return pair;
+        }
+    }
+
+    PyObject *validation_args = PyTuple_Pack(3, plan, value, loc_seq);
+    if (validation_args == NULL) {
+        return NULL;
+    }
+    PyObject *validated = wreath_run_validation(NULL, validation_args);
+    Py_DECREF(validation_args);
+    if (validated == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyTuple_GET_ITEM(validated, 0);
+    PyObject *errors = PyTuple_GET_ITEM(validated, 1);
+    PyObject *body;
+    if (PyList_GET_SIZE(errors) == 0) {
+        body = wreath_json_dumps(NULL, result);
+        if (body == NULL) {
+            Py_DECREF(validated);
+            return NULL;
+        }
+    }
+    else {
+        body = Py_NewRef(Py_None);
+    }
+    PyObject *pair = PyTuple_Pack(2, body, errors);
+    Py_DECREF(body);
+    Py_DECREF(validated);
     return pair;
 }

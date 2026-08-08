@@ -73,22 +73,65 @@ def _native(annotation: Any, value: Any, loc: tuple[Any, ...] = ("body",)) -> tu
 
 
 CASES: list[tuple[Any, Any]] = [
-    (Product, {"name": "a", "price": 1.5, "quantity": 2, "active": True, "kind": "basic",
-               "tags": ["x", "y"], "meta": {"k": 3}, "pair": [1, 2]}),
-    (Product, {"name": "a", "price": 2, "quantity": 1, "active": False, "kind": "premium",
-               "address": {"street": "s", "city": "c", "zip": "12"}}),
+    (
+        Product,
+        {
+            "name": "a",
+            "price": 1.5,
+            "quantity": 2,
+            "active": True,
+            "kind": "basic",
+            "tags": ["x", "y"],
+            "meta": {"k": 3},
+            "pair": [1, 2],
+        },
+    ),
+    (
+        Product,
+        {
+            "name": "a",
+            "price": 2,
+            "quantity": 1,
+            "active": False,
+            "kind": "premium",
+            "address": {"street": "s", "city": "c", "zip": "12"},
+        },
+    ),
     (Product, {"name": "a", "price": "nope", "quantity": 1, "active": True, "kind": "basic"}),
     (Product, {"price": 1.0}),
-    (Product, {"name": "a", "price": 1.0, "quantity": 1, "active": True, "kind": "basic",
-               "extra": 9, "more": 1, "another": 2}),
-    (Product, {"name": "a", "price": 1.0, "quantity": 1, "active": True, "kind": "basic",
-               "tags": [1, 2]}),
-    (Product, {"name": "a", "price": 1.0, "quantity": 1, "active": True, "kind": "basic",
-               "address": {"zip": None}}),
+    (
+        Product,
+        {
+            "name": "a",
+            "price": 1.0,
+            "quantity": 1,
+            "active": True,
+            "kind": "basic",
+            "extra": 9,
+            "more": 1,
+            "another": 2,
+        },
+    ),
+    (
+        Product,
+        {"name": "a", "price": 1.0, "quantity": 1, "active": True, "kind": "basic", "tags": [1, 2]},
+    ),
+    (
+        Product,
+        {
+            "name": "a",
+            "price": 1.0,
+            "quantity": 1,
+            "active": True,
+            "kind": "basic",
+            "address": {"zip": None},
+        },
+    ),
     (Product, "not-an-object"),
     (list[int], [1, 2, 3]),
     (list[int], [1, "x", 3]),
     (dict[str, int], {"a": 1, "b": "x"}),
+    (dict[str, Any], {"id": 7, "nested": [1, "two"]}),
     (int, True),
     (bool, 1),
     (float, 5),
@@ -104,6 +147,32 @@ CASES: list[tuple[Any, Any]] = [
 @pytest.mark.parametrize("annotation,value", CASES)
 def test_pure_native_parity(annotation: Any, value: Any) -> None:
     assert _pure(annotation, value) == _native(annotation, value)
+
+
+@native_only
+def test_native_any_mapping_validation_does_not_copy_an_unchanged_value() -> None:
+    payload = {"id": 7, "nested": [1, "two"]}
+    plan = _compile_plan(dict[str, Any], frozenset())
+
+    result, errors = _core.run_validation(plan, payload, ("response",))
+
+    assert errors == []
+    assert result is payload
+
+
+@native_only
+def test_native_any_mapping_contract_encodes_in_the_validation_entry() -> None:
+    payload = {"id": 7, "nested": [1, "two"]}
+    plan = _compile_plan(dict[str, Any], frozenset())
+
+    body, errors = _core.run_validation_json(plan, payload, ("response",))
+
+    assert errors == []
+    assert body == b'{"id":7,"nested":[1,"two"]}'
+
+    body, errors = _core.run_validation_json(plan, ["not", "an", "object"], ("response",))
+    assert body is None
+    assert errors == [{"loc": ["response"], "msg": "value is not an object", "type": "dict"}]
 
 
 def test_recursive_dataclass_falls_back_to_pure() -> None:
