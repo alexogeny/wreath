@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from wreath.middleware import CSRFMiddleware, csrf_token
+from wreath.policy import CsrfPolicy, csrf_token
 from wreath.request import Request
 from wreath.response import Response
 
@@ -65,8 +65,8 @@ async def test_an_unsafe_request_from_another_site_is_refused(site: bytes) -> No
     exists to stop. Go's `CrossOriginProtection` refuses it too. Accepting it
     would make the header check weaker than the token check it fronts.
     """
-    middleware = CSRFMiddleware(SECRET)
-    response = await middleware.before(_unsafe(site))
+    middleware = CsrfPolicy(SECRET)
+    response = await middleware._ingress(_unsafe(site))
     assert response is not None
     assert response.status == 403
     assert middleware.cross_site_refusals == 1
@@ -79,8 +79,8 @@ async def test_a_garbage_sec_fetch_site_is_refused_not_ignored() -> None:
     Falling through would let an attacker who can set one header downgrade the
     check to whichever path they prefer.
     """
-    middleware = CSRFMiddleware(SECRET)
-    response = await middleware.before(_unsafe(b"same-orig"))
+    middleware = CsrfPolicy(SECRET)
+    response = await middleware._ingress(_unsafe(b"same-orig"))
     assert response is not None and response.status == 403
 
 
@@ -88,8 +88,8 @@ async def test_a_garbage_sec_fetch_site_is_refused_not_ignored() -> None:
 @pytest.mark.asyncio
 async def test_an_unsafe_same_origin_request_passes_without_any_token(site: bytes) -> None:
     """The saving: no cookie, no header, no HMAC, and it is allowed."""
-    middleware = CSRFMiddleware(SECRET)
-    assert await middleware.before(_unsafe(site)) is None
+    middleware = CsrfPolicy(SECRET)
+    assert await middleware._ingress(_unsafe(site)) is None
     assert middleware.cross_site_refusals == 0
 
 
@@ -98,8 +98,8 @@ async def test_an_unsafe_same_origin_request_passes_without_any_token(site: byte
 
 @pytest.mark.asyncio
 async def test_a_client_sending_no_header_still_needs_a_valid_token() -> None:
-    middleware = CSRFMiddleware(SECRET)
-    response = await middleware.before(_request("POST", [(b"host", b"example.test")]))
+    middleware = CsrfPolicy(SECRET)
+    response = await middleware._ingress(_request("POST", [(b"host", b"example.test")]))
     assert response is not None and response.status == 403
     # Refused by the token path, not the header path.
     assert middleware.cross_site_refusals == 0
@@ -107,9 +107,9 @@ async def test_a_client_sending_no_header_still_needs_a_valid_token() -> None:
 
 @pytest.mark.asyncio
 async def test_a_legacy_client_with_a_valid_token_is_admitted() -> None:
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET")
-    assert await middleware.before(safe) is None
+    assert await middleware._ingress(safe) is None
     token = csrf_token(safe)
 
     unsafe = _request(
@@ -121,7 +121,7 @@ async def test_a_legacy_client_with_a_valid_token_is_admitted() -> None:
             (b"x-csrf-token", token.encode()),
         ],
     )
-    assert await middleware.before(unsafe) is None
+    assert await middleware._ingress(unsafe) is None
 
 
 # --- the safe path, where the cost was ---------------------------------------
@@ -129,10 +129,10 @@ async def test_a_legacy_client_with_a_valid_token_is_admitted() -> None:
 
 @pytest.mark.asyncio
 async def test_a_safe_request_with_the_header_mints_nothing() -> None:
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
-    assert await middleware.before(safe) is None
-    response = await middleware.after(safe, Response(b"ok"))
+    assert await middleware._ingress(safe) is None
+    response = await middleware._egress(safe, Response(b"ok"))
     assert _set_cookie(response) is None
 
 
@@ -143,15 +143,15 @@ async def test_csrf_token_still_works_for_a_modern_browser() -> None:
     Minting moved to the caller that wanted one, instead of being paid by every
     request that did not. The cookie is still written.
     """
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
-    assert await middleware.before(safe) is None
+    assert await middleware._ingress(safe) is None
 
     token = csrf_token(safe)
     assert token.startswith("v1.")
     assert csrf_token(safe) == token  # minted once, not per call
 
-    response = await middleware.after(safe, Response(b"ok"))
+    response = await middleware._egress(safe, Response(b"ok"))
     cookie = _set_cookie(response)
     assert cookie is not None and token.encode() in cookie
 
@@ -159,9 +159,9 @@ async def test_csrf_token_still_works_for_a_modern_browser() -> None:
 @pytest.mark.asyncio
 async def test_a_token_minted_on_demand_is_accepted_by_the_fallback() -> None:
     """End to end: the lazily minted token really works as a token."""
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
-    await middleware.before(safe)
+    await middleware._ingress(safe)
     token = csrf_token(safe)
 
     legacy = _request(
@@ -173,7 +173,7 @@ async def test_a_token_minted_on_demand_is_accepted_by_the_fallback() -> None:
             (b"x-csrf-token", token.encode()),
         ],
     )
-    assert await middleware.before(legacy) is None
+    assert await middleware._ingress(legacy) is None
 
 
 # --- Vary --------------------------------------------------------------------
@@ -181,10 +181,10 @@ async def test_a_token_minted_on_demand_is_accepted_by_the_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_a_response_whose_cookie_turned_on_the_header_varies_on_it() -> None:
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
-    await middleware.before(safe)
-    response = await middleware.after(safe, Response(b"ok"))
+    await middleware._ingress(safe)
+    response = await middleware._egress(safe, Response(b"ok"))
     assert _vary(response) is not None
     assert b"sec-fetch-site" in _vary(response).lower()
 
@@ -196,12 +196,12 @@ async def test_vary_is_merged_not_overwritten() -> None:
     `cors.py` shipped the mirror-image defect today -- appending only when there
     was no `Vary` at all -- so this is pinned rather than assumed.
     """
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
-    await middleware.before(safe)
+    await middleware._ingress(safe)
     response = Response(b"ok")
     response.headers.append((b"vary", b"accept-encoding"))
-    response = await middleware.after(safe, response)
+    response = await middleware._egress(safe, response)
     vary = _vary(response).lower()
     assert b"accept-encoding" in vary
     assert b"sec-fetch-site" in vary
@@ -209,10 +209,10 @@ async def test_vary_is_merged_not_overwritten() -> None:
 
 @pytest.mark.asyncio
 async def test_a_legacy_response_does_not_vary_on_a_header_it_never_read() -> None:
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     safe = _request("GET")
-    await middleware.before(safe)
-    response = await middleware.after(safe, Response(b"ok"))
+    await middleware._ingress(safe)
+    response = await middleware._egress(safe, Response(b"ok"))
     assert _vary(response) is None
 
 
@@ -226,30 +226,30 @@ async def test_the_refusals_are_not_vacuous() -> None:
     Without this, every deny above would still pass if `_TRUSTED_SITES` grew to
     admit everything -- the check would be gone and the suite green.
     """
-    from wreath.middleware import csrf as csrf_module
+    from wreath.policy import csrf as csrf_module
 
-    middleware = CSRFMiddleware(SECRET)
-    assert (await middleware.before(_unsafe(b"cross-site"))) is not None
+    middleware = CsrfPolicy(SECRET)
+    assert (await middleware._ingress(_unsafe(b"cross-site"))) is not None
 
     original = csrf_module._TRUSTED_SITES
     csrf_module._TRUSTED_SITES = frozenset({"same-origin", "none", "cross-site"})
     try:
-        assert (await middleware.before(_unsafe(b"cross-site"))) is None, (
+        assert (await middleware._ingress(_unsafe(b"cross-site"))) is None, (
             "widening the accepted set did not change the outcome, so these "
             "tests are not exercising the check they claim to"
         )
     finally:
         csrf_module._TRUSTED_SITES = original
 
-    assert (await middleware.before(_unsafe(b"cross-site"))) is not None
+    assert (await middleware._ingress(_unsafe(b"cross-site"))) is not None
 
 
 @pytest.mark.asyncio
 async def test_a_clean_run_leaves_the_refusal_counter_at_zero() -> None:
     """Otherwise "the counter moved" proves nothing."""
-    middleware = CSRFMiddleware(SECRET)
-    await middleware.before(_unsafe(b"same-origin"))
-    await middleware.before(_request("GET", [(b"sec-fetch-site", b"same-origin")]))
+    middleware = CsrfPolicy(SECRET)
+    await middleware._ingress(_unsafe(b"same-origin"))
+    await middleware._ingress(_request("GET", [(b"sec-fetch-site", b"same-origin")]))
     assert middleware.cross_site_refusals == 0
 
 
@@ -270,17 +270,17 @@ async def test_a_handler_can_still_mint_a_token_on_a_trusted_unsafe_request(
     handler answered 500. Not attacker-driven: a self-inflicted outage on the
     exact clients the header path was added for.
     """
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     request = _unsafe(site)
-    assert await middleware.before(request) is None
+    assert await middleware._ingress(request) is None
     assert csrf_token(request).startswith("v1.")
 
 
 @pytest.mark.asyncio
 async def test_a_refused_cross_site_request_prepares_no_minter() -> None:
     """The control: only a request that was *allowed* gets one."""
-    middleware = CSRFMiddleware(SECRET)
+    middleware = CsrfPolicy(SECRET)
     request = _unsafe(b"cross-site")
-    assert (await middleware.before(request)) is not None
+    assert (await middleware._ingress(request)) is not None
     with pytest.raises(RuntimeError, match="has not prepared a token"):
         csrf_token(request)

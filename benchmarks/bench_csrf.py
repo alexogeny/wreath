@@ -12,7 +12,7 @@ from pathlib import Path
 from time import perf_counter_ns
 from typing import Any
 
-from wreath.middleware import CSRFMiddleware, csrf_token
+from wreath.policy import CsrfPolicy, csrf_token
 from wreath.request import Request
 
 
@@ -35,22 +35,22 @@ def _request(method: str, headers: list[tuple[bytes, bytes]]) -> Request:
 
 
 async def _sample(
-    middleware: CSRFMiddleware,
+    middleware: CsrfPolicy,
     headers: list[tuple[bytes, bytes]],
     iterations: int,
 ) -> float:
     started = perf_counter_ns()
     for _ in range(iterations):
-        result = await middleware.before(_request("POST", headers))
+        result = await middleware._ingress(_request("POST", headers))
         if result is not None:
             raise AssertionError("valid CSRF token was rejected")
     return (perf_counter_ns() - started) / iterations
 
 
 async def run(iterations: int, warmup: int, trials: int) -> dict[str, Any]:
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     safe = _request("GET", [(b"host", b"example.test")])
-    await middleware.before(safe)
+    await middleware._ingress(safe)
     token = csrf_token(safe)
     headers = [
         (b"host", b"example.test"),

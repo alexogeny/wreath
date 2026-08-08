@@ -257,7 +257,7 @@ def test_wildcard_host_matching_agrees_with_the_pure_twin(
 
     The pure twin excluded only the bare parent (`host != suffix[1:]`), which
     still admitted the empty-label host that the C twin's length comparison
-    rejects. `TrustedHostMiddleware` normalizes such a host away before it gets
+    rejects. `TrustedHostPolicy` normalizes such a host away before it gets
     here, so this was a twin divergence rather than a live bypass -- but the
     pure matcher is what ships when the extension is not built.
     """
