@@ -295,7 +295,7 @@ async def test_every_subsystem_that_owns_tables_offers_a_component() -> None:
     from wreath.jobs import JobRunner
     from wreath.messaging import MessageBus
     from wreath.middleware.idempotency import PostgresIdempotencyStore
-    from wreath.middleware.ratelimit import PostgresRateLimitStore
+    from wreath.policy.ratelimit import PostgresRateLimitStore
     from wreath.session_store import PostgresSessionStore
     from wreath.webhooks import PostgresWebhookInbox, PostgresWebhookOutbox
 

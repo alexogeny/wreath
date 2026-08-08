@@ -336,7 +336,7 @@ def test_the_console_ships_no_javascript_so_its_csp_needs_no_nonce() -> None:
 
 
 def test_a_write_operation_requires_a_csrf_verifier() -> None:
-    """`CSRFMiddleware` is header-only and an HTML form cannot carry a header.
+    """`CsrfPolicy` is header-only and an HTML form cannot carry a header.
 
     `wreath.admin` requires `csrf=` before generating a write; the console with
     the larger blast radius cannot require less.

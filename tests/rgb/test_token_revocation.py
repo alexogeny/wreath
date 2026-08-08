@@ -101,9 +101,9 @@ class TestRateLimitTierDocumented:
     def test_the_consequence_is_stated(self):
         import inspect
 
-        from wreath.middleware.ratelimit import TieredRateLimitMiddleware
+        from wreath.policy.ratelimit import TieredRateLimitPolicy
 
-        doc = inspect.getdoc(TieredRateLimitMiddleware) or ""
+        doc = inspect.getdoc(TieredRateLimitPolicy) or ""
         lowered = doc.lower()
         assert "self-service" in lowered or "toggl" in lowered
         assert "fresh" in lowered or "reset" in lowered

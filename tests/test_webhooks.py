@@ -10,7 +10,7 @@ import pytest
 
 from wreath import Wreath
 from wreath.http_client import ClientResponse, ConnectError
-from wreath.middleware import CSRFMiddleware
+from wreath.policy import CsrfPolicy, HttpPolicy
 from wreath.testing import TestClient
 from wreath.webhooks import (
     HMACWebhookSigner,
@@ -525,8 +525,10 @@ async def test_webhook_hub_exposes_narrow_csrf_exemption() -> None:
     async def changed(context: WebhookContext, event: WidgetChanged) -> None:
         pass
 
-    app.add_middleware(
-        CSRFMiddleware("s" * 32, secure=False, exempt=hooks.csrf_exempt)
+    app.configure_http_policy(
+        HttpPolicy(
+            csrf=CsrfPolicy("s" * 32, secure=False, exempt=hooks.csrf_exempt)
+        )
     )
     envelope = WebhookEnvelope(
         id="evt-csrf",

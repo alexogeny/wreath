@@ -167,10 +167,10 @@ class TestCsrfTokenLifetime:
     async def test_an_unsafe_request_renews_an_ageing_token(self):
         import time
 
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
         secret = "k" * 32
-        middleware = CSRFMiddleware(secret, secure=False, max_age=100)
+        middleware = CsrfPolicy(secret, secure=False, max_age=100)
         now = int(time.time())
         # Minted 80s ago: valid, but past the 3/4 renewal point.
         token = middleware._new_token(now - 80)
@@ -212,22 +212,22 @@ class TestCsrfTokenLifetime:
                 }
 
         request = _Request()
-        assert await middleware.before(request) is None
+        assert await middleware._ingress(request) is None
         assert state.get("_wreath_csrf_issue") is True, (
             "an ageing token was accepted but never reissued"
         )
 
     def test_the_cookie_name_may_carry_the_host_prefix(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CSRFMiddleware("k" * 32, cookie_name="__Host-csrf", secure=True)
+        middleware = CsrfPolicy("k" * 32, cookie_name="__Host-csrf", secure=True)
         assert middleware._cookie_name == "__Host-csrf"
 
     def test_a_host_prefixed_cookie_requires_secure(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
         with pytest.raises(ValueError, match="__Host-"):
-            CSRFMiddleware("k" * 32, cookie_name="__Host-csrf", secure=False)
+            CsrfPolicy("k" * 32, cookie_name="__Host-csrf", secure=False)
 
 
 class TestActionTokenFields:

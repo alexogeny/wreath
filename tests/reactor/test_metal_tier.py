@@ -793,13 +793,16 @@ def test_metal_rejects_websocket_upgrade_confusion(
 def test_metal_trusted_host_rejects_userinfo_shaped_authority() -> None:
     """The fused metal path must not truncate an attacker-controlled Host."""
     from wreath import Wreath
-    from wreath.middleware import TrustedHostMiddleware
+    from wreath.policy import HttpPolicy, TrustedHostPolicy
     from wreath.server import ServerConfig
 
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     called = False
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(("good.example",)))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("good.example",))
+        )
+    )
 
     @app.get("/")
     async def index(request) -> str:

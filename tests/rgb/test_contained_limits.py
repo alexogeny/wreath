@@ -196,7 +196,7 @@ class TestCrudFieldAllowList:
 class TestCsrfTrustedHosts:
     """R-50: the expected origin is built from the raw `Host` header, so
     `Host: evil.example` + `Origin: http://evil.example` passes unless
-    `TrustedHostMiddleware` was separately mounted -- a dependency between two
+    `TrustedHostPolicy` was separately mounted -- a dependency between two
     middlewares that nothing states or enforces."""
 
     def _request(self, host, origin):
@@ -209,38 +209,38 @@ class TestCsrfTrustedHosts:
         return request, {b"host": host, b"origin": origin}
 
     def test_a_forged_host_is_refused_when_hosts_are_named(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CSRFMiddleware(
+        middleware = CsrfPolicy(
             "k" * 32, secure=False, trusted_hosts=["app.example"]
         )
         request, headers = self._request(b"evil.example", b"http://evil.example")
         assert middleware._origin_valid(request, headers) is False
 
     def test_the_configured_host_still_passes(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CSRFMiddleware(
+        middleware = CsrfPolicy(
             "k" * 32, secure=False, trusted_hosts=["app.example"]
         )
         request, headers = self._request(b"app.example", b"http://app.example")
         assert middleware._origin_valid(request, headers) is True
 
     def test_a_port_is_matched_as_written(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CSRFMiddleware(
+        middleware = CsrfPolicy(
             "k" * 32, secure=False, trusted_hosts=["app.example:8000"]
         )
         request, headers = self._request(b"app.example:8000", b"http://app.example:8000")
         assert middleware._origin_valid(request, headers) is True
 
     def test_without_the_list_the_behaviour_is_unchanged(self):
-        from wreath.middleware.csrf import CSRFMiddleware
+        from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CSRFMiddleware("k" * 32, secure=False)
+        middleware = CsrfPolicy("k" * 32, secure=False)
         request, headers = self._request(b"evil.example", b"http://evil.example")
         # Still passes -- the Host header is trusted, which is why the guide
-        # tells you to mount TrustedHostMiddleware. Pinned so the default
+        # tells you to mount TrustedHostPolicy. Pinned so the default
         # cannot change silently.
         assert middleware._origin_valid(request, headers) is True

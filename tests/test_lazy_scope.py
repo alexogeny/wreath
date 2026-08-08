@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from wreath.binding import compile_binder
-from wreath.middleware import CSRFMiddleware, SecurityHeadersMiddleware
+from wreath.policy import CsrfPolicy, SecurityHeadersPolicy
 from wreath.request import Request
 from wreath.response import Response
 
@@ -70,7 +70,7 @@ def _request(context: StrictContext, **kwargs: Any) -> Request:
     return Request(context, _receive, **kwargs)
 
 
-# --- SecurityHeadersMiddleware ----------------------------------------------
+# --- SecurityHeadersPolicy ----------------------------------------------
 # `after` is a global hook, so this one ran on literally every response.
 
 
@@ -81,9 +81,9 @@ async def test_security_headers_reads_scheme_without_building_the_scope(
 ) -> None:
     context = StrictContext(scheme=scheme)
     request = _request(context)
-    middleware = SecurityHeadersMiddleware(hsts_max_age=31_536_000)
+    middleware = SecurityHeadersPolicy(hsts_max_age=31_536_000)
 
-    response = await middleware.after(request, Response(b"x"))
+    response = await middleware._egress(request, Response(b"x"))
 
     assert context.scope_calls == 0
     assert request._scope is None
@@ -92,16 +92,16 @@ async def test_security_headers_reads_scheme_without_building_the_scope(
     assert (b"strict-transport-security" in names) is (scheme == "https")
 
 
-# --- CSRFMiddleware ---------------------------------------------------------
+# --- CsrfPolicy ---------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_csrf_safe_method_does_not_build_the_scope() -> None:
     context = StrictContext(method="GET")
     request = _request(context)
-    middleware = CSRFMiddleware(_SECRET, secure=False)
+    middleware = CsrfPolicy(_SECRET, secure=False)
 
-    assert await middleware.before(request) is None
+    assert await middleware._ingress(request) is None
     assert context.scope_calls == 0
     assert request._scope is None
 
@@ -109,7 +109,7 @@ async def test_csrf_safe_method_does_not_build_the_scope() -> None:
 @pytest.mark.asyncio
 async def test_csrf_unsafe_method_does_not_build_the_scope() -> None:
     """The origin check reads the scheme; it used to reach it via the scope."""
-    middleware = CSRFMiddleware(_SECRET, secure=False)
+    middleware = CsrfPolicy(_SECRET, secure=False)
     token = middleware._new_token(int(time.time()))
 
     context = StrictContext(
@@ -125,7 +125,7 @@ async def test_csrf_unsafe_method_does_not_build_the_scope() -> None:
 
     # None means "allowed to proceed": the origin check passed, which is the
     # branch that reads the scheme.
-    assert await middleware.before(request) is None
+    assert await middleware._ingress(request) is None
     assert context.scope_calls == 0
     assert request._scope is None
 
@@ -134,9 +134,9 @@ async def test_csrf_unsafe_method_does_not_build_the_scope() -> None:
 async def test_csrf_rejection_path_does_not_build_the_scope() -> None:
     context = StrictContext(method="POST", headers=[(b"host", b"example.test")])
     request = _request(context)
-    middleware = CSRFMiddleware(_SECRET, secure=False)
+    middleware = CsrfPolicy(_SECRET, secure=False)
 
-    response = await middleware.before(request)
+    response = await middleware._ingress(request)
 
     assert response is not None and response.status == 403
     assert context.scope_calls == 0
@@ -190,8 +190,8 @@ async def test_dict_scope_backed_requests_are_unaffected() -> None:
         "client": ("127.0.0.1", 5000),
     }
     request = Request(scope, _receive)
-    middleware = SecurityHeadersMiddleware(hsts_max_age=31_536_000)
-    response = await middleware.after(request, Response(b"x"))
+    middleware = SecurityHeadersPolicy(hsts_max_age=31_536_000)
+    response = await middleware._egress(request, Response(b"x"))
     assert b"strict-transport-security" in {name for name, _ in response.headers}
 
     async def handler(request: Request, limit: int = 10) -> dict:

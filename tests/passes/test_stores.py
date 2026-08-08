@@ -176,7 +176,7 @@ async def test_a_redeploy_mid_purge_resumes_rather_than_restarting():
 
 def test_every_store_that_purges_offers_a_pass():
     from wreath.middleware.idempotency import PostgresIdempotencyStore
-    from wreath.middleware.ratelimit import PostgresRateLimitStore
+    from wreath.policy.ratelimit import PostgresRateLimitStore
     from wreath.session_store import PostgresSessionStore
 
     # All three used to be one unbounded DELETE. The unbounded form is kept for

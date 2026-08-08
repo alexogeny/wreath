@@ -8,7 +8,7 @@ the framework did not read it, and nothing said so at the point of failure.
   own `_db`. So a two-database application that had said which one was refused
   at **lifespan startup** with "cannot tell which database the 'jobs' tables
   belong to".
-* `RateLimitMiddleware`, `IdempotencyMiddleware` and `SessionMiddleware` hold a
+* `RateLimitPolicy`, `IdempotencyMiddleware` and `SessionMiddleware` hold a
   store that owns tables and exposed neither `component()` nor `schema_owners`,
   so `schema_components()` walked them and found nothing: `wreath_rate_limit`,
   `wreath_idempotency` and `wreath_session` were emitted by
@@ -295,19 +295,22 @@ async def test_the_declared_database_is_recorded_against_the_object_it_built() -
 async def test_a_rate_limit_table_is_created_by_lifespan_startup() -> None:
     """The DDL is *applied*, not merely collected.
 
-    Asserting that `RateLimitMiddleware` now answers `schema_owners` would pass
+    Asserting that `RateLimitPolicy` now answers `schema_owners` would pass
     with the table still absent, which is the whole failure: the claim existed
     and was emitted by `wreath schema sql` all along. So the relation is looked
     up in `pg_class` after a real startup.
     """
-    from wreath.middleware.ratelimit import PostgresRateLimitStore, RateLimitMiddleware
+    from wreath.policy import HttpPolicy
+    from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
     table = f"wattr_{_worker()}_rl"
     dsn = await _database("rl")
     app = Wreath()
     database = app.postgres("main", dsn=dsn)
     store = PostgresRateLimitStore(database, table=table)
-    app.add_global_middleware(RateLimitMiddleware(limit=10, window=1.0, store=store))
+    app.configure_http_policy(
+        HttpPolicy(rate_limit=RateLimitPolicy(limit=10, window=1.0, store=store))
+    )
 
     assert await _resolves(dsn, table) is None, "the table must not pre-exist"
     sent = await _drive_startup(app)
@@ -363,7 +366,8 @@ async def test_a_middleware_owned_table_goes_to_the_database_its_store_holds() -
     rather than fixed it: the walk would find the table and then refuse at
     startup, in an application that had never had a problem before.
     """
-    from wreath.middleware.ratelimit import PostgresRateLimitStore, RateLimitMiddleware
+    from wreath.policy import HttpPolicy
+    from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
     table = f"wattr_{_worker()}_rl2"
     main = await _database("rl2main")
@@ -372,7 +376,9 @@ async def test_a_middleware_owned_table_goes_to_the_database_its_store_holds() -
     app.postgres("main", dsn=main)
     analytics = app.postgres("analytics", dsn=other)
     store = PostgresRateLimitStore(analytics, table=table)
-    app.add_global_middleware(RateLimitMiddleware(limit=10, window=1.0, store=store))
+    app.configure_http_policy(
+        HttpPolicy(rate_limit=RateLimitPolicy(limit=10, window=1.0, store=store))
+    )
 
     sent = await _drive_startup(app)
     assert sent[0]["type"] == "lifespan.startup.complete", sent
@@ -393,22 +399,23 @@ async def test_a_cookie_only_session_middleware_claims_nothing() -> None:
 
 
 async def test_every_tier_of_a_tiered_limiter_is_walked() -> None:
-    """`TieredRateLimitMiddleware` builds one whole limiter per tier, and its
+    """`TieredRateLimitPolicy` builds one whole limiter per tier, and its
     stores were unreachable for the same reason. Every tier shares the table
     name a `store_factory` gives it, so the claims deduplicate to one."""
-    from wreath.middleware.ratelimit import (
+    from wreath.policy import HttpPolicy
+    from wreath.policy.ratelimit import (
         PostgresRateLimitStore,
-        TieredRateLimitMiddleware,
+        TieredRateLimitPolicy,
     )
 
     app = Wreath()
     database = app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
-    app.add_middleware(
-        TieredRateLimitMiddleware(
+    app.configure_http_policy(
+        HttpPolicy(principal_rate_limit=TieredRateLimitPolicy(
             tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
             default=(60, 60.0),
             store_factory=lambda: PostgresRateLimitStore(database),
-        )
+        ))
     )
     assert [claim.name for claim in app.schema_components()] == ["ratelimit"]
     assert list(app._components_by_database(app.schema_components())) == [database]

@@ -37,7 +37,7 @@ class TestIdempotencyReachesAnIdentity:
     """R-79: `_key` needs `request.identity`, but a global `before` hook runs at
     ingress -- before the pipeline authenticates anyone -- so the identity is
     always None there and the middleware guards nothing at all. This is the
-    failure `RateLimitMiddleware` refuses at startup for `principal_key`."""
+    failure `RateLimitPolicy` refuses at startup for `principal_key`."""
 
     async def test_a_repeated_key_replays_instead_of_re_running(self):
         runs = 0
