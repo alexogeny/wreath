@@ -6,7 +6,11 @@ coerce_text/coerce_json/coerce_bytes. These guard that the shortcut produces
 identical status, headers, and body to the full constructors, so the speedup
 never changes what a client sees.
 """
+
 from __future__ import annotations
+
+import uuid
+from typing import Any
 
 import pytest
 
@@ -29,8 +33,7 @@ def test_coerce_text_matches_text_response(body: str) -> None:
     assert _shape(coerce_text(body)) == _shape(TextResponse(body))
 
 
-@pytest.mark.parametrize("data", [{}, {"a": 1}, {"nested": {"list": [1, 2, 3]}},
-                                  {"k": "v" * 500}])
+@pytest.mark.parametrize("data", [{}, {"a": 1}, {"nested": {"list": [1, 2, 3]}}, {"k": "v" * 500}])
 def test_coerce_json_matches_json_response(data: dict) -> None:
     assert _shape(coerce_json(data)) == _shape(JSONResponse(data))
 
@@ -85,8 +88,11 @@ async def test_end_to_end_handler_returns_are_coerced_correctly() -> None:
         async def send(message):
             sent.append(message)
 
-        await app({"type": "http", "method": "GET", "path": path,
-                   "headers": [], "query_string": b""}, receive, send)
+        await app(
+            {"type": "http", "method": "GET", "path": path, "headers": [], "query_string": b""},
+            receive,
+            send,
+        )
         return sent
 
     text = await call("/text")
@@ -102,3 +108,33 @@ async def test_end_to_end_handler_returns_are_coerced_correctly() -> None:
     raw = await call("/bytes")
     assert (b"content-type", b"application/octet-stream") in raw[0]["headers"]
     assert raw[1]["body"] == b"raw"
+
+
+@pytest.mark.asyncio
+async def test_typed_json_response_keeps_conversion_fallback_and_declared_status() -> None:
+    from wreath import Wreath
+
+    identifier = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    app = Wreath()
+
+    @app.get("/typed", status_code=201)
+    async def typed(request: Any) -> dict[str, Any]:
+        return {"id": identifier, "ok": True}
+
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(
+        {"type": "http", "method": "GET", "path": "/typed", "headers": []},
+        receive,
+        send,
+    )
+
+    assert sent[0]["status"] == 201
+    assert (b"content-type", b"application/json") in sent[0]["headers"]
+    assert sent[1]["body"] == (b'{"id":"12345678-1234-5678-1234-567812345678","ok":true}')

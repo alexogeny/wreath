@@ -8,7 +8,7 @@ the RFC 9457 document every wreath error becomes.
 ASGI messages. `StreamingResponse`, `SSEResponse`, and `FileResponse` are
 deliberately not `Response` subclasses: they own their emission and have no
 in-memory body, which is also why `wreath.response_cache` and
-`wreath.middleware.idempotency` refuse to store them.
+`wreath.policy.idempotency` refuse to store them.
 """
 
 from __future__ import annotations
@@ -135,9 +135,7 @@ class Response:
                 response_headers.append(
                     (
                         _CONTENT_LENGTH,
-                        _CONTENT_LENGTHS[size]
-                        if size < 1024
-                        else str(size).encode("ascii"),
+                        _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii"),
                     )
                 )
         else:
@@ -213,13 +211,10 @@ class Response:
         if samesite is not None:
             samesite = samesite.lower()
             if samesite not in ("strict", "lax", "none"):
-                raise ValueError(
-                    f"samesite must be 'strict', 'lax', or 'none', got {samesite!r}"
-                )
+                raise ValueError(f"samesite must be 'strict', 'lax', or 'none', got {samesite!r}")
             if samesite == "none" and not secure:
                 raise ValueError(
-                    "SameSite=None cookies must be Secure (RFC 6265bis 5.4.7); "
-                    "pass secure=True"
+                    "SameSite=None cookies must be Secure (RFC 6265bis 5.4.7); pass secure=True"
                 )
         # Fail at the call, not later at the native serializer: a control
         # character (CR/LF especially) in a cookie name or value is a
@@ -244,8 +239,7 @@ class Response:
             raise ValueError("__Secure- cookies must be Secure; pass secure=True")
         if name.startswith("__Host-") and not (secure and path == "/" and domain is None):
             raise ValueError(
-                "__Host- cookies must be Secure, have Path=/, and set no Domain "
-                "(RFC 6265bis 4.1.3)"
+                "__Host- cookies must be Secure, have Path=/, and set no Domain (RFC 6265bis 4.1.3)"
             )
         parts = [f"{name}={value}"]
         if max_age is not None:
@@ -348,6 +342,22 @@ _JSON_TYPE_HEADER = (_CONTENT_TYPE, JSONResponse.media_type)
 _OCTET_TYPE_HEADER = (_CONTENT_TYPE, Response.media_type)
 
 
+class _EncodedJSON:
+    """Validated JSON bytes waiting for the route's declared status.
+
+    The response-contract compiler can validate and encode in one native entry,
+    but status belongs to `_ensure_response`, which wraps it afterwards.  This
+    tiny internal carrier crosses that seam without decoding or serializing the
+    document again.  It is intentionally not a Response: the status wrapper
+    must still be able to apply a route's non-200 declaration.
+    """
+
+    __slots__ = ("body",)
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+
 def _build_response(body: bytes, type_header: tuple[bytes, bytes]) -> Response:
     # 200 is never in _STATUS_WITHOUT_BODY, so content-length always applies.
     response = Response.__new__(Response)
@@ -387,6 +397,11 @@ def coerce_json(data: Any) -> Response:
         ValueError: A non-finite float, which has no JSON spelling.
     """
     return _build_response(_json_dumps(data), _JSON_TYPE_HEADER)
+
+
+def _coerce_encoded_json(body: bytes) -> Response:
+    """Build the ordinary 200 JSON response around already encoded bytes."""
+    return _build_response(body, _JSON_TYPE_HEADER)
 
 
 def coerce_bytes(body: bytes) -> Response:
@@ -671,6 +686,15 @@ class StreamingResponse:
         success, failure, and cancellation alike.
         """
         try:
+            protocol = getattr(send, "__self__", None)
+            native_start = getattr(protocol, "_wreath_stream_start", None)
+            native_body = getattr(protocol, "_wreath_stream_body", None)
+            if native_start is not None and native_body is not None:
+                await native_start(self.status, self.headers)
+                async for chunk in self.body:
+                    await native_body(chunk, True)
+                await native_body(b"", False)
+                return
             await send(
                 {"type": "http.response.start", "status": self.status, "headers": self.headers}
             )
@@ -758,7 +782,11 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
     """
     if isinstance(event, ServerSentEvent):
         comment, name, ident, retry, data = (
-            event.comment, event.event, event.id, event.retry, event.data,
+            event.comment,
+            event.event,
+            event.id,
+            event.retry,
+            event.data,
         )
     elif isinstance(event, (str, bytes)):
         comment = name = ident = retry = None
@@ -776,9 +804,7 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
         None if name is None else str(name),
         None if ident is None else str(ident),
         None if retry is None else int(retry),
-        None if data is None else (
-            data.decode("utf-8") if isinstance(data, bytes) else str(data)
-        ),
+        None if data is None else (data.decode("utf-8") if isinstance(data, bytes) else str(data)),
     )
 
 
@@ -914,7 +940,7 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | _Unsatisfiab
         return None
     spec = spec.strip()
     if "," in spec:
-        return None                     # multi-range: not implemented, so ignored
+        return None  # multi-range: not implemented, so ignored
     first_text, separator, last_text = spec.partition("-")
     if not separator:
         return None
@@ -963,8 +989,11 @@ async def _send_from_descriptor(
     backpressure to the reader, so read-ahead and memory stay bounded no matter
     how large the file is. This replaces one executor job per 256 KiB chunk.
     """
-    start = {"type": "http.response.start", "status": status,
-             "headers": [*headers, (_CONTENT_LENGTH, _content_length(size))]}
+    start = {
+        "type": "http.response.start",
+        "status": status,
+        "headers": [*headers, (_CONTENT_LENGTH, _content_length(size))],
+    }
     await send(start)
     if size == 0:
         os.close(fd)
@@ -1075,9 +1104,7 @@ def _disposition(filename: str) -> bytes:
     # `filename*` parameter carries the real name for those that support it.
     fallback = escaped.encode("ascii", "replace").decode("ascii")
     encoded = quote(filename, safe="")
-    return (
-        f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
-    ).encode("ascii")
+    return (f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}").encode("ascii")
 
 
 def _open_fd(path: str) -> tuple[int, int]:
@@ -1126,7 +1153,13 @@ class FileResponse:
     """
 
     __slots__ = (
-        "_fd", "_stat", "background", "headers", "media_type", "path", "range",
+        "_fd",
+        "_stat",
+        "background",
+        "headers",
+        "media_type",
+        "path",
+        "range",
         "status",
     )
 
