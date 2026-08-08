@@ -36,7 +36,26 @@ from typing import Any
 # Scanned when no explicit paths are given, relative to the repository root.
 DEFAULT_ROOTS = ("src/wreath/_native",)
 
-WAIVER = re.compile(r"native-lint:\s*allow\s+(?P<code>NC\d{3})\s*--\s*(?P<reason>\S.*)")
+def waiver_pattern(tool: str, prefix: str) -> re.Pattern[str]:
+    """The `<tool>: allow <CODE> -- <reason>` comment a native lint honours.
+
+    One grammar, five spellings before this -- each lint wrote the regex out
+    again with its own tool name and code prefix substituted in. Nothing forced
+    them to agree, so a sixth lint could have taken `-` where the others take
+    `--`, or made the reason optional, and the only symptom would have been a
+    waiver silently not applying in the one file nobody re-read.
+
+    A reason is **required**: `(?P<reason>\\S.*)` cannot match the empty string,
+    so `allow NC001 --` does not parse as a waiver. `native-lint`'s
+    `WAIVER_BARE` is what turns that near-miss into a finding of its own rather
+    than into silence.
+    """
+    return re.compile(
+        rf"{re.escape(tool)}:\s*allow\s+(?P<code>{prefix}\d{{3}})\s*--\s*(?P<reason>\S.*)"
+    )
+
+
+WAIVER = waiver_pattern("native-lint", "NC")
 WAIVER_BARE = re.compile(r"native-lint:\s*allow(?!\s+NC\d{3}\s*--\s*\S)")
 
 

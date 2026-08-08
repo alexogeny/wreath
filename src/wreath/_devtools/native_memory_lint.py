@@ -18,6 +18,7 @@ from .native_lint import (
     repo_root,
     run_lint,
     strip_c,
+    waiver_pattern,
 )
 
 #: `iter_sources` and `repo_root` are re-exported, not merely used -- see the
@@ -25,7 +26,7 @@ from .native_lint import (
 __all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]
 
 DEFAULT_ROOTS = ("src/wreath/_native",)
-WAIVER = re.compile(r"native-memory-lint:\s*allow\s+(?P<code>NM\d{3})\s*--\s*(?P<reason>\S.*)")
+WAIVER = waiver_pattern("native-memory-lint", "NM")
 
 
 RULES: dict[str, Rule] = {
