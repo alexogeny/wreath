@@ -4,7 +4,7 @@ There is a category of defect that a framework can close on your behalf, and
 Wreath closes a great deal of it. A key that goes through
 `wreath.objects.normalize_key` cannot traverse. A document that goes through
 `wreath.xml.parse` cannot expand an external entity. A query compiled from a
-`Select` cannot be injected into. A cookie signed by `SessionMiddleware` cannot
+`Select` cannot be injected into. A cookie signed by `SessionPolicy` cannot
 be forged. None of that is advice; it is what the code does.
 
 And none of it is compulsory. An application can always reach around the

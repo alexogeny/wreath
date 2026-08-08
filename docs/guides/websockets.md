@@ -116,7 +116,7 @@ app.configure_http_policy(HttpPolicy(
 Missing, malformed, repeated, and unlisted `Origin` values are refused before
 `accept`. Handshake-safe global middleware also runs before WebSocket auth:
 `ProxyPolicy`, `TrustedHostPolicy`, and a global
-`SessionMiddleware` therefore apply on both HTTP and WebSocket paths. Encoded
+`SessionPolicy` therefore apply on both HTTP and WebSocket paths. Encoded
 slashes and backslashes are refused before WebSocket routing just as they are
 before HTTP routing.
 

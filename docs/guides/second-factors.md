@@ -100,7 +100,9 @@ same place a WebAuthn challenge goes. Name a store and it goes there instead:
 
 ```python
 store = PostgresSessionStore(app.postgres("main"))
-app.add_middleware(SessionMiddleware(secret=SECRET, store=store))
+app.configure_http_policy(
+    HttpPolicy(session=SessionPolicy(secret=SECRET, store=store))
+)
 app.include_router(second_factor_router(users, factors, enrolments=store))
 ```
 
@@ -116,7 +118,7 @@ lying about, and a store also makes an abandoned enrolment revocable.
     Earlier versions emitted a `UserWarning` when the router was built without
     `enrolments=`, because the secret and the challenge then rode in the session.
     It could only ever name *half* its condition: a router is built before any
-    application exists, so it cannot tell whether your `SessionMiddleware` was
+    application exists, so it cannot tell whether your `SessionPolicy` was
     given a `store=`. A warning nobody can act on with certainty is one people
     learn to ignore. The property now simply holds, so there is nothing left to
     warn about.
