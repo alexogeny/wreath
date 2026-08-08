@@ -10,8 +10,8 @@ from wreath._audit.dom import parse_html
 from wreath._audit.model import Severity
 from wreath._audit.rules import A11Y_RULES, app_perf
 from wreath._audit.sources import run_audit
-from wreath.middleware.compression import CompressionMiddleware
 from wreath.policy import HttpPolicy, SecurityHeadersPolicy
+from wreath.policy.compression import CompressionPolicy
 
 
 def _app() -> Wreath:
@@ -140,7 +140,7 @@ def test_perf_middleware_introspection_positive() -> None:
     app = Wreath(
         http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy())
     )
-    app.add_middleware(CompressionMiddleware())
+    app.configure_http_policy(HttpPolicy(compression=CompressionPolicy()))
     fired = {f.rule_id for f in app_perf(app, "{}")}
     assert "compression-enabled" not in fired
     assert "security-headers" not in fired

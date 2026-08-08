@@ -42,8 +42,8 @@ the same rule, or a semantic `var()` text colour on the base surface). It is adv
 
 | Rule | Budget / check | Severity | Remediation |
 |---|---|---|---|
-| `compression-enabled` | `CompressionMiddleware` mounted (or `Content-Encoding` at runtime) | warn | mount `CompressionMiddleware` |
-| `cache-control` | `CacheControlMiddleware` mounted (or `Cache-Control`/`ETag` at runtime) | warn | mount it / set `cache_control` on `static()` |
+| `compression-enabled` | `CompressionPolicy` mounted (or `Content-Encoding` at runtime) | warn | mount `CompressionPolicy` |
+| `cache-control` | `CachePolicy` mounted (or `Cache-Control`/`ETag` at runtime) | warn | mount it / set `cache_control` on `static()` |
 | `security-headers` | `SecurityHeadersPolicy` mounted (or CSP at runtime) | warn | mount `SecurityHeadersPolicy` |
 | `html-size` | document ≤ 100 KiB | warn | trim or paginate |
 | `json-size` | OpenAPI document ≤ 512 KiB | warn | trim descriptions/examples or split the API |

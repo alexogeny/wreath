@@ -95,17 +95,17 @@ def app_perf(app, openapi_json: str) -> Iterator[Finding]:
     """App-level performance findings (middleware presence + OpenAPI size)."""
     mounted = _mounted(app)
 
-    if "CompressionMiddleware" not in mounted:
+    if "CompressionPolicy" not in mounted:
         yield Finding("compression-enabled", Severity.WARN, "app",
-                      "no CompressionMiddleware mounted; text responses are uncompressed",
+                      "no CompressionPolicy mounted; text responses are uncompressed",
                       "perf:compression", "",
-                      "mount wreath.middleware.CompressionMiddleware")
+                      "mount wreath.middleware.CompressionPolicy")
 
-    if "CacheControlMiddleware" not in mounted:
+    if "CachePolicy" not in mounted:
         yield Finding("cache-control", Severity.WARN, "app",
-                      "no CacheControlMiddleware mounted; responses lack cache directives",
+                      "no CachePolicy mounted; responses lack cache directives",
                       "perf:cache", "",
-                      "mount CacheControlMiddleware or set per-mount cache_control on static()")
+                      "mount CachePolicy or set per-mount cache_control on static()")
 
     if "SecurityHeadersPolicy" not in mounted:
         yield Finding("security-headers", Severity.WARN, "app",

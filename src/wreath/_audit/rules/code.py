@@ -304,7 +304,7 @@ _SECRET_KEYWORDS = frozenset(
 )
 
 #: Constructors whose *first positional* argument is a signing key.
-_POSITIONAL_SECRET_CALLEES = frozenset({"SessionMiddleware", "CsrfPolicy"})
+_POSITIONAL_SECRET_CALLEES = frozenset({"SessionPolicy", "CsrfPolicy"})
 
 #: Modules that will resolve an external entity if asked.
 _UNSAFE_XML_MODULES = ("xml.sax", "xml.dom", "xml.etree", "xml.parsers", "lxml")

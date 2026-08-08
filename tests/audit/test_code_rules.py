@@ -235,8 +235,8 @@ def test_random_for_a_non_security_value_is_clean() -> None:
 def test_literal_session_secret_is_flagged() -> None:
     assert_flags(
         """
-        from wreath.middleware import SessionMiddleware
-        app.add_global_middleware(SessionMiddleware("northwind-dev-secret"))
+        from wreath.policy import HttpPolicy, SessionPolicy
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy("northwind-dev-secret")))
         """,
         "hardcoded-secret",
     )
@@ -246,8 +246,8 @@ def test_secret_read_from_the_environment_is_clean() -> None:
     assert_clean(
         """
         import os
-        from wreath.middleware import SessionMiddleware
-        app.add_global_middleware(SessionMiddleware(os.environ["SESSION_SECRET"]))
+        from wreath.policy import HttpPolicy, SessionPolicy
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy(os.environ["SESSION_SECRET"])))
         """,
         "hardcoded-secret",
     )
@@ -578,11 +578,11 @@ def test_every_rule_has_a_reference_and_a_suggestion() -> None:
         import importlib, random, tarfile, xml.sax, zipfile
         from wreath import Wreath
         from wreath.http_client import DestinationPolicy
-        from wreath.middleware import SessionMiddleware
+        from wreath.policy import HttpPolicy, SessionPolicy
         from wreath.templates import Template
 
         app = Wreath(debug=True)
-        app.add_global_middleware(SessionMiddleware("dev-secret"))
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy("dev-secret")))
         policy = DestinationPolicy(allow_loopback=True)
         token = random.Random(1).choice("abc")
 
@@ -622,7 +622,7 @@ def test_clean_application_source_produces_nothing() -> None:
 
         from wreath import Request, Router
         from wreath.auth import authenticated
-        from wreath.middleware import SessionMiddleware
+        from wreath.policy import HttpPolicy, SessionPolicy
         from wreath.orm import FromORM, Session
 
         ReadSession = Annotated[Session, FromORM("main", workload="read")]
@@ -896,7 +896,7 @@ def test_a_wildcard_proxy_boundary_does_not_silence_the_forwarded_rule() -> None
 def test_a_signing_key_declared_as_a_settings_default_is_flagged() -> None:
     """The shape a signing key actually ships in.
 
-    Not an argument to `SessionMiddleware` -- a default on a settings field, so
+    Not an argument to `SessionPolicy` -- a default on a settings field, so
     that every deployment which has not set the environment variable signs with
     the key that is in the source. Nothing at startup complains, because from
     the application's point of view the setting is populated.

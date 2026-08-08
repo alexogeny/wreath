@@ -22,7 +22,7 @@ def _header_findings(headers: dict[str, str], surface: str):
     if "content-encoding" not in lower:
         yield Finding("compression-enabled", Severity.WARN, surface,
                       "response has no Content-Encoding (uncompressed)", "perf:compression",
-                      "", "mount CompressionMiddleware and negotiate gzip")
+                      "", "mount CompressionPolicy and negotiate gzip")
     if "cache-control" not in lower and "etag" not in lower:
         yield Finding("cache-control", Severity.WARN, surface,
                       "response has no Cache-Control or ETag", "perf:cache",
