@@ -5,7 +5,7 @@ thin facade over `zlib` or over `compression.zstd`, both of which are C
 extensions in the interpreter, so the compression itself already runs at native
 speed and inherits the security fixes of the interpreter it is installed with.
 Selecting a content encoding from `Accept-Encoding` is a separate concern and
-lives in `wreath.middleware.CompressionMiddleware`; this module only turns bytes
+lives in `wreath.middleware.CompressionPolicy`; this module only turns bytes
 into compressed bytes.
 
 **zstd needs no third-party dependency, and brotli would.** `compression.zstd`

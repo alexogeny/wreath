@@ -6,7 +6,7 @@
 a real, importable module — rather than burying them inside one middleware —
 means you can compress a payload anywhere you need to, not only on the response
 path. The content-encoding negotiation that decides whether and how to compress
-belongs to `CompressionMiddleware` itself.
+belongs to `CompressionPolicy` itself.
 
 ## User story: shrink a large JSON list without paying on small ones
 
@@ -16,9 +16,11 @@ belongs to `CompressionMiddleware` itself.
 > overhead.*
 
 ```python
-from wreath.middleware import CompressionMiddleware
+from wreath.policy import CompressionPolicy, HttpPolicy
 
-app.add_middleware(CompressionMiddleware(minimum_size=1024))
+app.configure_http_policy(
+    HttpPolicy(compression=CompressionPolicy(minimum_size=1024))
+)
 ```
 
 The middleware reads `Accept-Encoding`, compresses only when the client accepts a
@@ -59,7 +61,9 @@ Levels are separate knobs, because the scales are unrelated — `gzip_level` run
 (3) as the default:
 
 ```python
-app.add_middleware(CompressionMiddleware(gzip_level=6, zstd_level=6))
+app.configure_http_policy(
+    HttpPolicy(compression=CompressionPolicy(gzip_level=6, zstd_level=6))
+)
 ```
 
 Note there is no zstd equivalent of gzip's `0`: levels below 1 are libzstd's
@@ -99,13 +103,13 @@ arithmetic produced zero would otherwise get the exact opposite of the guarantee
 this function exists to make.
 
 For the ordinary response case, though, you don't touch the codec directly. You add
-`CompressionMiddleware` from the [middleware](middleware.md) module, which reads
+`CompressionPolicy` from the [middleware](middleware.md) module, which reads
 the request's `Accept-Encoding`, checks that the content type is worth
 compressing, and does the rest:
 
 ```python
-from wreath.middleware import CompressionMiddleware
-app.add_middleware(CompressionMiddleware())
+from wreath.policy import CompressionPolicy, HttpPolicy
+app.configure_http_policy(HttpPolicy(compression=CompressionPolicy()))
 ```
 
 **Reference:** [`wreath.compression`](../reference/compression.md).

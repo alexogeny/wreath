@@ -3,7 +3,7 @@
 The reusable compression codecs: gzip (`GzipCompressor`, `gzip_compress`,
 `gzip_decompress`) and zstd (`ZstdCompressor`, `zstd_compress`).
 Content-encoding negotiation lives in `wreath.middleware`'s
-`CompressionMiddleware`.
+`CompressionPolicy`.
 
 `gzip_decompress` is the only entry point here that decodes, and so the only one
 with an adversary on the other end. Its `max_output_bytes` is a required
