@@ -152,9 +152,9 @@ def test_a_session_cookie_round_trips() -> None:
     import time
 
     from wreath._json import dumps as json_dumps
-    from wreath.middleware.sessions import SessionMiddleware
+    from wreath.policy.sessions import SessionPolicy
 
-    middleware = SessionMiddleware(secret="k" * 32)
+    middleware = SessionPolicy(secret="k" * 32)
     payload = {"uid": "ranger-1", "roles": ["ranger"]}
     raw = json_dumps(payload)
     cookie = middleware._sign(raw, int(time.time()))

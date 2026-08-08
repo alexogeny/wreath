@@ -111,14 +111,14 @@ class TestIdempotencyBodyCap:
     is a memory (or table) amplifier for the whole TTL."""
 
     async def test_a_large_response_is_not_stored(self):
-        from wreath.middleware.idempotency import (
-            IdempotencyMiddleware,
+        from wreath.policy.idempotency import (
+            IdempotencyPolicy,
             MemoryIdempotencyStore,
         )
         from wreath.response import Response
 
         store = MemoryIdempotencyStore()
-        middleware = IdempotencyMiddleware(store=store, max_body_bytes=1024)
+        middleware = IdempotencyPolicy(store=store, max_body_bytes=1024)
 
         class _State:
             idempotency_key = "k"
@@ -134,14 +134,14 @@ class TestIdempotencyBodyCap:
         assert await store.reserve("k") == ("fresh", None), "an oversized body was stored"
 
     async def test_an_ordinary_response_is_still_stored(self):
-        from wreath.middleware.idempotency import (
-            IdempotencyMiddleware,
+        from wreath.policy.idempotency import (
+            IdempotencyPolicy,
             MemoryIdempotencyStore,
         )
         from wreath.response import Response
 
         store = MemoryIdempotencyStore()
-        middleware = IdempotencyMiddleware(store=store, max_body_bytes=1024)
+        middleware = IdempotencyPolicy(store=store, max_body_bytes=1024)
 
         class _State:
             idempotency_key = "k"

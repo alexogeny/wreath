@@ -175,7 +175,7 @@ async def test_a_redeploy_mid_purge_resumes_rather_than_restarting():
 
 
 def test_every_store_that_purges_offers_a_pass():
-    from wreath.middleware.idempotency import PostgresIdempotencyStore
+    from wreath.policy.idempotency import PostgresIdempotencyStore
     from wreath.policy.ratelimit import PostgresRateLimitStore
     from wreath.session_store import PostgresSessionStore
 
@@ -196,7 +196,7 @@ def test_the_webhook_inbox_and_outbox_offer_a_pass():
 
 
 def test_the_unbounded_purge_documents_what_it_costs():
-    from wreath.middleware.idempotency import PostgresIdempotencyStore
+    from wreath.policy.idempotency import PostgresIdempotencyStore
 
     doc = PostgresIdempotencyStore.purge.__doc__
     assert "one unbounded statement" in doc.lower()

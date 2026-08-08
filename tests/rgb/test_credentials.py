@@ -280,7 +280,7 @@ class TestSsoSession:
         from wreath import Wreath
         from wreath._auth.oauth2 import register_oauth2_login
         from wreath._auth.oidc import OidcProvider
-        from wreath.middleware import SessionMiddleware
+        from wreath.policy import HttpPolicy, SessionPolicy
         from wreath.testing import TestClient
 
         provider = OidcProvider(
@@ -291,7 +291,7 @@ class TestSsoSession:
         provider.token_endpoint = "https://idp.example/token"
 
         app = Wreath()
-        app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
         register_oauth2_login(
             app, "idp", provider=provider, client_id="client",
             client_secret="secret", redirect_uri="https://app.example/auth/callback",

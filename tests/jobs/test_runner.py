@@ -396,7 +396,7 @@ async def test_a_handler_that_raises_still_retries_normally():
 # --- `drive`: the shift handler that keeps an online pass moving ---------------
 #
 # `jobs.drive(pass)` is how the purge and rewrite passes behind `session_store`,
-# `webhooks`, `middleware/idempotency` and `middleware/ratelimit` make progress,
+# `webhooks`, `policy/idempotency` and `policy/ratelimit` make progress,
 # and the closure it registers had never been executed by a test: `_start_passes`
 # was covered, but nothing ever ran the shift it enqueues. Every branch that
 # decides whether a pass continues, halts or fails was `unreached` -- a pass that

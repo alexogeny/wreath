@@ -47,13 +47,13 @@ class TestIdempotencyOperability:
     `request._state`."""
 
     async def test_a_stuck_key_can_be_released(self):
-        from wreath.middleware.idempotency import (
-            IdempotencyMiddleware,
+        from wreath.policy.idempotency import (
+            IdempotencyPolicy,
             MemoryIdempotencyStore,
         )
 
         store = MemoryIdempotencyStore()
-        middleware = IdempotencyMiddleware(store=store)
+        middleware = IdempotencyPolicy(store=store)
         await store.reserve("k")                  # claimed, never completed
         assert (await store.reserve("k"))[0] == "in_flight"
 
@@ -62,13 +62,13 @@ class TestIdempotencyOperability:
 
     async def test_in_flight_conflicts_are_counted(self):
         from wreath.auth import Identity
-        from wreath.middleware.idempotency import (
-            IdempotencyMiddleware,
+        from wreath.policy.idempotency import (
+            IdempotencyPolicy,
             MemoryIdempotencyStore,
         )
 
         store = MemoryIdempotencyStore()
-        middleware = IdempotencyMiddleware(store=store)
+        middleware = IdempotencyPolicy(store=store)
 
         class _Request:
             method = "POST"
@@ -86,9 +86,9 @@ class TestIdempotencyOperability:
     async def test_state_is_reached_through_the_public_api(self):
         import inspect
 
-        from wreath.middleware import idempotency
+        from wreath.policy import idempotency
 
-        source = inspect.getsource(idempotency.IdempotencyMiddleware.after)
+        source = inspect.getsource(idempotency.IdempotencyPolicy.after)
         assert "request._state" not in source, "the middleware still reaches into Request internals"
 
 

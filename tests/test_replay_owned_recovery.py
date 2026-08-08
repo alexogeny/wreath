@@ -256,7 +256,7 @@ async def test_a_lost_claim_makes_idempotency_re_run_rather_than_replay() -> Non
     describes. What it must never do is answer `done` with a fabricated replay,
     or `in_flight` for a request nobody is running.
     """
-    from wreath.middleware.idempotency import PostgresIdempotencyStore
+    from wreath.policy.idempotency import PostgresIdempotencyStore
 
     double = _double("adapter-claim_lost")
     outcome, replay = await PostgresIdempotencyStore(double).reserve("k")

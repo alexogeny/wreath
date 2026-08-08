@@ -194,7 +194,7 @@ class TestSessionSlidingExpiry:
     so an actively used session expires at its absolute age."""
 
     async def test_reading_an_active_session_extends_it(self):
-        from wreath.middleware.sessions import SessionMiddleware
+        from wreath.policy.sessions import SessionPolicy
 
         saved: list = []
 
@@ -211,7 +211,7 @@ class TestSessionSlidingExpiry:
             async def touch(self, sid, max_age):
                 saved.append(("touch", sid, max_age))
 
-        middleware = SessionMiddleware(secret="s" * 32, store=_Store())
+        middleware = SessionPolicy(secret="s" * 32, store=_Store())
         signed = middleware._sign(b"sid-1", __import__("time").time().__trunc__())
 
         class _State:

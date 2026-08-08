@@ -8,7 +8,7 @@ the framework did not read it, and nothing said so at the point of failure.
   own `_db`. So a two-database application that had said which one was refused
   at **lifespan startup** with "cannot tell which database the 'jobs' tables
   belong to".
-* `RateLimitPolicy`, `IdempotencyMiddleware` and `SessionMiddleware` hold a
+* `RateLimitPolicy`, `IdempotencyPolicy` and `SessionPolicy` hold a
   store that owns tables and exposed neither `component()` nor `schema_owners`,
   so `schema_components()` walked them and found nothing: `wreath_rate_limit`,
   `wreath_idempotency` and `wreath_session` were emitted by
@@ -320,8 +320,8 @@ async def test_a_rate_limit_table_is_created_by_lifespan_startup() -> None:
 
 @requires_db
 async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
-    from wreath.middleware.idempotency import (
-        IdempotencyMiddleware,
+    from wreath.policy.idempotency import (
+        IdempotencyPolicy,
         PostgresIdempotencyStore,
     )
 
@@ -330,7 +330,7 @@ async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
     app = Wreath()
     database = app.postgres("main", dsn=dsn)
     app.add_middleware(
-        IdempotencyMiddleware(store=PostgresIdempotencyStore(database, table=table))
+        IdempotencyPolicy(store=PostgresIdempotencyStore(database, table=table))
     )
 
     assert await _resolves(dsn, table) is None, "the table must not pre-exist"
@@ -341,7 +341,7 @@ async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
 
 @requires_db
 async def test_a_session_table_is_created_by_lifespan_startup() -> None:
-    from wreath.middleware.sessions import SessionMiddleware
+    from wreath.policy.sessions import SessionPolicy
     from wreath.session_store import PostgresSessionStore
 
     table = f"wattr_{_worker()}_sess"
@@ -349,7 +349,7 @@ async def test_a_session_table_is_created_by_lifespan_startup() -> None:
     app = Wreath()
     database = app.postgres("main", dsn=dsn)
     app.add_middleware(
-        SessionMiddleware("s" * 32, store=PostgresSessionStore(database, table=table))
+        SessionPolicy("s" * 32, store=PostgresSessionStore(database, table=table))
     )
 
     assert await _resolves(dsn, table) is None, "the table must not pre-exist"
@@ -389,12 +389,13 @@ async def test_a_middleware_owned_table_goes_to_the_database_its_store_holds() -
 async def test_a_cookie_only_session_middleware_claims_nothing() -> None:
     """No store means no tables, which must stay distinct from an unattributable
     claim: answering with `(None,)` would send `None` into the walk."""
-    from wreath.middleware.sessions import SessionMiddleware
+    from wreath.policy import HttpPolicy
+    from wreath.policy.sessions import SessionPolicy
 
-    middleware = SessionMiddleware("s" * 32)
+    middleware = SessionPolicy("s" * 32)
     assert middleware.schema_owners == ()
     app = Wreath()
-    app.add_middleware(middleware)
+    app.configure_http_policy(HttpPolicy(session=middleware))
     assert app.schema_components() == ()
 
 

@@ -118,12 +118,12 @@ def test_h2_initial_window_update_does_not_scan_all_active_streams() -> None:
 
 
 def test_hpack_enforces_decoded_limits_before_materializing_fields() -> None:
-    """The decoded budget belongs inside HPACK, before tuple/list allocation."""
+    """The decoded budget belongs inside HPACK, before retaining a field."""
     source = (_NATIVE / "server_hpack.c").read_text()
     decode = _function(source, "wreath_hpack_decode", "huffman_encoded_len")
-    tuple_at = decode.index("PyTuple_Pack")
-    assert "max_header_count" in decode[:tuple_at]
-    assert "max_header_list" in decode[:tuple_at]
+    append_at = decode.index("wreath_header_block_append_objects")
+    assert "max_header_count" in decode[:append_at]
+    assert "max_header_list" in decode[:append_at]
 
 
 def test_h2_and_h3_wreath_responses_bypass_generic_asgi_messages() -> None:

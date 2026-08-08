@@ -33,6 +33,7 @@ from wreath.authorization import (
     permission_document,
     permissions_router,
 )
+from wreath.policy import HttpPolicy
 from wreath.testing import TestClient
 
 POLICIES = """
@@ -1159,10 +1160,12 @@ async def test_a_composed_cache_middleware_leaves_one_cache_control() -> None:
     # Two `cache-control` headers leaves a proxy reading the first, which would
     # be whatever the middleware set -- `public` on a per-principal answer.
     from wreath.cache_control import CacheControl
-    from wreath.middleware import CacheControlMiddleware
+    from wreath.policy import CachePolicy
 
     app = _app(mount=False)
-    app.add_middleware(CacheControlMiddleware(CacheControl(public=True, max_age=60)))
+    app.configure_http_policy(
+        HttpPolicy(cache_control=CachePolicy(CacheControl(public=True, max_age=60)))
+    )
     app.include_router(permissions_router(app))
 
     async with TestClient(app) as client:
