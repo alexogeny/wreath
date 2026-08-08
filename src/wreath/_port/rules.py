@@ -139,8 +139,8 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "orm.query.order": ("orm_query", "queries", NEEDS_REVIEW, "The columns to order by are not plain strings here, so this tool cannot tell which columns they are. Written out, order_by('name') is .order_by(Model.name) and order_by('-created') is .order_by(Model.created.desc())."),
     "orm.query.order_exact": ("orm_query", "queries", TRANSLATED, "order_by('name') becomes .order_by(Model.name) and order_by('-created') becomes .order_by(Model.created.desc()), on a Model.select() run with session.fetch(). Pass --opinionated and this is written out for you."),
     # -- middleware / lifespan / infra (not floor-checked) --------------------
-    "mw.cors": ("middleware", "other", TRANSLATED, "add_middleware(CORSMiddleware, ...) -> add_middleware(CORSMiddleware(...)) (instance form)"),
-    "mw.trustedhost": ("middleware", "other", TRANSLATED, "TrustedHostMiddleware -> wreath security middleware (instance form)"),
+    "mw.cors": ("middleware", "other", TRANSLATED, "add_middleware(CORSMiddleware, ...) -> configure_http_policy(HttpPolicy(cors=CorsPolicy(...)))"),
+    "mw.trustedhost": ("middleware", "other", TRANSLATED, "TrustedHostMiddleware -> first-class TrustedHostPolicy"),
     "mw.custom": ("middleware", "other", NEEDS_REVIEW, "This is a custom BaseHTTPMiddleware. Check wreath's built-in middleware first, since much of what apps write by hand is already there. If it is genuinely yours, rework it onto wreath's middleware base -- the shape is different: wreath fuses the whole chain at startup instead of nesting one call per layer."),
     # The split at `yield` is determined only when it really is a split: a bare
     # `yield` at the top of the body partitions the statements in two, and each

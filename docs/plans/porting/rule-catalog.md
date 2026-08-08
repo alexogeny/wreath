@@ -76,7 +76,7 @@ layered on the ported models. **unsupported by design.**
 
 | Construct | → wreath | Tag |
 |---|---|---|
-| `add_middleware(CORSMiddleware, ...)` | `add_middleware(CORSMiddleware(...))` (instance form) | 1:1 |
+| `add_middleware(CORSMiddleware, ...)` | `configure_http_policy(HttpPolicy(cors=CorsPolicy(...)))` | 1:1 |
 | custom `BaseHTTPMiddleware` subclass | copy verbatim; map to a built-in by intent | lossy/unsupported |
 | `pydantic-settings` `BaseSettings` (incl. nested groups) | `load_env` + `required_env` + a dataclass | lossy |
 | `HTTPException(status_code=<int>, detail=)` | `NotFound(...)` etc. (status→class table) | 1:1 (literal status) |
