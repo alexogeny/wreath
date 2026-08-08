@@ -5,8 +5,12 @@ start/body/trailers, application exceptions, and out-of-order multiplexing.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from wreath import Wreath
+from wreath.response import PreparedResponse
 from wreath.server import ServerConfig
 
 from . import support
@@ -127,6 +131,99 @@ async def test_response_status_and_body(make_driver):
     status = dict(streams[1]["headers"])[b":status"]
     assert status == b"201"
     assert streams[1]["body"] == b"created"
+
+
+async def test_synchronous_completion_owns_no_asyncio_task(make_driver):
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"done"})
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_task_factory()
+    created: list[asyncio.Task] = []
+
+    def task_factory(loop, coroutine, **kwargs):
+        task = asyncio.Task(coroutine, loop=loop, **kwargs)
+        created.append(task)
+        return task
+
+    loop.set_task_factory(task_factory)
+    try:
+        d = make_driver(app)
+        await d.preface()
+        await d.feed_and_settle(
+            support.build_headers_frame(1, support.request_headers())
+        )
+    finally:
+        loop.set_task_factory(previous)
+
+    assert created == []
+    assert _decode_response(d)[1]["body"] == b"done"
+
+
+async def test_real_suspension_transfers_to_one_asyncio_task(make_driver):
+    async def app(scope, receive, send):
+        await asyncio.sleep(0)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"done"})
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_task_factory()
+    created: list[asyncio.Task] = []
+
+    def task_factory(loop, coroutine, **kwargs):
+        task = asyncio.Task(coroutine, loop=loop, **kwargs)
+        created.append(task)
+        return task
+
+    loop.set_task_factory(task_factory)
+    try:
+        d = make_driver(app)
+        await d.preface()
+        await d.feed_and_settle(
+            support.build_headers_frame(1, support.request_headers())
+        )
+    finally:
+        loop.set_task_factory(previous)
+
+    assert len(created) == 1
+    assert _decode_response(d)[1]["body"] == b"done"
+
+
+async def test_native_one_shot_response_fuses_headers_and_data_transport_write(
+    make_driver,
+):
+    app = Wreath()
+    app.frozen("/", PreparedResponse.text("done"))
+    d = make_driver(app)
+    await d.preface()
+    writes_before_request = len(d.transport.writes)
+
+    d.feed(support.build_headers_frame(1, support.request_headers()))
+
+    assert len(d.transport.writes) == writes_before_request + 1
+    assert _decode_response(d)[1]["body"] == b"done"
+
+
+async def test_native_one_shot_responses_share_the_input_batch_transport_write(
+    make_driver,
+):
+    app = Wreath()
+    app.frozen("/", PreparedResponse.text("done"))
+    d = make_driver(app)
+    await d.preface()
+    writes_before_requests = len(d.transport.writes)
+    request = support.request_headers()
+
+    d.feed(
+        support.build_headers_frame(1, request)
+        + support.build_headers_frame(3, request)
+    )
+
+    assert len(d.transport.writes) == writes_before_requests + 1
+    streams = _decode_response(d)
+    assert streams[1]["body"] == b"done"
+    assert streams[3]["body"] == b"done"
 
 
 async def test_server_default_response_headers(make_driver):
