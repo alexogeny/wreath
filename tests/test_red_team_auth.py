@@ -174,6 +174,109 @@ async def test_a_login_wired_to_the_wrong_factor_store_refuses_rather_than_admit
         assert "pending_second_factor" not in session
 
 
+class _SharedUserStore(InMemoryUserStore):
+    """Two objects, one table -- the shape `OrmUserStore` has by construction.
+
+    `OrmUserStore(session, model)` holds no data of its own, so two of them over
+    the same model read and write the same rows. A deployment that builds one
+    inline for each router therefore has two `UserStore` *objects* serving one
+    set of users, and `_SecondFactorWiring` matched them with `is`. Here the
+    shared table stands in for the shared database, and `store_id` is the
+    declared identity the ORM stores derive from their model.
+    """
+
+    def __init__(self, shared: dict[str, Any], store_id: object) -> None:
+        super().__init__()
+        self._by_id = shared["by_id"]
+        self._by_email = shared["by_email"]
+        self.store_id = store_id
+
+
+async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_check(
+) -> None:
+    """The identity keying, attacked where it is weakest.
+
+    `_mounted_second_factors(users)` filtered on `wiring.users is users`, so a
+    deployment that constructed its `UserStore` separately for each router
+    matched nothing at all: the login found no wiring to consult, decided the
+    account had no factor it could not check, and signed the caller in on a
+    password alone with 2FA enrolled. Every signal saying protected, nothing
+    being so -- the exact failure `second_factor_not_wired` exists to refuse,
+    reached by going around the test that finds it.
+    """
+    shared: dict[str, Any] = {"by_id": {}, "by_email": {}}
+    login_users = _SharedUserStore(shared, store_id="users-table")
+    enrol_users = _SharedUserStore(shared, store_id="users-table")
+    clock = _Clock()
+    login_store, enrol_store = InMemorySecondFactorStore(), InMemorySecondFactorStore()
+
+    app = Wreath()
+    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.include_router(
+        user_router(login_users, secret="u" * 32, second_factors=login_store, clock=clock)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        app.include_router(
+            second_factor_router(enrol_users, enrol_store, issuer="Wreath", clock=clock)
+        )
+
+    @app.get("/session")
+    async def show(request: Any) -> dict[str, Any]:
+        return dict(request.state.session)
+
+    async with TestClient(app) as client:
+        await login_users.create("ann@example.test", hash_password(PASSWORD))
+        cookie = await _enrol_totp(client, clock, _cookie(await _login(client)))
+        await client.post("/users/logout", headers={"cookie": cookie})
+        clock.now += 60
+
+        signed_in = await _login(client)
+
+    assert signed_in.status == 500, signed_in.json()
+    assert signed_in.json()["error"] == "second_factor_not_wired"
+
+
+async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> None:
+    """The control the widened match must not cost.
+
+    Two applications in one process have different users, and
+    `InMemoryUserStore` numbers both from `"1"`. Matching on a user id -- or on
+    nothing at all -- would make one application's login refuse because the
+    *other* application's user 1 has a factor. Declared identities differ here,
+    so neither consults the other.
+    """
+    clock = _Clock()
+    first_users = _SharedUserStore({"by_id": {}, "by_email": {}}, store_id="tenant-a")
+    second_users = _SharedUserStore({"by_id": {}, "by_email": {}}, store_id="tenant-b")
+    second_factors = InMemorySecondFactorStore()
+
+    app = Wreath()
+    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    # The first application's login reads no second-factor store at all, and its
+    # own user has no factor. The second application's user 1 does.
+    app.include_router(user_router(first_users, secret="u" * 32, clock=clock))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        app.include_router(
+            second_factor_router(second_users, second_factors, issuer="Wreath",
+                                 clock=clock)
+        )
+
+    async with TestClient(app) as client:
+        await first_users.create("ann@example.test", hash_password(PASSWORD))
+        user = await second_users.create("bob@example.test", hash_password(PASSWORD))
+        secret = generate_totp_secret()
+        await confirm_totp_enrolment(
+            second_factors, user.id, secret=secret,
+            code=totp_code(secret, totp_counter(clock.now)),
+            label="phone", at=clock.now,
+        )
+        signed_in = await _login(client)
+
+    assert signed_in.status == 200, signed_in.json()
+
+
 async def test_the_same_store_in_both_routers_still_prompts_for_the_factor() -> None:
     """Control: the correct wiring is unchanged, and must not start refusing.
 

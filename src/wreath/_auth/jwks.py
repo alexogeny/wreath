@@ -35,6 +35,7 @@ class JwksCache:
 
     __slots__ = (
         "duplicate_kids",
+        "empty_documents",
         "fetch_errors",
         "malformed_keys",
         "_client",
@@ -71,6 +72,10 @@ class JwksCache:
         #: provider that starts serving junk shows up here rather than as keys
         #: that quietly stopped resolving.
         self.malformed_keys = 0
+        #: Refreshes that read a 200 and found no usable signing key in it. The
+        #: cache is cleared on one, so this is the count of *revocations* --
+        #: distinct from `fetch_errors`, which never clears anything.
+        self.empty_documents = 0
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -164,8 +169,22 @@ class JwksCache:
                 self.duplicate_kids += 1
                 continue
             keys[name] = key
-        if keys:
-            self._keys = keys
+        if not keys:
+            # **Zero usable keys is an answer, not a failure**, and the two must
+            # not share a branch. The `status != 200` path above retains the
+            # cache deliberately, because a transient IdP error must not wipe a
+            # working one; a 200 carrying `{"keys": []}` is the issuer saying
+            # every key it had is withdrawn, and retaining them turns a
+            # revocation into a no-op for the process lifetime. The same state
+            # is reached by a document that is all `use:enc`, all malformed, or
+            # all duplicate `kid` -- in each case the issuer served something
+            # readable and none of it signs anything.
+            #
+            # Counted, because the previous behaviour's whole problem was that
+            # it was silent: `fetch_errors` and `malformed_keys` both stayed at
+            # zero while authentication carried on against withdrawn keys.
+            self.empty_documents += 1
+        self._keys = keys
         self._last_refresh = self._now()
         self._expires_at = self._last_refresh + _ttl_from_headers(response, self._ttl)
 
