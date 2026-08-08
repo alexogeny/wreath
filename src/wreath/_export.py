@@ -37,6 +37,7 @@ from collections.abc import Callable
 from typing import Any, Final
 from typing import Protocol as _Protocol
 
+from ._drainthread import DrainThread
 from ._logsink import BoundedLogQueue
 from ._otlp import (
     BoundedExportQueue,
@@ -236,7 +237,6 @@ class ExportPipeline:
         "_resource",
         "_queue",
         "_batch_size",
-        "_interval",
         "_snapshot_provider",
         "_metrics_start_ns",
         "_lock",
@@ -247,8 +247,7 @@ class ExportPipeline:
         "_exported_logs",
         "_log_queue",
         "_log_registry",
-        "_thread",
-        "_stop",
+        "_drain",
     )
 
     def __init__(
@@ -272,7 +271,6 @@ class ExportPipeline:
         self._resource = resource_attributes
         self._queue = BoundedExportQueue(queue_capacity)
         self._batch_size = batch_size
-        self._interval = interval
         self._snapshot_provider = snapshot_provider
         self._metrics_start_ns = 0
         self._lock = threading.Lock()
@@ -286,8 +284,9 @@ class ExportPipeline:
         # queue would let a log burst evict the traces an operator came for.
         self._log_queue: BoundedLogQueue = BoundedLogQueue(queue_capacity)
         self._log_registry = log_registry
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._drain = DrainThread(
+            "wreath-flight-export", interval, self._tick, self._flush
+        )
 
     # -- hook and lifecycle -------------------------------------------------
 
@@ -316,30 +315,25 @@ class ExportPipeline:
         self._snapshot_provider = provider
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        # The stamp is inside the guard, so a second `start` on a running
+        # pipeline does not reset the window the metric deltas are read against.
+        if self._drain.running:
             return
         self._metrics_start_ns = time.time_ns()
-        self._stop.clear()
-        thread = threading.Thread(
-            target=self._run, name="wreath-flight-export", daemon=True
-        )
-        self._thread = thread
-        thread.start()
+        self._drain.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout)
-            self._thread = None
-        # Final flush: drain whatever traces remain and emit one last metric read.
+        self._drain.stop(timeout)
+
+    def _flush(self) -> None:
+        """The last drain, after `stop` has joined the thread.
+
+        Traces and metrics but deliberately *not* logs: a log record is already
+        published to the ring by its writer, and re-exporting the tail here
+        would double-count against `_exported_logs`.
+        """
         self._export_traces()
         self._export_metrics()
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self._tick()
-            self._stop.wait(self._interval)
 
     def _tick(self) -> None:
         self._export_traces()
