@@ -1605,15 +1605,18 @@ async def test_registering_a_further_passkey_does_not_stamp_the_session() -> Non
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
-        # The victim enrols a TOTP factor and walks away.
+        # The victim enrols a TOTP factor, which stamps, and adds a passkey
+        # while that stamp is still fresh -- the ordinary way a user ends up
+        # with two factors, and the case the guard below must not cost.
+        enrolled_at = int(clock.now)
         cookie = await _enrol_totp(client, clock, _cookie(await _http_login(client)))
-        clock.now += 3600
+        clock.now += 60
 
         cookie = await _enrolled(client, _Authenticator(credential_id=b"second"), cookie)
         session = (await client.get("/session", headers={"cookie": cookie})).json()
-        # Stale, because the enrolment left it alone -- not absent, because the
-        # first factor's confirmation did stamp it an hour ago.
-        assert session["principal"]["second_factor_at"] == int(clock.now) - 3600
+        # A minute old, because the enrolment left it alone -- not absent,
+        # because the first factor's confirmation did stamp it.
+        assert session["principal"]["second_factor_at"] == enrolled_at
 
 
 async def test_registering_a_further_passkey_does_not_satisfy_the_removal_guard() -> None:
@@ -1631,15 +1634,49 @@ async def test_registering_a_further_passkey_does_not_satisfy_the_removal_guard(
             await client.delete(f"/auth/2fa/{victim_factor}", headers={"cookie": cookie})
         ).status == 403
 
-        cookie = await _enrolled(client, _Authenticator(credential_id=b"attacker"), cookie)
-        refused = await client.delete(
-            f"/auth/2fa/{victim_factor}", headers={"cookie": cookie}
+        # The enrolment itself is refused, so there is no passkey to prove.
+        refused = await client.post(
+            "/auth/2fa/webauthn/begin", headers={"cookie": cookie}
         )
         assert refused.status == 403
         assert refused.json() == {"error": "second_factor_required"}
+        assert (
+            await client.delete(f"/auth/2fa/{victim_factor}", headers={"cookie": cookie})
+        ).status == 403
 
 
-async def test_enrolling_totp_beside_a_passkey_does_not_stamp_either() -> None:
+async def test_a_stale_session_cannot_enrol_a_passkey_and_step_up_with_it() -> None:
+    """Declining to stamp the enrolment is not enough: `/verify` stamps too.
+
+    Registering a passkey never stamped the session, but nothing stopped the
+    caller registering one and then *proving* it a request later, which does.
+    The detour costs one round trip and ends with the attacker's own key as the
+    only factor on the account, so the enrolment is what has to be refused.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
+        await _seed(users)
+        cookie = await _enrol_totp(client, clock, _cookie(await _http_login(client)))
+        listed = (await client.get("/auth/2fa", headers={"cookie": cookie})).json()
+        victim_factor = listed["factors"][0]["id"]
+
+        clock.now += 3600
+        begun = await client.post("/auth/2fa/webauthn/begin", headers={"cookie": cookie})
+        assert begun.status == 403, begun.json()
+
+        # And the assertion end has nothing of the attacker's to prove: the only
+        # credential on the account is the victim's TOTP factor.
+        stepped_up = await client.post(
+            "/auth/2fa/webauthn/verify/begin", headers={"cookie": cookie}
+        )
+        assert stepped_up.status == 400
+        assert stepped_up.json() == {"error": "no_second_factor_enrolled"}
+        assert (
+            await client.delete(f"/auth/2fa/{victim_factor}", headers={"cookie": cookie})
+        ).status == 403
+
+
+async def test_a_stale_session_cannot_enrol_totp_beside_a_passkey() -> None:
     """The mirror image, so neither enrolment route carries the hole alone."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
@@ -1651,11 +1688,28 @@ async def test_enrolling_totp_beside_a_passkey_does_not_stamp_either() -> None:
         victim_factor = listed["factors"][0]["id"]
 
         clock.now += 3600
-        cookie = await _enrol_totp(client, clock, cookie)
-        refused = await client.delete(
-            f"/auth/2fa/{victim_factor}", headers={"cookie": cookie}
-        )
+        refused = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
         assert refused.status == 403
+        assert refused.json() == {"error": "second_factor_required"}
+        assert (
+            await client.delete(f"/auth/2fa/{victim_factor}", headers={"cookie": cookie})
+        ).status == 403
+
+
+async def test_enrolling_totp_beside_a_passkey_does_not_stamp_either() -> None:
+    """A fresh stamp permits the enrolment, and the enrolment does not renew it."""
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
+        await _seed(users)
+        enrolled_at = int(clock.now)
+        cookie = await _enrolled(
+            client, _Authenticator(), _cookie(await _http_login(client))
+        )
+
+        clock.now += 60
+        cookie = await _enrol_totp(client, clock, cookie)
+        session = (await client.get("/session", headers={"cookie": cookie})).json()
+        assert session["principal"]["second_factor_at"] == enrolled_at
 
 
 async def test_a_first_factor_still_stamps_so_it_can_be_undone() -> None:

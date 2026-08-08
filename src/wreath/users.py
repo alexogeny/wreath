@@ -124,13 +124,21 @@ class _SecondFactorWiring:
     """One mounted `second_factor_router`, as `user_router` needs to see it.
 
     `users` is the identity that scopes it. A `user_router` consults only the
-    wirings built over **the same `UserStore` object it holds**, which is what
-    makes this exact rather than approximate: two routers sharing a user store
-    are two halves of one application's login by construction, and a second
-    application in the same process -- or the next test in the same worker --
-    has a different store and is never consulted. Matching on the user id
-    instead would be a coincidence waiting to happen, since `InMemoryUserStore`
-    numbers its users from one.
+    wirings built over **the same users** it serves, and "the same" means the
+    same object *or* the same declared `store_id` -- see `_same_store`.
+
+    Object identity alone was the original rule and it was too narrow: it is
+    exact for a store that holds its own data, and silently false for one that
+    does not. `OrmUserStore(session, model)` holds nothing, so two of them over
+    the same model are two objects serving one table -- which is what a
+    deployment gets by building a store inline for each router, the mistake
+    `_factor_another_store_holds` was written for one field over. Under `is`
+    that login matched no wiring at all, concluded there was no factor it could
+    not check, and signed the caller in on a password alone with 2FA enrolled.
+
+    Matching on the *user id* instead would be a coincidence waiting to happen,
+    since `InMemoryUserStore` numbers its users from one -- which is why the
+    widening is a declared identity rather than a guess.
 
     `anchor` is a weak reference to one of that router's own handler functions,
     which is what scopes this record's *lifetime*: the router holds the handler,
@@ -161,19 +169,39 @@ class _SecondFactorWiring:
 _MOUNTED_SECOND_FACTORS: list[_SecondFactorWiring] = []
 
 
+def _same_store(left: Any, right: Any) -> bool:
+    """Whether two store objects serve the same rows.
+
+    The same object always does. Two *different* objects do when both declare
+    the same `store_id` -- an optional attribute a store sets when its identity
+    is something other than itself. `OrmUserStore` and `OrmSecondFactorStore`
+    return their model class, because that is what decides which table they
+    read; a store that holds its own data (`InMemoryUserStore`) declares none,
+    and `is` remains the right and only answer for it.
+
+    `None` on either side falls back to identity rather than matching, so a
+    store that declares nothing is never fused with another that declares
+    nothing. Two applications in one process would otherwise be treated as one.
+    """
+    if left is right:
+        return True
+    key = getattr(left, "store_id", None)
+    return key is not None and key == getattr(right, "store_id", None)
+
+
 def _mounted_second_factors(users: UserStore | None = None) -> list[_SecondFactorWiring]:
     """The live wirings, dropping any whose router has been collected.
 
-    With `users`, only the ones serving that same user store: see
-    `_SecondFactorWiring` for why identity is the right scope and a user id is
-    not.
+    With `users`, only the ones serving those same users: see
+    `_SecondFactorWiring` for why a declared store identity is the right scope
+    and a user id is not.
     """
     live = [wiring for wiring in _MOUNTED_SECOND_FACTORS if wiring.anchor() is not None]
     if len(live) != len(_MOUNTED_SECOND_FACTORS):
         _MOUNTED_SECOND_FACTORS[:] = live
     if users is None:
         return live
-    return [wiring for wiring in live if wiring.users is users]
+    return [wiring for wiring in live if _same_store(wiring.users, users)]
 
 
 def _ceremony_slots(users: UserStore, sessions: Any) -> list[tuple[str, str, Any]]:
@@ -297,7 +325,11 @@ async def _factor_another_store_holds(
     factor and no login prompt asks for one on its own.
     """
     for wiring in _mounted_second_factors(users):
-        if wiring.factors is consulted:
+        if _same_store(wiring.factors, consulted):
+            # Already read by the login itself. `_same_store` rather than `is`
+            # for the same reason as the user store: two `OrmSecondFactorStore`s
+            # over one model are one store, and asking the second would cost a
+            # query to re-read what the login has already seen.
             continue
         for row in await wiring.factors.credentials(user_id):
             if row.kind != "recovery":
@@ -971,16 +1003,26 @@ def second_factor_router(
     clears nothing, and there the ceremony's own record of who began it is what
     refuses a session that has changed hands.
 
+    **Adding a factor to an account that already has one is itself a step-up**,
+    and it is refused with `403 second_factor_required` unless a factor was
+    proved within `step_up_ttl` -- the same predicate `DELETE /{factor_id}`
+    uses, read in one place so the two cannot drift. `/totp/begin`,
+    `/webauthn/begin` and both `confirm` routes carry it; the confirms re-check
+    at the write, so a ceremony begun on a fresh stamp cannot land on a stale
+    one. The **first** factor is exempt, because there is nothing to step up
+    from, and recovery codes do not count as one -- they are minted alongside
+    TOTP and never alone.
+
     **Enrolling a factor stamps the session only when it is the first one.** A
     stamp says the caller proved a factor the account already had; a factor the
     caller has just chosen proves possession of their own authenticator instead.
-    Without that condition, somebody holding a stolen session could register a
-    passkey of their own, be stamped for it, and walk straight through
-    `DELETE /{factor_id}` and every `wreath.auth.second_factor` route -- the
-    guard turning aside exactly the caller it exists to stop. Adding a second
-    factor to an account that already has one therefore leaves the stamp alone,
-    and a user who wants to remove something afterwards proves a factor at
-    `POST /verify` like anybody else.
+    That condition is necessary and was once believed sufficient: it stops the
+    enrolment stamping directly, but not the caller who registers a passkey of
+    their own and then *proves* it at `POST /webauthn/verify` one request later,
+    which stamps for real. Somebody holding a stolen session walked through
+    `DELETE /{factor_id}` and every `wreath.auth.second_factor` route that way,
+    for the cost of one extra round trip. Refusing the enrolment is what closes
+    it; declining to stamp it remains true and is no longer load-bearing.
 
     `POST /verify` is the other end, and it serves two moments with one route.
     Given a **pending** login it finishes it, rotating the session id before
@@ -1146,6 +1188,46 @@ def second_factor_router(
             return None
         return await users.get_by_id(str(principal["sub"]))
 
+    def _stale_step_up(session: dict[str, Any]) -> bool:
+        """Whether no factor has been proved on this session within the window.
+
+        The one reading of `second_factor_at`, so `DELETE` and the enrolment
+        routes cannot drift apart on what counts as recent. A `bool` is refused
+        before the numeric test because `True` is an `int` and would otherwise
+        read as one second past the epoch -- ancient, but the arithmetic below
+        would still run on it.
+        """
+        principal = _principal(session)
+        stamp = None if principal is None else principal.get("second_factor_at")
+        return (
+            isinstance(stamp, bool)
+            or not isinstance(stamp, (int, float))
+            or clock() - stamp > step_up_ttl
+        )
+
+    def _step_up_required() -> JSONResponse:
+        return JSONResponse({"error": "second_factor_required"}, status=403)
+
+    def _may_enrol(session: dict[str, Any], enrolled: Any) -> bool:
+        """Whether this session may add a factor, given what the account holds.
+
+        **Adding a factor to an account that already has one is a step-up.**
+        Declining to *stamp* such an enrolment is not enough on its own: the
+        caller can register a passkey of their own and then prove it at
+        `POST /webauthn/verify` a request later, which does stamp, and walk
+        through `DELETE /{factor_id}` with the victim's real factor. The detour
+        costs one round trip, so the enrolment itself is what has to be refused.
+
+        The *first* factor is exempt, because there is nothing to step up from
+        and the account would otherwise be unable to enrol at all. Recovery
+        codes do not count as a factor here: they are minted alongside TOTP and
+        never on their own, so an account holding only them is in the same
+        position as an account holding nothing.
+        """
+        return not any(row.kind != "recovery" for row in enrolled) or not _stale_step_up(
+            session
+        )
+
     def _stamp(session: dict[str, Any], extra: dict[str, Any] | None = None) -> None:
         """Record on the principal that a second factor was just proved.
 
@@ -1253,7 +1335,14 @@ def second_factor_router(
             # Enrolling twice would mint a second secret and a second set of
             # recovery codes, invalidating neither -- so it is refused rather
             # than quietly leaving the user with two of everything.
+            #
+            # Ahead of the step-up check below because it is the more specific
+            # answer and costs nothing to give: `GET /auth/2fa` already lists
+            # this account's factors to any signed-in session, so naming the
+            # collision tells a caller nothing they could not already read.
             return JSONResponse({"error": "already_enrolled"}, status=409)
+        if not _may_enrol(session, enrolled):
+            return _step_up_required()
         enrolment = _secondfactor.begin_totp_enrolment(
             account=user.email, issuer=issuer, label=label,
             digits=digits, period=period,
@@ -1330,6 +1419,12 @@ def second_factor_router(
         if any(row.kind == "totp" for row in enrolled):
             await _forget_enrolment(session, marker)
             return JSONResponse({"error": "already_enrolled"}, status=409)
+        if not _may_enrol(session, enrolled):
+            # Re-checked at the write, not just at `begin`: a ceremony begun
+            # while the stamp was fresh must not be confirmable after it has
+            # gone stale, and the session may have changed hands in between.
+            await _forget_enrolment(session, marker)
+            return _step_up_required()
         # Whether this is the *first* real factor decides whether confirming it
         # may stamp the session. See `_stamp`'s caller below.
         first_factor = not any(row.kind != "recovery" for row in enrolled)
@@ -1600,12 +1695,15 @@ def second_factor_router(
             user = await _signed_in(session)
             if user is None:
                 return JSONResponse({"error": "not_authenticated"}, status=401)
+            existing = await factors.credentials(user.id)
+            if not _may_enrol(session, existing):
+                return _step_up_required()
             ceremony = _secondfactor.begin_webauthn_registration(
                 user_id=user.id,
                 account=user.email,
                 rp_id=rp_id,
                 rp_name=rp_name,
-                existing=await factors.credentials(user.id),
+                existing=existing,
                 user_verification=user_verification,
             )
             return await _begin_ceremony(session, ceremony, user.id)
@@ -1637,9 +1735,12 @@ def second_factor_router(
             # Read before the registration writes, for the same reason
             # `totp/confirm` reads before its own: only the *first* factor a
             # user has may stamp the session.
-            first_factor = not any(
-                row.kind != "recovery" for row in await factors.credentials(user.id)
-            )
+            existing = await factors.credentials(user.id)
+            if not _may_enrol(session, existing):
+                # Re-checked at the write, as `totp/confirm` re-checks its own:
+                # a ceremony begun on a fresh stamp must not land on a stale one.
+                return _step_up_required()
+            first_factor = not any(row.kind != "recovery" for row in existing)
             try:
                 credential, codes = await _secondfactor.confirm_webauthn_registration(
                     factors,
@@ -1784,18 +1885,14 @@ def second_factor_router(
         user = await _signed_in(session)
         if user is None:
             return JSONResponse({"error": "not_authenticated"}, status=401)
-        principal = _principal(session)
-        stamp = None if principal is None else principal.get("second_factor_at")
         # Turning a second factor off is what somebody holding a stolen session
         # wants to do first, so it is guarded by the thing they do not have. A
         # 403 rather than a 401: the caller is signed in, and re-entering a
         # password would not help -- `POST /auth/2fa/verify` is the remediation.
-        if (
-            isinstance(stamp, bool)
-            or not isinstance(stamp, (int, float))
-            or clock() - stamp > step_up_ttl
-        ):
-            return JSONResponse({"error": "second_factor_required"}, status=403)
+        # The same predicate guards the enrolment routes, because registering a
+        # factor and then proving it is otherwise a two-request way around this.
+        if _stale_step_up(session):
+            return _step_up_required()
         removed = await _secondfactor.remove_second_factor(factors, user.id, factor_id)
         if removed is None:
             # One answer for "no such id", "not yours", and "that is a recovery
@@ -1900,6 +1997,18 @@ class OrmUserStore:
     def __init__(self, session: Any, model: type[Any]) -> None:
         self._session = session
         self._model = model
+
+    @property
+    def store_id(self) -> object:
+        """The model, which is what decides the rows this store serves.
+
+        Two of these over one model are one store wearing two objects, and a
+        deployment that builds one inline for each router has exactly that. See
+        `UserStore` for the convention and `_same_store` for what reads it; the
+        session is deliberately not part of it, since two sessions on one
+        database still see the same table.
+        """
+        return self._model
 
     def _to_record(self, row: Any) -> UserRecord:
         return UserRecord(
@@ -2061,6 +2170,11 @@ class OrmSecondFactorStore:
         self._session = session
         self._model = model
         self._advance_sql: str | None = None
+
+    @property
+    def store_id(self) -> object:
+        """The model. `OrmUserStore.store_id` says why."""
+        return self._model
 
     def _to_record(self, row: Any) -> SecondFactor:
         return SecondFactor(

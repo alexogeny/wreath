@@ -205,7 +205,23 @@ class UserRecord:
 
 @runtime_checkable
 class UserStore(Protocol):
-    """Persistence seam for users — supply your own, or use InMemory/an ORM adapter."""
+    """Persistence seam for users — supply your own, or use InMemory/an ORM adapter.
+
+    **A store that does not hold its own data should declare a `store_id`.**
+    `wreath.users` has to decide whether a `user_router` and a
+    `second_factor_router` serve the same users, and two objects over one
+    database are two objects: `OrmUserStore(session, model)` keeps nothing, so
+    building one inline for each router is a mistake that reads as correct at
+    the call site. `store_id` is any hashable value equal across the stores that
+    share rows — the ORM adapters return their model class. Declaring none means
+    "this object is the identity", which is right for `InMemoryUserStore` and
+    for anything else that owns what it serves.
+    """
+
+    #: Optional. What decides which rows this store serves, when that is not the
+    #: object itself. See the class docstring; `wreath.users._same_store` reads
+    #: it, and a store that declares nothing is matched by identity.
+    store_id: object
 
     async def get_by_email(self, email: str) -> UserRecord | None:
         """The user with this email address, or `None` if there is none.
