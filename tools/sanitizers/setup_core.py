@@ -19,6 +19,7 @@ FLAGS = [
 # Kept in step with the `wreath._native._core` extension in setup.py.
 SOURCES = (
     "_coremodule.c",
+    "activate.c",
     "authz.c",
     "cedar.c",
     "env.c",
@@ -38,6 +39,7 @@ SOURCES = (
     "xml.c",
     "templates.c",
     "http.c",
+    "header_block.c",
     "router.c",
     "dtrouter.c",
     "dtbitset.c",
