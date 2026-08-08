@@ -19,9 +19,10 @@ import pytest
 from wreath import Wreath
 from wreath._auth.models import Identity
 from wreath._auth.requirements import add_authenticated
-from wreath.middleware import (
-    RateLimitMiddleware,
-    TieredRateLimitMiddleware,
+from wreath.policy import (
+    HttpPolicy,
+    RateLimitPolicy,
+    TieredRateLimitPolicy,
     principal_key,
 )
 from wreath.testing import TestClient
@@ -30,8 +31,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _app(middleware) -> Wreath:
-    app = Wreath()
-    app.add_middleware(middleware)
+    app = Wreath(http_policy=HttpPolicy(principal_rate_limit=middleware))
 
     @app.get("/llamas")
     @add_authenticated
@@ -45,7 +45,7 @@ def _app(middleware) -> Wreath:
 
 
 async def test_each_principal_gets_its_own_allowance() -> None:
-    app = _app(TieredRateLimitMiddleware(tiers={"pro": (9, 60.0)}, default=(1, 60.0)))
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (9, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
         ada = client.acting_as("ada")
         bo = client.acting_as("bo")
@@ -59,7 +59,7 @@ async def test_the_global_limiter_refuses_to_key_on_the_principal() -> None:
     """The trap: it runs before authentication, so it would bucket everyone
     together and look like it worked. A startup error beats that discovery."""
     with pytest.raises(ValueError, match="before authentication"):
-        RateLimitMiddleware(limit=1, window=60.0, key=principal_key)
+        RateLimitPolicy(limit=1, window=60.0, key=principal_key)
 
 
 async def test_a_principal_id_cannot_collide_with_an_address() -> None:
@@ -89,7 +89,7 @@ async def test_an_anonymous_caller_falls_back_to_its_address() -> None:
 
 
 async def test_a_tier_gets_the_allowance_its_role_names() -> None:
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (3, 60.0)}, default=(1, 60.0)
     ))
     async with TestClient(app) as client:
@@ -106,7 +106,7 @@ async def test_a_tier_gets_the_allowance_its_role_names() -> None:
 
 async def test_the_most_generous_matching_tier_wins() -> None:
     """Holding two plans must not be worse than holding the better one."""
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (3, 60.0), "enterprise": (8, 60.0)}, default=(1, 60.0)
     ))
     async with TestClient(app) as client:
@@ -118,7 +118,7 @@ async def test_the_most_generous_matching_tier_wins() -> None:
 
 
 async def test_an_unrecognised_role_gets_the_default() -> None:
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (5, 60.0)}, default=(1, 60.0)
     ))
     async with TestClient(app) as client:
@@ -130,7 +130,7 @@ async def test_an_unrecognised_role_gets_the_default() -> None:
 
 async def test_tiers_do_not_share_a_bucket() -> None:
     """A promotion arrives with a full allowance, not the old plan's remainder."""
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (2, 60.0)}, default=(1, 60.0)
     ))
     async with TestClient(app) as client:
@@ -144,7 +144,7 @@ async def test_tiers_do_not_share_a_bucket() -> None:
 
 
 async def test_a_custom_tier_function_can_read_anything() -> None:
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"enterprise": (4, 60.0)},
         default=(1, 60.0),
         tier=lambda request: (
@@ -160,7 +160,7 @@ async def test_a_custom_tier_function_can_read_anything() -> None:
 
 
 async def test_a_limited_response_says_when_to_come_back() -> None:
-    app = _app(TieredRateLimitMiddleware(tiers={"pro": (5, 60.0)}, default=(1, 60.0)))
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (5, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
         caller = client.acting_as("bo")
         await caller.get("/llamas")
@@ -170,23 +170,33 @@ async def test_a_limited_response_says_when_to_come_back() -> None:
     assert int(limited.header("retry-after")) >= 1
 
 
-async def test_it_is_route_middleware_on_purpose() -> None:
-    """Global hooks run before authentication, where there is no principal."""
-    assert TieredRateLimitMiddleware.global_scope is False
-    assert RateLimitMiddleware.global_scope is True     # ingress, keyed on address
+async def test_the_tiered_limiter_is_first_class_post_auth_policy() -> None:
+    """Its identity-dependent placement is fixed by HttpPolicy, not hook metadata."""
+    limiter = TieredRateLimitPolicy(tiers={"pro": (5, 60.0)}, default=(1, 60.0))
+    policy = HttpPolicy(principal_rate_limit=limiter)
+    assert policy.principal_rate_limit is limiter
+    assert not hasattr(TieredRateLimitPolicy, "global_scope")
+
+
+async def test_a_local_principal_limiter_uses_its_synchronous_stage() -> None:
+    app = _app(RateLimitPolicy(limit=1, window=60.0))
+    async with TestClient(app) as client:
+        caller = client.acting_as("ada")
+        assert (await caller.get("/llamas")).status == 200
+        assert (await caller.get("/llamas")).status == 429
 
 
 async def test_at_least_one_tier_is_required() -> None:
     with pytest.raises(ValueError, match="at least one tier"):
-        TieredRateLimitMiddleware(tiers={}, default=(1, 60.0))
+        TieredRateLimitPolicy(tiers={}, default=(1, 60.0))
 
 
 # --- what the tier actually hands to its limiter ------------------------------
 #
-# `TieredRateLimitMiddleware` builds one `RateLimitMiddleware` per tier.
+# `TieredRateLimitPolicy` builds one `RateLimitPolicy` per tier.
 # `wreath mutant` dropped `window=`, `cost=` and `exempt=` from that call and
 # every test stayed green: every test above uses `window=60.0`, which is also
-# `RateLimitMiddleware`'s default, so the propagation was invisible. A tier
+# `RateLimitPolicy`'s default, so the propagation was invisible. A tier
 # declared "10 per day" silently becoming "10 per minute" is a 1440x weaker
 # limit that no test could see.
 
@@ -194,10 +204,10 @@ async def test_at_least_one_tier_is_required() -> None:
 async def test_a_tier_window_is_not_quietly_replaced_by_the_default() -> None:
     """`Retry-After` is the observable that distinguishes one window from another.
 
-    60.0 is `RateLimitMiddleware`'s own default, so a window equal to it proves
+    60.0 is `RateLimitPolicy`'s own default, so a window equal to it proves
     nothing about whether the tier's value was passed at all.
     """
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (1, 3600.0)}, default=(1, 1800.0),
     ))
     async with TestClient(app) as client:
@@ -219,7 +229,7 @@ async def test_a_tier_window_is_not_quietly_replaced_by_the_default() -> None:
 
 async def test_the_cost_a_request_spends_reaches_every_tier() -> None:
     """`cost=2` against an allowance of 4 is two requests, not four."""
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (4, 60.0)}, default=(4, 60.0), cost=2.0,
     ))
     async with TestClient(app) as client:
@@ -231,7 +241,7 @@ async def test_the_cost_a_request_spends_reaches_every_tier() -> None:
 
 async def test_an_exempt_request_is_not_limited_in_any_tier() -> None:
     """The exemption has to reach the per-tier limiter, not just the wrapper."""
-    app = _app(TieredRateLimitMiddleware(
+    app = _app(TieredRateLimitPolicy(
         tiers={"pro": (1, 60.0)}, default=(1, 60.0),
         exempt=lambda request: request.header("x-internal") == "yes",
     ))
@@ -254,10 +264,13 @@ async def test_an_anonymous_caller_on_a_public_route_gets_the_default_tier() -> 
     unguarded version reaches `None.roles` and answers 500, turning a rate
     limiter into an outage for exactly the traffic it exists to bound.
     """
-    app = Wreath()
-    app.add_middleware(TieredRateLimitMiddleware(
-        tiers={"pro": (9, 60.0)}, default=(1, 60.0),
-    ))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            principal_rate_limit=TieredRateLimitPolicy(
+                tiers={"pro": (9, 60.0)}, default=(1, 60.0)
+            )
+        )
+    )
 
     @app.get("/public")
     async def public(request) -> dict:
