@@ -35,10 +35,10 @@ from wreath.http_client import (
     HTTPClient,
     RedirectError,
 )
-from wreath.middleware import MemoryIdempotencyStore
-from wreath.middleware.sessions import SessionMiddleware
 from wreath.orm import TenantContext
 from wreath.orm.errors import DeclarationError
+from wreath.policy import MemoryIdempotencyStore
+from wreath.policy.sessions import SessionPolicy
 from wreath.request import RequestLimits
 from wreath.response import Response
 from wreath.response_cache import cached
@@ -135,8 +135,8 @@ async def test_identified_request_can_use_a_key_that_names_its_principal() -> No
 def test_session_cookie_from_another_application_secret_is_refused(
     other_byte: int,
 ) -> None:
-    issued_by = SessionMiddleware(secret="A" * 32, secure=False)
-    read_by = SessionMiddleware(secret=chr(other_byte) * 32, secure=False)
+    issued_by = SessionPolicy(secret="A" * 32, secure=False)
+    read_by = SessionPolicy(secret=chr(other_byte) * 32, secure=False)
     cookie = issued_by._sign(b'{"principal":"victim"}', int(time.time()))
 
     if other_byte == ord("A"):

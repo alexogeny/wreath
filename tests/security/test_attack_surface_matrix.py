@@ -22,7 +22,7 @@ from wreath import Wreath
 from wreath._graphql.parser import GraphQLSyntaxError, Limits, parse
 from wreath.grpc import GrpcError, Status, Unframer, frame_message
 from wreath.http_client import DestinationPolicy, DestinationRejected
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 
 _ROOT = Path(__file__).parents[2]
@@ -123,7 +123,7 @@ def _flip_cookie_character(cookie: str, index: int) -> str:
 def test_signed_session_cookie_rejects_tampering_across_its_whole_shape(
     fraction: int,
 ) -> None:
-    middleware = SessionMiddleware(secret="s" * 32, secure=False)
+    middleware = SessionPolicy(secret="s" * 32, secure=False)
     cookie = middleware._sign(b'{"principal":{"sub":"victim"}}', int(time.time()))
     index = fraction * (len(cookie) - 1) // 24
 
@@ -146,7 +146,7 @@ def test_signed_session_cookie_rejects_tampering_across_its_whole_shape(
     ),
 )
 def test_signed_session_cookie_refuses_malformed_envelopes(value: str) -> None:
-    middleware = SessionMiddleware(secret="s" * 32, secure=False)
+    middleware = SessionPolicy(secret="s" * 32, secure=False)
     assert middleware._load(value) is None
 
 
