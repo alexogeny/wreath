@@ -1093,12 +1093,14 @@ def _reused_response_lifecycle(n: int):
 
     from wreath import Response, Wreath
     from wreath._devtools.measure import run, scope
-    from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES
+    from wreath._devtools.sample_app import POLICY_FACTORIES, policy_from_components
 
     async def drive() -> tuple[float, dict[str, int]]:
-        app = Wreath()
-        for factory in MIDDLEWARE_FACTORIES:
-            app.add_middleware(factory())
+        app = Wreath(
+            http_policy=policy_from_components(
+                [factory() for factory in POLICY_FACTORIES]
+            )
+        )
         response = Response(b"ok")
 
         @app.get("/", response_only=True)

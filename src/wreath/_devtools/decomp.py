@@ -1,6 +1,6 @@
 """Decompose a Wreath request into what each part of it costs.
 
-`wreath-request-trace` counts boundary crossings; `wreath-tape-decomp` prices the
+`wreath-request-trace` counts boundary crossings; `wreath-policy-decomp` prices the
 global middleware tape. This prices everything else, and calibrates the
 constants that turn crossing counts into microseconds:
 
