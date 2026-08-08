@@ -180,7 +180,7 @@ route table at startup already holds everything it needs.
 
 ## Cross-site request forgery for HTML form posts
 
-`wreath.middleware.CSRFMiddleware` reads the resubmitted token from a request
+`wreath.policy.CsrfPolicy` reads the resubmitted token from a request
 **header**, which suits a script client that sets one and cannot work for a plain
 HTML form — a form post carries no header. Mounting the middleware in front of a
 server-rendered form does not defend it, it refuses it.
