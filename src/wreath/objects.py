@@ -620,6 +620,14 @@ def _verify_local(
     secret: bytes, key: str, *, method: str, expires: int, signature: str
 ) -> bool:
     """Whether `signature` is authentic for `key` and the deadline has not passed."""
+    # `isascii()` before the compare, and it is load-bearing rather than belt
+    # and braces: `hmac.compare_digest` **raises** `TypeError` on a `str`
+    # carrying a non-ASCII character. The signature is a query parameter, so
+    # without this a `?signature=é` answers 500 instead of 403 -- unauthenticated
+    # input turning a refusal into an error. `_secondfactor.py`'s TOTP guard
+    # exists for the same hazard and names the same consequence.
+    if not signature.isascii():
+        return False
     expected = _sign_local(secret, method, normalize_key(key), expires)
     return hmac.compare_digest(expected, signature) and _now() <= expires
 
