@@ -54,7 +54,7 @@ _SUBSYSTEM_CATALOGUE: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("webhook inbox/outbox", "wreath.webhooks", ("SQS", "Celery"), "PostgreSQL"),
     ("sessions", "wreath.session_store", ("Redis", "Memcached"), "PostgreSQL"),
     ("rate limits", "wreath.policy.ratelimit", ("Redis",), "PostgreSQL"),
-    ("idempotency", "wreath.middleware.idempotency", ("Redis",), "PostgreSQL"),
+    ("idempotency", "wreath.policy.idempotency", ("Redis",), "PostgreSQL"),
     ("workflows", "wreath.workflows", ("Temporal", "Airflow"), "PostgreSQL"),
     ("chunked passes", "wreath.passes", ("Celery", "a bespoke backfill script"), "PostgreSQL"),
     ("progress", "wreath.progress", ("Redis pub/sub",), "PostgreSQL LISTEN/NOTIFY"),
@@ -76,7 +76,7 @@ _SUBSYSTEM_CATALOGUE: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
 _STORE_COMPONENTS: Mapping[str, str] = {
     "session": "wreath.session_store",
     "ratelimit": "wreath.policy.ratelimit",
-    "idempotency": "wreath.middleware.idempotency",
+    "idempotency": "wreath.policy.idempotency",
 }
 
 #: Subsystems the application object cannot see, and why. Each is a declaration

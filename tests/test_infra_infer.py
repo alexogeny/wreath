@@ -366,7 +366,7 @@ def test_every_shared_subsystem_is_listed_whether_or_not_it_is_used() -> None:
         "wreath.messaging",
         "wreath.session_store",
         "wreath.policy.ratelimit",
-        "wreath.middleware.idempotency",
+        "wreath.policy.idempotency",
         "wreath.workflows",
         "wreath.progress",
         "wreath.passes",
@@ -471,7 +471,7 @@ def test_a_middleware_owned_table_is_reported_as_the_same_postgresql() -> None:
     # The other two middleware-owned subsystems must stay absent: one store's
     # claim must not be read as a claim by all three.
     assert rows["wreath.session_store"].presence is Presence.ABSENT
-    assert rows["wreath.middleware.idempotency"].presence is Presence.ABSENT
+    assert rows["wreath.policy.idempotency"].presence is Presence.ABSENT
     (database,) = plan.databases
     assert "ratelimit" in {component.name for component in database.components}
 
