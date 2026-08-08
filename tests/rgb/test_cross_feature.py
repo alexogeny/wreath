@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from wreath import Wreath
-from wreath.middleware.csrf import CSRFMiddleware, csrf_token
+from wreath.policy import CsrfPolicy, HttpPolicy, csrf_token
 from wreath.response_cache import cached
 from wreath.testing import TestClient
 
@@ -20,8 +20,7 @@ class TestCsrfDoesNotDisableCaching:
     errors, and never serves a hit."""
 
     async def test_a_cached_page_that_never_asks_for_a_token_still_caches(self):
-        app = Wreath()
-        app.add_middleware(CSRFMiddleware(_SECRET))
+        app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET)))
         calls = 0
 
         @app.get("/report")
@@ -40,8 +39,7 @@ class TestCsrfDoesNotDisableCaching:
         assert calls == 1
 
     async def test_a_page_that_reads_the_token_still_gets_a_cookie(self):
-        app = Wreath()
-        app.add_middleware(CSRFMiddleware(_SECRET))
+        app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET)))
 
         @app.get("/form")
         async def form(request):
@@ -54,8 +52,9 @@ class TestCsrfDoesNotDisableCaching:
         assert response.json()["token"]
 
     async def test_an_unsafe_request_is_still_protected(self):
-        app = Wreath()
-        app.add_middleware(CSRFMiddleware(_SECRET, secure=False))
+        app = Wreath(
+            http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False))
+        )
 
         @app.post("/write")
         async def write(request):
@@ -66,8 +65,9 @@ class TestCsrfDoesNotDisableCaching:
         assert refused.status == 403
 
     async def test_the_token_round_trips_from_a_form_to_a_write(self):
-        app = Wreath()
-        app.add_middleware(CSRFMiddleware(_SECRET, secure=False))
+        app = Wreath(
+            http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False))
+        )
 
         @app.get("/form")
         async def form(request):
@@ -98,9 +98,9 @@ class TestRateLimitVisibility:
     identically looks exactly like one with nothing to do."""
 
     def test_refusals_are_counted(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware
+        from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitMiddleware(limit=1, window=60.0)
+        middleware = RateLimitPolicy(limit=1, window=60.0)
 
         class _Request:
             method = "GET"
@@ -108,9 +108,9 @@ class TestRateLimitVisibility:
             client = ("198.51.100.9", 5000)
             identity = None
 
-        assert middleware.before_sync(_Request()) is None
+        assert middleware._ingress_sync(_Request()) is None
         assert middleware.throttled == 0
-        assert middleware.before_sync(_Request()) is not None
+        assert middleware._ingress_sync(_Request()) is not None
         assert middleware.throttled == 1
 
 
@@ -208,22 +208,22 @@ class TestTieredKeyDeclaration:
     def test_the_exemption_is_declared_not_poked(self):
         import inspect
 
-        from wreath.middleware import ratelimit
+        from wreath.policy import ratelimit
 
-        source = inspect.getsource(ratelimit.TieredRateLimitMiddleware)
+        source = inspect.getsource(ratelimit.TieredRateLimitPolicy)
         assert "child._key" not in source, "the guard is bypassed by assignment"
 
     def test_a_global_limiter_still_refuses_the_principal_key(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware, principal_key
+        from wreath.policy.ratelimit import RateLimitPolicy, principal_key
 
         with pytest.raises(ValueError, match="global"):
-            RateLimitMiddleware(limit=10, window=60.0, key=principal_key)
+            RateLimitPolicy(limit=10, window=60.0, key=principal_key)
 
     def test_the_tiered_limiter_still_keys_on_the_principal(self):
         from wreath.auth import Identity
-        from wreath.middleware.ratelimit import TieredRateLimitMiddleware
+        from wreath.policy.ratelimit import TieredRateLimitPolicy
 
-        middleware = TieredRateLimitMiddleware(
+        middleware = TieredRateLimitPolicy(
             tiers={"pro": (10, 60.0)}, default=(1, 60.0)
         )
 
@@ -238,10 +238,10 @@ class TestTieredKeyDeclaration:
         import asyncio
 
         async def run():
-            assert await middleware.before(_Request("ann")) is None
+            assert await middleware._ingress(_Request("ann")) is None
             # A different principal from the same address has its own bucket.
-            assert await middleware.before(_Request("bo")) is None
-            assert await middleware.before(_Request("ann")) is not None
+            assert await middleware._ingress(_Request("bo")) is None
+            assert await middleware._ingress(_Request("ann")) is not None
 
         asyncio.run(run())
 

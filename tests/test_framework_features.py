@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from wreath import Response, Wreath
-from wreath.middleware.cors import CORSMiddleware
+from wreath.policy import CorsPolicy, HttpPolicy
 from wreath.response import FileResponse, HTMLResponse, RedirectResponse, TextResponse
 
 
@@ -205,12 +205,13 @@ async def test_background_runs_after_response() -> None:
 
 @pytest.mark.asyncio
 async def test_cors_preflight_short_circuits() -> None:
-    app = Wreath()
-    app.add_middleware(
-        CORSMiddleware(
-            allow_origins=["https://app.example"],
-            allow_methods=["GET", "POST"],
-            allow_headers=["x-custom"],
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cors=CorsPolicy(
+                allow_origins=["https://app.example"],
+                allow_methods=["GET", "POST"],
+                allow_headers=["x-custom"],
+            )
         )
     )
 
@@ -239,8 +240,9 @@ async def test_cors_preflight_short_circuits() -> None:
 async def test_cors_preflight_for_get_only_route() -> None:
     """Preflights target routes that declare no OPTIONS method; the app-level
     fallback must answer them before the 404 path."""
-    app = Wreath()
-    app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+    app = Wreath(
+        http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"]))
+    )
 
     @app.get("/data")
     async def data(request: Any) -> Any:
@@ -263,8 +265,7 @@ async def test_cors_preflight_for_get_only_route() -> None:
 
 @pytest.mark.asyncio
 async def test_cors_simple_request_headers_appended() -> None:
-    app = Wreath()
-    app.add_middleware(CORSMiddleware(allow_origins=["*"]))
+    app = Wreath(http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["*"])))
 
     @app.get("/data")
     async def data(request: Any) -> Any:
@@ -279,8 +280,9 @@ async def test_cors_simple_request_headers_appended() -> None:
 
 @pytest.mark.asyncio
 async def test_cors_disallowed_preflight_origin() -> None:
-    app = Wreath()
-    app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+    app = Wreath(
+        http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"]))
+    )
 
     @app.route("/data", methods=["OPTIONS"])
     async def data(request: Any) -> Any:
