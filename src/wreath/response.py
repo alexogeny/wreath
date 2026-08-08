@@ -28,9 +28,10 @@ from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from ._json import dumps as _json_dumps
 from ._native import _core
 
-# PreparedResponse's only request-time work is replaying two prebuilt ASGI
-# messages, so there is nothing above the noise floor for C to accelerate; the
-# pure implementation is the shipped one (see docs/reference/responses.md).
+# The portable implementation replays two prebuilt ASGI messages. Wreath's own
+# server recognizes the exact type and emits the same status, headers, and body
+# through its one-shot response ABI, avoiding ASGI message interpretation while
+# keeping this dependency-free implementation authoritative on every server.
 from ._pure.response import PreparedResponse as PreparedResponse
 from .background import Background
 from .cache_control import CacheControl
