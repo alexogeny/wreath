@@ -2,7 +2,7 @@
 
 The top level is intentionally small. Less common types live in their obvious
 modules — for example `wreath.response.ProblemResponse`,
-`wreath.binding.Query`, `wreath.middleware.CORSMiddleware`,
+`wreath.binding.Query`, `wreath.policy.CorsPolicy`,
 `wreath.webhooks.WebhookHub`, `wreath.http_client.HTTPClient`,
 `wreath.authorization.CedarPolicies`, `wreath.testing.TestClient`.
 
