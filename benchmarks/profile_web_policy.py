@@ -13,10 +13,8 @@ from wreath.cache_control import CacheControl
 from wreath.middleware import (
     CacheControlMiddleware,
     CompressionMiddleware,
-    CSRFMiddleware,
-    SecurityHeadersMiddleware,
-    csrf_token,
 )
+from wreath.policy import CsrfPolicy, SecurityHeadersPolicy, csrf_token
 
 
 async def _receive() -> dict[str, Any]:
@@ -43,36 +41,36 @@ async def profile_compression(iterations: int) -> None:
     request = _request()
     payload = {"message": "profile compression" * 1000}
     for _ in range(iterations):
-        await middleware.after(request, JSONResponse(payload))
+        await middleware._egress(request, JSONResponse(payload))
 
 
 async def profile_compression_skip(iterations: int) -> None:
     middleware = CompressionMiddleware(minimum_size=1024)
     request = _request(headers=[(b"host", b"example.test")])
     for _ in range(iterations):
-        await middleware.after(request, Response(b"tiny"))
+        await middleware._egress(request, Response(b"tiny"))
 
 
 async def profile_security(iterations: int) -> None:
-    middleware = SecurityHeadersMiddleware(
+    middleware = SecurityHeadersPolicy(
         hsts_max_age=31_536_000, hsts_include_subdomains=True
     )
     request = _request()
     for _ in range(iterations):
-        await middleware.after(request, Response(b"ok"))
+        await middleware._egress(request, Response(b"ok"))
 
 
 async def profile_cache(iterations: int) -> None:
     middleware = CacheControlMiddleware(CacheControl(private=True, no_store=True))
     request = _request()
     for _ in range(iterations):
-        await middleware.after(request, Response(b"ok"))
+        await middleware._egress(request, Response(b"ok"))
 
 
 async def profile_csrf(iterations: int) -> None:
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     safe = _request()
-    await middleware.before(safe)
+    await middleware._ingress(safe)
     token = csrf_token(safe)
     headers = [
         (b"host", b"example.test"),
@@ -81,7 +79,7 @@ async def profile_csrf(iterations: int) -> None:
         (b"x-csrf-token", token.encode()),
     ]
     for _ in range(iterations):
-        result = await middleware.before(_request("POST", headers))
+        result = await middleware._ingress(_request("POST", headers))
         if result is not None:
             raise AssertionError("valid CSRF token was rejected")
 
