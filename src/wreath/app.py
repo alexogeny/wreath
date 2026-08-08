@@ -2163,22 +2163,27 @@ class Wreath:
             and not self._has_global_http_hooks
             and self._dynamic_matcher is None
         ):
-            self._dispatch_http = (
-                (
+            if self._auth_handlers:
+                self._dispatch_http = (
                     self._handle_http_plain_auth_sync
                     if policy is None
                     and self._bearer_verifier is not None
                     and not self._bearer_verifier_is_async
+                    and self._classify is not None
                     and all(
                         not _iscoroutinefunction(handler)
                         and requirement.second_factor is None
                         and not requirement.policies
                         for handler, requirement in self._handler_requirements.items()
                     )
-                    else self._handle_http_plain_auth
+                    else (
+                        self._handle_http_plain_auth
+                        if self._classify is not None
+                        else self._handle_http
+                    )
                 )
-                if self._auth_handlers and self._classify is not None and self._resolve is not None
-                else (
+            else:
+                self._dispatch_http = (
                     self._handle_http_plain_sync
                     if policy is None
                     and all(
@@ -2187,7 +2192,6 @@ class Wreath:
                     )
                     else self._handle_http_plain
                 )
-            )
         elif (
             self._route_programs is not None
             and self._dynamic_matcher is None
@@ -2370,6 +2374,7 @@ class Wreath:
                     request,
                 )
         json_body: bytes | None = None
+        response: Response | StreamingResponse | FileResponse | PreparedResponse
         try:
             value = handler(request)
             if value.__class__ is _COROUTINE:
@@ -2378,12 +2383,15 @@ class Wreath:
                 )
             if method != "HEAD" and value.__class__ is dict:
                 json_body = _json_dumps(value)
-                response = None
             elif method != "HEAD" and value.__class__ is _EncodedJSON:
                 json_body = value.body
-                response = None
             else:
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             return self._finish_http_plain_error(
                 request, error, send, method, scope, native_response
@@ -2476,12 +2484,13 @@ class Wreath:
         if not native_response and _ambiguous_request_path(scope, path):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
-        # `_select_dispatch` assigns every application containing an auth route
-        # to `_handle_http_plain_auth`, so every route reachable here is public.
+        # `_select_dispatch` assigns classifying applications containing an auth
+        # route to `_handle_http_plain_auth` and trie applications to the general
+        # dispatcher, so every route reachable here is public.
         # Asking a classifying table to package `(1, match)` only to unpack it
         # again was a remnant of the former shared dispatcher, not useful work.
         matched = self._match(method, path)
-        if matched is None or matched[0] in self._auth_handlers:
+        if matched is None:
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
         if scope.flight if native_response else ("_wreath_flight" in scope):
@@ -2503,6 +2512,7 @@ class Wreath:
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
         json_body: bytes | None = None
+        response: Response | StreamingResponse | FileResponse | PreparedResponse
         try:
             # Called, then awaited only if calling produced something to await.
             # An `async def` route pays one `is` test for that; a `def` route
@@ -2518,7 +2528,6 @@ class Wreath:
                 and value.__class__ is dict
             ):
                 json_body = _json_dumps(value)
-                response = None
             elif (
                 native_response
                 and policy is None
@@ -2526,9 +2535,13 @@ class Wreath:
                 and value.__class__ is _EncodedJSON
             ):
                 json_body = value.body
-                response = None
             else:
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
         # `active_global` is 0 rather than omitted: this application has no
@@ -2581,6 +2594,7 @@ class Wreath:
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
         json_body: bytes | None = None
+        response: Response | StreamingResponse | FileResponse | PreparedResponse
         try:
             value = handler(request)
             if value.__class__ is _COROUTINE:
@@ -2589,12 +2603,15 @@ class Wreath:
                 )
             if native_response and method != "HEAD" and value.__class__ is dict:
                 json_body = _json_dumps(value)
-                response = None
             elif native_response and method != "HEAD" and value.__class__ is _EncodedJSON:
                 json_body = value.body
-                response = None
             else:
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             return self._finish_http_plain_error(
                 request, error, send, method, scope, native_response
@@ -2622,6 +2639,7 @@ class Wreath:
             response = (
                 resolved
                 if resolved.__class__ is Response
+                or resolved.__class__ is PreparedResponse
                 else _coerce_response(resolved)
             )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2813,6 +2831,7 @@ class Wreath:
                     return
 
         json_body: bytes | None = None
+        response: Response | StreamingResponse | FileResponse | PreparedResponse
         try:
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
@@ -2823,7 +2842,6 @@ class Wreath:
                 and value.__class__ is dict
             ):
                 json_body = _json_dumps(value)
-                response = None
             elif (
                 native_response
                 and policy is None
@@ -2831,9 +2849,13 @@ class Wreath:
                 and value.__class__ is _EncodedJSON
             ):
                 json_body = value.body
-                response = None
             else:
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
         if policy is None:
@@ -2959,7 +2981,11 @@ class Wreath:
         try:
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
-            response = value if value.__class__ is Response else _coerce_response(value)
+            response = (
+                value
+                if value.__class__ is Response or value.__class__ is PreparedResponse
+                else _coerce_response(value)
+            )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
         await self._finish_http(
@@ -3485,7 +3511,12 @@ class Wreath:
                 value = handler(request)
                 if value.__class__ is _COROUTINE:
                     value = await value
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
             else:
                 handler_start = _monotonic_ns()
                 value = handler(request)
@@ -3493,7 +3524,12 @@ class Wreath:
                     value = await value
                 flight_phase(_PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start)
                 serialize_start = _monotonic_ns()
-                response = value if value.__class__ is Response else _coerce_response(value)
+                response = (
+                    value
+                    if value.__class__ is Response
+                    or value.__class__ is PreparedResponse
+                    else _coerce_response(value)
+                )
                 flight_phase(_PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start)
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
@@ -3578,6 +3614,13 @@ class Wreath:
                 )
             else:
                 await protocol._wreath_response(plain.status, plain.headers, plain.body)
+        elif response.__class__ is PreparedResponse and native_response:
+            prepared = response
+            protocol = cast(Any, send).__self__
+            headers = prepared.headers if policy is None else list(prepared.headers)
+            await protocol._wreath_response(
+                prepared.status, headers, prepared.body
+            )
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -3644,6 +3687,12 @@ class Wreath:
             plain = cast(Response, response)
             protocol = cast(Any, send).__self__
             return protocol._wreath_response(plain.status, plain.headers, plain.body)
+        if response.__class__ is PreparedResponse and native_response:
+            prepared = response
+            protocol = cast(Any, send).__self__
+            return protocol._wreath_response(
+                prepared.status, prepared.headers, prepared.body
+            )
         if type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
