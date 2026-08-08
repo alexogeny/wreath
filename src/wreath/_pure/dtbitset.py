@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .authz import build_compiled_capability_mask
+
 _PARAM = None
 
 
@@ -270,6 +272,18 @@ class BitsetRouteTable:
             if _eligible(clauses, caller_mask):
                 return result
         return None
+
+    def resolve_identity(
+        self,
+        ticket: tuple[Any, ...],
+        descriptor: tuple[int, dict[str, int], dict[str, int]],
+        roles: Any,
+        permissions: Any,
+    ) -> tuple[Any, dict[str, str] | None] | None:
+        return self.resolve(
+            ticket,
+            build_compiled_capability_mask(descriptor, roles, permissions),
+        )
 
     def probe(
         self, method: str, path: str, all_capability_mask: int

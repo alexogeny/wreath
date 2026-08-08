@@ -1308,14 +1308,22 @@ route_eligible(BRoute *r, unsigned long long caller)
     return 0;
 }
 
-/* Append to the ticket list, creating it on first use: a classification that
- * finds a reachable route never pays for a list it would throw away. */
+/* Keep the common one-candidate ticket as the entry itself.  A list appears
+ * only when two protected routes genuinely compete for the same path; wrapping
+ * every single entry in list -> tuple machinery was allocation by convention,
+ * not information the resolver needed. */
 static int
 ticket_append(PyObject **ticket_out, PyObject *entry)
 {
     if (*ticket_out == NULL) {
-        *ticket_out = PyList_New(0);
-        if (*ticket_out == NULL) return -1;
+        *ticket_out = Py_NewRef(entry);
+        return 0;
+    }
+    if (!PyList_CheckExact(*ticket_out)) {
+        PyObject *items = PyList_New(1);
+        if (items == NULL) return -1;
+        PyList_SET_ITEM(items, 0, *ticket_out); /* steal the former owned ref */
+        *ticket_out = items;
     }
     return PyList_Append(*ticket_out, entry);
 }
@@ -1586,10 +1594,53 @@ brt_classify(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
     if (ticket == NULL) {
         return classification_pair(0, Py_NewRef(Py_None));
     }
-    PyObject *as_tuple = PyList_AsTuple(ticket);
-    Py_DECREF(ticket);
-    if (as_tuple == NULL) return NULL;
-    return classification_pair(2, as_tuple);
+    if (PyList_CheckExact(ticket)) {
+        PyObject *as_tuple = PyList_AsTuple(ticket);
+        Py_DECREF(ticket);
+        if (as_tuple == NULL) return NULL;
+        ticket = as_tuple;
+    }
+    return classification_pair(2, ticket);
+}
+
+static int
+brt_ticket_is_single(PyObject *ticket)
+{
+    if (PyTuple_GET_SIZE(ticket) != 2) return 0;
+    PyObject *clauses = PyTuple_GET_ITEM(ticket, 1);
+    if (!PyTuple_CheckExact(clauses)) return 0;
+    return PyTuple_GET_SIZE(clauses) == 0 ||
+           PyLong_CheckExact(PyTuple_GET_ITEM(clauses, 0));
+}
+
+static PyObject *
+brt_resolve_entry(PyObject *entry, unsigned long long caller)
+{
+    PyObject *clauses = PyTuple_GET_ITEM(entry, 1);
+    for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(clauses); c++) {
+        unsigned long long cl =
+            PyLong_AsUnsignedLongLong(PyTuple_GET_ITEM(clauses, c));
+        if (cl == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
+        if ((cl & ~caller) == 0) {
+            return Py_NewRef(PyTuple_GET_ITEM(entry, 0));
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+brt_resolve_word(PyObject *ticket, unsigned long long caller)
+{
+    if (brt_ticket_is_single(ticket)) {
+        return brt_resolve_entry(ticket, caller);
+    }
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ticket); i++) {
+        PyObject *resolved =
+            brt_resolve_entry(PyTuple_GET_ITEM(ticket, i), caller);
+        if (resolved == NULL || resolved != Py_None) return resolved;
+        Py_DECREF(resolved);
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -1610,19 +1661,24 @@ brt_resolve(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
     }
     unsigned long long caller = PyLong_AsUnsignedLongLong(caller_obj);
     if (caller == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ticket); i++) {
-        PyObject *entry = PyTuple_GET_ITEM(ticket, i);
-        PyObject *clauses = PyTuple_GET_ITEM(entry, 1);
-        for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(clauses); c++) {
-            unsigned long long cl =
-                PyLong_AsUnsignedLongLong(PyTuple_GET_ITEM(clauses, c));
-            if (cl == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-            if ((cl & ~caller) == 0) {
-                return Py_NewRef(PyTuple_GET_ITEM(entry, 0));
-            }
-        }
+    return brt_resolve_word(ticket, caller);
+}
+
+static PyObject *
+brt_resolve_identity(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
+                     Py_ssize_t nargs)
+{
+    if (brt_fastcall_arity("resolve_identity", nargs, 4, 4) < 0) return NULL;
+    if (!PyTuple_Check(args[0])) {
+        PyErr_SetString(PyExc_TypeError, "resolve ticket must be tuple");
+        return NULL;
     }
-    Py_RETURN_NONE;
+    unsigned long long caller;
+    if (wreath_compiled_capability_word(
+            args[1], args[2], args[3], &caller) < 0) {
+        return NULL;
+    }
+    return brt_resolve_word(args[0], caller);
 }
 
 /* Compatibility probe: never exposes protected tickets. */
@@ -1692,6 +1748,9 @@ static PyMethodDef brt_methods[] = {
      "classify(method, path) -> (classification, public_match | ticket | None)"},
     {"resolve", (PyCFunction)(void (*)(void))brt_resolve, METH_FASTCALL,
      "resolve(ticket, caller_mask) -> (handler, params | None) | None"},
+    {"resolve_identity",
+     (PyCFunction)(void (*)(void))brt_resolve_identity, METH_FASTCALL,
+     "resolve_identity(ticket, descriptor, roles, permissions) -> match | None"},
     {"probe", (PyCFunction)(void (*)(void))brt_probe, METH_FASTCALL,
      "probe(method, path, all_capability_mask) -> (classification, match | None)"},
     {"stats", (PyCFunction)brt_stats, METH_NOARGS,
