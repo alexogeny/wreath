@@ -273,7 +273,7 @@ def scim_router(
 
         Built from the request's own scheme and `Host`, which is what a
         directory will call back on. Behind a TLS-terminating proxy the scheme
-        is the one this process accepted -- add `ProxyHeadersMiddleware` for the
+        is the one this process accepted -- add `ProxyPolicy` for the
         forwarded one, exactly as every other absolute URL wreath builds needs.
         """
         mounted = prefix.format(**request.path_params) if "{" in prefix else prefix
