@@ -2,7 +2,7 @@
 
 Three separate at-least-once mechanisms, composed into one guarantee:
 
-* the client retries a POST, and `IdempotencyMiddleware` replays the response
+* the client retries a POST, and `IdempotencyPolicy` replays the response
   instead of re-running the handler;
 * the handler enqueues a durable job with the same key, and a unique index
   makes the enqueue happen once however many times the handler runs;
@@ -24,7 +24,7 @@ import pytest
 
 from wreath.jobs import JobRunner
 from wreath.messaging import MessageBus
-from wreath.middleware import IdempotencyMiddleware
+from wreath.policy import IdempotencyPolicy
 from wreath.request import Request
 from wreath.response import Response
 
@@ -171,7 +171,7 @@ def _runner(database: Any) -> JobRunner:
 
 
 async def test_a_retry_on_the_same_worker_never_reaches_the_handler() -> None:
-    middleware = IdempotencyMiddleware()
+    middleware = IdempotencyPolicy()
     runs = 0
 
     async def handle(request: Request) -> Response:
@@ -193,7 +193,7 @@ async def test_a_retry_on_the_same_worker_never_reaches_the_handler() -> None:
 
 async def test_a_failed_write_stays_retryable() -> None:
     """Replaying a 500 would strand the client on an error that was transient."""
-    middleware = IdempotencyMiddleware()
+    middleware = IdempotencyPolicy()
     first = _request()
     await middleware.action(first)
     await middleware.after(first, Response(b"boom", status=500))
@@ -217,7 +217,7 @@ async def test_a_retry_on_another_worker_still_enqueues_once() -> None:
         handle = await runner.launch("send_receipt", 7, key="checkout-7")
         return handle.task_id
 
-    worker_a, worker_b = IdempotencyMiddleware(), IdempotencyMiddleware()
+    worker_a, worker_b = IdempotencyPolicy(), IdempotencyPolicy()
 
     request_a = _request()
     assert await worker_a.action(request_a) is None

@@ -12,14 +12,16 @@ makes it hold.
 ## The whole thing
 
 ```python
-from wreath.middleware import IdempotencyMiddleware, PostgresIdempotencyStore
+from wreath.policy import HttpPolicy, IdempotencyPolicy, PostgresIdempotencyStore
 
 db = app.postgres("app", dsn=...)
 jobs = app.jobs("work", database="app")
 bus = app.messaging("events", database="app")
 
-app.add_global_middleware(
-    IdempotencyMiddleware(store=PostgresIdempotencyStore(db))
+app.configure_http_policy(
+    HttpPolicy(
+        idempotency=IdempotencyPolicy(store=PostgresIdempotencyStore(db))
+    )
 )
 
 @app.post("/orders")
@@ -40,7 +42,7 @@ Four lines of composition. What each one is actually doing:
 
 ## 1. The client's retry never reaches the handler
 
-`IdempotencyMiddleware` claims the key before the handler runs and replays the
+`IdempotencyPolicy` claims the key before the handler runs and replays the
 stored response for any repeat. The claim is atomic, so two simultaneous
 retries do not both proceed — the second gets `409` while the first is in
 flight.
