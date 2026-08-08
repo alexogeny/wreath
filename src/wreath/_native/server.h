@@ -89,9 +89,18 @@ typedef struct {
     PyObject *http_version_10;
     PyObject *http_version_11;
     PyObject *root_path;
-    /* config._default_response_headers.headers, resolved once per connection so
-     * the egress path does not re-run two GetAttrString calls per response. */
+    /* config._default_response_headers fields, resolved once per connection.
+     * `wire` is a stable bytearray refreshed in place with the date cache. */
     PyObject *default_response_headers;
+    PyObject *default_response_wire;
+    /* One explicitly owned immutable-header cache. PreparedResponse reuses an
+     * exact tuple, so validation and lowercasing are startup/first-use work. */
+    PyObject *response_header_cache_key;
+    PyObject *response_header_cache_wire;
+    Py_ssize_t response_header_cache_length;
+    int response_header_cache_has_length;
+    int response_header_cache_has_date;
+    int response_header_cache_has_server;
     PyObject *loop_create_future;
     PyObject *loop_create_task;
     PyObject *loop_call_later;

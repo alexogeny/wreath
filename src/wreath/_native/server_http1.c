@@ -507,6 +507,7 @@ write_error(WreathHttpProtocol *self, int status)
     Py_ssize_t reason_size;
     const char *reason = reason_phrase(status, &reason_size);
     Py_ssize_t body_size = reason_size + 1;
+    int append_result;
     int result = -1;
 
     out = PyByteArray_FromStringAndSize(NULL, 0);
@@ -521,25 +522,14 @@ write_error(WreathHttpProtocol *self, int status)
         append_decimal(out, body_size) < 0 || append_raw(out, "\r\n", 2) < 0) {
         goto done;
     }
-    {
-        /* Cached in http_protocol_init; see begin_response_parts. */
-        PyObject *items = PySequence_Fast(self->default_response_headers,
-                                          "default response headers must be a sequence");
-        if (items == NULL) goto done;
-        for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(items); i++) {
-            PyObject *pair = PySequence_Fast_GET_ITEM(items, i);
-            PyObject *name = PyTuple_GET_ITEM(pair, 0);
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            if (append_raw(out, PyBytes_AS_STRING(name), PyBytes_GET_SIZE(name)) < 0 ||
-                append_raw(out, ": ", 2) < 0 ||
-                append_raw(out, PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value)) < 0 ||
-                append_raw(out, "\r\n", 2) < 0) {
-                Py_DECREF(items);
-                goto done;
-            }
-        }
-        Py_DECREF(items);
-    }
+    /* The date cache updates this bytearray in place. The critical section is
+     * a no-op on GIL builds and makes the direct buffer read valid under
+     * free-threading when another server loop refreshes the shared config. */
+    Py_BEGIN_CRITICAL_SECTION(self->default_response_wire);
+    append_result = append_raw(out, PyByteArray_AS_STRING(self->default_response_wire),
+                               PyByteArray_GET_SIZE(self->default_response_wire));
+    Py_END_CRITICAL_SECTION();
+    if (append_result < 0) goto done;
     if (append_raw(out, "connection: close\r\n\r\n",
                    sizeof("connection: close\r\n\r\n") - 1) < 0) goto done;
     /* A HEAD response carries content-length but never the body. */
@@ -1135,11 +1125,15 @@ static int
 begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *headers)
 {
     PyObject *items = NULL;
+    PyObject *cache_wire = NULL;
     long status;
     Py_ssize_t reason_size;
+    Py_ssize_t header_wire_start = 0;
     const char *reason;
     int has_date = 0;
     int has_server = 0;
+    int append_result;
+    int cacheable = 0;
 
     clear_response_builder(self);
     if (status_obj == NULL) {
@@ -1178,7 +1172,23 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
         return -1;
     }
 
-    if (headers != NULL && headers != Py_None) {
+    if (headers != NULL && headers == self->response_header_cache_key) {
+        if (response_append(self, PyBytes_AS_STRING(self->response_header_cache_wire),
+                            PyBytes_GET_SIZE(self->response_header_cache_wire)) < 0) {
+            goto error;
+        }
+        self->resp_has_length = self->response_header_cache_has_length;
+        self->resp_content_length = self->response_header_cache_length;
+        has_date = self->response_header_cache_has_date;
+        has_server = self->response_header_cache_has_server;
+    }
+    else if (headers != NULL && headers != Py_None) {
+        /* One small immutable response shape is retained per connection. The
+         * bounds keep a one-off tuple with oversized fields from becoming
+         * connection-lifetime storage; PreparedResponse's usual two fields
+         * occupy only a few dozen bytes. */
+        cacheable = PyTuple_CheckExact(headers) && PyTuple_GET_SIZE(headers) <= 16;
+        header_wire_start = self->response_bytes_len;
         items = PySequence_Fast(headers, "response headers must be a sequence");
         if (items == NULL) {
             return -1;
@@ -1192,10 +1202,12 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
             if (PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2) {
                 name = PyTuple_GET_ITEM(pair, 0);
                 value = PyTuple_GET_ITEM(pair, 1);
+                if (!PyTuple_CheckExact(pair)) cacheable = 0;
             }
             else if (PyList_Check(pair) && PyList_GET_SIZE(pair) == 2) {
                 name = PyList_GET_ITEM(pair, 0);
                 value = PyList_GET_ITEM(pair, 1);
+                cacheable = 0;
             }
             else {
                 PyErr_SetString(PyExc_RuntimeError, "response header must be a pair");
@@ -1205,6 +1217,7 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
                 PyErr_SetString(PyExc_RuntimeError, "response header must be bytes");
                 goto error;
             }
+            if (!PyBytes_CheckExact(name) || !PyBytes_CheckExact(value)) cacheable = 0;
             name_data = PyBytes_AS_STRING(name);
             name_size = PyBytes_GET_SIZE(name);
             if (!wreath_field_name_valid(name_data, name_size) ||
@@ -1237,10 +1250,38 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
             }
         }
         Py_CLEAR(items);
+        if (cacheable) {
+            const char *wire_start = (self->response_bytes != NULL
+                ? PyBytes_AS_STRING(self->response_bytes) : self->response_inline)
+                + header_wire_start;
+            cache_wire = PyBytes_FromStringAndSize(
+                wire_start, self->response_bytes_len - header_wire_start);
+            if (cache_wire == NULL) goto error;
+            if (PyBytes_GET_SIZE(cache_wire) <= 1024) {
+                Py_XSETREF(self->response_header_cache_key, Py_NewRef(headers));
+                Py_XSETREF(self->response_header_cache_wire, cache_wire);
+                cache_wire = NULL;
+                self->response_header_cache_has_length = self->resp_has_length;
+                self->response_header_cache_length = self->resp_content_length;
+                self->response_header_cache_has_date = has_date;
+                self->response_header_cache_has_server = has_server;
+            }
+            Py_CLEAR(cache_wire);
+        }
     }
-    {
-        /* Resolved once in http_protocol_init (config is immutable while
-         * serving), so the hot egress path just replays the cached sequence. */
+    if (!has_date && !has_server) {
+        /* The common case is one contiguous copy instead of a generic sequence
+         * conversion, two pair walks and eight fragmented appends. */
+        Py_BEGIN_CRITICAL_SECTION(self->default_response_wire);
+        append_result = response_append(
+            self, PyByteArray_AS_STRING(self->default_response_wire),
+            PyByteArray_GET_SIZE(self->default_response_wire));
+        Py_END_CRITICAL_SECTION();
+        if (append_result < 0) goto error;
+    }
+    else {
+        /* A response overriding one default still needs the individual fields
+         * so it can suppress only the matching configured value. */
         items = PySequence_Fast(self->default_response_headers,
                                 "default response headers must be a sequence");
         if (items == NULL) {
@@ -1270,6 +1311,7 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
 
 error:
     Py_XDECREF(items);
+    Py_XDECREF(cache_wire);
     clear_response_builder(self);
     return -1;
 }
@@ -1994,224 +2036,6 @@ get_extra_info(WreathHttpProtocol *self, const char *name)
     return PyObject_CallMethod(self->transport, "get_extra_info", "s", name);
 }
 
-static int connection_value_has_token(
-    const char *, Py_ssize_t, const char *, Py_ssize_t);
-
-
-/*
- * Decide how to read the request body, rejecting the malformed and
- * request-smuggling framings. These are load-bearing MUSTs -- do not relax one
- * without re-reading the clause:
- *   - Transfer-Encoding AND Content-Length together   -> 400 (RFC 9112 s6.1)
- *   - Transfer-Encoding whose final token != "chunked" -> 400 (RFC 9112 s6.1)
- *   - more than one "chunked" coding                   -> 400 (RFC 9112 s6.1)
- *   - duplicate Content-Length with differing values   -> 400 (RFC 9110 s8.6)
- *   - non-numeric / empty Content-Length               -> 400 (RFC 9110 s8.6)
- *   - Expect other than 100-continue, or repeated       -> 417 (RFC 9110 s10.1.1)
- * Returns 0 on success (with kind, length, and send_continue set) or when it
- * sets err_status to the status to reject with; -1 on a Python error.
- */
-static int
-decide_framing(WreathHttpProtocol *self, PyObject *headers, int *kind, Py_ssize_t *length,
-               int *err_status, int *send_continue, int *keep_alive,
-               int *upgrade_request)
-{
-    /* kind: 0 none, 1 fixed, 2 chunked. err_status non-zero => reject. */
-    const char *first_length = NULL;
-    Py_ssize_t first_length_size = 0;
-    int saw_transfer = 0;
-    int chunked_count = 0;
-    int expect_count = 0;
-    int connection_close = 0;
-    int connection_keep_alive = 0;
-    int connection_upgrade = 0;
-    const char *upgrade = NULL;
-    Py_ssize_t upgrade_size = 0;
-    Py_ssize_t i;
-    Py_ssize_t n = wreath_headers_count(headers);
-    if (n < 0) return -1;
-    *err_status = 0;
-    *kind = 0;
-    *length = 0;
-    *send_continue = 0;
-    *keep_alive = self->http11;
-    *upgrade_request = 0;
-
-    for (i = 0; i < n; i++) {
-        const char *nd;
-        const char *vd;
-        Py_ssize_t ns;
-        Py_ssize_t vs;
-        if (wreath_headers_view(headers, i, &nd, &ns, &vd, &vs) < 0) return -1;
-        if (ns == 6 && memcmp(nd, "expect", 6) == 0) {
-            expect_count++;
-            if (vs != 12 || PyOS_strnicmp(vd, "100-continue", 12) != 0) {
-                *err_status = 417;
-                return 0;
-            }
-            *send_continue = 1;
-        }
-        if (ns == 14 && memcmp(nd, "content-length", 14) == 0) {
-            while (vs > 0 && (vd[0] == ' ' || vd[0] == '\t')) { vd++; vs--; }
-            while (vs > 0 && (vd[vs - 1] == ' ' || vd[vs - 1] == '\t')) { vs--; }
-            if (first_length == NULL) {
-                first_length = vd;
-                first_length_size = vs;
-            }
-            else if (first_length_size != vs ||
-                     memcmp(first_length, vd, (size_t)vs) != 0) {
-                *err_status = 400;
-                return 0;
-            }
-        }
-        else if (ns == 17 && memcmp(nd, "transfer-encoding", 17) == 0) {
-            Py_ssize_t start = 0;
-            saw_transfer = 1;
-            while (start <= vs) {
-                Py_ssize_t end = start;
-                const char *part;
-                Py_ssize_t part_size;
-                while (end < vs && vd[end] != ',') { end++; }
-                part = vd + start;
-                part_size = end - start;
-                while (part_size > 0 && (part[0] == ' ' || part[0] == '\t')) {
-                    part++;
-                    part_size--;
-                }
-                while (part_size > 0 &&
-                       (part[part_size - 1] == ' ' || part[part_size - 1] == '\t')) {
-                    part_size--;
-                }
-                if (part_size != 7 || PyOS_strnicmp(part, "chunked", 7) != 0) {
-                    *err_status = 400;
-                    return 0;
-                }
-                chunked_count++;
-                if (end == vs) {
-                    break;
-                }
-                start = end + 1;
-            }
-        }
-        else if (ns == 10 && memcmp(nd, "connection", 10) == 0) {
-            connection_close |= connection_value_has_token(vd, vs, "close", 5);
-            connection_keep_alive |= connection_value_has_token(
-                vd, vs, "keep-alive", 10);
-            connection_upgrade |= connection_value_has_token(vd, vs, "upgrade", 7);
-        }
-        else if (upgrade == NULL && ns == 7 && memcmp(nd, "upgrade", 7) == 0) {
-            upgrade = vd;
-            upgrade_size = vs;
-        }
-    }
-
-    *keep_alive = self->http11 ? !connection_close : connection_keep_alive;
-    if (upgrade != NULL && connection_upgrade) {
-        while (upgrade_size > 0 && (upgrade[0] == ' ' || upgrade[0] == '\t')) {
-            upgrade++;
-            upgrade_size--;
-        }
-        while (upgrade_size > 0 &&
-               (upgrade[upgrade_size - 1] == ' ' || upgrade[upgrade_size - 1] == '\t')) {
-            upgrade_size--;
-        }
-        *upgrade_request = upgrade_size == 9 &&
-            PyOS_strnicmp(upgrade, "websocket", 9) == 0;
-    }
-
-    if (expect_count > 1) {
-        *err_status = 417;
-        return 0;
-    }
-    if (saw_transfer && first_length != NULL) {
-        *err_status = 400;
-        return 0;
-    }
-    if (saw_transfer) {
-        if (chunked_count != 1) {
-            *err_status = 400;
-            return 0;
-        }
-        *kind = 2;
-        return 0;
-    }
-    if (first_length != NULL) {
-        const char *d = first_length;
-        Py_ssize_t s = first_length_size;
-        Py_ssize_t value = 0;
-        if (s == 0) {
-            *err_status = 400;
-            return 0;
-        }
-        for (i = 0; i < s; i++) {
-            int digit = (unsigned char)d[i] - '0';
-            if (digit < 0 || digit > 9 || value > (PY_SSIZE_T_MAX - digit) / 10) {
-                *err_status = 400;
-                return 0;
-            }
-            value = value * 10 + digit;
-        }
-        if (value > self->max_body_bytes) {
-            *err_status = 413;
-            return 0;
-        }
-        *kind = 1;
-        *length = value;
-        return 0;
-    }
-    return 0;
-}
-
-
-/* Connection is a comma-delimited list of case-insensitive tokens, not a bag
- * of substrings.  Treating "xupgrade" as "upgrade" lets an intermediary and
- * this server disagree about whether the HTTP connection changed protocols. */
-static int
-connection_value_has_token(const char *value, Py_ssize_t size,
-                           const char *token, Py_ssize_t token_size)
-{
-    Py_ssize_t start = 0;
-    while (start <= size) {
-        Py_ssize_t end = start;
-        const char *part;
-        Py_ssize_t part_size;
-        while (end < size && value[end] != ',') {
-            end++;
-        }
-        part = value + start;
-        part_size = end - start;
-        while (part_size > 0 && (part[0] == ' ' || part[0] == '\t')) {
-            part++;
-            part_size--;
-        }
-        while (part_size > 0 &&
-               (part[part_size - 1] == ' ' || part[part_size - 1] == '\t')) {
-            part_size--;
-        }
-        if (part_size == token_size) {
-            Py_ssize_t i;
-            for (i = 0; i < token_size; i++) {
-                char c = part[i];
-                if (c >= 'A' && c <= 'Z') {
-                    c = (char)(c + ('a' - 'A'));
-                }
-                if (c != token[i]) {
-                    break;
-                }
-            }
-            if (i == token_size) {
-                return 1;
-            }
-        }
-        if (end == size) {
-            break;
-        }
-        start = end + 1;
-    }
-    return 0;
-}
-
-
 static void
 reset_response_state(WreathHttpProtocol *self, int keep_alive)
 {
@@ -2581,7 +2405,7 @@ done:
 
 static int
 begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *target,
-              PyObject *headers)
+              PyObject *headers, const WreathHttpRequestMeta *request_meta)
 {
     const char *td = PyBytes_AS_STRING(target);
     Py_ssize_t ts = PyBytes_GET_SIZE(target);
@@ -2590,12 +2414,12 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     PyObject *query_string = NULL;
     PyObject *path = NULL;
     PyObject *scope = NULL;
-    int kind;
-    Py_ssize_t length;
-    int err_status;
-    int send_continue;
-    int keep_alive;
-    int upgrade_request;
+    int kind = request_meta->kind;
+    Py_ssize_t length = request_meta->length;
+    int err_status = request_meta->err_status;
+    int send_continue = request_meta->send_continue;
+    int keep_alive = request_meta->keep_alive;
+    int upgrade_request = request_meta->upgrade_request;
     int bad = 0;
     int result = -1;
     WreathPolicyReply policy_reply = {0};
@@ -2641,13 +2465,11 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
         result = bad ? (send_error(self, 400) < 0 ? -1 : 0) : -1;
         goto done;
     }
-    /* Resolve HTTP message framing before switching protocols.  Otherwise a
-     * body (or a TE/CL ambiguity) is reinterpreted as WebSocket frames even
-     * though the request message has not been completely consumed. */
-    if (decide_framing(
-            self, headers, &kind, &length, &err_status, &send_continue,
-            &keep_alive, &upgrade_request) < 0) {
-        goto done;
+    /* The parser resolved framing while every validated header span was still
+     * hot. Keep the body ceiling here because it belongs to this protocol
+     * configuration rather than to HTTP syntax. */
+    if (err_status == 0 && kind == 1 && length > self->max_body_bytes) {
+        err_status = 413;
     }
     if (err_status != 0) {
         result = send_error(self, err_status) < 0 ? -1 : 0;
@@ -3245,6 +3067,7 @@ drive_head(WreathHttpProtocol *self)
     PyObject *target = NULL;
     PyObject *headers = NULL;
     Py_ssize_t consumed = 0;
+    WreathHttpRequestMeta request_meta = {0};
     int minor = 0;
     int parsed;
     int rc;
@@ -3270,7 +3093,7 @@ drive_head(WreathHttpProtocol *self)
 
     parsed = wreath_http_parse_request_parts(
         (const uint8_t *)p, n, head_end, &method, &target, &minor, &headers,
-        &consumed, self->max_header_count
+        &consumed, self->max_header_count, &request_meta
     );
     if (parsed == -2) {
         return send_error(self, 431) < 0 ? -1 : 0;
@@ -3283,43 +3106,11 @@ drive_head(WreathHttpProtocol *self)
         return -1;
     }
     if (parsed == 0) return 0;
-    if (minor == 1) {
-        Py_ssize_t host_count = 0;
-        Py_ssize_t header_count = wreath_headers_count(headers);
-        if (header_count < 0) {
-            Py_DECREF(method);
-            Py_DECREF(target);
-            Py_DECREF(headers);
-            return -1;
-        }
-        for (Py_ssize_t i = 0; i < header_count; i++) {
-            const char *name;
-            const char *value;
-            Py_ssize_t name_size;
-            Py_ssize_t value_size;
-            if (wreath_headers_view(headers, i, &name, &name_size,
-                                    &value, &value_size) < 0) {
-                Py_DECREF(method);
-                Py_DECREF(target);
-                Py_DECREF(headers);
-                return -1;
-            }
-            if (name_size == 4 && memcmp(name, "host", 4) == 0) {
-                host_count++;
-            }
-        }
-        if (host_count != 1) {
-            Py_DECREF(method);
-            Py_DECREF(target);
-            Py_DECREF(headers);
-            return send_error(self, 400) < 0 ? -1 : 0;
-        }
-    }
-    if (wreath_headers_count(headers) > self->max_header_count) {
+    if (minor == 1 && request_meta.host_count != 1) {
         Py_DECREF(method);
         Py_DECREF(target);
         Py_DECREF(headers);
-        return send_error(self, 431) < 0 ? -1 : 0;
+        return send_error(self, 400) < 0 ? -1 : 0;
     }
     do_consume(self, consumed);
     if (set_deadline(self, self->request_timeout, 1) < 0) {
@@ -3328,7 +3119,7 @@ drive_head(WreathHttpProtocol *self)
         Py_DECREF(headers);
         return -1;
     }
-    rc = begin_request(self, method, minor, target, headers);
+    rc = begin_request(self, method, minor, target, headers, &request_meta);
     Py_DECREF(method);
     Py_DECREF(target);
     Py_DECREF(headers);
@@ -4354,6 +4145,9 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->http_version_11);
     Py_VISIT(self->root_path);
     Py_VISIT(self->default_response_headers);
+    Py_VISIT(self->default_response_wire);
+    Py_VISIT(self->response_header_cache_key);
+    Py_VISIT(self->response_header_cache_wire);
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->loop_call_later);
@@ -4404,6 +4198,9 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->http_version_11);
     Py_CLEAR(self->root_path);
     Py_CLEAR(self->default_response_headers);
+    Py_CLEAR(self->default_response_wire);
+    Py_CLEAR(self->response_header_cache_key);
+    Py_CLEAR(self->response_header_cache_wire);
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->loop_call_later);
@@ -4547,15 +4344,29 @@ http_protocol_init(WreathHttpProtocol *self, PyObject *args, PyObject *kwargs)
     {
         PyObject *defaults = PyObject_GetAttrString(config, "_default_response_headers");
         PyObject *header_seq;
+        PyObject *wire;
         if (defaults == NULL) {
             return -1;
         }
         header_seq = PyObject_GetAttrString(defaults, "headers");
-        Py_DECREF(defaults);
         if (header_seq == NULL) {
+            Py_DECREF(defaults);
+            return -1;
+        }
+        wire = PyObject_GetAttrString(defaults, "wire");
+        Py_DECREF(defaults);
+        if (wire == NULL) {
+            Py_DECREF(header_seq);
+            return -1;
+        }
+        if (!PyByteArray_Check(wire)) {
+            Py_DECREF(header_seq);
+            Py_DECREF(wire);
+            PyErr_SetString(PyExc_TypeError, "default response wire must be bytearray");
             return -1;
         }
         Py_XSETREF(self->default_response_headers, header_seq);
+        Py_XSETREF(self->default_response_wire, wire);
     }
 
     if (read_ssize_attr(config, "max_request_line", &self->max_request_line) < 0 ||

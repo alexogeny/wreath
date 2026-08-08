@@ -25,6 +25,7 @@ from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath.auth import BearerTokenBackend, Identity, authenticated
 from wreath.cache_control import CacheControl
 from wreath.policy import CachePolicy, CompressionPolicy, HttpPolicy
+from wreath.response import PreparedResponse
 from wreath.server import ServerConfig
 
 try:
@@ -222,6 +223,7 @@ async def test_native_bearer_policy_activates_verifier_from_header_spans() -> No
         [b"GET /private HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer credential\r\n\r\n"],
     )
 
+    assert app._dispatch_http.__name__ == "_handle_http_plain_auth"
     assert seen == ["credential"]
     assert b"200 OK" in transport.buffer
     assert transport.buffer.endswith(b"native-user")
@@ -249,6 +251,45 @@ async def test_native_first_class_cache_and_compression_transform_before_egress(
     assert b"content-encoding: gzip\r\n" in head
     assert b"vary: accept-encoding\r\n" in head
     assert gzip.decompress(body) == b"native-policy" * 100
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_cache_policy_transforms_a_prepared_response_one_shot() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cache_control=CachePolicy(CacheControl(public=True, max_age=60))
+        )
+    )
+    response = PreparedResponse.text("ready")
+
+    @app.get("/")
+    async def payload(request: Any) -> PreparedResponse:
+        return response
+
+    transport = await drive(_NativeHttpProtocol, app, [GET])
+    head, body = bytes(transport.buffer).split(b"\r\n\r\n", 1)
+
+    assert b"cache-control: public, max-age=60\r\n" in head
+    assert body == b"ready"
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_reuses_prepared_header_wire_on_keep_alive() -> None:
+    app = Wreath()
+    response = PreparedResponse.text("ready", headers=[(b"X-Prepared", b"yes")])
+
+    @app.get("/")
+    async def payload(request: Any) -> PreparedResponse:
+        return response
+
+    transport = await drive(_NativeHttpProtocol, app, [GET + GET])
+    wire = bytes(transport.buffer).lower()
+
+    assert wire.count(b"http/1.1 200 ok\r\n") == 2
+    assert wire.count(b"x-prepared: yes\r\n") == 2
+    assert wire.count(b"\r\n\r\nready") == 2
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
@@ -911,6 +952,28 @@ async def test_server_default_headers_can_be_disabled(protocol_cls: type) -> Non
     head = transport.buffer.partition(b"\r\n\r\n")[0].lower()
     assert b"server:" not in head
     assert b"date:" not in head
+
+
+@impl
+@pytest.mark.asyncio
+async def test_existing_protocol_observes_refreshed_default_header_wire(
+    protocol_cls: type,
+) -> None:
+    config = ServerConfig(server_header="before", date_header=False)
+    loop = asyncio.get_running_loop()
+    transport = FakeTransport()
+    protocol = protocol_cls(echo_ok, config, loop, set())
+    protocol.connection_made(transport)
+
+    defaults = config._default_response_headers
+    defaults.server = b"after"
+    defaults.refresh(False)
+    feed(protocol, GET)
+    await _settle()
+
+    head = transport.buffer.partition(b"\r\n\r\n")[0].lower()
+    assert b"server: after\r\n" in head
+    assert b"server: before\r\n" not in head
 
 
 # --- HTTP/1.0 ---------------------------------------------------------------

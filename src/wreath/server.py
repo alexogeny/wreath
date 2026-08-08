@@ -372,12 +372,13 @@ class TLSConfig:
 class _DefaultResponseHeaders:
     """Mutable date cache owned by one server configuration."""
 
-    __slots__ = ("date", "headers", "server")
+    __slots__ = ("date", "headers", "server", "wire")
 
     def __init__(self, server: str | None, include_date: bool) -> None:
         self.server = None if server is None else server.encode("ascii")
         self.date = b""
         self.headers: list[tuple[bytes, bytes]] = []
+        self.wire = bytearray()
         self.refresh(include_date)
 
     def refresh(self, include_date: bool) -> None:
@@ -388,6 +389,7 @@ class _DefaultResponseHeaders:
             self.date = formatdate(usegmt=True).encode("ascii")
             headers.append((b"date", self.date))
         self.headers[:] = headers
+        self.wire[:] = b"".join(name + b": " + value + b"\r\n" for name, value in headers)
 
 
 class EnvConfigWarning(UserWarning):
