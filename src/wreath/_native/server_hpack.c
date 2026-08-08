@@ -571,14 +571,11 @@ wreath_hpack_decode(WreathHpackTable *t, const uint8_t *data, Py_ssize_t len,
         }
         header_count++;
         header_size += name_size + value_size + 32;
-        PyObject *tuple = PyTuple_Pack(2, name, value);
-        Py_XDECREF(name);
-        Py_XDECREF(value);
-        if (tuple == NULL) {
-            return -1;
-        }
-        int rc = PyList_Append(out_list, tuple);
-        Py_DECREF(tuple);
+        int rc = wreath_headers_is_block(out_list)
+            ? wreath_header_block_append_objects(out_list, name, value)
+            : -1;
+        Py_DECREF(name);
+        Py_DECREF(value);
         if (rc < 0) {
             return -1;
         }

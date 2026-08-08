@@ -339,7 +339,7 @@ the whole decision, and the reason is what a cancel does *not* undo: unwinding a
 `POST` rolls its transaction back cleanly, but the job it enqueued, the card it
 charged and the mail it sent all already happened — and the client is gone and
 cannot be told which. Wreath draws the same safe/unsafe line
-`wreath.middleware.idempotency` does.
+`wreath.policy.idempotency` does.
 
 Declare the exception on the route:
 

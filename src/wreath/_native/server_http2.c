@@ -243,7 +243,8 @@ h2_future_set_result(PyObject *future, PyObject *result)
     if (is_done) {
         return 0;
     }
-    PyObject *r = PyObject_CallMethod(future, "set_result", "O", result);
+    /* Parentheses keep a tuple-valued body slot as one positional argument. */
+    PyObject *r = PyObject_CallMethod(future, "set_result", "(O)", result);
     if (r == NULL) {
         return -1;
     }
@@ -522,13 +523,28 @@ h2_stream_error(PyObject *proto, uint32_t sid, int code)
 /* Http2Stream methods                                                      */
 /* ======================================================================== */
 
+static int
+h2_stream_is_native(Http2Stream *self)
+{
+    return self->scope != NULL && wreath_request_context_check(self->scope);
+}
+
+static PyObject *
+h2_body_slot(PyObject *body, int more, int disconnected)
+{
+    return PyTuple_Pack(3, body, more ? Py_True : Py_False,
+                        disconnected ? Py_True : Py_False);
+}
+
 static PyObject *
 stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     Http2Stream *self = (Http2Stream *)op;
     /* disconnect takes priority */
     if (self->disconnected) {
-        PyObject *msg = Py_BuildValue("{s:s}", "type", "http.disconnect");
+        PyObject *msg = h2_stream_is_native(self)
+            ? h2_body_slot(Py_None, 0, 1)
+            : Py_BuildValue("{s:s}", "type", "http.disconnect");
         if (msg == NULL) {
             return NULL;
         }
@@ -550,9 +566,11 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
             return NULL;
         }
         int more = body_queue_len(self) > 0 || !self->request_ended;
-        PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
-                                      "body", body, "more_body",
-                                      more ? Py_True : Py_False);
+        PyObject *msg = h2_stream_is_native(self)
+            ? h2_body_slot(body, more, 0)
+            : Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
+                            "body", body, "more_body",
+                            more ? Py_True : Py_False);
         Py_DECREF(body);
         if (msg == NULL) {
             return NULL;
@@ -562,8 +580,10 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         return aw;
     }
     if (self->request_ended) {
-        PyObject *msg = Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
-                                      "body", "", 0, "more_body", Py_False);
+        PyObject *msg = h2_stream_is_native(self)
+            ? h2_body_slot(Py_None, 0, 0)
+            : Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
+                            "body", "", 0, "more_body", Py_False);
         if (msg == NULL) {
             return NULL;
         }
@@ -1196,17 +1216,55 @@ stream_send(PyObject *op, PyObject *message)
 static PyObject *
 stream_wreath_response(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    if (nargs != 3) {
+    if (nargs != 3 && nargs != 4) {
         PyErr_Format(
-            PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
+            PyExc_TypeError, "_wreath_response expected 3 or 4 arguments, got %zd", nargs
         );
         return NULL;
     }
     if (self->protocol == NULL || self->state == S_CLOSED) return completed_none();
+    PyObject *body = Py_NewRef(args[2]);
+    int authenticated = nargs == 4 ? PyObject_IsTrue(args[3]) : 0;
+    Http2Protocol *proto = (Http2Protocol *)self->protocol;
+    if (authenticated < 0 || (proto->policy.response_transform && wreath_policy_response(
+            &proto->policy, &self->policy_state, args[0], args[1], &body,
+            authenticated) < 0)) {
+        Py_DECREF(body);
+        return NULL;
+    }
     PyObject *started = h2_response_start(self, args[0], args[1], 0);
-    if (started == NULL) return NULL;
+    if (started == NULL) {
+        Py_DECREF(body);
+        return NULL;
+    }
     Py_DECREF(started);
-    return h2_response_body(self, args[2], 0);
+    PyObject *result = h2_response_body(self, body, 0);
+    Py_DECREF(body);
+    return result;
+}
+
+static PyObject *
+stream_wreath_start(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_wreath_stream_start expected 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    return h2_response_start(self, args[0], args[1], 0);
+}
+
+static PyObject *
+stream_wreath_body(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_wreath_stream_body expected 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    int more = PyObject_IsTrue(args[1]);
+    if (more < 0) return NULL;
+    return h2_response_body(self, args[0], more);
 }
 
 
@@ -1326,6 +1384,10 @@ static PyMethodDef stream_methods[] = {
     {"_receive", stream_receive, METH_NOARGS, NULL},
     {"_send", stream_send, METH_O, NULL},
     {"_wreath_response", (PyCFunction)(void (*)(void))stream_wreath_response,
+     METH_FASTCALL, NULL},
+    {"_wreath_stream_start", (PyCFunction)(void (*)(void))stream_wreath_start,
+     METH_FASTCALL, NULL},
+    {"_wreath_stream_body", (PyCFunction)(void (*)(void))stream_wreath_body,
      METH_FASTCALL, NULL},
     {"_done", stream_done, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1581,21 +1643,28 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
 {
     PyObject *method = NULL, *path = NULL, *scheme = NULL, *authority = NULL;
     PyObject *host = NULL;
-    PyObject *scope_headers = PyList_New(0);
+    PyObject *scope_headers = wreath_header_block_new_objects(16);
     if (scope_headers == NULL) {
         return -2;
     }
     int seen_regular = 0;
     Py_ssize_t content_length = -1;
-    Py_ssize_t count = PyList_GET_SIZE(header_list);
+    Py_ssize_t count = wreath_headers_count(header_list);
     for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *pair = PyList_GET_ITEM(header_list, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        char *nptr; Py_ssize_t nlen;
-        char *vptr; Py_ssize_t vlen;
-        PyBytes_AsStringAndSize(name, &nptr, &nlen);
-        PyBytes_AsStringAndSize(value, &vptr, &vlen);
+        const char *nptr;
+        const char *vptr;
+        Py_ssize_t nlen;
+        Py_ssize_t vlen;
+        if (wreath_headers_view(header_list, i, &nptr, &nlen,
+                                &vptr, &vlen) < 0) {
+            Py_DECREF(scope_headers);
+            return -2;
+        }
+        PyObject *value = wreath_headers_value_borrowed(header_list, i);
+        if (value == NULL) {
+            Py_DECREF(scope_headers);
+            return -2;
+        }
         if (nlen == 0) {
             goto proto_err;
         }
@@ -1661,7 +1730,14 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
             }
             content_length = declared;
         }
-        if (PyList_Append(scope_headers, pair) < 0) {
+        PyObject *name = wreath_headers_name_object(header_list, i);
+        PyObject *owned_value = wreath_headers_value_object(header_list, i);
+        int append_result = name != NULL && owned_value != NULL
+            ? wreath_header_block_append_objects(scope_headers, name, owned_value)
+            : -1;
+        Py_XDECREF(name);
+        Py_XDECREF(owned_value);
+        if (append_result < 0) {
             Py_DECREF(scope_headers);
             return -2;
         }
@@ -1701,11 +1777,11 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
     /* synthesize host from :authority when no host field is present; the name
      * is a cached constant, not a fresh allocation each request */
     if (host == NULL && authority != NULL) {
-        PyObject *hpair = PyTuple_Pack(2, header_host, authority);
-        if (hpair == NULL) { Py_DECREF(scope_headers); return -2; }
-        int rc = PyList_Insert(scope_headers, 0, hpair);
-        Py_DECREF(hpair);
-        if (rc < 0) { Py_DECREF(scope_headers); return -2; }
+        if (wreath_header_block_append_objects(
+                scope_headers, header_host, authority) < 0) {
+            Py_DECREF(scope_headers);
+            return -2;
+        }
     }
 
     /* Split path and query, then build the scope from the *decoded* path, the
@@ -1768,6 +1844,15 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
         Py_DECREF(scope_headers);
     }
     else {
+        PyObject *asgi_headers = wreath_headers_materialize(scope_headers);
+        if (asgi_headers == NULL) {
+            Py_DECREF(method_str);
+            Py_DECREF(path_str);
+            Py_DECREF(raw_path);
+            Py_DECREF(query);
+            Py_DECREF(scope_headers);
+            return -2;
+        }
         scope = Py_BuildValue(
             "{s:s,s:s,s:s,s:N,s:N,s:N,s:N,s:O}",
             "type", "http",
@@ -1777,7 +1862,8 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
             "path", path_str,
             "raw_path", raw_path,
             "query_string", query,
-            "headers", scope_headers);
+            "headers", asgi_headers);
+        Py_DECREF(asgi_headers);
         Py_DECREF(scope_headers);
     }
     if (scope == NULL) {
@@ -1924,7 +2010,8 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     PyObject_GC_Track((PyObject *)st);
 
     if (self->policy.descriptor != NULL) {
-        PyObject *policy_headers = PyObject_GetAttrString(scope, "headers");
+        PyObject *policy_headers = wreath_request_context_headers(scope);
+        Py_XINCREF(policy_headers);
         PyObject *policy_method = PyObject_GetAttrString(scope, "method");
         PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
         PyObject *policy_client = PyObject_GetAttrString(scope, "client");
@@ -1973,15 +2060,19 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
 
     /* RFC 9218 priority hint; content-length was parsed during validation. */
     if (self->rfc9218_enabled) {
-        Py_ssize_t hc = PyList_GET_SIZE(header_list);
+        Py_ssize_t hc = wreath_headers_count(header_list);
         for (Py_ssize_t i = 0; i < hc; i++) {
-            PyObject *pair = PyList_GET_ITEM(header_list, i);
-            PyObject *name = PyTuple_GET_ITEM(pair, 0);
-            if (PyBytes_GET_SIZE(name) == 8 &&
-                memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
-                PyObject *value = PyTuple_GET_ITEM(pair, 1);
-                parse_priority_field(PyBytes_AS_STRING(value),
-                                     PyBytes_GET_SIZE(value),
+            const char *name;
+            const char *value;
+            Py_ssize_t name_size;
+            Py_ssize_t value_size;
+            if (wreath_headers_view(header_list, i, &name, &name_size,
+                                    &value, &value_size) < 0) {
+                Py_DECREF(st);
+                return -1;
+            }
+            if (name_size == 8 && memcmp(name, "priority", 8) == 0) {
+                parse_priority_field(value, value_size,
                                      &st->urgency, &st->incremental);
             }
         }
@@ -2027,15 +2118,21 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         else if (wreath_request_scope_seed_flight(st->scope, &st->nfr_ctx) < 0) {
             PyErr_Clear();
         }
-        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(header_list); i++) {
-            PyObject *pair = PyList_GET_ITEM(header_list, i);
-            PyObject *name = PyTuple_GET_ITEM(pair, 0);
-            if (PyBytes_GET_SIZE(name) == 11 &&
-                memcmp(PyBytes_AS_STRING(name), "traceparent", 11) == 0) {
-                PyObject *value = PyTuple_GET_ITEM(pair, 1);
+        Py_ssize_t header_count = wreath_headers_count(header_list);
+        for (Py_ssize_t i = 0; i < header_count; i++) {
+            const char *name;
+            const char *value;
+            Py_ssize_t name_size;
+            Py_ssize_t value_size;
+            if (wreath_headers_view(header_list, i, &name, &name_size,
+                                    &value, &value_size) < 0) {
+                Py_DECREF(st);
+                return -1;
+            }
+            if (name_size == 11 && memcmp(name, "traceparent", 11) == 0) {
                 flight_capi->context_propagate(
                     self->nfr_worker, &st->nfr_ctx,
-                    (const uint8_t *)PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value));
+                    (const uint8_t *)value, value_size);
                 break;
             }
         }
@@ -2095,9 +2192,11 @@ deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
             return -1;
         }
         int more = !st->request_ended;
-        PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
-                                      "body", body, "more_body",
-                                      more ? Py_True : Py_False);
+        PyObject *msg = h2_stream_is_native(st)
+            ? h2_body_slot(body, more, 0)
+            : Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
+                            "body", body, "more_body",
+                            more ? Py_True : Py_False);
         Py_DECREF(body);
         if (msg == NULL) {
             return -1;
@@ -2200,7 +2299,7 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
 static int
 finish_header_block(Http2Protocol *self, uint32_t sid, int end_stream)
 {
-    PyObject *header_list = PyList_New(0);
+    PyObject *header_list = wreath_header_block_new_objects(16);
     if (header_list == NULL) {
         return -1;
     }

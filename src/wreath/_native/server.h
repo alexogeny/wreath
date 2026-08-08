@@ -15,6 +15,7 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "header_block.h"
 
 #include <math.h>
 #include <string.h>
@@ -398,6 +399,7 @@ extern PyTypeObject ValueAwaitableType;
 
 int wreath_request_context_ready(PyObject *module);
 int wreath_request_context_check(PyObject *object);
+PyObject *wreath_request_context_headers(PyObject *object); /* borrowed */
 /* Seed a dict scope's `_wreath_flight` slot with the recorder's request id, for
  * the protocols that dispatch without a request-context object (HTTP/2, HTTP/3,
  * WebSocket). See the definition in server_request.c for why the id can share

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import gzip
 import importlib
+import inspect
 import tracemalloc
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -20,6 +22,9 @@ from _server_ingest import feed
 
 from wreath import Response, Wreath
 from wreath._pure.server import HttpProtocol as PureHttpProtocol
+from wreath.auth import BearerTokenBackend, Identity, authenticated
+from wreath.cache_control import CacheControl
+from wreath.policy import CachePolicy, CompressionPolicy, HttpPolicy
 from wreath.server import ServerConfig
 
 try:
@@ -186,6 +191,101 @@ def parse_responses(data: bytes | bytearray) -> list[bytes]:
 
 
 GET = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+
+
+def test_native_application_entry_returns_the_compiled_dispatcher_directly() -> None:
+    app = Wreath()
+
+    assert not inspect.iscoroutinefunction(app._wreath_http)
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_bearer_policy_activates_verifier_from_header_spans() -> None:
+    seen: list[str] = []
+
+    async def verify(token: str) -> Identity | None:
+        seen.append(token)
+        return Identity("native-user") if token == "credential" else None
+
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend(verify))
+
+    @app.get("/private")
+    @authenticated()
+    async def private(request: Any) -> str:
+        return request.identity.id
+
+    transport = await drive(
+        _NativeHttpProtocol,
+        app,
+        [b"GET /private HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer credential\r\n\r\n"],
+    )
+
+    assert seen == ["credential"]
+    assert b"200 OK" in transport.buffer
+    assert transport.buffer.endswith(b"native-user")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_first_class_cache_and_compression_transform_before_egress() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cache_control=CachePolicy(CacheControl(public=True, max_age=60)),
+            compression=CompressionPolicy(minimum_size=0),
+        )
+    )
+
+    @app.get("/")
+    async def payload(request: Any) -> str:
+        return "native-policy" * 100
+
+    request = GET[:-2] + b"Accept-Encoding: gzip\r\n\r\n"
+    transport = await drive(_NativeHttpProtocol, app, [request])
+    assert app._dispatch_http.__name__ == "_handle_http_plain"
+    head, body = bytes(transport.buffer).split(b"\r\n\r\n", 1)
+    assert b"cache-control: public, max-age=60\r\n" in head
+    assert b"content-encoding: gzip\r\n" in head
+    assert b"vary: accept-encoding\r\n" in head
+    assert gzip.decompress(body) == b"native-policy" * 100
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_bearer_auth_reads_one_header_without_materializing_the_block() -> None:
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: Identity("native") if token == "valid-token" else None)
+    )
+
+    @app.get("/auth")
+    @authenticated()
+    async def protected(request: Any) -> str:
+        return request.identity.id
+
+    fields = (
+        b"host: localhost\r\nuser-agent: wreath-test\r\naccept: */*\r\n"
+        b"accept-encoding: gzip\r\nx-request-id: test\r\n"
+        b"x-forwarded-proto: https\r\ncache-control: no-cache\r\n"
+    )
+    allowed = await drive(
+        _NativeHttpProtocol,
+        app,
+        [b"GET /auth HTTP/1.1\r\n" + fields + b"authorization: Bearer valid-token\r\n\r\n"],
+    )
+    duplicate = await drive(
+        _NativeHttpProtocol,
+        app,
+        [
+            b"GET /auth HTTP/1.1\r\n" + fields + b"authorization: Bearer valid-token\r\n"
+            b"authorization: Bearer other\r\n\r\n"
+        ],
+    )
+
+    assert allowed.buffer.startswith(b"HTTP/1.1 200")
+    assert allowed.buffer.endswith(b"native")
+    assert duplicate.buffer.startswith(b"HTTP/1.1 401")
 
 
 # --- head fragmentation -----------------------------------------------------
@@ -1012,10 +1112,10 @@ async def test_protocol_collectable_after_loss(protocol_cls: type) -> None:
 async def one_shot_ok(scope: dict, receive: Any, send: Any) -> None:
     await send(
         {
-        "type": "wreath.response",
-        "status": 200,
-        "headers": [(b"content-type", b"text/plain")],
-        "body": b"hello",
+            "type": "wreath.response",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+            "body": b"hello",
         }
     )
 
@@ -1155,7 +1255,7 @@ async def test_buffered_fragmented_request_invokes_app() -> None:
     protocol, transport = _make_native(echo_ok)
     payload = b"POST /frag HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
     for i in range(len(payload)):
-        feed(protocol, payload[i:i + 1])
+        feed(protocol, payload[i : i + 1])
     await _settle()
     assert transport.buffer.startswith(b"HTTP/1.1 200")
     assert transport.buffer.endswith(b"hello")
@@ -1169,7 +1269,7 @@ async def test_buffered_keep_alive_requests_reuse_allocation() -> None:
     protocol, transport = _make_native(echo_ok)
     first = memoryview(protocol.get_buffer(-1))
     capacity = len(first)
-    first[:len(GET)] = GET
+    first[: len(GET)] = GET
     protocol.buffer_updated(len(GET))
     first.release()
     await _settle()
@@ -1178,7 +1278,7 @@ async def test_buffered_keep_alive_requests_reuse_allocation() -> None:
         # Fully drained keep-alive traffic re-offers the same-size tail
         # instead of growing the allocation.
         assert len(view) == capacity
-        view[:len(GET)] = GET
+        view[: len(GET)] = GET
         protocol.buffer_updated(len(GET))
         view.release()
         await _settle()
@@ -1196,7 +1296,7 @@ async def test_pipelined_requests_survive_deferred_compaction() -> None:
     view = memoryview(protocol.get_buffer(-1))
     alias = memoryview(protocol)  # second export of the same offer
     data = GET + GET
-    view[:len(data)] = data
+    view[: len(data)] = data
     protocol.buffer_updated(len(data))
     await _settle()
     assert parse_responses(transport.buffer) == [b"HTTP/1.1 200 OK", b"HTTP/1.1 200 OK"]
@@ -1252,7 +1352,7 @@ async def test_overlapping_read_offers_rejected() -> None:
         protocol.get_buffer(-1)
     with pytest.raises(RuntimeError):
         protocol.data_received(b"x")  # mixing ingestion paths is refused
-    view[:len(GET)] = GET
+    view[: len(GET)] = GET
     protocol.buffer_updated(len(GET))
     view.release()
     await _settle()
@@ -1294,7 +1394,7 @@ async def test_native_data_received_compat_path_still_parses() -> None:
     protocol, transport = _make_native(echo_ok)
     payload = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
     for i in range(len(payload)):
-        feed(protocol, payload[i:i + 1], force_data_received=True)
+        feed(protocol, payload[i : i + 1], force_data_received=True)
     await _settle()
     feed(protocol, GET + GET, force_data_received=True)
     await _settle()

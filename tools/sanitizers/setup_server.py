@@ -26,6 +26,7 @@ setup(
                 str(ROOT / "src/wreath/_native/_servermodule.c"),
                 str(ROOT / "src/wreath/_native/server_common.c"),
                 str(ROOT / "src/wreath/_native/http.c"),
+                str(ROOT / "src/wreath/_native/header_block.c"),
                 str(ROOT / "src/wreath/_native/server_request.c"),
                 str(ROOT / "src/wreath/_native/server_http1.c"),
                 str(ROOT / "src/wreath/_native/server_http2.c"),
