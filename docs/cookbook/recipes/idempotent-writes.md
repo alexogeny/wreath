@@ -2,14 +2,16 @@
 
 Networks retry. A user double-clicks, a proxy resends, a mobile client reconnects
 and replays its last request. For a `GET` that's harmless; for `POST /orders` it
-charges the card twice. `IdempotencyMiddleware` makes the retry safe: when a
+charges the card twice. `IdempotencyPolicy` makes the retry safe: when a
 request carries an `Idempotency-Key`, the first response is remembered and
 replayed for any repeat of that key — from a small, bounded, in-process store:
 
 ```python
-from wreath.middleware import IdempotencyMiddleware
+from wreath.policy import HttpPolicy, IdempotencyPolicy
 
-app.add_global_middleware(IdempotencyMiddleware(ttl=24 * 60 * 60))
+app.configure_http_policy(
+    HttpPolicy(idempotency=IdempotencyPolicy(ttl=24 * 60 * 60))
+)
 ```
 
 The client generates one key per logical operation and sends it as a header:

@@ -12,7 +12,7 @@ import os
 
 from wreath import Wreath
 from wreath.auth import SessionIdentityBackend
-from wreath.middleware import SessionMiddleware
+from wreath.policy import HttpPolicy, SessionPolicy
 
 app = Wreath()
 # Global, not route-scoped: `SessionIdentityBackend` reads the session while it
@@ -20,7 +20,9 @@ app = Wreath()
 # other way — `add_middleware`, `Router(middleware=[...])`, or `middleware=[...]`
 # on one route — every protected route answers 401 to a valid session cookie, so
 # Wreath refuses all of those when the routes compile.
-app.add_global_middleware(SessionMiddleware(secret=os.environ["SESSION_SECRET"]))
+app.configure_http_policy(
+    HttpPolicy(session=SessionPolicy(secret=os.environ["SESSION_SECRET"]))
+)
 
 # 1. an HTTP client pinned to the issuer origin
 app.http_client("idp", base_url="https://issuer.example.com")
