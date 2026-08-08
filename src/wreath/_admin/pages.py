@@ -3,7 +3,7 @@
 Server-rendered, and **no JavaScript at all**. That is a deliberate decision
 rather than an omission, and it settles two things the plan left open:
 
-* `wreath.middleware.security` has no CSP nonce support, so any policy for a
+* `wreath.policy.security` has no CSP nonce support, so any policy for a
   page carrying inline script has to be permissive. A page with no script needs
   no nonce, so the admin ships `script-src 'none'` -- the strongest policy
   available -- instead of waiting for a nonce mechanism it would then have to

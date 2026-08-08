@@ -347,7 +347,7 @@ class Admin:
         Raises:
             AdminError: nothing is registered, or a write operation is
                 registered with no `csrf` verifier. A server-rendered form
-                cannot carry `CSRFMiddleware`'s header, so an admin that
+                cannot carry `CsrfPolicy`'s header, so an admin that
                 accepted posts without one would be a cross-site write against
                 the most privileged surface in the application.
         """
@@ -366,7 +366,7 @@ class Admin:
         if writing and self._csrf is None:
             raise AdminError(
                 f"the admin generates {', '.join(writing)} but was given no "
-                "`csrf` verifier. wreath.middleware.CSRFMiddleware reads its "
+                "`csrf` verifier. wreath.policy.CsrfPolicy reads its "
                 "token from a request header, which a plain HTML form post "
                 "cannot carry, so it cannot protect these routes -- mounting it "
                 "would refuse every admin form instead. Pass csrf=(request) -> "
@@ -758,7 +758,7 @@ def _html(template: Any, context: dict[str, Any], status: int = 200) -> Response
     namespace there, and a model's column names are not ours to constrain.
 
     Transport policy is not among the headers set here:
-    `Strict-Transport-Security` is `SecurityHeadersMiddleware`'s, because it is a
+    `Strict-Transport-Security` is `SecurityHeadersPolicy`'s, because it is a
     statement about the origin rather than about this response, and an admin that
     set it would be deciding something for every other route in the deployment.
     """

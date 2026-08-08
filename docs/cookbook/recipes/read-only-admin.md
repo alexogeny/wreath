@@ -53,7 +53,7 @@ admin.register(
 ## Growing it into a writable one
 
 You need two things: a CSRF verifier, because
-`wreath.middleware.CSRFMiddleware` is header-only and an HTML form cannot carry a
+`wreath.policy.CsrfPolicy` is header-only and an HTML form cannot carry a
 header, and a step-up window on the write operations.
 
 ```python

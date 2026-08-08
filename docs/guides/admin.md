@@ -146,7 +146,7 @@ The read screens stay usable all day; the destructive ones ask again.
 
 ## Cross-site request forgery, and a gap you must close
 
-`wreath.middleware.CSRFMiddleware` reads its token from a request *header*. A
+`wreath.policy.CsrfPolicy` reads its token from a request *header*. A
 plain HTML form post cannot carry one, so that middleware cannot protect these
 routes — mounting it would refuse every admin form rather than defend it.
 
@@ -162,7 +162,7 @@ start — register the read operations and the requirement goes away:
 admin.register(Account, operations=("list", "retrieve"))
 ```
 
-Form-field CSRF support in `CSRFMiddleware` is on
+Form-field CSRF support in `CsrfPolicy` is on
 [the roadmap](../reference/roadmap.md); when it lands, `csrf=` becomes a
 one-liner pointing at it.
 
