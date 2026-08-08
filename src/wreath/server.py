@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from email.utils import formatdate
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from ._native import extension as _extension
 from .config import read_osenv
 from .inspector import InspectorConfig, InspectorServer, serve_inspector
 from .telemetry import Mode, TelemetryConfig
@@ -47,13 +48,7 @@ def _load_native_started_coroutine() -> Any | None:
     Resolved once at import rather than per request, and by the same rule the
     protocol selection uses: `WREATH_PURE` takes the readable implementation.
     """
-    if os.environ.get("WREATH_PURE"):
-        return None
-    try:
-        extension = importlib.import_module("wreath._native._server")
-    except ImportError:
-        return None
-    return getattr(extension, "StartedCoroutine", None)
+    return getattr(_extension("_server"), "StartedCoroutine", None)
 
 
 class _StartedCoroutine:
@@ -149,9 +144,10 @@ def _create_recorder(config: ServerConfig) -> Any:
     telemetry = config.telemetry
     if telemetry is None or telemetry.mode is Mode.OFF:
         return None
-    try:
-        flight = importlib.import_module("wreath._native._flight")
-    except ImportError:
+    # `_flight` is declared as not honouring WREATH_PURE: the recorder's ring is
+    # native by definition and has no reference implementation to fall back to.
+    flight = _extension("_flight")
+    if flight is None:
         return None
     # A Forensic recorder preallocates the capture-slab pool; every other mode
     # passes capture_slabs=0 and reserves nothing (deny-by-default all the way
@@ -798,28 +794,20 @@ def configure_from_env(
 
 
 def _select_protocol() -> type:
-    if os.environ.get("WREATH_PURE"):
-        from ._pure.server import HttpProtocol
-
-        return HttpProtocol
-    try:
-        # importlib keeps the compiled submodule invisible to static analysis
-        # while remaining independent of the _core accelerator loader.
-        server_ext = importlib.import_module("wreath._native._server")
+    # Re-resolved per call, not cached: `tests/test_server_cancel_on_disconnect`
+    # parametrizes native-versus-pure by setting WREATH_PURE between calls, and
+    # `Server` resolves its protocol class on the first connection.
+    server_ext = _extension("_server")
+    if server_ext is not None:
         return cast(type, server_ext.HttpProtocol)
-    except ImportError:
-        from ._pure.server import HttpProtocol
 
-        return HttpProtocol
+    from ._pure.server import HttpProtocol
+
+    return HttpProtocol
 
 
 def _native_server_module() -> Any | None:
-    if os.environ.get("WREATH_PURE"):
-        return None
-    try:
-        return importlib.import_module("wreath._native._server")
-    except ImportError:
-        return None
+    return _extension("_server")
 
 
 def _require_native_h2() -> Any:
@@ -974,10 +962,12 @@ def _http3_available() -> bool:
         if importlib.util.find_spec("wreath._native._http3") is None:
             _http3_available_cache = False
         else:
+            # `_extension` answers the ImportError half; the ValueError is this
+            # function's own case -- a partial build whose `.so` loads far enough
+            # to raise from module init rather than to fail the import.
             try:
-                importlib.import_module("wreath._native._http3")
-                _http3_available_cache = True
-            except ImportError, ValueError:
+                _http3_available_cache = _extension("_http3") is not None
+            except ValueError:
                 _http3_available_cache = False
     return _http3_available_cache
 
@@ -1313,7 +1303,9 @@ class Server:
             freeze()
 
     async def _bind_datagram(self, tls: TLSConfig, port: int) -> asyncio.DatagramTransport:
-        ext = importlib.import_module("wreath._native._http3")
+        ext = _extension("_http3")
+        if ext is None:  # pragma: no cover - `_http3_available` refuses at startup
+            raise RuntimeError("the native wreath._native._http3 extension is not loadable")
         config = self._config
 
         def factory() -> Any:

@@ -82,8 +82,12 @@ def test_an_unknown_client_is_refused(server) -> None:
 
 def test_a_scope_the_client_was_not_registered_for_is_refused(server) -> None:
     """A client cannot ask for more than registration granted it."""
+    _, challenge = _pkce()
     with pytest.raises(OAuthRefusal, match="not registered for scope") as raised:
-        server.issue_code(client_id="console", subject="u", scope=("admin",))
+        server.issue_code(
+            client_id="console", subject="u", scope=("admin",), challenge=challenge,
+            redirect_uri="https://app.example/cb",
+        )
     assert raised.value.reason == "invalid-scope"
 
 
@@ -91,8 +95,12 @@ def test_a_scope_the_client_was_not_registered_for_is_refused(server) -> None:
 
 
 def test_a_code_can_be_redeemed_once(server) -> None:
-    code = server.issue_code(client_id="console", subject="u", scope=("read",))
-    token = server.redeem(code)
+    verifier, _ = _pkce()
+    code = _issued(server)
+    token = server.redeem(
+        code, verifier=verifier, client_id="console",
+        redirect_uri="https://app.example/cb",
+    )
     assert token.subject == "u"
     assert token.scope == ("read",)
 
@@ -105,40 +113,39 @@ def test_redeeming_a_code_twice_revokes_the_token_the_first_redemption_issued(
     Refusing the second redemption alone leaves the attacker's token live if
     they got there first, so neither party keeps anything.
     """
-    code = server.issue_code(client_id="console", subject="u", scope=("read",))
-    first = server.redeem(code)
+    verifier, _ = _pkce()
+    code = _issued(server)
+    redemption = {
+        "verifier": verifier,
+        "client_id": "console",
+        "redirect_uri": "https://app.example/cb",
+    }
+    first = server.redeem(code, **redemption)
     assert not server.is_revoked(first.access_token)
     with pytest.raises(OAuthRefusal, match="has been revoked") as raised:
-        server.redeem(code)
+        server.redeem(code, **redemption)
     assert raised.value.reason == "code-replayed"
     assert server.is_revoked(first.access_token)
 
 
 def test_a_code_redeemed_with_the_wrong_pkce_verifier_is_refused(server) -> None:
-    import hashlib
-    from base64 import urlsafe_b64encode
-
-    verifier = "the-real-one"
-    challenge = urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    code = server.issue_code(
-        client_id="console", subject="u", scope=("read",), challenge=challenge)
+    code = _issued(server)
     with pytest.raises(OAuthRefusal, match="does not match the challenge") as raised:
-        server.redeem(code, verifier="a-different-one")
+        server.redeem(
+            code, verifier="a-different-one", client_id="console",
+            redirect_uri="https://app.example/cb",
+        )
     assert raised.value.reason == "pkce-mismatch"
 
 
 def test_the_matching_verifier_is_accepted(server) -> None:
     """So the refusal above is not passing for free."""
-    import hashlib
-    from base64 import urlsafe_b64encode
-
-    verifier = "the-real-one"
-    challenge = urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    code = server.issue_code(
-        client_id="console", subject="u", scope=("read",), challenge=challenge)
-    assert server.redeem(code, verifier=verifier).subject == "u"
+    verifier, _ = _pkce()
+    code = _issued(server)
+    assert server.redeem(
+        code, verifier=verifier, client_id="console",
+        redirect_uri="https://app.example/cb",
+    ).subject == "u"
 
 
 # --- refresh ----------------------------------------------------------------
@@ -198,9 +205,12 @@ def test_a_confidential_client_gets_a_subjectless_token(server) -> None:
 def test_a_token_carries_the_tenant_it_was_minted_in(server) -> None:
     """It composes with `wreath.tenancy` rather than around it: a token minted
     inside one tenant must not read another's data, whatever roles it holds."""
-    code = server.issue_code(
-        client_id="console", subject="u", scope=("read",), tenant="acme")
-    assert server.redeem(code).tenant == "acme"
+    verifier, _ = _pkce()
+    code = _issued(server, tenant="acme")
+    assert server.redeem(
+        code, verifier=verifier, client_id="console",
+        redirect_uri="https://app.example/cb",
+    ).tenant == "acme"
 
 
 # --- the half that makes it one feature rather than two ---------------------
@@ -367,3 +377,159 @@ def test_the_hmac_path_counts_tokens_but_not_signing_time(server) -> None:
     measures -- the trap `AGENTS.md` names about cProfile, one order down."""
     server.issue_access(subject="u", audience="a")
     assert server.counters() == {"tokens_issued": 1.0, "signing_seconds": 0.0}
+
+
+# --- the code endpoint's preconditions --------------------------------------
+#
+# Each of these is a check RFC 6749 §4.1.3 requires of the token endpoint and
+# that `redeem` did not make. They are grouped because they share one shape: a
+# field the code carries, stored and then never read.
+
+
+def _pkce() -> tuple[str, str]:
+    """A verifier and its S256 challenge."""
+    import hashlib
+    from base64 import urlsafe_b64encode
+
+    verifier = "the-real-one-and-it-is-long-enough-to-be-worth-something"
+    challenge = urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _issued(server: AuthorizationServer, **overrides) -> str:
+    verifier, challenge = _pkce()
+    options = {
+        "client_id": "console",
+        "subject": "u",
+        "scope": ("read",),
+        "challenge": challenge,
+        "redirect_uri": "https://app.example/cb",
+    }
+    options.update(overrides)
+    return server.issue_code(**options)
+
+
+def test_a_code_cannot_be_minted_without_a_pkce_challenge(server) -> None:
+    """The module docstring says PKCE is required; the default made it optional.
+
+    `challenge=""` skipped the comparison in `redeem` entirely, so a deployment
+    that simply did not pass one got a PKCE-free authorization-code flow that
+    the documentation says cannot exist.
+    """
+    with pytest.raises(OAuthRefusal, match="code_challenge") as raised:
+        server.issue_code(
+            client_id="console", subject="u", challenge="",
+            redirect_uri="https://app.example/cb",
+        )
+    assert raised.value.reason == "weak-pkce"
+
+
+def test_a_challenge_that_is_not_an_s256_digest_is_refused(server) -> None:
+    """A `plain` challenge is 43 characters of *verifier*, and looks like one."""
+    with pytest.raises(OAuthRefusal, match="code_challenge") as raised:
+        server.issue_code(
+            client_id="console", subject="u", challenge="short",
+            redirect_uri="https://app.example/cb",
+        )
+    assert raised.value.reason == "weak-pkce"
+
+
+def test_redeeming_without_a_verifier_is_refused(server) -> None:
+    code = _issued(server)
+    with pytest.raises(OAuthRefusal, match="does not match the challenge") as raised:
+        server.redeem(
+            code, verifier="", client_id="console",
+            redirect_uri="https://app.example/cb",
+        )
+    assert raised.value.reason == "pkce-mismatch"
+
+
+def test_a_code_is_redeemable_only_by_the_client_it_was_issued_to(server) -> None:
+    """Otherwise a leaked code is redeemable by any registered client."""
+    verifier, _ = _pkce()
+    code = _issued(server)
+    with pytest.raises(OAuthRefusal, match="issued to a different client") as raised:
+        server.redeem(
+            code, verifier=verifier, client_id="spa",
+            redirect_uri="https://app.example/cb",
+        )
+    assert raised.value.reason == "client-mismatch"
+
+
+def test_a_code_is_redeemable_only_against_the_redirect_uri_it_was_issued_for(
+    server,
+) -> None:
+    """RFC 6749 §4.1.3. The field was stored and read nowhere."""
+    verifier, _ = _pkce()
+    code = _issued(server)
+    with pytest.raises(OAuthRefusal, match="redirect_uri") as raised:
+        server.redeem(
+            code, verifier=verifier, client_id="console",
+            redirect_uri="https://app.example/other",
+        )
+    assert raised.value.reason == "redirect_uri-mismatch"
+
+
+def test_an_authorization_code_expires(server) -> None:
+    """`issued_at` was stored and never read, so a leaked code never went stale."""
+    verifier, _ = _pkce()
+    code = _issued(server, now=1000.0)
+    with pytest.raises(OAuthRefusal, match="expired") as raised:
+        server.redeem(
+            code, verifier=verifier, client_id="console",
+            redirect_uri="https://app.example/cb", now=1000.0 + 61.0,
+        )
+    assert raised.value.reason == "code-expired"
+
+
+def test_a_code_inside_its_window_still_redeems(server) -> None:
+    """So the expiry above is not passing for free."""
+    verifier, _ = _pkce()
+    code = _issued(server, now=1000.0)
+    token = server.redeem(
+        code, verifier=verifier, client_id="console",
+        redirect_uri="https://app.example/cb", now=1000.0 + 30.0,
+    )
+    assert token.subject == "u"
+
+
+# --- refresh reuse actually revokes -----------------------------------------
+
+
+def test_refresh_reuse_revokes_the_chain_it_says_it_revokes(server) -> None:
+    """The refusal message claims the chain is dead. It has to be dead.
+
+    Detection that fires and does nothing is worse than no detection: the
+    operator reads "every token in its chain has been revoked" and believes the
+    incident is contained while the thief keeps rotating.
+    """
+    first = server.issue_refresh(subject="u")
+    stolen = server.rotate(first)
+    further = server.rotate(stolen.refresh_token)
+
+    with pytest.raises(OAuthRefusal, match="already been rotated"):
+        server.rotate(first)
+
+    assert server.is_revoked(stolen.access_token)
+    assert server.is_revoked(further.access_token)
+    with pytest.raises(OAuthRefusal, match="already been rotated"):
+        server.rotate(further.refresh_token)
+
+
+def test_revoking_a_chain_covers_the_access_token_minted_beside_its_first_refresh(
+    server,
+) -> None:
+    """`issue_refresh` seeded an empty chain, so the token issued alongside it
+    was never in the chain and survived the revocation."""
+    verifier, _ = _pkce()
+    code = _issued(server)
+    token = server.redeem(
+        code, verifier=verifier, client_id="console",
+        redirect_uri="https://app.example/cb",
+    )
+    assert token.refresh_token
+    with pytest.raises(OAuthRefusal, match="already been rotated"):
+        server.rotate(token.refresh_token)
+        server.rotate(token.refresh_token)
+    assert server.is_revoked(token.access_token)

@@ -180,7 +180,7 @@ async def test_projector_stops_cleanly_on_shutdown(tmp_path) -> None:
     await server.wait_closed()
     # After shutdown the server drops its references and the thread is joined.
     assert server._projector is None
-    assert projector._thread is None
+    assert projector._drain.thread is None
 
 
 @pytest.mark.asyncio
