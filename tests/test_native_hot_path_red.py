@@ -25,6 +25,38 @@ def test_http1_complete_head_is_not_scanned_twice() -> None:
     assert scans == 1, "the HTTP/1 driver and parser both scan the complete request head"
 
 
+def test_http1_framing_does_not_walk_materialized_headers_again() -> None:
+    """Host and body framing should be collected while parser spans are hot."""
+    driver = (_NATIVE / "server_http1.c").read_text()
+    parser = (_NATIVE / "http.c").read_text()
+    parse = _function(parser, "wreath_http_parse_request_parts", "wreath_http_parse_request")
+
+    assert "\ndecide_framing(" not in driver
+    assert 'memcmp(name, "content-length", 14)' in parse
+    assert "request_meta->kind" in parse
+
+
+def test_http1_common_default_headers_are_one_contiguous_copy() -> None:
+    """Configured Server and Date fields should not be replayed pair by pair."""
+    source = (_NATIVE / "server_http1.c").read_text()
+    begin = _function(source, "begin_response_parts", "begin_response")
+    start = begin.index("if (!has_date && !has_server)")
+    common = begin[start : begin.index("else {", start)]
+
+    assert "default_response_wire" in common
+    assert "PySequence_Fast" not in common
+
+
+def test_http1_reused_immutable_response_headers_skip_revalidation() -> None:
+    """Prepared response tuples should replay their validated native wire."""
+    source = (_NATIVE / "server_http1.c").read_text()
+    begin = _function(source, "begin_response_parts", "begin_response")
+
+    assert "headers == self->response_header_cache_key" in begin
+    assert "response_header_cache_wire" in begin
+    assert "PyBytes_GET_SIZE(cache_wire) <= 1024" in begin
+
+
 def test_decision_router_compile_has_no_pairwise_distinctness_scan() -> None:
     """Route compilation must not compare every candidate with its predecessors."""
     source = (_NATIVE / "dtrouter.c").read_text()
@@ -42,7 +74,7 @@ def test_decision_router_compile_has_no_pairwise_distinctness_scan() -> None:
 def test_eager_request_completion_does_not_cross_back_to_probe_task_state() -> None:
     """The synchronous fast path should not need a Python Task.done() round trip."""
     source = (_NATIVE / "server_http1.c").read_text()
-    spawn = _function(source, "spawn_app_task", "is_upgrade_request")
+    spawn = _function(source, "spawn_app_task", "send_policy_reply")
 
     assert "task_done_fn" not in spawn, (
         "every eager request calls back into Python to probe Task.done()"
@@ -210,7 +242,7 @@ def test_hpack_hard_limit_reclaims_entries_and_capacity_immediately() -> None:
 def test_eager_http1_completion_only_allocates_a_task_after_suspension() -> None:
     """The synchronous path completes inline; loop task ownership starts on yield."""
     source = (_NATIVE / "server_http1.c").read_text()
-    spawn = _function(source, "spawn_app_task", "is_upgrade_request")
+    spawn = _function(source, "spawn_app_task", "send_policy_reply")
 
     assert "PyIter_Send(" in spawn
     assert "loop_create_task" in spawn

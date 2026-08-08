@@ -72,7 +72,7 @@ def test_snapshot_iteration_does_not_copy_the_generation() -> None:
 def test_eager_http1_handler_does_not_allocate_asyncio_task() -> None:
     """A handler that never suspends should not pay Task construction."""
     source = (_NATIVE / "server_http1.c").read_text()
-    spawn = _function(source, "spawn_app_task", "is_upgrade_request")
+    spawn = _function(source, "spawn_app_task", "send_policy_reply")
     assert "task_class" not in spawn
 
 
