@@ -160,6 +160,7 @@ typedef struct {
     PyObject *scope_root_path;
 
     PyObject *streams;         /* dict {int stream_id: Http2Stream} */
+    PyObject *pending_apps;    /* streams activated after the current input batch */
     PyObject *pending_priorities; /* bounded PRIORITY_UPDATE values for idle streams */
     PyObject *conn_blocked;    /* cursor queue of streams with pending DATA */
     Py_ssize_t conn_blocked_head;
@@ -186,6 +187,7 @@ typedef struct {
     int fatal;                 /* hard stop: connection error, stop reading */
     int goaway_sent;
     int accepting;
+    int app_batch_active;      /* native one-shot replies flush after activation */
 
     /* CONTINUATION assembly */
     uint32_t header_stream;    /* stream id mid-header-block, 0 if none */
@@ -1065,7 +1067,7 @@ h2_run_write_scheduler(PyObject *op, PyObject *Py_UNUSED(ignored))
 
 static PyObject *
 h2_response_start(Http2Stream *self, PyObject *status_obj, PyObject *headers,
-                  int trailers_expected)
+                  int trailers_expected, int flush_now)
 {
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
     long status = status_obj ? PyLong_AsLong(status_obj) : 200;
@@ -1099,13 +1101,13 @@ h2_response_start(Http2Stream *self, PyObject *status_obj, PyObject *headers,
     }
     Py_DECREF(block);
     self->response_started = 1;
-    if (h2_flush((PyObject *)proto) < 0) return NULL;
+    if (flush_now && h2_flush((PyObject *)proto) < 0) return NULL;
     return completed_none();
 }
 
 
 static PyObject *
-h2_response_body(Http2Stream *self, PyObject *body, int more_body)
+h2_response_body(Http2Stream *self, PyObject *body, int more_body, int flush_now)
 {
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
     if (!self->response_started) {
@@ -1131,7 +1133,7 @@ h2_response_body(Http2Stream *self, PyObject *body, int more_body)
     self->pending_end_stream = !more_body && !self->trailers_expected;
     if (mark_conn_blocked(proto, self) < 0 ||
         h2_schedule_pending((PyObject *)proto) < 0 ||
-        h2_flush((PyObject *)proto) < 0) {
+        (flush_now && h2_flush((PyObject *)proto) < 0)) {
         return NULL;
     }
     if (self->pending_body == NULL) return completed_none();
@@ -1160,14 +1162,14 @@ stream_send(PyObject *op, PyObject *message)
         int has_trailers = trailers != NULL && PyObject_IsTrue(trailers);
         return h2_response_start(
             self, PyDict_GetItemString(message, "status"),
-            PyDict_GetItemString(message, "headers"), has_trailers
+            PyDict_GetItemString(message, "headers"), has_trailers, 1
         );
     }
     if (strcmp(t, "http.response.body") == 0) {
         PyObject *more = PyDict_GetItemString(message, "more_body");
         return h2_response_body(
             self, PyDict_GetItemString(message, "body"),
-            more != NULL && PyObject_IsTrue(more)
+            more != NULL && PyObject_IsTrue(more), 1
         );
     }
     if (strcmp(t, "http.response.trailers") == 0) {
@@ -1232,13 +1234,17 @@ stream_wreath_response(Http2Stream *self, PyObject *const *args, Py_ssize_t narg
         Py_DECREF(body);
         return NULL;
     }
-    PyObject *started = h2_response_start(self, args[0], args[1], 0);
+    /* This is a one-shot response: retain HEADERS until DATA is framed below,
+     * then h2_response_body emits both in one transport write. The portable
+     * response.start path still flushes immediately because user code may
+     * suspend before sending its body. */
+    PyObject *started = h2_response_start(self, args[0], args[1], 0, 0);
     if (started == NULL) {
         Py_DECREF(body);
         return NULL;
     }
     Py_DECREF(started);
-    PyObject *result = h2_response_body(self, body, 0);
+    PyObject *result = h2_response_body(self, body, 0, !proto->app_batch_active);
     Py_DECREF(body);
     return result;
 }
@@ -1251,7 +1257,7 @@ stream_wreath_start(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
                      "_wreath_stream_start expected 2 arguments, got %zd", nargs);
         return NULL;
     }
-    return h2_response_start(self, args[0], args[1], 0);
+    return h2_response_start(self, args[0], args[1], 0, 1);
 }
 
 static PyObject *
@@ -1264,7 +1270,7 @@ stream_wreath_body(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
     }
     int more = PyObject_IsTrue(args[1]);
     if (more < 0) return NULL;
-    return h2_response_body(self, args[0], more);
+    return h2_response_body(self, args[0], more, 1);
 }
 
 
@@ -1300,21 +1306,11 @@ h2_maybe_close_stream(PyObject *proto, Http2Stream *st)
     }
 }
 
-static PyObject *
-stream_done(PyObject *op, PyObject *task)
+static void
+stream_finish(Http2Stream *self, PyObject *exc, PyObject *owner,
+              uint8_t nfr_terminal)
 {
-    Http2Stream *self = (Http2Stream *)op;
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
-    PyObject *exc = PyObject_CallMethod(task, "exception", NULL);
-    uint8_t nfr_terminal = WREATH_NFR_TERM_OK;
-    if (exc == NULL) {
-        /* task was cancelled */
-        nfr_terminal = WREATH_NFR_TERM_CANCELLED;
-        PyErr_Clear();
-    }
-    else if (exc != Py_None) {
-        nfr_terminal = WREATH_NFR_TERM_ERROR;
-    }
     /* Publish one completion cell for this stream's request. The worker lives on
      * the protocol; the context lives on the stream. */
     if (proto != NULL && proto->nfr_worker != NULL && self->nfr_active) {
@@ -1361,23 +1357,94 @@ stream_done(PyObject *op, PyObject *task)
         } else if (proto != NULL && !self->response_ended) {
             h2_stream_error((PyObject *)proto, self->id, H2_INTERNAL_ERROR);
         }
-        PyErr_WriteUnraisable(task);
+        PyErr_WriteUnraisable(owner);
     }
-    Py_XDECREF(exc);
     if (proto != NULL) {
         if (!self->response_ended && self->response_started && !self->disconnected) {
             /* app finished without a final empty body: end the stream */
             h2_write_frame((PyObject *)proto, FRAME_DATA, FLAG_END_STREAM,
                            self->id, NULL, 0);
         }
-        /* The application task has completed: the stream is finished regardless
-         * of whether a full response was produced (e.g. after a disconnect). */
+        /* Application execution has completed: the stream is finished regardless
+         * of whether it ever needed a Task or produced a full response. */
         self->response_ended = 1;
-        h2_flush((PyObject *)proto);
+        if (!proto->app_batch_active) {
+            h2_flush((PyObject *)proto);
+        }
         Py_CLEAR(self->task);
         h2_maybe_close_stream((PyObject *)proto, self);
     }
+}
+
+static PyObject *
+stream_done(PyObject *op, PyObject *task)
+{
+    Http2Stream *self = (Http2Stream *)op;
+    PyObject *exc = PyObject_CallMethod(task, "exception", NULL);
+    uint8_t nfr_terminal = WREATH_NFR_TERM_OK;
+    if (exc == NULL) {
+        /* task was cancelled */
+        nfr_terminal = WREATH_NFR_TERM_CANCELLED;
+        PyErr_Clear();
+    }
+    else if (exc != Py_None) {
+        nfr_terminal = WREATH_NFR_TERM_ERROR;
+    }
+    stream_finish(self, exc, task, nfr_terminal);
+    Py_XDECREF(exc);
     Py_RETURN_NONE;
+}
+
+static int
+start_stream_app(Http2Protocol *proto, Http2Stream *stream)
+{
+    PyObject *app_args[3] = {
+        stream->scope, stream->receive_callable, stream->send_callable
+    };
+    PyObject *target = proto->native_app != NULL ? proto->native_app : proto->app;
+    PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
+    PyObject *yielded = NULL;
+    PyObject *continuation = NULL;
+    PyObject *task = NULL;
+    if (coro == NULL) {
+        return -1;
+    }
+
+    PySendResult state = PyIter_Send(coro, Py_None, &yielded);
+    if (state == PYGEN_RETURN) {
+        stream_finish(stream, Py_None, (PyObject *)stream, WREATH_NFR_TERM_OK);
+        Py_DECREF(coro);
+        Py_XDECREF(yielded);
+        return 0;
+    }
+    if (state == PYGEN_ERROR) {
+        PyObject *error = PyErr_GetRaisedException();
+        if (error == NULL) {
+            Py_DECREF(coro);
+            return -1;
+        }
+        stream_finish(stream, error, coro, WREATH_NFR_TERM_ERROR);
+        Py_DECREF(error);
+        Py_DECREF(coro);
+        return 0;
+    }
+
+    continuation = wreath_started_coroutine(coro, yielded);
+    if (continuation != NULL) {
+        task = PyObject_CallOneArg(proto->loop_create_task, continuation);
+    }
+    Py_DECREF(coro);
+    Py_XDECREF(yielded);
+    Py_XDECREF(continuation);
+    if (task == NULL) {
+        return -1;
+    }
+    stream->task = task;  /* owned */
+    if (wreath_task_add_done_callback(task, stream->done_callable) < 0) {
+        Py_CLEAR(stream->task);
+        return -1;
+    }
+    return 0;
 }
 
 static PyMethodDef stream_methods[] = {
@@ -1914,7 +1981,7 @@ parse_priority_field(const char *value, Py_ssize_t length,
     }
 }
 
-/* Create the stream object, build scope, spawn the ASGI task. */
+/* Create the stream object, build scope, and stage ASGI activation. */
 static int
 start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
               int end_stream)
@@ -2041,10 +2108,10 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         if (policy_result > 0) {
             PyObject *status = PyLong_FromLong(reply.status);
             PyObject *started = status != NULL
-                ? h2_response_start(st, status, reply.headers, 0) : NULL;
+                ? h2_response_start(st, status, reply.headers, 0, 0) : NULL;
             Py_XDECREF(status);
             PyObject *finished = started != NULL
-                ? h2_response_body(st, reply.body, 0) : NULL;
+                ? h2_response_body(st, reply.body, 0, 1) : NULL;
             Py_XDECREF(started);
             Py_XDECREF(finished);
             wreath_policy_reply_clear(&reply);
@@ -2138,28 +2205,15 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         }
     }
 
-    /* spawn task: loop.create_task(app(scope, receive, send)) */
-    PyObject *app_args[3] = {scope, st->receive_callable, st->send_callable};
-    PyObject *target = self->native_app != NULL ? self->native_app : self->app;
-    PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
-    if (coro == NULL) {
+    /* Activation waits until the parser has consumed this whole input batch.
+     * A HEADERS followed by RST_STREAM in one read must be cancelled before
+     * application code can answer it. Once that ordering boundary is crossed,
+     * start_stream_app eagerly completes the common case without a Task. */
+    if (PyList_Append(self->pending_apps, (PyObject *)st) < 0) {
         Py_DECREF(st);
         return -1;
     }
-    PyObject *task = PyObject_CallOneArg(self->loop_create_task, coro);
-    Py_DECREF(coro);
-    if (task == NULL) {
-        Py_DECREF(st);
-        return -1;
-    }
-    st->task = task;  /* owned */
-    PyObject *cb = PyObject_CallMethod(task, "add_done_callback", "O",
-                                       st->done_callable);
-    Py_XDECREF(cb);
     Py_DECREF(st);  /* dict holds the reference */
-    if (cb == NULL) {
-        return -1;
-    }
     return 0;
 }
 
@@ -2769,6 +2823,39 @@ parse_frames(Http2Protocol *self, int borrowed)
     return 0;
 }
 
+static int
+start_pending_apps(Http2Protocol *self)
+{
+    PyObject *pending = self->pending_apps;
+    if (PyList_GET_SIZE(pending) == 0) {
+        return 0;
+    }
+    PyObject *replacement = PyList_New(0);
+    if (replacement == NULL) {
+        return -1;
+    }
+    self->pending_apps = replacement;
+    self->app_batch_active = 1;
+
+    Py_ssize_t count = PyList_GET_SIZE(pending);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        Http2Stream *stream = (Http2Stream *)PyList_GET_ITEM(pending, i);
+        if (stream->disconnected || stream->state == S_CLOSED) {
+            stream_finish(
+                stream, Py_None, (PyObject *)stream, WREATH_NFR_TERM_CANCELLED
+            );
+        }
+        else if (start_stream_app(self, stream) < 0) {
+            self->app_batch_active = 0;
+            Py_DECREF(pending);
+            return -1;
+        }
+    }
+    self->app_batch_active = 0;
+    Py_DECREF(pending);
+    return 0;
+}
+
 /* ======================================================================== */
 /* asyncio.Protocol interface                                               */
 /* ======================================================================== */
@@ -2874,8 +2961,10 @@ h2_process_owned_input(Http2Protocol *self)
         }
         self->buf_len = remaining;
     }
-    if (self->preface_seen == H2_PREFACE_LEN && parse_frames(self, 0) < 0) {
-        return -1;
+    if (self->preface_seen == H2_PREFACE_LEN) {
+        if (parse_frames(self, 0) < 0 || start_pending_apps(self) < 0) {
+            return -1;
+        }
     }
     return h2_flush((PyObject *)self);
 }
@@ -2930,7 +3019,7 @@ wreath_http2_feed_external(PyObject *protocol, const char *data, Py_ssize_t size
     self->buf_cap = owned_cap;
     self->buf_len = 0;
     self->cursor = 0;
-    if (result < 0) {
+    if (result < 0 || start_pending_apps(self) < 0) {
         return -1;
     }
     if (remaining > 0) {
@@ -3059,6 +3148,13 @@ h2_connection_lost(PyObject *op, PyObject *Py_UNUSED(exc))
         }
         PyDict_Clear(self->streams);
     }
+    if (self->pending_apps != NULL) {
+        if (PyList_SetSlice(
+                self->pending_apps, 0, PyList_GET_SIZE(self->pending_apps), NULL
+            ) < 0) {
+            PyErr_Clear();
+        }
+    }
     if (self->conn_blocked != NULL) {
         Py_ssize_t queued = PyList_GET_SIZE(self->conn_blocked);
         if (PyList_SetSlice(self->conn_blocked, 0, queued, NULL) < 0) {
@@ -3180,6 +3276,7 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->scope_scheme);
     Py_VISIT(self->scope_root_path);
     Py_VISIT(self->streams);
+    Py_VISIT(self->pending_apps);
     Py_VISIT(self->pending_priorities);
     Py_VISIT(self->conn_blocked);
     Py_VISIT(self->stream_window_blocked);
@@ -3209,6 +3306,7 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->scope_scheme);
     Py_CLEAR(self->scope_root_path);
     Py_CLEAR(self->streams);
+    Py_CLEAR(self->pending_apps);
     Py_CLEAR(self->pending_priorities);
     Py_CLEAR(self->conn_blocked);
     Py_CLEAR(self->stream_window_blocked);
@@ -3281,6 +3379,7 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         return -1;
     }
     self->streams = PyDict_New();
+    self->pending_apps = PyList_New(0);
     self->pending_priorities = PyDict_New();
     self->conn_blocked = PyList_New(0);
     self->stream_window_blocked = PyDict_New();
@@ -3301,7 +3400,8 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     }
     self->out = PyByteArray_FromStringAndSize("", 0);
     self->header_block = PyByteArray_FromStringAndSize("", 0);
-    if (!self->streams || !self->pending_priorities || !self->conn_blocked ||
+    if (!self->streams || !self->pending_apps || !self->pending_priorities ||
+        !self->conn_blocked ||
         !self->stream_window_blocked ||
         !self->scheduler_callable ||
         !self->out || !self->header_block) {
@@ -3316,6 +3416,7 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->fatal = 0;
     self->goaway_sent = 0;
     self->accepting = 1;
+    self->app_batch_active = 0;
     self->header_stream = 0;
     self->header_end_stream = 0;
     self->last_stream_id = 0;

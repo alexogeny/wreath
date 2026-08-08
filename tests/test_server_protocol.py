@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from _server_ingest import feed
 
+import wreath.app as app_module
 from wreath import Response, Wreath
 from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath.auth import BearerTokenBackend, Identity, authenticated
@@ -290,6 +291,99 @@ async def test_native_reuses_prepared_header_wire_on_keep_alive() -> None:
     assert wire.count(b"http/1.1 200 ok\r\n") == 2
     assert wire.count(b"x-prepared: yes\r\n") == 2
     assert wire.count(b"\r\n\r\nready") == 2
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_frozen_route_never_constructs_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen("/", PreparedResponse.text("ready"))
+    app._compile_routes()
+
+    def unexpected_request(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("frozen native route constructed Request")
+
+    def unexpected_general_finisher(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("frozen native route entered the general response finisher")
+
+    # The routine test runner may enable process-wide trace propagation around
+    # selected tests; this test isolates the ordinary unrecorded production
+    # path whose absence of Request construction it pins.
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(app_module, "Request", unexpected_request)
+    monkeypatch.setattr(Wreath, "_finish_http_plain", unexpected_general_finisher)
+    monkeypatch.setattr(
+        app_module,
+        "_arm_cancel_on_disconnect",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("undeclared frozen route armed disconnect override")
+        ),
+    )
+    transport = await drive(_NativeHttpProtocol, app, [GET + GET])
+    wire = bytes(transport.buffer).lower()
+
+    assert app._dispatch_http == app._handle_http_frozen
+    assert wire.count(b"http/1.1 200 ok\r\n") == 2
+    assert wire.count(b"\r\n\r\nready") == 2
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_frozen_route_arms_disconnect_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen(
+        "/",
+        PreparedResponse.text("ready"),
+        cancel_on_disconnect=False,
+    )
+    app._compile_routes()
+    armed: list[bool] = []
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(
+        app_module,
+        "_arm_cancel_on_disconnect",
+        lambda send, enabled: armed.append(enabled),
+    )
+    transport = await drive(_NativeHttpProtocol, app, [GET])
+
+    assert bytes(transport.buffer).endswith(b"ready")
+    assert armed == [False]
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_frozen_route_without_override_stays_unarmed_in_mixed_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen(
+        "/declared",
+        PreparedResponse.text("declared"),
+        cancel_on_disconnect=False,
+    )
+    app.frozen("/plain", PreparedResponse.text("plain"))
+    app._compile_routes()
+    armed: list[bool] = []
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(
+        app_module,
+        "_arm_cancel_on_disconnect",
+        lambda send, enabled: armed.append(enabled),
+    )
+    transport = await drive(
+        _NativeHttpProtocol,
+        app,
+        [b"GET /plain HTTP/1.1\r\nHost: x\r\n\r\n"],
+    )
+
+    assert bytes(transport.buffer).endswith(b"plain")
+    assert armed == []
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
