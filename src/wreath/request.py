@@ -687,10 +687,6 @@ class Request:
             self._context = scope
         self._receive = receive
         self._app = app
-        self._body: bytes | object = _MISSING
-        self._cookies: dict[str, str] | object = _MISSING
-        self._json: Any = _MISSING
-        self._form: FormData | object = _MISSING
         self._header_map: dict[bytes, bytes] | None = None
         self._header_scanned = False
         self._path_params = path_params
@@ -753,6 +749,42 @@ class Request:
 
     def _set_identity(self, identity: Identity | None) -> None:
         self._identity = identity
+
+    def _bearer_token(self) -> str | None:
+        """One valid built-in bearer token, without materializing native headers.
+
+        The dict-scope half is the independent ASGI definition.  Wreath's
+        request context performs the same duplicate refusal and syntax check
+        over validated header spans, then materializes only the token string.
+        """
+        context = self._context
+        if context is not None:
+            return cast("str | None", context._bearer_token())
+        value_bytes: bytes | None = None
+        for name, candidate in self.headers:
+            if name != b"authorization":
+                continue
+            if value_bytes is not None:
+                return None
+            value_bytes = candidate
+        if value_bytes is None:
+            return None
+        value = value_bytes.decode("latin-1")
+        scheme, _separator, token = value.partition(" ")
+        return token if token and scheme.lower() == "bearer" else None
+
+    def _bearer_verify(self, verifier: Any) -> Any:
+        """Activate a built-in bearer verifier at the native header boundary.
+
+        The portable half remains the independent ASGI definition.  Wreath's
+        request context scans and calls in one C entry, returning an async
+        verifier's coroutine untouched for dispatch to await.
+        """
+        context = self._context
+        if context is not None:
+            return context._bearer_verify(verifier)
+        token = self._bearer_token()
+        return None if token is None else verifier(token)
 
     @property
     def state(self) -> State:
@@ -1020,7 +1052,7 @@ class Request:
         # Parsed once and cached request-locally, like `_body` and
         # `_header_map`: repeated reads are common (session, CSRF, auth) and
         # each one otherwise rescanned the header list and rebuilt the dict.
-        cached = self._cookies
+        cached = getattr(self, "_cookies", _MISSING)
         if cached is not _MISSING:
             return cast(dict[str, str], cached)
         # HTTP/2 permits Cookie to be split across field lines. Combine every
@@ -1060,8 +1092,9 @@ class Request:
         # them consistent -- and ProxyHeaders is precisely the caller that has
         # just built the index, so discarding it here would make the next
         # consumer rebuild the whole thing.
-        if self._header_map is not None:
-            self._header_map[name] = value
+        header_map = self._header_map
+        if header_map is not None:
+            header_map[name] = value
 
     def _index_headers(self) -> dict[bytes, bytes]:
         """Materialize the first-value header index for multi-header consumers."""
@@ -1174,7 +1207,7 @@ class Request:
                 See `_check_body` -- ingress cannot do this check, because the
                 body has not arrived when global middleware runs.
         """
-        cached = self._body
+        cached = getattr(self, "_body", _MISSING)
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
             raise StreamConsumed("request body stream has already been consumed")
         if cached is not _MISSING:
@@ -1252,7 +1285,7 @@ class Request:
         Raises:
             BadRequest: a covered `Content-Digest` does not match these bytes.
         """
-        cached = self._body
+        cached = getattr(self, "_body", _MISSING)
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
             raise StreamConsumed("request body stream has already been consumed")
         if cached is not _MISSING:
@@ -1268,6 +1301,29 @@ class Request:
         try:
             while True:
                 message = await self._receive()
+                if type(message) is tuple:
+                    body, more_body, disconnected = message
+                    if disconnected:
+                        self._body = b""
+                        raise ClientDisconnect(
+                            "the client disconnected before the request body was received"
+                        )
+                    if body:
+                        if len(body) > limit - total:
+                            self._body = b""
+                            raise PayloadTooLarge(f"request body exceeds {limit} bytes")
+                        total += len(body)
+                        if running is not None:
+                            running.update(body)
+                        yield body
+                    if not more_body:
+                        if running is not None and expected is not None:
+                            if not compare_digest(running.digest(), expected[1]):
+                                raise BadRequest(
+                                    "request body does not match its signed content-digest"
+                                )
+                        return
+                    continue
                 message_type = message["type"]
                 if message_type == "http.disconnect":
                     self._body = b""
@@ -1295,7 +1351,7 @@ class Request:
                             )
                     return
         finally:
-            if self._body is _STREAMING:
+            if getattr(self, "_body", _MISSING) is _STREAMING:
                 self._body = _STREAM_CONSUMED
 
     async def json(self) -> Any:
@@ -1317,7 +1373,7 @@ class Request:
             PayloadTooLarge: the body exceeds `RequestLimits.max_body_bytes`
             ClientDisconnect: the peer went away before the body finished
         """
-        cached = self._json
+        cached = getattr(self, "_json", _MISSING)
         if cached is not _MISSING:
             return cached
         result = _json_loads(await self.body())
@@ -1356,7 +1412,7 @@ class Request:
             PayloadTooLarge: the body, the parts, or the field count exceed a limit
             ClientDisconnect: the peer went away before the body finished
         """
-        cached = self._form
+        cached = getattr(self, "_form", _MISSING)
         if cached is not _MISSING:
             return cast(FormData, cached)
         # Via the `headers` property, not `self.scope`: on the native path the

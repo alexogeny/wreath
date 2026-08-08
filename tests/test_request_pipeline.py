@@ -419,7 +419,7 @@ async def test_a_before_that_raises_does_not_run_its_own_after() -> None:
 
     Design 22 item 12. `after` is cleanup for preconditions `before`
     establishes; running it against a `before` that raised part-way is
-    guessing how far it got. `SessionMiddleware` is the near-miss --
+    guessing how far it got. `SessionPolicy` is the near-miss --
     `_after_stored` reads `state._session_loaded` by attribute while reading
     its siblings with `.get()`, so it is one inserted `await` away from
     turning an error response into an unrelated `AttributeError` 500.

@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include <stddef.h>  /* offsetof */
+#include <string.h>
 
 typedef struct {
     PyObject_HEAD
@@ -94,9 +95,15 @@ static PyObject *
 context_scope(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
 {
     PyObject *scope;
+    PyObject *headers;
     if (self->scope != NULL) return Py_NewRef(self->scope);
     scope = PyDict_New();
     if (scope == NULL) return NULL;
+    headers = wreath_headers_materialize(self->headers);
+    if (headers == NULL) {
+        Py_DECREF(scope);
+        return NULL;
+    }
     if (PyDict_SetItem(scope, s_type, self->scope_type) < 0 ||
         PyDict_SetItem(scope, k_asgi, self->asgi) < 0 ||
         PyDict_SetItem(scope, k_http_version, self->http_version) < 0 ||
@@ -105,14 +112,16 @@ context_scope(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
         PyDict_SetItem(scope, k_path, self->path) < 0 ||
         PyDict_SetItem(scope, k_raw_path, self->raw_path) < 0 ||
         PyDict_SetItem(scope, k_query_string, self->query_string) < 0 ||
-        PyDict_SetItem(scope, s_headers, self->headers) < 0 ||
+        PyDict_SetItem(scope, s_headers, headers) < 0 ||
         PyDict_SetItem(scope, k_server, self->server) < 0 ||
         PyDict_SetItem(scope, k_client, self->client) < 0 ||
         PyDict_SetItem(scope, k_root_path, self->root_path) < 0 ||
         PyDict_SetItem(scope, k_extensions, extensions_dict) < 0) {
+        Py_DECREF(headers);
         Py_DECREF(scope);
         return NULL;
     }
+    Py_DECREF(headers);
     self->scope = Py_NewRef(scope);
     return scope;
 }
@@ -128,10 +137,16 @@ CONTEXT_GETTER(method)
 CONTEXT_GETTER(path)
 CONTEXT_GETTER(raw_path)
 CONTEXT_GETTER(query_string)
-CONTEXT_GETTER(headers)
 CONTEXT_GETTER(scheme)
 CONTEXT_GETTER(http_version)
 CONTEXT_GETTER(client)
+
+static PyObject *
+context_get_headers(WreathRequestContext *self, void *closure)
+{
+    (void)closure;
+    return wreath_headers_materialize(self->headers);
+}
 
 static PyObject *
 context_get_policy_request_id(WreathRequestContext *self, void *closure)
@@ -158,6 +173,79 @@ context_get_policy_csrf_token(WreathRequestContext *self, void *closure)
     }
     if (self->policy_csrf_token == NULL) Py_RETURN_NONE;
     return Py_NewRef(self->policy_csrf_token);
+}
+
+static unsigned char
+ascii_lower(unsigned char value)
+{
+    return value >= 'A' && value <= 'Z'
+        ? (unsigned char)(value + ('a' - 'A')) : value;
+}
+
+/* Extract the one built-in bearer credential without exposing the header
+ * collection to Python.  This scan is deliberately here, on the native request
+ * context: asking for ``context.headers`` materializes every name, value, pair,
+ * and list slot, although authentication needs only this token.  The verifier
+ * remains the single Python activation point.
+ *
+ * Authorization is not list-valued.  A duplicate returns None even when the
+ * first value was usable, preserving the proxy/application ambiguity defence
+ * in BearerTokenBackend's independent ASGI path. */
+static PyObject *
+extract_bearer_token(WreathRequestContext *self)
+{
+    const char *found = NULL;
+    Py_ssize_t found_size = 0;
+    Py_ssize_t count = wreath_headers_count(self->headers);
+    if (count < 0) return NULL;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(self->headers, i, &name, &name_size,
+                                &value, &value_size) < 0) {
+            return NULL;
+        }
+        if (name_size != 13 || memcmp(name, "authorization", 13) != 0) {
+            continue;
+        }
+        if (found != NULL) Py_RETURN_NONE;
+        found = value;
+        found_size = value_size;
+    }
+    if (found == NULL || found_size <= 7 || found[6] != ' ' ||
+        ascii_lower((unsigned char)found[0]) != 'b' ||
+        ascii_lower((unsigned char)found[1]) != 'e' ||
+        ascii_lower((unsigned char)found[2]) != 'a' ||
+        ascii_lower((unsigned char)found[3]) != 'r' ||
+        ascii_lower((unsigned char)found[4]) != 'e' ||
+        ascii_lower((unsigned char)found[5]) != 'r') {
+        Py_RETURN_NONE;
+    }
+    return PyUnicode_DecodeLatin1(found + 7, found_size - 7, NULL);
+}
+
+static PyObject *
+context_bearer_token(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
+{
+    return extract_bearer_token(self);
+}
+
+/* The built-in verifier is the activation boundary: scan native header spans
+ * and enter Python exactly once with the token, without first returning the
+ * token through a Request method and then calling it from another Python
+ * frame.  An async verifier's coroutine is deliberately returned untouched;
+ * dispatch owns the one necessary await. */
+static PyObject *
+context_bearer_verify(WreathRequestContext *self, PyObject *verifier)
+{
+    PyObject *token = extract_bearer_token(self);
+    if (token == NULL) return NULL;
+    if (token == Py_None) return token;
+    PyObject *result = PyObject_CallOneArg(verifier, token);
+    Py_DECREF(token);
+    return result;
 }
 
 /* ProxyHeadersMiddleware overrides. The materialized scope dict, when one
@@ -351,6 +439,8 @@ context_flight_request_id(WreathRequestContext *self, PyObject *Py_UNUSED(ignore
 
 static PyMethodDef context_methods[] = {
     {"_asgi_scope", (PyCFunction)context_scope, METH_NOARGS, NULL},
+    {"_bearer_token", (PyCFunction)context_bearer_token, METH_NOARGS, NULL},
+    {"_bearer_verify", (PyCFunction)context_bearer_verify, METH_O, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
     {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
@@ -417,6 +507,13 @@ int
 wreath_request_context_check(PyObject *object)
 {
     return PyObject_TypeCheck(object, request_context_type);
+}
+
+PyObject *
+wreath_request_context_headers(PyObject *object)
+{
+    if (!wreath_request_context_check(object)) return NULL;
+    return ((WreathRequestContext *)object)->headers;
 }
 
 /* Seed the dict-scope `_wreath_flight` slot with the recorder's request id.

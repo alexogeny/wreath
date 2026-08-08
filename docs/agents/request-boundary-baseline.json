@@ -4,11 +4,11 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 130,
+        "c": 129,
         "python": 2
       },
       "pre_activation": {
-        "c": 39,
+        "c": 38,
         "python": 1
       },
       "phases": {
@@ -17,11 +17,11 @@
           "python": 1
         },
         "routing": {
-          "c": 3,
+          "c": 7,
           "python": 0
         },
         "auth": {
-          "c": 6,
+          "c": 1,
           "python": 0
         },
         "handler": {
@@ -67,7 +67,6 @@
         "str.partition": 1,
         "wreath._native._core.build_capability_mask": 1,
         "BitsetRouteTable.resolve": 1,
-        "frozenset.issubset": 1,
         "wreath._native._core.orm_shape": 1,
         "str.rpartition": 1,
         "builtins.hasattr": 1,

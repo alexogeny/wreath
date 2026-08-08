@@ -66,7 +66,7 @@ Refactor Neo's HTTP request control flow so every request is classified by the r
 - [x] Run CORS preflight from the global ingress branch before endpoint authentication.
 - [x] Run ordinary CORS response handling as a global finalizer so configured 401/403/static responses can receive headers.
 - [x] Run `SecurityHeadersPolicy` as a global finalizer (including 404s when configured).
-- [x] Keep `SessionMiddleware` route-local.
+- [x] Keep `SessionPolicy` route-local.
 - [x] Reject multiple CORS preflight registrations instead of silently replacing one.
 
 ### Benchmarks and documentation
