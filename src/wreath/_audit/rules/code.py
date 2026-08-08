@@ -161,7 +161,7 @@ CODE_RULES: tuple[CodeRule, ...] = (
     ),
     CodeRule(
         "cors-reflect-origin", Severity.ERROR, "CWE-942",
-        "use CORSMiddleware with an explicit allow_origins list",
+        "use CorsPolicy with an explicit allow_origins list",
         "the request Origin reflected into Access-Control-Allow-Origin",
     ),
     CodeRule(
@@ -171,7 +171,7 @@ CODE_RULES: tuple[CodeRule, ...] = (
     ),
     CodeRule(
         "untrusted-forwarded-header", Severity.WARN, "CWE-348",
-        "establish the header with ProxyHeadersMiddleware(trusted=...) before reading it",
+        "establish the header with ProxyPolicy(trusted=...) before reading it",
         "a forwarded client address read without a configured proxy trust boundary",
     ),
     CodeRule(
@@ -304,7 +304,7 @@ _SECRET_KEYWORDS = frozenset(
 )
 
 #: Constructors whose *first positional* argument is a signing key.
-_POSITIONAL_SECRET_CALLEES = frozenset({"SessionMiddleware", "CSRFMiddleware"})
+_POSITIONAL_SECRET_CALLEES = frozenset({"SessionMiddleware", "CsrfPolicy"})
 
 #: Modules that will resolve an external entity if asked.
 _UNSAFE_XML_MODULES = ("xml.sax", "xml.dom", "xml.etree", "xml.parsers", "lxml")
@@ -321,7 +321,7 @@ _TRUST_KEYWORDS = frozenset(
 #: Origins are the exception, and are handled separately: a public read-only API
 #: is entitled to answer any origin, so `allow_origins=["*"]` alone is a design
 #: decision rather than a defect. It becomes one opposite credentials, which is
-#: the single pair `CORSMiddleware` refuses at construction.
+#: the single pair `CorsPolicy` refuses at construction.
 _ORIGIN_KEYWORDS = frozenset({"allow_origins", "allow_origin", "origins"})
 
 #: Headers that carry a client address only when a proxy is trusted.
@@ -482,7 +482,7 @@ def _wildcard_in(node: ast.AST) -> bool:
 
 
 def _establishes_trust(node: ast.Call) -> bool:
-    """Whether a `ProxyHeadersMiddleware(...)` call names a real boundary."""
+    """Whether a `ProxyPolicy(...)` call names a real boundary."""
     for keyword in node.keywords:
         if keyword.arg == "trusted":
             return not _wildcard_in(keyword.value)
@@ -1014,7 +1014,7 @@ class _Scanner(ast.NodeVisitor):
             if isinstance(node, ast.Call):
                 dotted = _dotted(node.func)
                 name = _name_of(node.func)
-                if name == "ProxyHeadersMiddleware" and _establishes_trust(node):
+                if name == "ProxyPolicy" and _establishes_trust(node):
                     # Only a *real* boundary silences `untrusted-forwarded-header`.
                     # `trusted=["*"]` trusts every peer, which is no boundary at
                     # all, and treating it as one meant the worst possible
@@ -1342,7 +1342,7 @@ class _Scanner(ast.NodeVisitor):
             elif keyword.arg in _ORIGIN_KEYWORDS and credentialed:
                 # A public read-only API may answer any origin. Credentials are
                 # what turn the wildcard into a trust decision, and that single
-                # pair is the one `CORSMiddleware` refuses at construction.
+                # pair is the one `CorsPolicy` refuses at construction.
                 self._flag(
                     "wildcard-trust-list", node,
                     f"{keyword.arg}= is a wildcard alongside allow_credentials=True",
@@ -1448,7 +1448,7 @@ class _Scanner(ast.NodeVisitor):
                     and arg.value.lower() in _FORWARDED_HEADERS:
                 self._flag(
                     "untrusted-forwarded-header", node,
-                    f"{arg.value} is read but no ProxyHeadersMiddleware establishes it",
+                    f"{arg.value} is read but no ProxyPolicy establishes it",
                 )
 
     def _random_use(self, node: ast.Call) -> None:

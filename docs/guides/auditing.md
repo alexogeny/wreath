@@ -72,7 +72,7 @@ cites its success criterion. The full list — with severity, WCAG SC, and wheth
 can remediate it — is in the [audit rule reference](../reference/audit.md).
 
 **Performance.** Whether `CompressionMiddleware`, `CacheControlMiddleware`, and
-`SecurityHeadersMiddleware` are mounted (checked by introspecting your app, not guessed),
+`SecurityHeadersPolicy` are mounted (checked by introspecting your app, not guessed),
 plus document-size and OpenAPI-size budgets, missing image dimensions, render-blocking
 `<head>` assets, and large un-nonced inline `<style>`/`<script>`.
 

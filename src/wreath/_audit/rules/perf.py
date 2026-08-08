@@ -81,6 +81,9 @@ def inline_asset(root, html, surface) -> Iterator[Finding]:
 
 def _mounted(app) -> set[str]:
     names: set[str] = set()
+    policy = getattr(app, "_http_policy", None)
+    if policy is not None:
+        names.update(type(component).__name__ for component in policy.components)
     for attr in ("_middleware", "_global_middleware"):
         for item in getattr(app, attr, []) or []:
             mw = item[-1] if isinstance(item, tuple) else item
@@ -104,11 +107,11 @@ def app_perf(app, openapi_json: str) -> Iterator[Finding]:
                       "perf:cache", "",
                       "mount CacheControlMiddleware or set per-mount cache_control on static()")
 
-    if "SecurityHeadersMiddleware" not in mounted:
+    if "SecurityHeadersPolicy" not in mounted:
         yield Finding("security-headers", Severity.WARN, "app",
-                      "no SecurityHeadersMiddleware mounted (CSP / X-Content-Type-Options / "
+                      "no SecurityHeadersPolicy mounted (CSP / X-Content-Type-Options / "
                       "Referrer-Policy / HSTS)", "perf:security-headers", "",
-                      "mount wreath.middleware.SecurityHeadersMiddleware")
+                      "configure HttpPolicy(security_headers=SecurityHeadersPolicy(...))")
 
     size = len(openapi_json.encode("utf-8"))
     if size > _JSON_BUDGET:

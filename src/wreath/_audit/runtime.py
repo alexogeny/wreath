@@ -30,7 +30,7 @@ def _header_findings(headers: dict[str, str], surface: str):
     if "content-security-policy" not in lower:
         yield Finding("security-headers", Severity.WARN, surface,
                       "response has no Content-Security-Policy", "perf:security-headers",
-                      "", "mount SecurityHeadersMiddleware")
+                      "", "mount SecurityHeadersPolicy")
 
 
 def audit_response(

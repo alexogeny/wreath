@@ -44,7 +44,7 @@ the same rule, or a semantic `var()` text colour on the base surface). It is adv
 |---|---|---|---|
 | `compression-enabled` | `CompressionMiddleware` mounted (or `Content-Encoding` at runtime) | warn | mount `CompressionMiddleware` |
 | `cache-control` | `CacheControlMiddleware` mounted (or `Cache-Control`/`ETag` at runtime) | warn | mount it / set `cache_control` on `static()` |
-| `security-headers` | `SecurityHeadersMiddleware` mounted (or CSP at runtime) | warn | mount `SecurityHeadersMiddleware` |
+| `security-headers` | `SecurityHeadersPolicy` mounted (or CSP at runtime) | warn | mount `SecurityHeadersPolicy` |
 | `html-size` | document ≤ 100 KiB | warn | trim or paginate |
 | `json-size` | OpenAPI document ≤ 512 KiB | warn | trim descriptions/examples or split the API |
 | `img-dims` | `<img>` has `width` + `height` (avoids layout shift) | warn | set explicit dimensions |
@@ -77,7 +77,7 @@ built on Wreath, not just for Wreath's own surfaces. Cookie rules see **every**
 | `cors-credentials` | Fetch (CORS) | error | no `Access-Control-Allow-Origin: *` with `Allow-Credentials: true` |
 | `referrer-policy` | OWASP | info | a `Referrer-Policy` header is set |
 
-Mounting `SecurityHeadersMiddleware` clears the header-based warnings; the cookie
+Mounting `SecurityHeadersPolicy` clears the header-based warnings; the cookie
 and status-code rules are satisfied by how your handlers set cookies and raise
 `Unauthorized(challenge=…)` / `MethodNotAllowed(allow=…)`.
 

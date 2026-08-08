@@ -492,9 +492,9 @@ def test_origin_reflected_into_the_cors_header_is_flagged() -> None:
 def test_explicit_cors_origins_are_clean() -> None:
     assert_clean(
         """
-        from wreath.middleware import CORSMiddleware
+        from wreath.policy import CorsPolicy
         app.add_global_middleware(
-            CORSMiddleware(allow_origins=("https://console.example",), allow_credentials=True)
+            CorsPolicy(allow_origins=("https://console.example",), allow_credentials=True)
         )
         """,
         "cors-reflect-origin",
@@ -531,17 +531,19 @@ def test_debug_from_configuration_is_clean() -> None:
 def test_rate_limit_key_from_a_forwarded_header_is_flagged() -> None:
     assert_flags(
         """
-        from wreath.middleware import RateLimitMiddleware
+        from wreath.policy import HttpPolicy, RateLimitPolicy
         def key(request):
             return request.header("x-forwarded-for")
-        app.add_global_middleware(RateLimitMiddleware(limit=5, key=key))
+        app.configure_http_policy(HttpPolicy(
+            rate_limit=RateLimitPolicy(limit=5, key=key)
+        ))
         """,
         "untrusted-forwarded-header",
     )
 
 
 def test_forwarded_header_with_proxy_middleware_configured_is_clean() -> None:
-    """`ProxyHeadersMiddleware` is what makes the header mean something.
+    """`ProxyPolicy` is what makes the header mean something.
 
     The rule is about an *unestablished* header, so an application that
     configures the trust boundary is doing the right thing and must not be
@@ -549,11 +551,15 @@ def test_forwarded_header_with_proxy_middleware_configured_is_clean() -> None:
     """
     assert_clean(
         """
-        from wreath.middleware import ProxyHeadersMiddleware, RateLimitMiddleware
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=("10.0.0.1",)))
+        from wreath.policy import HttpPolicy, ProxyPolicy, RateLimitPolicy
+        app.configure_http_policy(HttpPolicy(
+            proxy=ProxyPolicy(trusted=("10.0.0.1",))
+        ))
         def key(request):
             return request.header("x-forwarded-for")
-        app.add_global_middleware(RateLimitMiddleware(limit=5, key=key))
+        app.configure_http_policy(HttpPolicy(
+            rate_limit=RateLimitPolicy(limit=5, key=key)
+        ))
         """,
         "untrusted-forwarded-header",
     )
@@ -810,8 +816,10 @@ def test_a_prng_seeded_from_a_caller_value_still_fires() -> None:
 def test_wildcard_host_allowlist_is_flagged() -> None:
     assert_flags(
         """
-        from wreath.middleware import TrustedHostMiddleware
-        app.add_global_middleware(TrustedHostMiddleware(allowed_hosts=["*"]))
+        from wreath.policy import HttpPolicy, TrustedHostPolicy
+        app.configure_http_policy(HttpPolicy(
+            trusted_host=TrustedHostPolicy(allowed_hosts=["*"])
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -820,10 +828,10 @@ def test_wildcard_host_allowlist_is_flagged() -> None:
 def test_wildcard_cors_origins_are_flagged() -> None:
     assert_flags(
         """
-        from wreath.middleware import CORSMiddleware
-        app.add_global_middleware(
-            CORSMiddleware(allow_origins=["*"], allow_credentials=True)
-        )
+        from wreath.policy import CorsPolicy, HttpPolicy
+        app.configure_http_policy(HttpPolicy(
+            cors=CorsPolicy(allow_origins=["*"], allow_credentials=True)
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -832,11 +840,11 @@ def test_wildcard_cors_origins_are_flagged() -> None:
 def test_real_trust_lists_are_clean() -> None:
     assert_clean(
         """
-        from wreath.middleware import CORSMiddleware, ProxyHeadersMiddleware
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]))
-        app.add_global_middleware(
-            CORSMiddleware(allow_origins=["https://console.example"])
-        )
+        from wreath.policy import CorsPolicy, HttpPolicy, ProxyPolicy
+        app.configure_http_policy(HttpPolicy(
+            proxy=ProxyPolicy(trusted=["10.0.0.0/8"]),
+            cors=CorsPolicy(allow_origins=["https://console.example"]),
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -845,18 +853,20 @@ def test_real_trust_lists_are_clean() -> None:
 def test_a_wildcard_proxy_boundary_does_not_silence_the_forwarded_rule() -> None:
     """The worst spelling must not buy the quietest result.
 
-    `prepare` used to set `proxy_trusted` on *any* `ProxyHeadersMiddleware(...)`
+    `prepare` used to set `proxy_trusted` on *any* `ProxyPolicy(...)`
     call. An application that wrote `trusted=["*"]` -- a boundary that trusts
     every peer, which is to say no boundary -- therefore silenced
     `untrusted-forwarded-header` for the whole file. The audit rewarded the one
     configuration that deserved it least.
     """
     source = """
-        from wreath.middleware import ProxyHeadersMiddleware, RateLimitMiddleware
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["*"]))
+        from wreath.policy import HttpPolicy, ProxyPolicy, RateLimitPolicy
+        app.configure_http_policy(HttpPolicy(proxy=ProxyPolicy(trusted=["*"])))
         def key(request):
             return request.header("x-forwarded-for")
-        app.add_global_middleware(RateLimitMiddleware(limit=5, key=key))
+        app.configure_http_policy(HttpPolicy(
+            rate_limit=RateLimitPolicy(limit=5, key=key)
+        ))
     """
     assert_flags(source, "untrusted-forwarded-header")
     assert_flags(source, "wildcard-trust-list")
@@ -952,7 +962,7 @@ def test_a_wildcard_host_allow_list_is_flagged() -> None:
 def test_a_wildcard_proxy_trust_is_flagged() -> None:
     assert_flags(
         """
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["*"]))
+        app.configure_http_policy(HttpPolicy(proxy=ProxyPolicy(trusted=["*"])))
         """,
         "wildcard-trust-list",
     )
@@ -961,9 +971,9 @@ def test_a_wildcard_proxy_trust_is_flagged() -> None:
 def test_a_wildcard_origin_with_credentials_is_flagged() -> None:
     assert_flags(
         """
-        app.add_global_middleware(
-            CORSMiddleware(allow_origins=["*"], allow_credentials=True)
-        )
+        app.configure_http_policy(HttpPolicy(
+            cors=CorsPolicy(allow_origins=["*"], allow_credentials=True)
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -972,7 +982,9 @@ def test_a_wildcard_origin_with_credentials_is_flagged() -> None:
 def test_a_named_trust_list_is_clean() -> None:
     assert_clean(
         """
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]))
+        app.configure_http_policy(HttpPolicy(
+            proxy=ProxyPolicy(trusted=["10.0.0.0/8"])
+        ))
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=["trek.example"])
         """,
         "wildcard-trust-list",
@@ -982,10 +994,12 @@ def test_a_named_trust_list_is_clean() -> None:
 def test_a_wildcard_origin_without_credentials_is_clean() -> None:
     """A public read-only API is allowed to answer any origin. It is the
     *combination* with credentials that makes the wildcard a trust decision,
-    which is why `CORSMiddleware` refuses only that pair."""
+    which is why `CorsPolicy` refuses only that pair."""
     assert_clean(
         """
-        app.add_global_middleware(CORSMiddleware(allow_origins=["*"]))
+        app.configure_http_policy(HttpPolicy(
+            cors=CorsPolicy(allow_origins=["*"])
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -1001,7 +1015,7 @@ def test_a_wildcard_proxy_trust_does_not_establish_the_boundary() -> None:
     """
     assert_flags(
         """
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["*"]))
+        app.configure_http_policy(HttpPolicy(proxy=ProxyPolicy(trusted=["*"])))
 
         @router.get("/sightings")
         async def sightings(request):
@@ -1015,7 +1029,9 @@ def test_a_configured_proxy_trust_still_silences_the_forwarded_rule() -> None:
     """The other half: a real boundary must keep working."""
     assert_clean(
         """
-        app.add_global_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]))
+        app.configure_http_policy(HttpPolicy(
+            proxy=ProxyPolicy(trusted=["10.0.0.0/8"])
+        ))
 
         @router.get("/sightings")
         async def sightings(request):
@@ -1786,9 +1802,9 @@ def test_a_wildcard_origin_with_credentials_disabled_is_clean() -> None:
     """The credentials half of the pair, asserted from the other side."""
     assert_clean(
         """
-        app.add_global_middleware(
-            CORSMiddleware(allow_origins=["*"], allow_credentials=False)
-        )
+        app.configure_http_policy(HttpPolicy(
+            cors=CorsPolicy(allow_origins=["*"], allow_credentials=False)
+        ))
         """,
         "wildcard-trust-list",
     )
@@ -1799,7 +1815,9 @@ def test_only_proxy_headers_middleware_establishes_the_boundary() -> None:
     boundary, and must not silence the forwarded-header rule."""
     assert_flags(
         """
-        app.add_global_middleware(TrustedHostMiddleware(trusted=["trek.example"]))
+        app.configure_http_policy(HttpPolicy(
+            trusted_host=TrustedHostPolicy(trusted=["trek.example"])
+        ))
 
         @router.get("/herds")
         async def herds(request):
@@ -2140,7 +2158,7 @@ def test_a_wildcard_in_an_unrelated_keyword_is_clean() -> None:
     assert_clean(
         """
         app.add_global_middleware(
-            CORSMiddleware(
+            CorsPolicy(
                 allow_origins=["https://console.trek.example"],
                 allow_methods=["*"],
                 allow_headers=["*"],
@@ -2206,12 +2224,12 @@ def test_an_inline_client_with_a_tainted_url_is_flagged() -> None:
 
 
 def test_only_a_trusted_keyword_establishes_the_boundary() -> None:
-    """`ProxyHeadersMiddleware(trust_host=False, trusted=["*"])` -- the trust
+    """`ProxyPolicy(trust_host=False, trusted=["*"])` -- the trust
     list is the keyword that decides, not whichever one comes first."""
     assert_flags(
         """
         app.add_global_middleware(
-            ProxyHeadersMiddleware(trust_host=False, trusted=["*"])
+            ProxyPolicy(trust_host=False, trusted=["*"])
         )
 
         @router.get("/herds")
@@ -2312,7 +2330,7 @@ def test_a_wildcard_origin_beside_an_unrelated_true_flag_is_clean() -> None:
     assert_clean(
         """
         app.add_global_middleware(
-            CORSMiddleware(allow_origins=["*"], allow_private_network=True)
+            CorsPolicy(allow_origins=["*"], allow_private_network=True)
         )
         """,
         "wildcard-trust-list",
@@ -2358,7 +2376,7 @@ def test_credentials_decided_at_runtime_are_read_without_crashing() -> None:
     assert_clean(
         """
         app.add_global_middleware(
-            CORSMiddleware(allow_origins=["*"], allow_credentials=credentialed())
+            CorsPolicy(allow_origins=["*"], allow_credentials=credentialed())
         )
         """,
         "wildcard-trust-list",
