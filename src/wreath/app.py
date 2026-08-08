@@ -43,8 +43,6 @@ from ._flight_schema import CaptureFieldClass as _CaptureFieldClass
 from ._flight_schema import PhaseCoverage as _PhaseCoverage
 from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
-from ._middleware_tape import compile_tape as _compile_tape
-from ._middleware_tape import preflight_answer as _preflight_answer
 from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
 from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
@@ -74,6 +72,8 @@ from .logging import begin_request_seeded as _log_begin_seeded
 from .logging import finish_request_for as _log_finish_request
 from .logging import finish_session as _log_finish_session
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
+from .middleware.tape import compile_tape as _compile_tape
+from .middleware.tape import preflight_answer as _preflight_answer
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
     FileResponse,
@@ -667,7 +667,7 @@ class Wreath:
 
         self._hardening = _resolve_hardening(hardening)
         self._routing = routing
-        #: Where the global middleware tape runs. See `_middleware_tape`.
+        #: Where the global middleware tape runs. See `middleware.tape`.
         #: `native` is opt-in because it changes what the Python tape sees:
         #: a CORS preflight answered by the server never reaches middleware
         #: registered before CORS, so a rate limiter stops counting them.
