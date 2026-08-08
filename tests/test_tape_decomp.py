@@ -1,4 +1,4 @@
-"""`wreath-tape-decomp`: middleware cost decomposition and its silent-failure guards."""
+"""First-class HTTP policy cost decomposition and its silent-failure guards."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from wreath._devtools import tape_decomp
-from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES, build_realistic_app
-from wreath.middleware.ratelimit import RateLimitMiddleware
+from wreath._devtools.sample_app import POLICY_FACTORIES, build_realistic_app
+from wreath.policy.ratelimit import RateLimitPolicy
 
 
 def _template() -> dict[str, Any]:
@@ -18,37 +18,54 @@ def _template() -> dict[str, Any]:
 
 
 def _arms(mode: str = "both") -> list[tape_decomp.Arm]:
-    names = [type(factory()).__name__ for factory in MIDDLEWARE_FACTORIES]
+    names = [type(factory()).__name__ for factory in POLICY_FACTORIES]
     return tape_decomp._build_arms(
         lambda: build_realistic_app()[0],
         names,
-        lambda index: MIDDLEWARE_FACTORIES[index](),
+        lambda index: POLICY_FACTORIES[index](),
         mode,
     )
 
 
 def test_the_stack_is_built_from_factories_not_shared_instances() -> None:
-    # Sharing one middleware object across arms let a token bucket drain, and
+    # Sharing one policy component across arms let a token bucket drain, and
     # the drained arm then "measured" 429s -- faster than bare, which is how the
     # decomposition came to report a negative cost.
-    first = [factory() for factory in MIDDLEWARE_FACTORIES]
-    second = [factory() for factory in MIDDLEWARE_FACTORIES]
+    first = [factory() for factory in POLICY_FACTORIES]
+    second = [factory() for factory in POLICY_FACTORIES]
     for one, other in zip(first, second, strict=True):
         assert one is not other
 
 
-def test_no_two_arms_share_a_middleware_object() -> None:
+def test_no_two_arms_share_a_policy_component() -> None:
     seen: set[int] = set()
     for arm in _arms():
-        for middleware in arm.middleware:
-            assert id(middleware) not in seen, f"{arm.label} reuses a middleware instance"
-            seen.add(id(middleware))
+        for component in arm.components:
+            assert id(component) not in seen, f"{arm.label} reuses a policy component"
+            seen.add(id(component))
+
+
+def test_a_shared_app_activates_each_arm_before_it_is_measured() -> None:
+    app = build_realistic_app()[0]
+    arms = tape_decomp._build_arms(
+        lambda: app,
+        ["RateLimitPolicy"],
+        lambda _index: RateLimitPolicy(limit=1_000_000),
+        "alone",
+        shared_app=True,
+    )
+    assert len({id(arm.app) for arm in arms}) == 1
+
+    arms[1].activate()
+    assert type(app._http_policy.rate_limit) is RateLimitPolicy
+    arms[0].activate()
+    assert app._http_policy is None
 
 
 def test_the_sample_rate_limiter_cannot_drain_during_a_benchmark() -> None:
     limiter = next(
-        factory() for factory in MIDDLEWARE_FACTORIES
-        if isinstance(factory(), RateLimitMiddleware)
+        factory() for factory in POLICY_FACTORIES
+        if isinstance(factory(), RateLimitPolicy)
     )
     # Behavioral, not a private-attribute assertion: a full decomposition drives
     # well over a million requests through one bucket, and the limit must be out
@@ -70,8 +87,8 @@ def test_verify_refuses_an_arm_that_stopped_serving() -> None:
     # A limiter with nothing left is exactly the failure that made the tool lie.
     drained = tape_decomp._build_arms(
         lambda: build_realistic_app()[0],
-        ["RateLimitMiddleware"],
-        lambda _index: RateLimitMiddleware(limit=1, window=3600.0),
+        ["RateLimitPolicy"],
+        lambda _index: RateLimitPolicy(limit=1, window=3600.0),
         "alone",
     )
     template = _template()
