@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
+from hashlib import new as new_hash
+from hmac import compare_digest
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,11 +24,12 @@ from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
 from .exceptions import (
+    BadRequest,
     ClientDisconnect,
     PayloadTooLarge,
     RequestHeaderFieldsTooLarge,
 )
-from .state import State
+from .state import BODY_CHECK_SLOT, State
 
 if TYPE_CHECKING:
     # **This one import decides whether `wreath` can be entered from any door.**
@@ -1162,6 +1165,9 @@ class Request:
         Raises:
             PayloadTooLarge: the body exceeds `RequestLimits.max_body_bytes`
             ClientDisconnect: the peer went away before the body finished
+            BadRequest: a covered `Content-Digest` does not match these bytes.
+                See `_check_body` -- ingress cannot do this check, because the
+                body has not arrived when global middleware runs.
         """
         cached = self._body
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
@@ -1191,7 +1197,36 @@ class Request:
         else:
             result = b""
         self._body = result
+        self._check_body(result)
         return result
+
+    def _take_body_check(self) -> tuple[str, bytes] | None:
+        """The deferred whole-body digest a middleware parked here, spent once.
+
+        One `is None` on the common path, because `state` is not allocated at
+        all for a request whose middleware never touched it. `wreath.signatures`
+        is the only writer: it verifies an RFC 9421 signature at ingress, where
+        the body has not arrived yet, so the `Content-Digest` that signature
+        covered can only be checked from here. Taken rather than read, so a
+        second `body()` off the cache does not re-hash what it already checked.
+        """
+        state = self._state
+        if state is None:
+            return None
+        expected = state.get(BODY_CHECK_SLOT, None)
+        if expected is None:
+            return None
+        state.__setattr__(BODY_CHECK_SLOT, None)
+        return cast("tuple[str, bytes]", expected)
+
+    def _check_body(self, body: bytes) -> None:
+        """Refuse a body that does not hash to what its signature covered."""
+        expected = self._take_body_check()
+        if expected is None:
+            return
+        algorithm, digest = expected
+        if not compare_digest(new_hash(algorithm.replace("-", ""), body).digest(), digest):
+            raise BadRequest("request body does not match its signed content-digest")
 
     async def stream(self) -> AsyncIterator[bytes]:
         """Yield request-body chunks directly from the ASGI receive channel.
@@ -1201,6 +1236,16 @@ class Request:
         consumer stops early), `body()`, `json()`, `form()`, and a second stream
         raise `StreamConsumed`. If `body()` ran first, its cached bytes are
         replayed once without touching the receive channel.
+
+        A `Content-Digest` a signature covered is hashed **incrementally** here
+        and compared when the last chunk arrives, so a streaming handler gets
+        the same guarantee as `body()` without materialising anything. A
+        consumer that stops early leaves it unchecked, which it must: the bytes
+        it did not read cannot be hashed, and there is no complete body to have
+        an opinion about.
+
+        Raises:
+            BadRequest: a covered `Content-Digest` does not match these bytes.
         """
         cached = self._body
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
@@ -1213,6 +1258,8 @@ class Request:
         self._body = _STREAMING
         total = 0
         limit = self._limits.max_body_bytes
+        expected = self._take_body_check()
+        running = None if expected is None else new_hash(expected[0].replace("-", ""))
         try:
             while True:
                 message = await self._receive()
@@ -1230,8 +1277,17 @@ class Request:
                         self._body = b""
                         raise PayloadTooLarge(f"request body exceeds {limit} bytes")
                     total += len(body)
+                    if running is not None:
+                        # Before the yield, not after: a consumer that stops
+                        # early must not leave a chunk it *did* read unhashed.
+                        running.update(body)
                     yield body
                 if not message.get("more_body", False):
+                    if running is not None and expected is not None:
+                        if not compare_digest(running.digest(), expected[1]):
+                            raise BadRequest(
+                                "request body does not match its signed content-digest"
+                            )
                     return
         finally:
             if self._body is _STREAMING:
