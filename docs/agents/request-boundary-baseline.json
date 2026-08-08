@@ -13,15 +13,11 @@
       },
       "phases": {
         "ingress": {
-          "c": 30,
+          "c": 31,
           "python": 1
         },
         "routing": {
           "c": 7,
-          "python": 0
-        },
-        "auth": {
-          "c": 1,
           "python": 0
         },
         "handler": {
@@ -36,7 +32,7 @@
       "c_calls": {
         "dict.get": 39,
         "builtins.isinstance": 10,
-        "builtins.getattr": 5,
+        "builtins.getattr": 6,
         "builtins.len": 4,
         "list.append": 4,
         "TracedUser._orm_is_dirty": 4,
@@ -65,8 +61,7 @@
         "wreath._native._core.csrf_new_token": 1,
         "BitsetRouteTable.classify": 1,
         "str.partition": 1,
-        "wreath._native._core.build_capability_mask": 1,
-        "BitsetRouteTable.resolve": 1,
+        "BitsetRouteTable.resolve_identity": 1,
         "wreath._native._core.orm_shape": 1,
         "str.rpartition": 1,
         "builtins.hasattr": 1,
@@ -116,18 +111,14 @@
           "python": 0
         },
         "handler": {
-          "c": 3,
-          "python": 0
-        },
-        "egress": {
-          "c": 1,
+          "c": 4,
           "python": 0
         }
       },
       "c_calls": {
         "dict.get": 2,
         "builtins.isinstance": 2,
-        "BitsetRouteTable.classify": 1,
+        "BitsetRouteTable.match": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,
         "builtins.len": 1

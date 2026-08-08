@@ -1,9 +1,17 @@
 # Where a request's instructions actually go
 
-Status: **measurement.** 2026-08-06. Fourth pass of the method in
+Status: **historical measurement, superseded.** 2026-08-06. Fourth pass of the method in
 [`hmac-key-schedule.md`](hmac-key-schedule.md),
 [`repeated-work-audit.md`](repeated-work-audit.md) and
 [`middleware-tape-cost.md`](middleware-tape-cost.md).
+
+The map below records the pre-policy architecture. As of 2026-08-08, the native
+server stores validated request headers as one raw block plus spans and
+materializes Python pairs only when observed, while first-class HTTP policy has
+replaced the shipped middleware tape. Do not use the header or middleware rows
+below as current budgets. The current A/A and cumulative policy map is captured
+in
+[`native_overhead_hunt_2026-08-08.json`](../../benchmarks/results/native_overhead_hunt_2026-08-08.json).
 
 The first three passes each went at one subsystem. This one steps back and maps
 the whole request, so the next piece of work can be chosen by size rather than
