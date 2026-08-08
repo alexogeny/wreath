@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import re
 import struct
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from ._migrations.scan import (
     transitional_read,
     waive_transitional,
 )
+from ._native import extension as _extension
 from .orm.fields import _IMPLICIT_OPCLASS_METHODS
 from .orm.types import BIT_OID, ExtensionType
 
@@ -736,12 +736,13 @@ class MigrationGeneration:
 
 
 def _metal() -> Any:
-    try:
-        module = importlib.import_module("wreath._native._postgres")
-    except ImportError as error:
-        raise RuntimeError(
-            "wreath.migrations requires the Wreath-metal PostgreSQL extension"
-        ) from error
+    # `ignore_pure`: migrations have no pure twin -- the planner, the diff and
+    # the SQL emitter live only in C -- so `WREATH_PURE=1` must not turn every
+    # migration command into the "not built" error. The mode selects between two
+    # implementations of the same thing; here there is only one.
+    module = _extension("_postgres", ignore_pure=True)
+    if module is None:
+        raise RuntimeError("wreath.migrations requires the Wreath-metal PostgreSQL extension")
     if not hasattr(module, "_migration_resolve_managed"):
         raise RuntimeError(
             "the installed Wreath-metal PostgreSQL extension does not provide migrations; "
