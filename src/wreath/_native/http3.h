@@ -31,6 +31,7 @@
 
 #include "flight.h"
 #include "server_request_capi.h"
+#include "server_policy.h"
 
 struct WreathH3Endpoint;
 struct WreathH3Conn;
@@ -88,6 +89,7 @@ typedef struct {
     wreath_nfr_context nfr_ctx;
     int nfr_active;
     uint64_t nfr_bytes_out;
+    WreathPolicyState policy_state;
 } WreathH3Stream;
 
 /* Per QUIC connection. Plain C struct; owned by a PyCapsule in the endpoint's
@@ -123,6 +125,7 @@ typedef struct WreathH3Endpoint {
     PyObject_HEAD
     PyObject *app;
     PyObject *native_app;               /* bound Wreath._wreath_http, or NULL */
+    WreathPolicyProgram policy;
     PyObject *config;
     PyObject *loop;
     PyObject *registry;

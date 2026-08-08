@@ -1079,6 +1079,10 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     if (ep->native_app == NULL) {
         PyErr_Clear();
     }
+    ep->policy.descriptor = NULL;
+    if (ep->native_app != NULL && wreath_policy_program_load(&ep->policy, app) < 0) {
+        return -1;
+    }
     ep->config = Py_NewRef(config);
     ep->loop = Py_NewRef(loop);
     ep->registry = Py_NewRef(registry);
@@ -1150,6 +1154,7 @@ endpoint_traverse(PyObject *op, visitproc visit, void *arg)
     WreathH3Endpoint *ep = (WreathH3Endpoint *)op;
     Py_VISIT(ep->app);
     Py_VISIT(ep->native_app);
+    Py_VISIT(ep->policy.descriptor);
     Py_VISIT(ep->config);
     Py_VISIT(ep->loop);
     Py_VISIT(ep->registry);
@@ -1178,6 +1183,7 @@ endpoint_clear(PyObject *op)
     }
     Py_CLEAR(ep->app);
     Py_CLEAR(ep->native_app);
+    wreath_policy_program_clear(&ep->policy);
     Py_CLEAR(ep->config);
     Py_CLEAR(ep->loop);
     Py_CLEAR(ep->registry);

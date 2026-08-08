@@ -87,9 +87,9 @@ class TestCorsPreflightValidation:
     case-sensitive with no normalization."""
 
     def _middleware(self, **kwargs):
-        from wreath.middleware.cors import CORSMiddleware
+        from wreath.policy.cors import CorsPolicy
 
-        return CORSMiddleware(
+        return CorsPolicy(
             allow_origins=["https://app.example"],
             allow_methods=("GET", "POST"),
             **kwargs,
@@ -114,21 +114,21 @@ class TestCorsPreflightValidation:
 
     async def test_a_method_outside_the_allow_list_is_refused(self):
         middleware = self._middleware()
-        response = await middleware.before(
+        response = await middleware._ingress(
             self._Preflight("https://app.example", requested="DELETE")
         )
         assert response is not None and response.status == 403
 
     async def test_an_allowed_method_still_passes(self):
         middleware = self._middleware()
-        response = await middleware.before(
+        response = await middleware._ingress(
             self._Preflight("https://app.example", requested="POST")
         )
         assert response is not None and response.status == 204
 
     async def test_the_origin_scheme_and_host_are_compared_case_insensitively(self):
         middleware = self._middleware()
-        response = await middleware.before(self._Preflight("HTTPS://App.Example"))
+        response = await middleware._ingress(self._Preflight("HTTPS://App.Example"))
         assert response is not None and response.status == 204
 
 
@@ -143,17 +143,17 @@ class TestRateLimitHeaders:
     than nothing. See report 23 G-63."""
 
     async def test_an_allowed_request_is_not_made_more_expensive(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware
+        from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitMiddleware(limit=5, window=60.0)
+        middleware = RateLimitPolicy(limit=5, window=60.0)
         assert not hasattr(middleware, "after"), (
             "a global after hook prices every successful request"
         )
 
     async def test_a_refused_request_still_carries_retry_after(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware
+        from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitMiddleware(limit=1, window=60.0)
+        middleware = RateLimitPolicy(limit=1, window=60.0)
 
         class _Request:
             method = "GET"
@@ -161,8 +161,8 @@ class TestRateLimitHeaders:
             client = ("198.51.100.5", 5000)
             identity = None
 
-        middleware.before_sync(_Request())
-        refused = middleware.before_sync(_Request())
+        middleware._ingress_sync(_Request())
+        refused = middleware._ingress_sync(_Request())
         assert refused.status == 429
         assert _header(refused.headers, b"retry-after") is not None
         assert _header(refused.headers, b"x-ratelimit-remaining") == b"0"

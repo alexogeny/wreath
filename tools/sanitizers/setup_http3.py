@@ -72,6 +72,7 @@ setup(
                 str(ROOT / "src/wreath/_native/_http3module.c"),
                 str(ROOT / "src/wreath/_native/http3_asgi.c"),
                 str(ROOT / "src/wreath/_native/http3_connection.c"),
+                str(ROOT / "src/wreath/_native/server_policy.c"),
             ],
             extra_compile_args=[*FLAGS, *cflags],
             extra_link_args=["-fsanitize=address,undefined", *libs],

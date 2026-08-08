@@ -348,6 +348,14 @@ h3_response_start(WreathH3Stream *s, PyObject *status_obj, PyObject *headers)
         PyErr_SetString(PyExc_RuntimeError, "response already started");
         return NULL;
     }
+    if (s->policy_state.native &&
+        wreath_policy_egress(&s->conn->endpoint->policy,
+                             &s->policy_state, headers) < 0) {
+        return NULL;
+    }
+    if (s->scope != NULL) {
+        wreath_h3_request_capi->update_policy(s->scope, &s->policy_state);
+    }
     PyObject *header_items = headers
         ? PySequence_Fast(headers, "response headers must be a sequence")
         : PyTuple_New(0);
@@ -795,6 +803,11 @@ h3_stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(s->receive_waiter);
     Py_VISIT(s->resp_headers);
     Py_VISIT(s->send_waiter);
+    Py_VISIT(s->policy_state.client);
+    Py_VISIT(s->policy_state.scheme);
+    Py_VISIT(s->policy_state.origin);
+    Py_VISIT(s->policy_state.request_id);
+    Py_VISIT(s->policy_state.csrf_token);
     for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
         Py_VISIT(s->resp_chunks[i]);
     }
@@ -828,6 +841,7 @@ h3_stream_clear(PyObject *op)
     s->resp_payload_acked = 0;
     s->resp_retained_bytes = 0;
     s->resp_retained_segments = 0;
+    wreath_policy_state_clear(&s->policy_state);
     return 0;
 }
 
@@ -919,6 +933,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->resp_eof = 0;
     s->nfr_active = 0;
     s->nfr_bytes_out = 0;
+    wreath_policy_state_init(&s->policy_state);
     PyObject_GC_Track((PyObject *)s);
     if (s->header_list == NULL || s->body_buffer == NULL) {
         Py_DECREF(s);
@@ -1166,6 +1181,48 @@ start_request(WreathH3Stream *s)
     }
     if (scope == NULL) return -1;
     s->scope = scope;
+
+    if (c->endpoint->policy.descriptor != NULL) {
+        PyObject *policy_headers = PyObject_GetAttrString(scope, "headers");
+        PyObject *policy_method = PyObject_GetAttrString(scope, "method");
+        PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
+        PyObject *policy_client = PyObject_GetAttrString(scope, "client");
+        WreathPolicyReply reply = {0};
+        if (policy_headers == NULL || policy_method == NULL ||
+            policy_scheme == NULL || policy_client == NULL) {
+            Py_XDECREF(policy_headers);
+            Py_XDECREF(policy_method);
+            Py_XDECREF(policy_scheme);
+            Py_XDECREF(policy_client);
+            return -1;
+        }
+        int policy_result = wreath_policy_ingress(
+            &c->endpoint->policy, &s->policy_state, policy_method,
+            policy_scheme, policy_client, policy_headers, &reply);
+        Py_DECREF(policy_headers);
+        Py_DECREF(policy_method);
+        Py_DECREF(policy_scheme);
+        Py_DECREF(policy_client);
+        if (policy_result < 0) {
+            wreath_policy_reply_clear(&reply);
+            return -1;
+        }
+        wreath_h3_request_capi->set_policy(scope, &s->policy_state);
+        if (policy_result > 0) {
+            PyObject *status = PyLong_FromLong(reply.status);
+            PyObject *started = status != NULL
+                ? h3_response_start(s, status, reply.headers) : NULL;
+            Py_XDECREF(status);
+            PyObject *finished = started != NULL
+                ? h3_response_body(s, reply.body, 0) : NULL;
+            Py_XDECREF(started);
+            wreath_policy_reply_clear(&reply);
+            if (finished == NULL) return -1;
+            Py_DECREF(finished);
+            return 0;
+        }
+        wreath_policy_reply_clear(&reply);
+    }
 
     s->receive_callable = PyObject_GetAttrString((PyObject *)s, "_receive");
     s->send_callable = PyObject_GetAttrString((PyObject *)s, "_send");
