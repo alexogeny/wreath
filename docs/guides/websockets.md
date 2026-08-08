@@ -106,14 +106,16 @@ CORS does not protect WebSockets, and a browser attaches matching cookies to the
 handshake. Install an exact origin allowlist for every browser-facing socket:
 
 ```python
-from wreath.middleware import WebSocketOriginMiddleware
+from wreath.policy import HttpPolicy, WebSocketOriginPolicy
 
-app.add_middleware(WebSocketOriginMiddleware(["https://app.example"]))
+app.configure_http_policy(HttpPolicy(
+    websocket_origin=WebSocketOriginPolicy(["https://app.example"]),
+))
 ```
 
 Missing, malformed, repeated, and unlisted `Origin` values are refused before
 `accept`. Handshake-safe global middleware also runs before WebSocket auth:
-`ProxyHeadersMiddleware`, `TrustedHostMiddleware`, and a global
+`ProxyPolicy`, `TrustedHostPolicy`, and a global
 `SessionMiddleware` therefore apply on both HTTP and WebSocket paths. Encoded
 slashes and backslashes are refused before WebSocket routing just as they are
 before HTTP routing.
