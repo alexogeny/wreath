@@ -75,6 +75,7 @@ import ast
 import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Final
 
 from ...crud import SENSITIVE_FIELD
 from ..model import Finding, Severity
@@ -848,6 +849,43 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
+#: Reads off the request object whose value is whatever the caller sent.
+#:
+#: **`request` is framework-injected, so the parameter itself is not a taint
+#: source** (`_INJECTED_PARAMS`) -- which used to mean *nothing reached through
+#: it was either.* The same handler was an ERROR when the value arrived as a
+#: bound parameter and clean when it arrived through `request.query_params`,
+#: which is the more idiomatic of the two spellings.
+#:
+#: `request.state` is deliberately absent: it holds what middleware resolved --
+#: a tenant, an identity, a correlation id -- not what the caller sent, and
+#: flagging it would fire on the tenant-scoped query that is the correct answer.
+_REQUEST_READS: Final = (
+    "request.json",
+    "request.form",
+    "request.body",
+    "request.query_params",
+    "request.path_params",
+    "request.cookies",
+    "request.headers",
+    "request.header",
+)
+
+
+def _reads_request(node: ast.AST) -> bool:
+    """Whether this expression reads anything the caller put on the request.
+
+    Matched on the attribute rather than the call, so the subscript spellings
+    (`request.query_params["q"]`) are covered by the same arm as the call ones
+    (`await request.json()`), and a receiver other than the bare name --
+    `self.request.headers` -- still matches on the suffix.
+    """
+    return any(
+        isinstance(child, ast.Attribute) and _dotted(child).endswith(_REQUEST_READS)
+        for child in ast.walk(node)
+    )
+
+
 def _is_dynamic_string(node: ast.AST) -> bool:
     """Whether this expression builds a string from something at run time."""
     if isinstance(node, ast.JoinedStr):
@@ -1058,8 +1096,7 @@ class _Scanner(ast.NodeVisitor):
                     continue
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 names = [name for target in targets for name in _bound_names(target)]
-                referenced = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
-                if referenced & (self.caller_controlled | self.request_bound):
+                if self._tainted(value):
                     self.caller_controlled.update(names)
                     if _is_dynamic_string(value.value if isinstance(value, ast.Await) else value):
                         self.dynamic_strings.update(names)
@@ -1086,10 +1123,21 @@ class _Scanner(ast.NodeVisitor):
             self.origin_bound.update(names)
 
     def _is_request_data(self, node: ast.AST) -> bool:
-        if not isinstance(node, ast.Call):
-            return False
-        dotted = _dotted(node.func)
-        return dotted.endswith(("request.json", "request.form", "request.body"))
+        return _reads_request(node)
+
+    def _tainted(self, node: ast.AST) -> bool:
+        """Whether this expression carries anything the caller chose.
+
+        The two ways it can: a name already known to be caller-controlled, or a
+        read off the request in place. The second half is why this is a method
+        rather than eight copies of one set intersection -- the copies had it
+        missing, uniformly, and a rule that catches the bound-parameter spelling
+        and not the `request.query_params` one catches neither in practice.
+        """
+        referenced = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        if referenced & (self.caller_controlled | self.request_bound):
+            return True
+        return _reads_request(node)
 
     def _is_random(self, node: ast.AST) -> bool:
         if isinstance(node, ast.Call):
@@ -1149,8 +1197,7 @@ class _Scanner(ast.NodeVisitor):
         if _dotted(node.func) not in ("os.path.join", "path.join", "posixpath.join"):
             return
         for argument in node.args[1:]:
-            referenced = {n.id for n in ast.walk(argument) if isinstance(n, ast.Name)}
-            if referenced & (self.caller_controlled | self.request_bound):
+            if self._tainted(argument):
                 self._flag(
                     "path-from-request", node,
                     "a path is joined with a value the caller chose; an absolute "
@@ -1195,10 +1242,11 @@ class _Scanner(ast.NodeVisitor):
                 return
             referenced = {n.id for n in ast.walk(expression) if isinstance(n, ast.Name)}
             supplied = referenced & self.request_bound
-            if supplied:
+            if supplied or _reads_request(expression):
+                named = sorted(supplied)[0] if supplied else "a value read off the request"
                 self._flag(
                     "secret-in-log", node,
-                    f"{sorted(supplied)[0]} is the caller's own body, which is not known to be "
+                    f"{named} is the caller's own body, which is not known to be "
                     "free of credentials",
                 )
                 return
@@ -1230,10 +1278,11 @@ class _Scanner(ast.NodeVisitor):
             return
         referenced = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
         chosen = referenced & (self.caller_controlled | self.request_bound)
-        if chosen:
+        if chosen or _reads_request(target):
+            named = sorted(chosen)[0] if chosen else "the request"
             self._flag(
                 "outbound-url-from-request", node,
-                f"the destination of this request comes from {sorted(chosen)[0]}",
+                f"the destination of this request comes from {named}",
             )
 
     def _sql(self, node: ast.Call) -> None:
@@ -1247,8 +1296,7 @@ class _Scanner(ast.NodeVisitor):
             tainted = first.id in self.caller_controlled
         else:
             interpolated = _is_dynamic_string(first)
-            referenced = {n.id for n in ast.walk(first) if isinstance(n, ast.Name)}
-            tainted = bool(referenced & (self.caller_controlled | self.request_bound))
+            tainted = self._tainted(first)
         # Interpolating a module constant is how a schema-qualified statement is
         # written. Interpolating something a caller chose is an injection. Only
         # the second is a finding, and conflating them is what made the first
@@ -1352,9 +1400,7 @@ class _Scanner(ast.NodeVisitor):
             self._flag("dynamic-import", node, f"{callee}() executes data as code")
             return
         if dotted.endswith("import_module") or callee == "__import__":
-            referenced = {n.id for n in ast.walk(node.args[0])
-                          if isinstance(n, ast.Name)} if node.args else set()
-            caller_chose = bool(referenced & (self.caller_controlled | self.request_bound))
+            caller_chose = bool(node.args) and self._tainted(node.args[0])
             if node.args and not isinstance(node.args[0], ast.Constant) and caller_chose:
                 self._flag(
                     "dynamic-import", node,
@@ -1787,8 +1833,7 @@ class _Scanner(ast.NodeVisitor):
         """
         if not isinstance(node.op, ast.Div) or not self._is_pathlike(node.left):
             return
-        referenced = {n.id for n in ast.walk(node.right) if isinstance(n, ast.Name)}
-        if not (referenced & (self.caller_controlled | self.request_bound)):
+        if not self._tainted(node.right):
             return
         self._flag(
             "path-from-request", node,
@@ -1810,8 +1855,7 @@ class _Scanner(ast.NodeVisitor):
         # A bound body model is the same value as `await request.json()` with a
         # schema in front of it, and walking *it* onto a row throws the schema
         # away again -- so the caller-controlled set counts here too.
-        iterated = {n.id for n in ast.walk(node.iter) if isinstance(n, ast.Name)}
-        if not (iterated & (self.request_bound | self.caller_controlled)):
+        if not self._tainted(node.iter):
             return
         for inner in ast.walk(node):
             if isinstance(inner, ast.Call) and _name_of(inner.func) == "setattr":

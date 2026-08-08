@@ -2727,3 +2727,84 @@ def test_the_name_of_the_variable_a_secret_is_read_from_is_clean() -> None:
         """,
         "hardcoded-secret",
     )
+
+
+# --- request accessors are taint sources too ---------------------------------
+#
+# The taint model started at the *bound parameter*, so the same handler was an
+# ERROR when the value arrived as `q: str` and clean when it arrived off
+# `request` -- which is the more idiomatic of the two spellings and the one a
+# reader would reach for. `hardening="block"` is sold as "this application does
+# not boot carrying one of these", so a blind source is a blind gate.
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        'request.query_params["q"]',
+        "request.path_params['name']",
+        'request.cookies["t"]',
+        'request.headers["x-tenant"]',
+        'request.header("x-tenant")',
+    ],
+)
+def test_sql_built_from_a_request_accessor_is_flagged(read: str) -> None:
+    assert_flags(
+        f"""
+        @router.get("/search")
+        async def search(request, session):
+            return await session.raw(f"SELECT * FROM t WHERE name = '{{{read}}}'").fetch()
+        """,
+        "sql-interpolation",
+    )
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        'request.query_params["q"]',
+        'request.headers["x-tenant"]',
+    ],
+)
+def test_a_request_accessor_taints_the_name_it_is_bound_to(read: str) -> None:
+    """One hop, which is how the value is actually written down."""
+    assert_flags(
+        f"""
+        @router.get("/search")
+        async def search(request, session):
+            needle = {read}
+            return await session.raw(f"SELECT * FROM t WHERE name = '{{needle}}'").fetch()
+        """,
+        "sql-interpolation",
+    )
+
+
+def test_a_path_joined_with_a_request_accessor_is_flagged() -> None:
+    assert_flags(
+        """
+        @router.get("/download")
+        async def download(request):
+            return open(EXPORTS / request.query_params["name"]).read()
+        """,
+        "path-from-request",
+    )
+
+
+def test_request_state_is_not_a_caller_accessor() -> None:
+    """The precision guard on the widened source list.
+
+    `request.state` is what *middleware* put there -- a resolved tenant, an
+    identity, a correlation id -- not what the caller sent. Adding every
+    `request.*` read as a taint source would flag the tenant-scoped query that
+    is the correct spelling, and a rule that fires on the safe form is worse
+    than no rule.
+    """
+    assert_clean(
+        """
+        @router.get("/search")
+        async def search(request, session):
+            tenant = request.state.tenant
+            return await session.raw(f"SELECT * FROM t WHERE tenant = {tenant}").fetch()
+        """,
+        "sql-interpolation",
+    )
