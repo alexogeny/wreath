@@ -20,7 +20,7 @@ from typing import Any
 
 from .._auth.requirements import AuthRequirement, PolicyRequirement, merge_requirements
 from ..binding import BindingSpec, ValidationError, validate
-from ..middleware.ratelimit import MemoryRateLimitStore
+from ..policy.ratelimit import MemoryRateLimitStore
 from .catalog import Catalog
 from .limits import ToolRateLimit
 from .schema import ToolSignatureError, derive_input_schema
