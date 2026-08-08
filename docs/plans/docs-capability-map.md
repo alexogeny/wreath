@@ -129,7 +129,7 @@ afterwards recognises the shape:
 | Validation and settings | `pydantic`, `pydantic-settings` | `wreath.binding`, `wreath.config` | [Binding](guides/binding.md) |
 | File uploads | `python-multipart` | built in | [Forms](guides/forms.md) |
 | Server-sent events | `sse-starlette` | `wreath.response.SSEResponse` | [SSE](guides/sse.md) |
-| Rate limiting | `slowapi`, `flask-limiter`, `limits` | `wreath.middleware.ratelimit` | [Middleware](guides/middleware.md) |
+| Rate limiting | `slowapi`, `flask-limiter`, `limits` | `wreath.policy.ratelimit` | [HTTP policy and custom middleware](guides/middleware.md) |
 | CORS, CSRF, sessions, security headers | `flask-cors`, `django-cors-headers`, `secure` | `wreath.middleware` | [Middleware](guides/middleware.md) |
 | ORM and migrations | `sqlalchemy`, `alembic`, `asyncpg` | `wreath.orm`, `wreath.migrations`, `wreath.postgres` | [ORM](guides/orm.md) |
 | Background and durable jobs | `celery`, `rq`, `arq`, `apscheduler` | `wreath.jobs`, `wreath.passes`, `wreath.background` | [Jobs](guides/jobs.md) |

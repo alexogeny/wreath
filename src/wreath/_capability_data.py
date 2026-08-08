@@ -77,7 +77,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     {
         'name': 'middleware',
         'capability': 'Rate limiting and metered quotas, CORS, CSRF, sessions, security headers, compression, request IDs, idempotency keys, and cache-control policy',
-        'modules': ('wreath.middleware', 'wreath.compression', 'wreath.cache_control', 'wreath.session_store', 'wreath.store', 'wreath.quota'),
+        'modules': ('wreath.middleware', 'wreath.policy', 'wreath.compression', 'wreath.cache_control', 'wreath.session_store', 'wreath.store', 'wreath.quota'),
         'guides': ('docs/guides/middleware.md', 'docs/guides/compression.md', 'docs/guides/caching.md', 'docs/guides/idempotency.md', 'docs/guides/quotas.md'),
         'replaces': ('slowapi', 'limits', 'flask-cors', 'django-cors-headers', 'secure', 'itsdangerous'),
     },
