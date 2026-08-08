@@ -174,7 +174,7 @@ worth having in a framework that already owns authorization, rather than a
 bolt-on: `declared_actions` and the permission document already enumerate
 sensitive actions, so the policy has somewhere to attach.
 
-Rotate the session on every factor transition. `middleware/sessions.py` already
+Rotate the session on every factor transition. `policy/sessions.py` already
 exports `rotate_session` and `_auth/oauth2.py` already calls it after login;
 promotion from pending to full is exactly the same fixation risk.
 

@@ -21,7 +21,7 @@ app.include_router(user_router(users, secret=SECRET, second_factors=factors))
 app.include_router(second_factor_router(users, factors, issuer="Camera Trap"))
 ```
 
-Both routers need `SessionMiddleware` registered globally, as login already did.
+Both routers need `SessionPolicy` registered globally, as login already did.
 
 **Both lines, not just the second one.** `second_factors=` is what teaches login
 that a factor exists; mounting only `second_factor_router` would leave users
