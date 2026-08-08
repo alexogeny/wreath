@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from wreath import Wreath
-from wreath.middleware.cors import CORSMiddleware
+from wreath.policy.cors import CorsPolicy
 from wreath.testing import TestClient
 
 
@@ -39,17 +39,17 @@ class TestCorsCredentialReflection:
 
     def test_wildcard_with_credentials_is_refused_at_construction(self):
         with pytest.raises(ValueError, match="credential"):
-            CORSMiddleware(allow_origins=["*"], allow_credentials=True)
+            CorsPolicy(allow_origins=["*"], allow_credentials=True)
 
     def test_wildcard_without_credentials_is_still_allowed(self):
-        middleware = CORSMiddleware(allow_origins=["*"])
+        middleware = CorsPolicy(allow_origins=["*"])
         assert middleware._origin_header("https://anything.example") == (
             b"access-control-allow-origin",
             b"*",
         )
 
     def test_named_origins_with_credentials_are_still_allowed(self):
-        middleware = CORSMiddleware(
+        middleware = CorsPolicy(
             allow_origins=["https://app.example"], allow_credentials=True
         )
         assert middleware._origin_header("https://app.example") == (
@@ -64,30 +64,30 @@ class TestCorsVaryOnRejection:
     cache can store the no-ACAO response and serve it to an allowed origin."""
 
     async def test_a_disallowed_origin_still_varies(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
 
         class _Response:
             def __init__(self):
                 self.headers: list[tuple[bytes, bytes]] = []
 
-        response = await middleware.after(_Request(origin="https://evil.example"), _Response())
+        response = await middleware._egress(_Request(origin="https://evil.example"), _Response())
         assert _header(response, b"vary") == b"origin"
         assert _header(response, b"access-control-allow-origin") is None
 
     async def test_an_allowed_origin_varies_as_before(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
 
         class _Response:
             def __init__(self):
                 self.headers: list[tuple[bytes, bytes]] = []
 
-        response = await middleware.after(_Request(origin="https://app.example"), _Response())
+        response = await middleware._egress(_Request(origin="https://app.example"), _Response())
         assert _header(response, b"vary") == b"origin"
         assert _header(response, b"access-control-allow-origin") == b"https://app.example"
 
     async def test_a_preflight_rejection_varies(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
-        response = await middleware.before(
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
+        response = await middleware._ingress(
             _Request(origin="https://evil.example", method="OPTIONS")
         )
         assert response is not None and response.status == 403
@@ -120,8 +120,8 @@ class TestCorsVaryMergesWithAnExistingVary:
             self.headers: list[tuple[bytes, bytes]] = list(headers)
 
     async def test_a_disallowed_origin_merges_into_an_existing_vary(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
-        response = await middleware.after(
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
+        response = await middleware._egress(
             _Request(origin="https://evil.example"),
             self._Response([(b"vary", b"accept-encoding")]),
         )
@@ -130,8 +130,8 @@ class TestCorsVaryMergesWithAnExistingVary:
         assert _header(response, b"access-control-allow-origin") is None
 
     async def test_an_allowed_origin_merges_into_an_existing_vary(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
-        response = await middleware.after(
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
+        response = await middleware._egress(
             _Request(origin="https://app.example"),
             self._Response([(b"vary", b"accept-encoding")]),
         )
@@ -140,8 +140,8 @@ class TestCorsVaryMergesWithAnExistingVary:
         assert _header(response, b"access-control-allow-origin") == b"https://app.example"
 
     async def test_an_existing_origin_vary_is_not_duplicated(self):
-        middleware = CORSMiddleware(allow_origins=["https://app.example"])
-        response = await middleware.after(
+        middleware = CorsPolicy(allow_origins=["https://app.example"])
+        response = await middleware._egress(
             _Request(origin="https://evil.example"),
             self._Response([(b"vary", b"Accept-Encoding, Origin")]),
         )
@@ -154,9 +154,9 @@ class TestRateLimitKeyIsRequired:
     deployment where `scope["client"]` is absent is silently unlimited."""
 
     async def test_a_request_with_no_client_is_still_limited(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware
+        from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitMiddleware(limit=1, window=60.0)
+        middleware = RateLimitPolicy(limit=1, window=60.0)
 
         class _NoClient:
             method = "GET"
@@ -167,15 +167,15 @@ class TestRateLimitKeyIsRequired:
             def header(self, name, default=None):
                 return default
 
-        first = middleware.before_sync(_NoClient())
-        second = middleware.before_sync(_NoClient())
+        first = middleware._ingress_sync(_NoClient())
+        second = middleware._ingress_sync(_NoClient())
         assert first is None
         assert second is not None and second.status == 429
 
     async def test_an_exempt_request_is_still_exempt(self):
-        from wreath.middleware.ratelimit import RateLimitMiddleware
+        from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitMiddleware(
+        middleware = RateLimitPolicy(
             limit=1, window=60.0, exempt=lambda request: True
         )
 
@@ -185,8 +185,8 @@ class TestRateLimitKeyIsRequired:
             client = None
             identity = None
 
-        assert middleware.before_sync(_NoClient()) is None
-        assert middleware.before_sync(_NoClient()) is None
+        assert middleware._ingress_sync(_NoClient()) is None
+        assert middleware._ingress_sync(_NoClient()) is None
 
 
 class TestForwardedForFallback:

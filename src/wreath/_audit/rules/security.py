@@ -122,7 +122,7 @@ def hsts(view: ResponseView) -> Iterator[Finding]:
     if not raw:
         yield _f("hsts", Severity.WARN, view,
                  "HTTPS response has no Strict-Transport-Security header",
-                 "RFC 6797", "mount SecurityHeadersMiddleware(hsts=...)")
+                 "RFC 6797", "mount SecurityHeadersPolicy(hsts=...)")
         return
     max_age = 0
     for segment in raw.split(";"):
@@ -144,7 +144,7 @@ def content_type_options(view: ResponseView) -> Iterator[Finding]:
     if view.get("x-content-type-options").lower() != "nosniff":
         yield _f("content-type-options", Severity.WARN, view,
                  "response has no 'X-Content-Type-Options: nosniff'",
-                 "OWASP:headers", "mount SecurityHeadersMiddleware")
+                 "OWASP:headers", "mount SecurityHeadersPolicy")
 
 
 @_rule
@@ -177,4 +177,4 @@ def referrer_policy(view: ResponseView) -> Iterator[Finding]:
     if not view.has("referrer-policy"):
         yield _f("referrer-policy", Severity.INFO, view,
                  "response has no Referrer-Policy header",
-                 "OWASP:headers", "mount SecurityHeadersMiddleware (sets no-referrer)")
+                 "OWASP:headers", "mount SecurityHeadersPolicy (sets no-referrer)")

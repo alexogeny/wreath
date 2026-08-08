@@ -7,7 +7,7 @@ Run from the repository root::
 The script binds only to loopback and uses TLS+ALPN, Wreath's metal event loop,
 native HTTP/2 protocol, and an independent test HPACK encoder.  The request is
 for ``evil.example`` in HTTP/2 control data but supplies ``Host: good.example``.
-A vulnerable build lets TrustedHostMiddleware validate the latter and runs the
+A vulnerable build lets TrustedHostPolicy validate the latter and runs the
 handler for the former.
 """
 
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from http2 import support as h2
 
 from wreath import Wreath
-from wreath.middleware import TrustedHostMiddleware
+from wreath.policy import HttpPolicy, TrustedHostPolicy
 from wreath.reactor import metal_event_loop
 from wreath.server import Server, ServerConfig, TLSConfig
 
@@ -126,8 +126,11 @@ def _status(response: bytes) -> bytes | None:
 def main() -> int:
     cert_path, key_path = _certificate()
     seen_hosts: list[str | None] = []
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(("good.example",)))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("good.example",))
+        )
+    )
 
     @app.get("/")
     async def index(request) -> str:

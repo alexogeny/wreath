@@ -1,4 +1,4 @@
-"""PoC: bypass TrustedHostMiddleware with a user-info-shaped Host value.
+"""PoC: bypass TrustedHostPolicy with a user-info-shaped Host value.
 
 Run from the repository root::
 
@@ -6,7 +6,7 @@ Run from the repository root::
 
 The script binds only to loopback and drives Wreath through the metal event
 loop and native HTTP/1 parser.  The application models a password-reset link
-builder which relies on TrustedHostMiddleware before interpolating the Host
+builder which relies on TrustedHostPolicy before interpolating the Host
 header.  A vulnerable build accepts ``good.example:@evil.example`` and emits a
 link whose browser destination is ``evil.example``.
 """
@@ -19,7 +19,7 @@ import threading
 from urllib.parse import urlsplit
 
 from wreath import Wreath
-from wreath.middleware import TrustedHostMiddleware
+from wreath.policy import HttpPolicy, TrustedHostPolicy
 from wreath.reactor import metal_event_loop
 from wreath.server import Server, ServerConfig
 
@@ -61,8 +61,11 @@ async def _drive(server: Server, port: int) -> bytes:
 
 
 def main() -> int:
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(("good.example",)))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("good.example",))
+        )
+    )
 
     @app.get("/reset-link")
     async def reset_link(request) -> str:

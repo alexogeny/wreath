@@ -19,7 +19,7 @@ Add production-shaped browser request forgery protection, structured HSTS, expli
 
 ## Existing seams and constraints
 
-- `SecurityHeadersMiddleware` already emits HSTS from an unvalidated raw string. Extend it; do not add a second HSTS middleware.
+- `SecurityHeadersPolicy` already emits HSTS from an unvalidated raw string. Extend it; do not add a second HSTS middleware.
 - Global hook middleware covers route hits, misses, static files, and authorization failures. It is the correct seam for CSRF ingress checks and response policy.
 - Middleware runs `before` hooks in sorted registration order and `after` hooks in reverse order. Integration tests must lock ordering.
 - `Response` owns an in-memory `bytes` body and mutable header list. `StreamingResponse` owns an `AsyncIterable[bytes]`. `FileResponse` streams a path and computes length at send time.
@@ -192,7 +192,7 @@ def csrf_token(request: Request) -> str:
     ...
 ```
 
-`csrf_token()` returns the token prepared by middleware on safe requests. It raises a clear `RuntimeError` when `CSRFMiddleware` is not installed or has not run; it never creates a token independently.
+`csrf_token()` returns the token prepared by middleware on safe requests. It raises a clear `RuntimeError` when `CsrfPolicy` is not installed or has not run; it never creates a token independently.
 
 Token wire format:
 
@@ -277,7 +277,7 @@ docs/reference/middleware.md
 Public API:
 
 ```python
-CSRFMiddleware(
+CsrfPolicy(
     secret: str | bytes,
     *,
     cookie_name: str = "neo_csrf",
@@ -349,10 +349,10 @@ docs/guides/security.md
 docs/reference/middleware.md
 ```
 
-Extend `SecurityHeadersMiddleware`:
+Extend `SecurityHeadersPolicy`:
 
 ```python
-SecurityHeadersMiddleware(
+SecurityHeadersPolicy(
     ...,
     hsts_max_age: int | None = None,
     hsts_include_subdomains: bool = False,
@@ -601,10 +601,10 @@ tests/test_security_middleware.py
 Recommended priority ordering, from low to high:
 
 ```text
-SecurityHeadersMiddleware     0
+SecurityHeadersPolicy     0
 CompressionMiddleware        10
 CacheControlMiddleware       20
-Session/CSRFMiddleware       30
+Session/CsrfPolicy       30
 ```
 
 Because after-hooks execute in reverse, the response path becomes:

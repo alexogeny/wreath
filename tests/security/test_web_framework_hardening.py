@@ -22,8 +22,8 @@ from wreath.auth import (
 )
 from wreath.binding import File, Form
 from wreath.middleware.compression import CompressionMiddleware
-from wreath.middleware.security import TrustedHostMiddleware
 from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy import HttpPolicy, TrustedHostPolicy, WebSocketOriginPolicy
 from wreath.templates import Template, TemplateSyntaxError
 from wreath.testing import TestClient
 from wreath.users import user_router
@@ -228,8 +228,9 @@ async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
 
 
 async def test_websocket_honours_trusted_host_middleware() -> None:
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(["good.example"]))
+    app = Wreath(
+        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["good.example"]))
+    )
 
     @app.websocket("/ws")
     async def socket(websocket: Any) -> None:
@@ -244,10 +245,11 @@ async def test_websocket_honours_trusted_host_middleware() -> None:
 
 
 async def test_cookie_authenticated_websocket_requires_an_allowed_origin() -> None:
-    from wreath.middleware.security import WebSocketOriginMiddleware
-
-    app = Wreath()
-    app.add_middleware(WebSocketOriginMiddleware(["https://app.example"]))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            websocket_origin=WebSocketOriginPolicy(["https://app.example"])
+        )
+    )
 
     @app.websocket("/ws")
     async def socket(websocket: Any) -> None:
@@ -302,8 +304,9 @@ async def test_websocket_authentication_can_load_the_global_session() -> None:
 
 
 async def test_duplicate_host_headers_are_rejected_by_trusted_host() -> None:
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(["app.example"]))
+    app = Wreath(
+        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["app.example"]))
+    )
 
     @app.get("/private")
     async def private(request: Any) -> dict[str, bool]:
