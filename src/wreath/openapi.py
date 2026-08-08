@@ -48,7 +48,7 @@ BEHAVIOUR_EXTENSION = "x-wreath-behaviours"
 
 
 def _contract_candidates(app: Any, definition: Any, method: str) -> list[Any]:
-    """Every middleware whose tape covers this operation, outermost first.
+    """Every first-class policy and custom hook covering this operation.
 
     This mirrors `Wreath._compile_routes_locked` exactly, because a document
     that disagrees with the tape about *which* routes a middleware covers is
@@ -76,7 +76,9 @@ def _contract_candidates(app: Any, definition: Any, method: str) -> list[Any]:
         definition.endpoint,
         authenticated=bool(getattr(requirement, "authenticated", False)),
     )
-    applicable = list(globals_)
+    policy = app._http_policy
+    applicable = list(policy.components if policy is not None else ())
+    applicable.extend(globals_)
     for item in (*route_scoped, *definition.middleware):
         predicate = getattr(item, "applies_to", None)
         if predicate is None or predicate(route):
@@ -85,13 +87,13 @@ def _contract_candidates(app: Any, definition: Any, method: str) -> list[Any]:
 
 
 def _collect_contracts(app: Any, definition: Any, method: str) -> list[Any]:
-    """Ask each covering middleware for its contract; skip those with none."""
+    """Ask each covering policy or custom hook for its declared contract."""
     from .middleware.base import BEHAVIOURS
 
     contracts = []
     for item in _contract_candidates(app, definition, method):
         # `callable(None)` is False, so the absent case needs no clause of its
-        # own -- a middleware with no `describe`, and one carrying a `describe`
+        # own -- a component with no `describe`, and one carrying a `describe`
         # that is not a method, are both simply not asked.
         describe = getattr(item, "describe", None)
         if not callable(describe):

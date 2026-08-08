@@ -85,7 +85,7 @@ contain `null`. Neither module ships for an application that declares neither.
 
 ## A client that behaves, because the server said how
 
-The middleware on your tape [describe themselves](middleware.md#what-the-tape-tells-the-document),
+First-class policy and custom hooks [describe themselves](middleware.md#what-policy-and-custom-hooks-tell-the-document),
 so the document carries more than shapes. An operation guarded by
 `IdempotencyMiddleware` is documented as reading an `Idempotency-Key`; one
 behind a rate limiter is documented as answering `429` with a `Retry-After`.
@@ -152,7 +152,7 @@ sending a shape you do not model is something to hear about at the boundary,
 not three layers in.
 
 Where the provider declared an [idempotency
-behaviour](middleware.md#what-the-tape-tells-the-document), the generated
+behaviour](middleware.md#what-policy-and-custom-hooks-tell-the-document), the generated
 method takes an `idempotency_key` and defaults it, because the server said it
 honours one.
 
