@@ -11,7 +11,7 @@ cooperating subsystems:
    applies (or reverts) it under a transaction lock.
 
 Most day-to-day migration logic and all I/O orchestration lives in Python
-(`src/wreath/migrations.py`, `src/wreath/_migrations_cli.py`); the C here is the
+(`src/wreath/migrations.py`, `src/wreath/_migrations/cli.py`); the C here is the
 bounded, allocation-frugal core those call into. **Rule of thumb:** parsing,
 diffing, SQL text, checksums, and inversion are metal; connection lifecycle,
 transactions, and history SQL are Python.

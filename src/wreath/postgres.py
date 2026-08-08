@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib
-import os
 import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -40,6 +38,7 @@ from ._flight_markers import (
     phase_marker as _phase_marker,
 )
 from ._locks import AdvisoryLock, AdvisoryTryLock, SingletonRunner
+from ._native import extension as _extension
 from ._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 
 Workload = Literal["security_read", "read", "write"]
@@ -48,11 +47,9 @@ _WORKLOADS = frozenset({"security_read", "read", "write"})
 
 
 def _select_backend() -> ModuleType:
-    if not os.environ.get("WREATH_PURE"):
-        try:
-            return importlib.import_module("wreath._native._postgres")
-        except ImportError:
-            pass
+    backend = _extension("_postgres")
+    if backend is not None:
+        return cast(ModuleType, backend)
 
     from ._pure import postgres
 
