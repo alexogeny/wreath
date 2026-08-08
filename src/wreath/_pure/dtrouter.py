@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .authz import build_compiled_capability_mask
+
 # A compiled route: literal segments as str, parameter slots as None.
 Pattern = tuple[str | None, ...]
 
@@ -195,6 +197,18 @@ class DecisionRouteTable:
             if _eligible(route.access_clauses, caller_mask):
                 return route.handler, params
         return None
+
+    def resolve_identity(
+        self,
+        ticket: tuple[tuple[_ClassifiedRoute, dict[str, str] | None], ...],
+        descriptor: tuple[int, dict[str, int], dict[str, int]],
+        roles: Any,
+        permissions: Any,
+    ) -> tuple[Any, dict[str, str] | None] | None:
+        return self.resolve(
+            ticket,
+            build_compiled_capability_mask(descriptor, roles, permissions),
+        )
 
     def _classify_method(
         self, method: str, segments: list[str]

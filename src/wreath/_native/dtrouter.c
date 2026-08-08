@@ -1491,6 +1491,35 @@ drt_resolve(DecisionRouteTable *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+static PyObject *
+drt_resolve_identity(DecisionRouteTable *self, PyObject *args)
+{
+    (void)self;
+    PyObject *ticket, *descriptor, *roles, *permissions;
+    if (!PyArg_ParseTuple(args, "O!OOO:resolve_identity", &PyTuple_Type,
+                          &ticket, &descriptor, &roles, &permissions)) {
+        return NULL;
+    }
+    PyObject *caller_mask =
+        wreath_compiled_capability_mask(descriptor, roles, permissions);
+    if (caller_mask == NULL) return NULL;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ticket); i++) {
+        PyObject *entry = PyTuple_GET_ITEM(ticket, i);
+        int eligible = access_eligible(PyTuple_GET_ITEM(entry, 1), caller_mask);
+        if (eligible < 0) {
+            Py_DECREF(caller_mask);
+            return NULL;
+        }
+        if (eligible) {
+            PyObject *result = Py_NewRef(PyTuple_GET_ITEM(entry, 0));
+            Py_DECREF(caller_mask);
+            return result;
+        }
+    }
+    Py_DECREF(caller_mask);
+    Py_RETURN_NONE;
+}
+
 /* Compatibility probe retaining the original protected-handler-hiding API. */
 static PyObject *
 drt_probe(DecisionRouteTable *self, PyObject *args)
@@ -1594,6 +1623,8 @@ static PyMethodDef drt_methods[] = {
      "classify(method, path) -> (classification, public_match | ticket | None)"},
     {"resolve", (PyCFunction)drt_resolve, METH_VARARGS,
      "resolve(ticket, caller_mask) -> (handler, params | None) | None"},
+    {"resolve_identity", (PyCFunction)drt_resolve_identity, METH_VARARGS,
+     "resolve_identity(ticket, descriptor, roles, permissions) -> match | None"},
     {"probe", (PyCFunction)drt_probe, METH_VARARGS,
      "probe(method, path, all_capability_mask) -> (classification, public_match | None)"},
     {NULL, NULL, 0, NULL},
