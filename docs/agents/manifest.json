@@ -33,7 +33,7 @@
     {
       "name": "application",
       "capability": "The application itself: routes, routers, app state, lifespan, and errors rendered as RFC 9457 problem details",
-      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. Dispatch is chosen at compile time too: `_select_dispatch` picks `_handle_http_plain` for an application with no global hooks and no dynamic matcher, and every delegation from it back to `_handle_http` must be decided *before* the specialized path has any effect a second dispatch would repeat -- before the Request exists, before a hook could run, before the recorder is told anything. A route handler may be `def` as well as `async def`; dispatch calls it and awaits only what came back awaitable, and every wrapper (binder, response validator, status coercion) preserves whichever convention it was handed. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it. A global middleware may expose `applies_to(method, path)`, consulted once per route at compile time; routes it declines dispatch through a program compiled without it, so declining costs nothing per request. `_select_dispatch` then picks `_handle_http_compartment`, which routes *before* running the tape -- legal only because `classify` needs no Request, and only for an application with a classifying table, no dynamic matcher (host routing matches on a Host `ProxyHeaders` may rewrite) and no stage hooks. Per request it handles only `classify == 1`: a miss, an auth ticket, an armed recorder or an ambiguous path all hand back to `_handle_http` and run the full tape, so a rate limiter still counts 404s. Per-route programs are keyed by `(method, handler)` -- a multi-method route with no route middleware compiles to one shared endpoint object, and method is the axis compartments are most wanted on. `Wreath(middleware=\"native\")` opts into `_middleware_tape`, which records at boot every answer a configured `CORSMiddleware` can give a preflight and lets `_wreath_http` serve them before the tape, before routing and before a `Request` exists. The table is recorded by *asking the middleware*, never by rebuilding its answer beside it -- reconstruction missed the `content-type` a 204 inherits from the Response class default, and the recorded answer must include the middleware's own egress hook, which is where a 403 refusal picks up `access-control-allow-origin` (so refusals are recorded per origin). Each probe runs twice and a middleware whose answers differ is declined. An origin outside the table falls through to Python rather than being refused, because `CORSMiddleware`'s normalized compare accepts spellings the table does not carry. Opting in is a documented ordering change: middleware registered before CORS stops seeing preflights.",
+      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. Dispatch is chosen at compile time too: `_select_dispatch` picks `_handle_http_plain` for an application with no global hooks and no dynamic matcher, and every delegation from it back to `_handle_http` must be decided *before* the specialized path has any effect a second dispatch would repeat -- before the Request exists, before a hook could run, before the recorder is told anything. A route handler may be `def` as well as `async def`; dispatch calls it and awaits only what came back awaitable, and every wrapper (binder, response validator, status coercion) preserves whichever convention it was handed. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it. A global middleware may expose `applies_to(method, path)`, consulted once per route at compile time; routes it declines dispatch through a program compiled without it, so declining costs nothing per request. `_select_dispatch` then picks `_handle_http_compartment`, which routes *before* running the tape -- legal only because `classify` needs no Request, and only for an application with a classifying table, no dynamic matcher (host routing matches on a Host `ProxyHeaders` may rewrite) and no stage hooks. Per request it handles only `classify == 1`: a miss, an auth ticket, an armed recorder or an ambiguous path all hand back to `_handle_http` and run the full tape, so a rate limiter still counts 404s. Per-route programs are keyed by `(method, handler)` -- a multi-method route with no route middleware compiles to one shared endpoint object, and method is the axis compartments are most wanted on. `Wreath(middleware=\"native\")` opts into `middleware.tape`, which records at boot every answer a configured `CORSMiddleware` can give a preflight and lets `_wreath_http` serve them before the tape, before routing and before a `Request` exists. The table is recorded by *asking the middleware*, never by rebuilding its answer beside it -- reconstruction missed the `content-type` a 204 inherits from the Response class default, and the recorded answer must include the middleware's own egress hook, which is where a 403 refusal picks up `access-control-allow-origin` (so refusals are recorded per origin). Each probe runs twice and a middleware whose answers differ is declined. An origin outside the table falls through to Python rather than being refused, because `CORSMiddleware`'s normalized compare accepts spellings the table does not carry. Opting in is a documented ordering change: middleware registered before CORS stops seeing preflights.",
       "guides": [
         "docs/guides/routing.md",
         "docs/guides/config-state.md"
@@ -49,7 +49,7 @@
         "src/wreath/router.py",
         "src/wreath/state.py",
         "src/wreath/exceptions.py",
-        "src/wreath/_middleware_tape.py"
+        "src/wreath/middleware/tape.py"
       ],
       "tests": [
         "tests/test_app.py",
@@ -697,7 +697,7 @@
       ],
       "sources": [
         "src/wreath/infra/",
-        "src/wreath/_infra_cli.py"
+        "src/wreath/infra/cli.py"
       ],
       "tests": [
         "tests/test_infra_infer.py",
@@ -721,7 +721,7 @@
       ],
       "sources": [
         "src/wreath/migrations.py",
-        "src/wreath/_migrations_cli.py",
+        "src/wreath/_migrations/cli.py",
         "src/wreath/_migrations/"
       ],
       "tests": [
@@ -1569,7 +1569,7 @@
       "reference": [],
       "sources": [
         "src/wreath/_docs/",
-        "src/wreath/_docs_cli.py",
+        "src/wreath/_docs/cli.py",
         "wreath_docs.py",
         "src/wreath/_capabilities.py",
         "src/wreath/_capability_data.py"
@@ -1661,7 +1661,7 @@
       "sources": [
         "src/wreath/privacy.py",
         "src/wreath/_privacy/",
-        "src/wreath/_privacy_cli.py"
+        "src/wreath/_privacy/cli.py"
       ],
       "tests": [
         "tests/test_privacy_plan.py",
