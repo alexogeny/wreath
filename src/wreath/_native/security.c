@@ -336,7 +336,14 @@ wreath_csrf_validate(PyObject *self, PyObject *args)
     number[lengths[1]] = '\0';
     errno = 0;
     issued = strtoll(number, &end, 10);
-    if (*end != '\0' || errno != 0) {
+    /* `end - number == lengths[1]`, not `*end == '\0'`. The two differ on an
+     * *embedded* NUL: strtoll halts at it and leaves `end` pointing at a NUL,
+     * which reads as "consumed the whole field" while the field still carries
+     * everything after it. The pure twin's `\Z`-anchored regex refuses that, so
+     * the cheaper test was a parity breach on a security primitive -- and it
+     * verified, because the message is rebuilt from the parsed `issued` and the
+     * tail vanishes before the HMAC is recomputed. */
+    if (end - number != lengths[1] || errno != 0) {
         return Py_BuildValue("(OL)", Py_False, 0LL);
     }
     if (!component_valid(parts[2], lengths[2]) || !component_valid(parts[3], lengths[3])) {

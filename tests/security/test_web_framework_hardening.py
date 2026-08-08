@@ -130,7 +130,10 @@ def test_template_source_cannot_call_or_construct_python(tmp_path: Path) -> None
 def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> None:
     """Trip if a server-importable module grows a generic code-loading primitive."""
     source_root = Path(__file__).parents[2] / "src" / "wreath"
-    tooling = {"_cli.py", "_devserver.py", "_infra_cli.py"}
+    # Paths, not basenames: `cli.py` now appears in five packages, and matching
+    # on the name alone would excuse every one of them. Each entry names the one
+    # file it means, relative to `src/wreath`.
+    tooling = {Path("_cli.py"), Path("_devserver.py"), Path("infra/cli.py")}
     excluded_directories = {"_devtools", "_docs", "_mutant", "_port", "typegen"}
     dangerous_imports = {"dill", "marshal", "pickle", "shelve"}
     # Every finding below names one of these in source, so a file containing
@@ -146,7 +149,7 @@ def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> Non
 
     for path in source_root.rglob("*.py"):
         relative = path.relative_to(source_root)
-        if path.name in tooling or any(part in excluded_directories for part in relative.parts):
+        if relative in tooling or any(part in excluded_directories for part in relative.parts):
             continue
         source = path.read_text(encoding="utf-8")
         if not any(token in source for token in tokens):
