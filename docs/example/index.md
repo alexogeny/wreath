@@ -77,7 +77,7 @@ does not need doing, because the parts were built to hold each other.
 | Cursor pagination with a sort allow-list | hand-written keyset SQL | `wreath.pagination` |
 | A cached species list that a write invalidates | a cache plus an invalidation hook | `@cached`, and the ORM tells it |
 | Authorization, and *reporting* authorization to a UI | a policy engine plus a permissions endpoint | one Cedar policy set |
-| Sessions, and an identity read from them | a session library plus an auth shim | `SessionMiddleware` + a backend |
+| Sessions, and an identity read from them | a session library plus an auth shim | `SessionPolicy` + a backend |
 
 No Redis. No Celery. No Alembic. No `requirements.txt` at all: wreath has no
 mandatory runtime dependencies, so the example's dependency list is wreath and

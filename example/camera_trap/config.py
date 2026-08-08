@@ -67,7 +67,7 @@ SESSION_INSECURE_VARIABLE = "CAMERA_TRAP_SESSION_INSECURE"
 MEDIA_ROOT_VARIABLE = "CAMERA_TRAP_MEDIA_ROOT"
 MEDIA_SECRET_VARIABLE = "CAMERA_TRAP_MEDIA_SECRET"
 
-#: The shortest secret that is worth calling one. `SessionMiddleware` signs with
+#: The shortest secret that is worth calling one. `SessionPolicy` signs with
 #: HMAC-SHA256, so a short secret is not a shorter signature -- it is a smaller
 #: search space, and the failure is silent.
 MIN_SECRET_LENGTH = 32
