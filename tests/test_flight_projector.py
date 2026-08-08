@@ -377,7 +377,7 @@ def test_export_hook_failure_is_isolated_and_counted() -> None:
 # --- background thread -----------------------------------------------------
 
 
-def test_background_thread_drains_and_stop_flushes() -> None:
+def test_background_thread_drains_on_its_interval() -> None:
     rec = FakeRecorder()
     for i in range(1, 21):
         rec.feed(completion(i))
@@ -400,6 +400,37 @@ def test_background_thread_drains_and_stop_flushes() -> None:
     proj.stop()
 
     assert set(seen) == set(range(1, 21))
+
+
+def test_stop_flushes_the_ring_with_no_thread_to_have_drained_it() -> None:
+    """`stop()`'s own drain is the only thing that can deliver these.
+
+    No thread is ever started, so nothing on the interval loop can have seen
+    these cells -- every trace that arrives came from the two `poll` calls on
+    the way out of `stop`. That is also a real path: `_abort_startup` stops a
+    projector that never ran.
+
+    Split out of `test_background_thread_drains_on_its_interval`, which waited
+    for the background thread to catch up *before* stopping and therefore passed
+    with the final drain deleted -- it proved the loop drained, and named the
+    flush. Two polls, because a completion needs a second settle to pick up its
+    tail, which is why `stop` calls `poll` twice rather than once.
+    """
+    rec = FakeRecorder()
+    seen: list[int] = []
+
+    def on_trace(t: ProjectedTrace) -> None:
+        seen.append(t.request_id)
+
+    proj = Projector(rec, interval=60.0, on_trace=on_trace)
+    # One `feed`, because it queues one *drain's* worth: five separate feeds
+    # would need five drains and `stop` only polls twice.
+    rec.feed(*(completion(i) for i in range(1, 6)))
+
+    assert seen == [], "nothing may arrive before stop, or this proves nothing"
+    proj.stop()
+
+    assert set(seen) == set(range(1, 6))
 
 
 def test_start_is_idempotent() -> None:

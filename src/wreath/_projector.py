@@ -38,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from typing import Final
 from typing import Protocol as _Protocol
 
+from ._drainthread import DrainThread
 from ._flight_schema import (
     CELL_SIZE,
     FLAG_ERROR_PROMOTED,
@@ -247,7 +248,6 @@ class Projector:
     __slots__ = (
         "_recorder",
         "_epoch_unix_ns",
-        "_interval",
         "_max_cells",
         "_on_trace",
         "_on_log",
@@ -262,8 +262,7 @@ class Projector:
         "_loss",
         "_assembled",
         "_cycle",
-        "_thread",
-        "_stop",
+        "_drain",
     )
 
     def __init__(
@@ -291,7 +290,6 @@ class Projector:
         # without the accessor fall back to stamping the wall clock at finalize.
         calibration = getattr(recorder, "clock_calibration", None)
         self._epoch_unix_ns = calibration[1] if calibration else 0
-        self._interval = interval
         self._max_cells = max_cells
         self._on_trace = on_trace
         self._on_log = on_log
@@ -311,42 +309,33 @@ class Projector:
         self._loss = ProjectorLoss()
         self._assembled = 0
         self._cycle = 0
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._drain = DrainThread(
+            "wreath-flight-projector", interval, self.poll, self._flush
+        )
 
     # --- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
         """Spawn the drain thread. Idempotent; a stopped projector can restart."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        thread = threading.Thread(
-            target=self._run, name="wreath-flight-projector", daemon=True
-        )
-        self._thread = thread
-        thread.start()
+        self._drain.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Signal the drain thread to finish, drain once more, and join.
+        """Signal the drain thread to finish, join it, and drain once more.
 
-        A final `poll` on the way out flushes whatever the ring still
-        holds, so shutdown does not silently strand recorded cells.
+        A final drain on the way out flushes whatever the ring still holds, so
+        shutdown does not silently strand recorded cells.
         """
-        self._stop.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout)
-            self._thread = None
-        # A last drain after the writer paths are quiesced by the caller. Settle
-        # twice so completions seen on the final cycle still get their tail.
-        self.poll()
-        self.poll()
+        self._drain.stop(timeout)
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.poll()
-            self._stop.wait(self._interval)
+    def _flush(self) -> None:
+        """The last drain, after the writer paths are quiesced by the caller.
+
+        Settle *twice*: a completion seen on the final cycle still needs a
+        second pass to pick up its tail, so one poll would strand exactly the
+        requests that finished last.
+        """
+        self.poll()
+        self.poll()
 
     # --- draining and assembly --------------------------------------------
 
