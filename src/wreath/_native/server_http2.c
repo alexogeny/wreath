@@ -114,6 +114,10 @@ typedef struct {
     uint8_t urgency;           /* RFC 9218 urgency, 0 (highest) through 7 */
     uint8_t incremental;       /* RFC 9218 incremental delivery preference */
 
+    /* First-class HTTP policy is stream-owned: concurrent h2 requests must
+     * never share ingress/egress state. */
+    WreathPolicyState policy_state;
+
     /* Native Flight Recorder per-stream context (one request). */
     wreath_nfr_context nfr_ctx;
     int nfr_active;
@@ -140,6 +144,7 @@ typedef struct {
     PyObject_HEAD
     PyObject *app;
     PyObject *native_app;       /* bound Wreath._wreath_http, or NULL */
+    WreathPolicyProgram policy;
     PyObject *loop;
     PyObject *registry;
     PyObject *config;
@@ -1053,6 +1058,13 @@ h2_response_start(Http2Stream *self, PyObject *status_obj, PyObject *headers,
         PyErr_SetString(PyExc_RuntimeError, "response already started");
         return NULL;
     }
+    if (self->policy_state.native &&
+        wreath_policy_egress(&proto->policy, &self->policy_state, headers) < 0) {
+        return NULL;
+    }
+    if (self->scope != NULL) {
+        wreath_request_context_update_policy(self->scope, &self->policy_state);
+    }
     self->nfr_status = (int)status;
     self->trailers_expected = trailers_expected;
     PyObject *block = PyByteArray_FromStringAndSize("", 0);
@@ -1335,6 +1347,11 @@ stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->receive_waiter);
     Py_VISIT(self->pending_body);
     Py_VISIT(self->send_waiter);
+    Py_VISIT(self->policy_state.client);
+    Py_VISIT(self->policy_state.scheme);
+    Py_VISIT(self->policy_state.origin);
+    Py_VISIT(self->policy_state.request_id);
+    Py_VISIT(self->policy_state.csrf_token);
     return 0;
 }
 
@@ -1354,6 +1371,7 @@ stream_clear(PyObject *op)
     self->pending_offset = 0;
     self->pending_end_stream = 0;
     Py_CLEAR(self->send_waiter);
+    wreath_policy_state_clear(&self->policy_state);
     return 0;
 }
 
@@ -1871,6 +1889,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->send_deficit = 0;
     st->urgency = 3;
     st->incremental = 0;
+    wreath_policy_state_init(&st->policy_state);
     if (self->rfc9218_enabled) {
         PyObject *priority_key = PyLong_FromUnsignedLong(sid);
         if (priority_key == NULL) {
@@ -1903,6 +1922,54 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->nfr_active = 0;
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
+
+    if (self->policy.descriptor != NULL) {
+        PyObject *policy_headers = PyObject_GetAttrString(scope, "headers");
+        PyObject *policy_method = PyObject_GetAttrString(scope, "method");
+        PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
+        PyObject *policy_client = PyObject_GetAttrString(scope, "client");
+        WreathPolicyReply reply = {0};
+        if (policy_headers == NULL || policy_method == NULL ||
+            policy_scheme == NULL || policy_client == NULL) {
+            Py_XDECREF(policy_headers);
+            Py_XDECREF(policy_method);
+            Py_XDECREF(policy_scheme);
+            Py_XDECREF(policy_client);
+            Py_DECREF(st);
+            return -1;
+        }
+        int policy_result = wreath_policy_ingress(
+            &self->policy, &st->policy_state, policy_method, policy_scheme,
+            policy_client, policy_headers, &reply);
+        Py_DECREF(policy_headers);
+        Py_DECREF(policy_method);
+        Py_DECREF(policy_scheme);
+        Py_DECREF(policy_client);
+        if (policy_result < 0) {
+            wreath_policy_reply_clear(&reply);
+            Py_DECREF(st);
+            return -1;
+        }
+        wreath_request_context_set_policy(scope, &st->policy_state);
+        if (policy_result > 0) {
+            PyObject *status = PyLong_FromLong(reply.status);
+            PyObject *started = status != NULL
+                ? h2_response_start(st, status, reply.headers, 0) : NULL;
+            Py_XDECREF(status);
+            PyObject *finished = started != NULL
+                ? h2_response_body(st, reply.body, 0) : NULL;
+            Py_XDECREF(started);
+            Py_XDECREF(finished);
+            wreath_policy_reply_clear(&reply);
+            if (finished == NULL) {
+                Py_DECREF(st);
+                return -1;
+            }
+            Py_DECREF(st);
+            return 0;
+        }
+        wreath_policy_reply_clear(&reply);
+    }
 
     /* RFC 9218 priority hint; content-length was parsed during validation. */
     if (self->rfc9218_enabled) {
@@ -3000,6 +3067,7 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Http2Protocol *self = (Http2Protocol *)op;
     Py_VISIT(self->app);
     Py_VISIT(self->native_app);
+    Py_VISIT(self->policy.descriptor);
     Py_VISIT(self->loop);
     Py_VISIT(self->registry);
     Py_VISIT(self->config);
@@ -3028,6 +3096,7 @@ h2_clear(PyObject *op)
     Http2Protocol *self = (Http2Protocol *)op;
     Py_CLEAR(self->app);
     Py_CLEAR(self->native_app);
+    wreath_policy_program_clear(&self->policy);
     Py_CLEAR(self->loop);
     Py_CLEAR(self->registry);
     Py_CLEAR(self->config);
@@ -3088,6 +3157,10 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->native_app = PyObject_GetAttrString(app, "_wreath_http");
     if (self->native_app == NULL) {
         PyErr_Clear();
+    }
+    self->policy.descriptor = NULL;
+    if (self->native_app != NULL && wreath_policy_program_load(&self->policy, app) < 0) {
+        return -1;
     }
     self->config = Py_NewRef(config);
     self->loop = Py_NewRef(loop);

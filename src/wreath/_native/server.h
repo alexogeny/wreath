@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "wreathcore.h"
+#include "server_policy.h"
 
 #include "flight.h"
 
@@ -94,6 +95,11 @@ typedef struct {
     PyObject *loop_create_task;
     PyObject *loop_call_later;
     PyObject *deadline_callable;
+    /* First-class HTTP policy. The program is connection-constant; the state
+     * is reset per request and never becomes a middleware/object tape. */
+    WreathPolicyProgram policy;
+    WreathPolicyState policy_state;
+    PyObject *policy_context;  /* current native _RequestContext, or NULL */
 
     /* Extracted configuration limits. */
     Py_ssize_t max_request_line;
@@ -407,6 +413,10 @@ void wreath_request_context_set_flight(PyObject *object, wreath_nfr_context *nfr
                                        wreath_nfr_worker *nfr_worker);
 int wreath_request_context_set_armed(PyObject *object);
 void wreath_request_context_sever(PyObject *object);
+void wreath_request_context_set_policy(PyObject *object,
+                                       const WreathPolicyState *state);
+void wreath_request_context_update_policy(PyObject *object,
+                                          const WreathPolicyState *state);
 
 /* --- integer rendering for the response head ----------------------------- */
 /* Every response formats at least a status code and a Content-Length, and a

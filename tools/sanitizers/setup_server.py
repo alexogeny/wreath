@@ -30,6 +30,7 @@ setup(
                 str(ROOT / "src/wreath/_native/server_http1.c"),
                 str(ROOT / "src/wreath/_native/server_http2.c"),
                 str(ROOT / "src/wreath/_native/server_hpack.c"),
+                str(ROOT / "src/wreath/_native/server_policy.c"),
             ],
             extra_compile_args=FLAGS,
             extra_link_args=["-fsanitize=address,undefined"],

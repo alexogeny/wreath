@@ -1102,6 +1102,14 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
         PyErr_SetString(PyExc_ValueError, "response status must be between 100 and 999");
         return -1;
     }
+    if (self->policy_state.native &&
+        wreath_policy_egress(&self->policy, &self->policy_state, headers) < 0) {
+        return -1;
+    }
+    if (self->policy_context != NULL) {
+        wreath_request_context_update_policy(
+            self->policy_context, &self->policy_state);
+    }
     self->resp_status = (int)status;
     self->response_started = 1;
     if (status < 200 || status == 204 || status == 304) {
@@ -2161,13 +2169,21 @@ build_scope(WreathHttpProtocol *self, PyObject *method, PyObject *path, PyObject
 {
     PyObject *scope;
     PyObject *version = self->http11 ? self->http_version_11 : self->http_version_10;
+    PyObject *scheme = self->policy_state.native
+        ? self->policy_state.scheme : self->scheme;
+    PyObject *client = self->policy_state.native
+        ? self->policy_state.client : self->client_address;
 
     if (self->native_app != NULL) {
         PyObject *context = wreath_request_context_new(
-            self->scope_type, self->asgi_metadata, version, method, self->scheme,
+            self->scope_type, self->asgi_metadata, version, method, scheme,
             path, raw_path, query_string, headers, self->server_address,
-            self->client_address, self->root_path
+            client, self->root_path
         );
+        if (context != NULL && self->policy_state.native) {
+            wreath_request_context_set_policy(context, &self->policy_state);
+            Py_XSETREF(self->policy_context, Py_NewRef(context));
+        }
         if (context != NULL && self->nfr_worker != NULL) {
             /* Let dispatch stamp the matched route onto this request's recorder
              * context; the pointer stays valid for the request's lifetime. */
@@ -2182,13 +2198,13 @@ build_scope(WreathHttpProtocol *self, PyObject *method, PyObject *path, PyObject
         PyDict_SetItem(scope, k_asgi, self->asgi_metadata) < 0 ||
         PyDict_SetItem(scope, k_http_version, version) < 0 ||
         PyDict_SetItem(scope, k_method, method) < 0 ||
-        PyDict_SetItem(scope, k_scheme, self->scheme) < 0 ||
+        PyDict_SetItem(scope, k_scheme, scheme) < 0 ||
         PyDict_SetItem(scope, k_path, path) < 0 ||
         PyDict_SetItem(scope, k_raw_path, raw_path) < 0 ||
         PyDict_SetItem(scope, k_query_string, query_string) < 0 ||
         PyDict_SetItem(scope, s_headers, headers) < 0 ||
         PyDict_SetItem(scope, k_server, self->server_address) < 0 ||
-        PyDict_SetItem(scope, k_client, self->client_address) < 0 ||
+        PyDict_SetItem(scope, k_client, client) < 0 ||
         PyDict_SetItem(scope, k_root_path, self->root_path) < 0 ||
         PyDict_SetItem(scope, k_extensions, extensions_dict) < 0) {
         Py_DECREF(scope);
@@ -2248,6 +2264,33 @@ done:
     Py_XDECREF(continuation);
     Py_XDECREF(task);
     return result;
+}
+
+
+static int
+send_policy_reply(WreathHttpProtocol *self, PyObject *request_headers,
+                  WreathPolicyReply *reply)
+{
+    PyObject *status = PyLong_FromLong(reply->status);
+    PyObject *awaitable = NULL;
+    if (status == NULL) return -1;
+    reset_response_state(self, request_headers);
+    self->state = ST_REQUEST_RUNNING;
+    self->request_more_body = 0;
+    /* A native ingress refusal has no application task to drain a request body
+     * or advance keep-alive from _on_app_done. Close after the complete reply;
+     * the wire response is unchanged and untrusted body bytes cannot be parsed
+     * as the next request. */
+    self->response_keep_alive = 0;
+    if (begin_response_parts(self, status, reply->headers) < 0) {
+        Py_DECREF(status);
+        return -1;
+    }
+    Py_DECREF(status);
+    awaitable = write_body_parts(self, reply->body, NULL);
+    if (awaitable == NULL) return -1;
+    Py_DECREF(awaitable);
+    return 0;
 }
 
 
@@ -2386,7 +2429,11 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
         }
     }
 
-    scheme = PyUnicode_CompareWithASCIIString(self->scheme, "https") == 0
+    PyObject *effective_scheme = self->policy_state.scheme != NULL
+        ? self->policy_state.scheme : self->scheme;
+    PyObject *effective_client = self->policy_state.client != NULL
+        ? self->policy_state.client : self->client_address;
+    scheme = PyUnicode_CompareWithASCIIString(effective_scheme, "https") == 0
                  ? s_wss_scheme
                  : s_ws_scheme;
     scope = PyDict_New();
@@ -2402,9 +2449,10 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
         PyDict_SetItem(scope, k_query_string, query_string) < 0 ||
         PyDict_SetItem(scope, s_headers, headers) < 0 ||
         PyDict_SetItem(scope, k_server, self->server_address) < 0 ||
-        PyDict_SetItem(scope, k_client, self->client_address) < 0 ||
+        PyDict_SetItem(scope, k_client, effective_client) < 0 ||
         PyDict_SetItem(scope, k_root_path, self->root_path) < 0 ||
-        PyDict_SetItem(scope, k_subprotocols, protocols) < 0) {
+        PyDict_SetItem(scope, k_subprotocols, protocols) < 0 ||
+        PyDict_SetItemString(scope, "_wreath_policy_native", Py_True) < 0) {
         goto done;
     }
 
@@ -2495,6 +2543,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     int send_continue;
     int bad = 0;
     int result = -1;
+    WreathPolicyReply policy_reply = {0};
 
     self->http11 = (minor == 1);
     self->method_is_head = PyUnicode_CompareWithASCIIString(method, "HEAD") == 0;
@@ -2548,7 +2597,24 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
         result = send_error(self, err_status) < 0 ? -1 : 0;
         goto done;
     }
+    {
+        int policy_result = wreath_policy_ingress(
+            &self->policy, &self->policy_state, method, self->scheme,
+            self->client_address, headers, &policy_reply);
+        if (policy_result < 0) goto done;
+        if (policy_result > 0) {
+            result = send_policy_reply(self, headers, &policy_reply) < 0 ? -1 : 0;
+            goto done;
+        }
+    }
     if (is_upgrade_request(headers)) {
+        int origin_result = wreath_policy_websocket_origin(
+            &self->policy, headers, &policy_reply);
+        if (origin_result < 0) goto done;
+        if (origin_result > 0) {
+            result = send_policy_reply(self, headers, &policy_reply) < 0 ? -1 : 0;
+            goto done;
+        }
         if (kind == 2 || length > 0 || send_continue) {
             result = send_error(self, 400) < 0 ? -1 : 0;
         }
@@ -2659,6 +2725,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     }
     result = 1;  /* continue draining any buffered body */
 done:
+    wreath_policy_reply_clear(&policy_reply);
     Py_XDECREF(raw_path);
     Py_XDECREF(query_string);
     Py_XDECREF(path);
@@ -4160,6 +4227,8 @@ advance:
         wreath_request_context_sever(self->nfr_http_scope);
         Py_CLEAR(self->nfr_http_scope);
     }
+    Py_CLEAR(self->policy_context);
+    wreath_policy_state_clear(&self->policy_state);
     if (self->want_next && !self->closing) {
         self->want_next = 0;
         if (reset_request(self) < 0) {
@@ -4215,6 +4284,13 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->loop_call_later);
     Py_VISIT(self->deadline_callable);
+    Py_VISIT(self->policy.descriptor);
+    Py_VISIT(self->policy_state.client);
+    Py_VISIT(self->policy_state.scheme);
+    Py_VISIT(self->policy_state.origin);
+    Py_VISIT(self->policy_state.request_id);
+    Py_VISIT(self->policy_state.csrf_token);
+    Py_VISIT(self->policy_context);
     for (Py_ssize_t i = self->receive_head; i < self->receive_queue_len; i++) {
         Py_VISIT(self->receive_queue[i]);
     }
@@ -4258,6 +4334,9 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->loop_call_later);
     Py_CLEAR(self->deadline_callable);
+    wreath_policy_program_clear(&self->policy);
+    wreath_policy_state_clear(&self->policy_state);
+    Py_CLEAR(self->policy_context);
     receive_queue_clear(self, 1);
     Py_CLEAR(self->receive_waiter);
     Py_CLEAR(self->drain_waiter);
@@ -4311,6 +4390,7 @@ http_protocol_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UN
 {
     WreathHttpProtocol *self = (WreathHttpProtocol *)type->tp_alloc(type, 0);
     if (self != NULL) {
+        wreath_policy_state_init(&self->policy_state);
         self->state = ST_READING_HEAD;
         self->accepting = 1;
         self->http11 = 1;  /* pre-request default matches the pure reference */
@@ -4374,6 +4454,10 @@ http_protocol_init(WreathHttpProtocol *self, PyObject *args, PyObject *kwargs)
     if (self->native_app == NULL) {
         if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return -1;
         PyErr_Clear();
+    }
+    if (self->native_app != NULL &&
+        wreath_policy_program_load(&self->policy, app) < 0) {
+        return -1;
     }
     Py_INCREF(config);
     Py_XSETREF(self->config, config);

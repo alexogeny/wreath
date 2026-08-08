@@ -17,6 +17,12 @@ typedef struct {
     PyObject *client;
     PyObject *root_path;
     PyObject *scope;
+    PyObject *policy_request_id;
+    PyObject *policy_csrf_token;
+    PyObject *policy_csrf_config;
+    uint64_t policy_elapsed_ns;
+    int policy_native;
+    WreathPolicyState *policy_state; /* borrowed for this request lifetime */
     /* Native Flight Recorder route attribution. `nfr_ctx` and `nfr_worker` are
      * borrowed pointers to the owning protocol's per-request context and worker,
      * set only when telemetry is recording; `flight` is the fast Python-visible
@@ -47,6 +53,9 @@ context_traverse(WreathRequestContext *self, visitproc visit, void *arg)
     Py_VISIT(self->client);
     Py_VISIT(self->root_path);
     Py_VISIT(self->scope);
+    Py_VISIT(self->policy_request_id);
+    Py_VISIT(self->policy_csrf_token);
+    Py_VISIT(self->policy_csrf_config);
     return 0;
 }
 
@@ -66,6 +75,10 @@ context_clear(WreathRequestContext *self)
     Py_CLEAR(self->client);
     Py_CLEAR(self->root_path);
     Py_CLEAR(self->scope);
+    Py_CLEAR(self->policy_request_id);
+    Py_CLEAR(self->policy_csrf_token);
+    Py_CLEAR(self->policy_csrf_config);
+    self->policy_state = NULL;
     return 0;
 }
 
@@ -119,6 +132,33 @@ CONTEXT_GETTER(headers)
 CONTEXT_GETTER(scheme)
 CONTEXT_GETTER(http_version)
 CONTEXT_GETTER(client)
+
+static PyObject *
+context_get_policy_request_id(WreathRequestContext *self, void *closure)
+{
+    (void)closure;
+    if (self->policy_request_id == NULL) Py_RETURN_NONE;
+    return Py_NewRef(self->policy_request_id);
+}
+
+static PyObject *
+context_get_policy_elapsed(WreathRequestContext *self, void *closure)
+{
+    (void)closure;
+    if (self->policy_elapsed_ns == 0) Py_RETURN_NONE;
+    return PyFloat_FromDouble((double)self->policy_elapsed_ns / 1000000000.0);
+}
+
+static PyObject *
+context_get_policy_csrf_token(WreathRequestContext *self, void *closure)
+{
+    (void)closure;
+    if (self->policy_state != NULL) {
+        return wreath_policy_csrf_token(self->policy_state);
+    }
+    if (self->policy_csrf_token == NULL) Py_RETURN_NONE;
+    return Py_NewRef(self->policy_csrf_token);
+}
 
 /* ProxyHeadersMiddleware overrides. The materialized scope dict, when one
  * exists, is kept in sync so both views of the request agree; before anything
@@ -324,6 +364,8 @@ static PyMethodDef context_methods[] = {
 static PyMemberDef context_members[] = {
     /* Fast route-attribution gate read by dispatch; 0 unless telemetry records. */
     {"flight", Py_T_INT, offsetof(WreathRequestContext, flight), Py_READONLY, NULL},
+    {"policy_native", Py_T_INT, offsetof(WreathRequestContext, policy_native),
+     Py_READONLY, NULL},
     {NULL, 0, 0, 0, NULL},
 };
 
@@ -336,6 +378,9 @@ static PyGetSetDef context_getset[] = {
     {"scheme", (getter)context_get_scheme, NULL, NULL, NULL},
     {"http_version", (getter)context_get_http_version, NULL, NULL, NULL},
     {"client", (getter)context_get_client, NULL, NULL, NULL},
+    {"policy_request_id", (getter)context_get_policy_request_id, NULL, NULL, NULL},
+    {"policy_csrf_token", (getter)context_get_policy_csrf_token, NULL, NULL, NULL},
+    {"policy_elapsed", (getter)context_get_policy_elapsed, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -433,10 +478,43 @@ wreath_request_context_new(
     self->server = Py_NewRef(server);
     self->client = Py_NewRef(client);
     self->root_path = Py_NewRef(root_path);
+    self->policy_request_id = NULL;
+    self->policy_csrf_token = NULL;
+    self->policy_csrf_config = NULL;
+    self->policy_elapsed_ns = 0;
+    self->policy_native = 0;
+    self->policy_state = NULL;
     self->nfr_ctx = NULL;
     self->nfr_worker = NULL;
     self->flight = 0;
     return (PyObject *)self;
+}
+
+void
+wreath_request_context_set_policy(PyObject *object,
+                                  const WreathPolicyState *state)
+{
+    if (!wreath_request_context_check(object)) return;
+    WreathRequestContext *self = (WreathRequestContext *)object;
+    self->policy_native = state->native;
+    self->policy_state = (WreathPolicyState *)state;
+    if (state->client != NULL) {
+        Py_SETREF(self->client, Py_NewRef(state->client));
+    }
+    if (state->scheme != NULL) {
+        Py_SETREF(self->scheme, Py_NewRef(state->scheme));
+    }
+    Py_XSETREF(self->policy_request_id, Py_XNewRef(state->request_id));
+    Py_XSETREF(self->policy_csrf_token, Py_XNewRef(state->csrf_token));
+    Py_XSETREF(self->policy_csrf_config, Py_XNewRef(state->csrf_config));
+    self->policy_elapsed_ns = state->elapsed_ns;
+}
+
+void
+wreath_request_context_update_policy(PyObject *object,
+                                     const WreathPolicyState *state)
+{
+    wreath_request_context_set_policy(object, state);
 }
 
 /* Attach the owning protocol's recorder context and worker (borrowed) so

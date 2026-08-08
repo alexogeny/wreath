@@ -22,7 +22,7 @@ import pytest
 import wreath
 from wreath.auth import BearerTokenBackend, Identity, authenticated
 from wreath.http_client import DestinationPolicy, HTTPClient
-from wreath.middleware import ProxyHeadersMiddleware
+from wreath.policy import HttpPolicy, ProxyPolicy
 from wreath.server import ServerConfig, TLSConfig, _select_protocol, serve
 
 
@@ -191,9 +191,10 @@ async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> No
     await outbound.start()
 
     pivots = 0
-    app = wreath.Wreath()
-    app.add_middleware(
-        ProxyHeadersMiddleware(trusted=("127.0.0.0/8",)), priority=-10
+    app = wreath.Wreath(
+        http_policy=HttpPolicy(
+            proxy=ProxyPolicy(trusted=("127.0.0.0/8",))
+        )
     )
     app.configure_auth(
         BearerTokenBackend(

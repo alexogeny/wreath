@@ -3,9 +3,10 @@
 
 #include <Python.h>
 #include "flight.h"
+#include "server_policy.h"
 
 #define WREATH_REQUEST_CAPI_NAME "wreath._native._server._REQUEST_C_API"
-#define WREATH_REQUEST_CAPI_VERSION 2
+#define WREATH_REQUEST_CAPI_VERSION 3
 
 typedef struct {
     uint32_t version;
@@ -18,6 +19,8 @@ typedef struct {
     int (*set_armed)(PyObject *);
     void (*sever)(PyObject *);
     int (*seed_flight)(PyObject *, const wreath_nfr_context *);
+    void (*set_policy)(PyObject *, const WreathPolicyState *);
+    void (*update_policy)(PyObject *, const WreathPolicyState *);
 } WreathRequestCAPI;
 
 #endif

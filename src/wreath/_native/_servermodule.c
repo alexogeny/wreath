@@ -10,6 +10,8 @@ static WreathRequestCAPI request_capi = {
     wreath_request_context_set_armed,
     wreath_request_context_sever,
     wreath_request_scope_seed_flight,
+    wreath_request_context_set_policy,
+    wreath_request_context_update_policy,
 };
 
 static WreathHttp1CAPI http1_capi = {

@@ -52,7 +52,7 @@ to assemble from four packages**:
 | OAuth 2.1 resource server + PKCE | `_auth/oauth2.py`, `_auth/oidc.py`, `_auth/jwks.py`, `_native/jose.c` |
 | Per-tool authorization | `CedarAuthorizer` (`authorization.py`) |
 | An audit trail of what was called with what | the Flight Recorder, plus `crud.py`'s sensitive-name redaction |
-| Abuse control per tool | `middleware/ratelimit.py`, incl. `TieredRateLimitMiddleware` |
+| Abuse control per tool | `middleware/ratelimit.py`, incl. `TieredRateLimitPolicy` |
 
 `fastapi-mcp` (20.4M installs/yr) exists for no purpose other than converting
 FastAPI route metadata into tool schemas from outside the framework. Wreath
