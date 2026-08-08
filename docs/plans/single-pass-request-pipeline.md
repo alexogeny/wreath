@@ -62,10 +62,10 @@ Refactor Neo's HTTP request control flow so every request is classified by the r
 
 ### First-party security middleware
 
-- [x] Run `TrustedHostMiddleware` in the global ingress seam before authentication.
+- [x] Run `TrustedHostPolicy` in the global ingress seam before authentication.
 - [x] Run CORS preflight from the global ingress branch before endpoint authentication.
 - [x] Run ordinary CORS response handling as a global finalizer so configured 401/403/static responses can receive headers.
-- [x] Run `SecurityHeadersMiddleware` as a global finalizer (including 404s when configured).
+- [x] Run `SecurityHeadersPolicy` as a global finalizer (including 404s when configured).
 - [x] Keep `SessionMiddleware` route-local.
 - [x] Reject multiple CORS preflight registrations instead of silently replacing one.
 

@@ -655,6 +655,7 @@ class Request:
         "_json",
         "_limits",
         "_path_params",
+        "_policy_mask",
         "_receive",
         "_route_outcome",
         "_state",
@@ -693,6 +694,10 @@ class Request:
         self._header_map: dict[bytes, bytes] | None = None
         self._header_scanned = False
         self._path_params = path_params
+        # Completed first-class policy stages. The reference executor updates
+        # this bitset; the native server keeps the equivalent C-owned state and
+        # never touches it. It is not middleware depth and has no ordering API.
+        self._policy_mask = 0
         self._identity: Identity | None = None
         self._route_outcome: str | None = None
         self._state: State | None = None
@@ -794,7 +799,7 @@ class Request:
 
         Reach for it for the parts of ASGI wreath does not surface, such as
         `root_path` or `extensions`. To override the peer or the scheme, use
-        `ProxyHeadersMiddleware`; writing to this dict after something has read
+        `ProxyPolicy`; writing to this dict after something has read
         a property does not update the native context behind it.
         """
         scope = self._scope
@@ -901,7 +906,7 @@ class Request:
 
         The socket peer, which behind a load balancer or a reverse proxy is the
         proxy and not the caller. `X-Forwarded-For` is deliberately ignored here
-        -- any client can send it. Add `ProxyHeadersMiddleware` with the proxy
+        -- any client can send it. Add `ProxyPolicy` with the proxy
         networks you trust and it rewrites this from the forwarded header, in
         which case the port is None because no forwarding header carries it.
         Everything that buckets by caller, rate limiting included, reads this.
@@ -921,7 +926,7 @@ class Request:
         The scheme of the connection this process accepted. Behind a
         TLS-terminating proxy that connection is plaintext, so this reads
         `"http"` for a request the browser made over HTTPS -- which silently
-        disables HSTS and breaks CSRF's origin check. `ProxyHeadersMiddleware`,
+        disables HSTS and breaks CSRF's origin check. `ProxyPolicy`,
         configured with the proxy networks you trust, restores it from
         `X-Forwarded-Proto`; nothing else honours that header.
         """
@@ -934,7 +939,7 @@ class Request:
         return scope.get("scheme", "http")
 
     def _set_client(self, client: tuple[str, int | None]) -> None:
-        # ProxyHeadersMiddleware rewrites the peer from X-Forwarded-For. The
+        # ProxyPolicy rewrites the peer from X-Forwarded-For. The
         # write goes to the context when one backs this request so the ASGI
         # scope is never materialized just to carry it.
         context = self._context
@@ -1040,7 +1045,7 @@ class Request:
         return parsed
 
     def _set_header(self, name: bytes, value: bytes) -> None:
-        # Only ProxyHeadersMiddleware needs this: it rewrites Host from a
+        # Only ProxyPolicy needs this: it rewrites Host from a
         # trusted X-Forwarded-Host before anything downstream reads it. The
         # cache maintenance lives here because the caches do.
         headers = self.headers

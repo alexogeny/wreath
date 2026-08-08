@@ -4,11 +4,11 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 129,
+        "c": 130,
         "python": 2
       },
       "pre_activation": {
-        "c": 40,
+        "c": 39,
         "python": 1
       },
       "phases": {
@@ -17,7 +17,7 @@
           "python": 1
         },
         "routing": {
-          "c": 4,
+          "c": 3,
           "python": 0
         },
         "auth": {
@@ -29,13 +29,13 @@
           "python": 1
         },
         "egress": {
-          "c": 28,
+          "c": 30,
           "python": 0
         }
       },
       "c_calls": {
-        "dict.get": 40,
-        "builtins.isinstance": 9,
+        "dict.get": 39,
+        "builtins.isinstance": 10,
         "builtins.getattr": 5,
         "builtins.len": 4,
         "list.append": 4,
@@ -44,13 +44,14 @@
         "str.encode": 4,
         "bytes.decode": 3,
         "str.lower": 2,
-        "bytes.lower": 2,
         "time.perf_counter": 2,
+        "bytes.lower": 2,
         "lock.__enter__": 2,
         "KV.get": 2,
         "lock.__exit__": 2,
         "builtins.id": 2,
         "dict.clear": 2,
+        "wreath._native._core.replace_response_header": 2,
         "TrustedNetworks.contains": 1,
         "wreath._native._core.build_header_map": 1,
         "TrustedNetworks.forwarded_client": 1,
@@ -58,10 +59,10 @@
         "bytes.strip": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
-        "time.time": 1,
-        "wreath._native._core.csrf_new_token": 1,
         "wreath._native._core.find_header": 1,
         "wreath._native._core.random_hex": 1,
+        "time.time": 1,
+        "wreath._native._core.csrf_new_token": 1,
         "BitsetRouteTable.classify": 1,
         "str.partition": 1,
         "wreath._native._core.build_capability_mask": 1,
@@ -77,16 +78,15 @@
         "set.clear": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,
-        "wreath._native._core.format_server_timing": 1,
-        "wreath._native._core.replace_server_timing": 1,
-        "wreath._native._core.replace_response_header": 1,
         "wreath._native._core.append_missing_headers": 1,
         "str.capitalize": 1,
         "str.join": 1,
         "wreath._native._core.replace_cookie": 1,
         "wreath._native._core.find_response_header": 1,
         "list.extend": 1,
-        "wreath._native._core.append_vary": 1
+        "wreath._native._core.append_vary": 1,
+        "wreath._native._core.format_server_timing": 1,
+        "wreath._native._core.replace_server_timing": 1
       },
       "python_frames": {
         "src/wreath/app.py:__call__": 1,

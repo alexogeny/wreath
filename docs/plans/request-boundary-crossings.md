@@ -189,7 +189,7 @@ contract. Not one of them ever yields.** The tape is synchronous work wearing a
 coroutine costume, so a native driver would not need to be a coroutine to run
 it.
 
-The codebase already knows this. `RateLimitMiddleware.__init__` binds
+The codebase already knows this. `RateLimitPolicy.__init__` binds
 `self.before` to `_before_local` or `_before_remote` at construction, commenting
 that "a synchronous store also skips a coroutine on the hot path". That is this
 idea, applied once, by hand.
@@ -472,7 +472,7 @@ cannot. Pre-activation went **54 Python frames / 49 C calls → 50 / 37**.
    **Its timing win did not resolve** (−0.04us against a 2.98us floor). It was
    kept for the crossing reduction, not for a measured speedup, and the ~8us
    this was predicted to save was an artifact of reading cProfile.
-3. **`ProxyHeadersMiddleware` shares one header index** instead of running three
+3. **`ProxyPolicy` shares one header index** instead of running three
    scans, and `Request._set_header` now *updates* the index rather than dropping
    it — otherwise ProxyHeaders' own write forced every later consumer to rebuild
    it. (−2 Python frames, −3 C calls; timing unresolved in both directions,

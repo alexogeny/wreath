@@ -9,12 +9,10 @@ from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import AuthorizationDecision, authorize, roles
 from wreath.middleware import (
-    CORSMiddleware,
     MiddlewareHooks,
     PipelineHooks,
-    SecurityHeadersMiddleware,
-    TrustedHostMiddleware,
 )
+from wreath.policy import CorsPolicy, HttpPolicy, SecurityHeadersPolicy, TrustedHostPolicy
 from wreath.response import TextResponse
 from wreath.testing import TestClient
 
@@ -161,9 +159,10 @@ async def test_trusted_host_rejects_before_authentication() -> None:
         auth_calls += 1
         return Identity(token, roles=frozenset({"admin"}))
 
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("api.example",)))
+    )
     app.configure_auth(BearerTokenBackend(verify))
-    app.add_middleware(TrustedHostMiddleware(("api.example",)))
 
     @app.get("/admin")
     @roles("admin")
@@ -185,9 +184,14 @@ async def test_security_finalizer_covers_auth_denial() -> None:
     async def verify(token: str) -> Identity | None:
         return None
 
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
+                content_security_policy="default-src 'none'"
+            )
+        )
+    )
     app.configure_auth(BearerTokenBackend(verify))
-    app.add_middleware(SecurityHeadersMiddleware(content_security_policy="default-src 'none'"))
 
     @app.get("/private")
     @roles("admin")
@@ -223,9 +227,12 @@ async def test_cors_finalizer_covers_auth_denial() -> None:
     async def verify(token: str) -> Identity | None:
         return None
 
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cors=CorsPolicy(allow_origins=["https://app.example"])
+        )
+    )
     app.configure_auth(BearerTokenBackend(verify))
-    app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
 
     @app.get("/private")
     @roles("admin")
@@ -248,8 +255,13 @@ async def test_cors_finalizer_covers_auth_denial() -> None:
 @pytest.mark.asyncio
 async def test_global_security_finalizer_covers_static_files(tmp_path: Path) -> None:
     (tmp_path / "asset.txt").write_text("asset")
-    app = Wreath()
-    app.add_middleware(SecurityHeadersMiddleware(content_security_policy="default-src 'none'"))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
+                content_security_policy="default-src 'none'"
+            )
+        )
+    )
     app.static("/assets", str(tmp_path))
 
     async with TestClient(app) as client:
