@@ -7,16 +7,19 @@ HTTP from the proxy's address, and the real scheme and client are tucked away in
 `X-Forwarded-*` headers. If Wreath believes the connection is insecure, it will
 make the wrong calls about HSTS, secure cookies, and CSRF.
 
-`ProxyHeadersMiddleware` fixes this by trusting those forwarded headers — but
+`ProxyPolicy` fixes this by trusting those forwarded headers — but
 only from your proxy, never from a client that might forge them:
 
 ```python
-from wreath.middleware import ProxyHeadersMiddleware, TrustedHostMiddleware
+from wreath import Wreath
+from wreath.policy import HttpPolicy, ProxyPolicy, TrustedHostPolicy
 
-app.add_global_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]))
-app.add_middleware(TrustedHostMiddleware(("api.example",)))
+app = Wreath(http_policy=HttpPolicy(
+    proxy=ProxyPolicy(trusted=["10.0.0.0/8"]),
+    trusted_host=TrustedHostPolicy(("api.example",)),
+))
 ```
 
 Restrict `trusted` to the network your proxy actually sits on. With that in
 place, scheme- and host-dependent behaviour is correct again, and a
-`TrustedHostMiddleware` turns away requests for hostnames you don't serve.
+`TrustedHostPolicy` turns away requests for hostnames you don't serve.
