@@ -58,7 +58,8 @@ from wreath._secondfactor import (
     totp_counter,
     verify_second_factor,
 )
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 from wreath.users import (
     InMemoryUserStore,
@@ -103,7 +104,7 @@ def _two_router_app(
     lands. A correctly wired application passes the same object twice.
     """
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=login_store, clock=clock)
     )
@@ -211,7 +212,7 @@ async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_ch
     login_store, enrol_store = InMemorySecondFactorStore(), InMemorySecondFactorStore()
 
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         user_router(login_users, secret="u" * 32, second_factors=login_store, clock=clock)
     )
@@ -252,7 +253,7 @@ async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> 
     second_factors = InMemorySecondFactorStore()
 
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     # The first application's login reads no second-factor store at all, and its
     # own user has no factor. The second application's user 1 does.
     app.include_router(user_router(first_users, secret="u" * 32, clock=clock))

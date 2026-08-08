@@ -13,7 +13,7 @@ Three defects, all the same shape and none of them the same code:
   Ending the other sessions is the documented point of passing `sessions=`, and
   it silently did nothing.
 * **A refusal with nothing to check.** `Wreath._reject_session_after_authentication`
-  scanned `add_middleware()` only, so `Router(middleware=[SessionMiddleware(...)])`
+  scanned `add_middleware()` only, so `Router(middleware=[SessionPolicy(...)])`
   walked past it: sign-in answered 200 and the protected route answered 401 to
   the cookie sign-in had just issued.
 * **One of three OIDC endpoints not origin-pinned.** `jwks_uri` and
@@ -36,7 +36,8 @@ import pytest
 
 from wreath import Wreath
 from wreath.auth import SessionIdentityBackend, authenticated
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.router import Router
 from wreath.testing import TestClient
 
@@ -64,7 +65,7 @@ def _cookie(response: Any) -> str:
 # --- 1. the refusal that scanned only application middleware ------------------
 #
 # `SessionIdentityBackend` reads `request.state.session` during authentication.
-# `SessionMiddleware` registered anywhere on the *route* pipeline publishes it
+# `SessionPolicy` registered anywhere on the *route* pipeline publishes it
 # afterwards, so the backend is asked for an identity before the session exists.
 # `Wreath` refuses that pairing at route-compile time -- but the scan only ever
 # looked at `add_middleware()`, and a router is the other place the mistake is
@@ -79,7 +80,7 @@ def _session_app(*, scope: str) -> Wreath:
     """
     app = Wreath()
     app.configure_auth(SessionIdentityBackend())
-    session = SessionMiddleware(secret=SECRET, secure=False)
+    session = SessionPolicy(secret=SECRET, secure=False)
 
     routes = Router()
     if scope == "router":
@@ -98,7 +99,7 @@ def _session_app(*, scope: str) -> Wreath:
         return {"id": request.identity.id}
 
     if scope == "global":
-        app.add_global_middleware(session)
+        app.configure_http_policy(HttpPolicy(session=session))
     elif scope == "app":
         app.add_middleware(session)
 
@@ -132,6 +133,15 @@ async def _outcome(app: Wreath) -> tuple[Any, Any]:
         return (signed_in.status, me.status)
 
 
+async def _scope_outcome(scope: str) -> tuple[Any, Any]:
+    """Include registration-time refusals in the observable outcome."""
+    try:
+        app = _session_app(scope=scope)
+    except TypeError as refusal:
+        return ("refused", str(refusal))
+    return await _outcome(app)
+
+
 @pytest.mark.parametrize("scope", ["router", "nested", "route"])
 async def test_route_scoped_session_middleware_never_401s_a_cookie_it_just_issued(
     scope: str,
@@ -143,7 +153,7 @@ async def test_route_scoped_session_middleware_never_401s_a_cookie_it_just_issue
     others were not -- a test that drove only `Router(middleware=...)` would go
     green again the moment somebody added `@app.get(middleware=...)`.
     """
-    outcome = await _outcome(_session_app(scope=scope))
+    outcome = await _scope_outcome(scope)
 
     _require(
         outcome[0] == "refused",
@@ -152,7 +162,7 @@ async def test_route_scoped_session_middleware_never_401s_a_cookie_it_just_issue
     # The remedy has to be in the message: the failure it replaces is a 401,
     # which says nothing about where the middleware was registered.
     message = str(outcome[1])
-    for fragment in ("add_global_middleware", "SessionMiddleware", "SessionIdentityBackend"):
+    for fragment in ("HttpPolicy", "configure_http_policy", "SessionPolicy"):
         _require(fragment in message, f"the refusal never names {fragment!r}: {message}")
 
 
@@ -162,7 +172,7 @@ async def test_the_application_scoped_registration_is_still_refused() -> None:
     Passes in both trees. Widening a scan is exactly the change that can lose
     the case it started from.
     """
-    outcome = await _outcome(_session_app(scope="app"))
+    outcome = await _scope_outcome("app")
 
     _require(outcome[0] == "refused", f"add_middleware() stopped being refused: {outcome}")
 
@@ -174,7 +184,7 @@ async def test_the_correct_global_registration_admits_a_valid_cookie() -> None:
     would be a lockout, not a fix -- and a refusal widened until it refuses
     everything satisfies every attack above.
     """
-    outcome = await _outcome(_session_app(scope="global"))
+    outcome = await _scope_outcome("global")
 
     _require(outcome == (200, 200), f"the global wiring did not sign anybody in: {outcome}")
 
@@ -191,7 +201,7 @@ async def test_a_router_middleware_that_publishes_no_session_is_not_refused() ->
 
     app = Wreath()
     app.configure_auth(SessionIdentityBackend())
-    app.add_global_middleware(SessionMiddleware(secret=SECRET, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret=SECRET, secure=False)))
     routes = Router(middleware=[_Noop()])
 
     @routes.get("/me")
@@ -204,25 +214,24 @@ async def test_a_router_middleware_that_publishes_no_session_is_not_refused() ->
 
 
 async def test_a_backend_that_reads_no_session_is_not_refused() -> None:
-    """Control: a router-scoped session is fine when nothing authenticates on it.
-
-    Passes in both trees. Route scope is the cheaper registration and the
-    documented default for a session only handlers read, so refusing it would
-    break the ordinary case to fix the authenticated one.
-    """
+    """Standard session policy cannot be smuggled onto a custom hook tape."""
     app = Wreath()
 
-    routes = Router(middleware=[SessionMiddleware(secret=SECRET, secure=False)])
+    routes = Router(middleware=[SessionPolicy(secret=SECRET, secure=False)])
 
     @routes.get("/visit")
     async def visit(request: Any) -> dict[str, Any]:
         return {"n": len(request.state.session)}
 
     app.include_router(routes)
-    app._compile_routes()   # must not raise
-
-    async with TestClient(app) as client:
-        _require((await client.get("/visit")).status == 200, "the plain session route broke")
+    try:
+        app._compile_routes()
+    except TypeError as refusal:
+        message = str(refusal)
+        for fragment in ("HttpPolicy", "configure_http_policy", "SessionPolicy"):
+            _require(fragment in message, f"the refusal never names {fragment!r}: {message}")
+    else:
+        raise AssertionError("SessionPolicy was compiled onto a middleware tape")
 
 
 # --- 2. a password reset that enumerated the wrong session key ----------------
@@ -280,7 +289,9 @@ def _reset_app(store: Any, *, session_key: str) -> tuple[Wreath, Any]:
 
     users = InMemoryUserStore()
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret=SECRET, secure=False, store=store))
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret=SECRET, secure=False, store=store))
+    )
     app.include_router(
         user_router(users, secret=SECRET, session_key=session_key, sessions=store)
     )

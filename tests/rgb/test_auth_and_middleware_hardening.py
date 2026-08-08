@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.middleware.sessions import SessionMiddleware
 from wreath.policy.csrf import CsrfPolicy
+from wreath.policy.sessions import SessionPolicy
 
 _SECRET = "k" * 32
 
@@ -18,10 +18,10 @@ class TestSecretStrength:
 
     def test_session_secret_has_a_floor(self):
         with pytest.raises(ValueError):
-            SessionMiddleware(secret="short")
+            SessionPolicy(secret="short")
 
     def test_a_long_session_secret_is_accepted(self):
-        assert SessionMiddleware(secret=_SECRET) is not None
+        assert SessionPolicy(secret=_SECRET) is not None
 
     def test_a_bare_string_hmac_key_has_a_floor(self):
         from wreath._auth.jwt import JwtError, JwtVerifier

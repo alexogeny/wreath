@@ -173,29 +173,20 @@ class BearerTokenBackend:
         returned unchanged — this backend adds no roles, permissions or claims
         of its own.
         """
-        value_bytes: bytes | None = None
-        for name, candidate in request.headers:
-            # ASGI supplies lowercase field names; avoid re-normalizing every
-            # header in this authentication scan.
-            if name != b"authorization":
-                continue
-            if value_bytes is not None:
-                # Authorization is not a list-valued field. Refusing ambiguity
-                # prevents a proxy and the application authenticating different
-                # values under first/last/combined interpretations.
-                return None
-            value_bytes = candidate
-        if value_bytes is None:
-            return None
-        value = value_bytes.decode("latin-1")
-        scheme, _separator, token = value.partition(" ")
-        if not token or scheme.lower() != "bearer":
+        token = request._bearer_token()
+        if token is None:
             return None
         result = self._verifier(token)
         if self._verifier_is_async:
             return await cast(Awaitable[Identity | None], result)
+        # The verifier contract has two completed answers.  Guard them before
+        # asking inspect's Awaitable ABC machinery: a synchronous verifier
+        # returning an Identity is the ordinary path, while a plain function
+        # returning an awaitable is supported but exceptional.
+        if result is None or isinstance(result, Identity):
+            return result
         if inspect.isawaitable(result):
-            return cast(Identity | None, await result)
+            return await result
         return cast(Identity | None, result)
 
     def challenge(self, request: Request) -> str:

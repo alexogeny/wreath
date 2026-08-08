@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode
 
 from .._b64 import b64url_encode
-from ..middleware.sessions import rotate_session
+from ..policy.sessions import rotate_session
 from ..response import JSONResponse, RedirectResponse
 from .oidc import OidcProvider, _same_origin_path
 

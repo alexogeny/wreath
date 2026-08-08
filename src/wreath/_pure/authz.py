@@ -18,6 +18,21 @@ def build_capability_mask(
     return mask
 
 
+def build_compiled_capability_mask(
+    descriptor: tuple[int, dict[str, int], dict[str, int]],
+    roles: Iterable[str],
+    permissions: Iterable[str],
+) -> int:
+    """Build a mask from startup-partitioned capability registries."""
+    authenticated, role_capabilities, permission_capabilities = descriptor
+    mask = authenticated
+    for role in roles:
+        mask |= role_capabilities.get(role, 0)
+    for permission in permissions:
+        mask |= permission_capabilities.get(permission, 0)
+    return mask
+
+
 def normalize_authorization_decision(result: Any, decision_type: type[Any]) -> Any:
     """Normalize a Cedar-engine result, denying unrecognized shapes by default."""
     if isinstance(result, decision_type):

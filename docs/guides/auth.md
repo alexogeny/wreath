@@ -67,22 +67,17 @@ isn't.
 ### A backend that reads the session must be behind global middleware
 
 `SessionIdentityBackend` reads `request.state.session` while it authenticates.
-`SessionMiddleware` is route middleware by default — compiled into a route's
-tape, so a miss or a static file never pays to decode a cookie — and route
-middleware runs *after* authorization. Register the two that way and the session
-arrives after the backend has already been asked who the caller is, so every
-protected route answers `401` to a cookie the server itself just issued.
+`SessionPolicy` is a first-class activation policy. Its fixed position is after
+native ingress and before identity resolution, so a backend always sees the
+session and no middleware tape can reorder it.
 
 ```python
-app.add_global_middleware(SessionMiddleware(secret=...))   # yes
-app.add_middleware(SessionMiddleware(secret=...))          # refused
-app.include_router(Router(middleware=[SessionMiddleware(secret=...)]))   # refused
+app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret=...)))
 ```
 
-Wreath refuses every route-scoped spelling when the routes compile — the
-application's, a router's, a nested router's, and one route's — naming the
-remedy, because the symptom is a `401` indistinguishable from a genuinely
-anonymous request. A session that only handlers read has no such ordering
+Wreath refuses every middleware spelling immediately and names `HttpPolicy`,
+because sessions are framework behavior rather than custom hooks. A session
+that only handlers read has the same fixed position; there is no second mode
 requirement, and route scope stays the cheaper registration for it.
 
 ## Deciding what they may do

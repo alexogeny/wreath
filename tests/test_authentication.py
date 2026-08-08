@@ -7,6 +7,8 @@ import pytest
 from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity, authenticated
 from wreath.authorization import roles
+from wreath.policy import HttpPolicy
+from wreath.request import Request
 
 
 async def invoke(
@@ -99,6 +101,52 @@ async def test_bearer_scheme_is_case_insensitive_and_other_schemes_are_refused()
 
 
 @pytest.mark.asyncio
+async def test_bearer_backend_uses_the_native_token_seam_without_reading_headers() -> None:
+    class NativeContext:
+        def _bearer_token(self) -> str:
+            return "native-token"
+
+        @property
+        def headers(self) -> list[tuple[bytes, bytes]]:
+            raise AssertionError("native bearer extraction materialized all headers")
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(NativeContext(), receive)
+    backend = BearerTokenBackend(
+        lambda token: Identity("native") if token == "native-token" else None
+    )
+
+    assert await backend.authenticate(request) == Identity("native")
+
+
+@pytest.mark.asyncio
+async def test_bearer_backend_subclass_keeps_its_authenticate_override() -> None:
+    calls = 0
+
+    class CustomBearerBackend(BearerTokenBackend):
+        async def authenticate(self, request: Request) -> Identity | None:
+            nonlocal calls
+            calls += 1
+            return Identity("custom")
+
+    app = Wreath()
+    app.configure_auth(CustomBearerBackend(lambda token: Identity(token)))
+
+    @app.get("/private")
+    @authenticated()
+    async def private(request: Request) -> str:
+        return request.identity.id
+
+    sent = await invoke(app, "/private")
+
+    assert sent[0]["status"] == 200
+    assert sent[1]["body"] == b"custom"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> None:
     async def verify(token: str) -> Identity | None:
         if token == "admin":
@@ -124,7 +172,7 @@ async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> No
 
 # --- the session backend's ordering requirement -------------------------------
 #
-# `SessionIdentityBackend` reads `request.state.session`, which `SessionMiddleware`
+# `SessionIdentityBackend` reads `request.state.session`, which `SessionPolicy`
 # publishes. Route middleware runs *after* authorization, so registering the two
 # in the obvious way authenticated every caller as anonymous and answered 401 to
 # a valid session cookie -- silently, and identically to a genuine anonymous
@@ -133,15 +181,15 @@ async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> No
 
 def _session_app(*, global_scope: bool) -> Wreath:
     from wreath.auth import SessionIdentityBackend
-    from wreath.middleware import SessionMiddleware
+    from wreath.policy import SessionPolicy
 
     app = Wreath()
     app.configure_auth(SessionIdentityBackend())
-    middleware = SessionMiddleware(secret="x" * 32, secure=False)
+    policy = SessionPolicy(secret="x" * 32, secure=False)
     if global_scope:
-        app.add_global_middleware(middleware)
+        app.configure_http_policy(HttpPolicy(session=policy))
     else:
-        app.add_middleware(middleware)
+        app.add_middleware(policy)
 
     @app.get("/me")
     @authenticated()
@@ -152,15 +200,12 @@ def _session_app(*, global_scope: bool) -> Wreath:
 
 
 def test_a_session_backend_refuses_route_scoped_session_middleware() -> None:
-    app = _session_app(global_scope=False)
     with pytest.raises(TypeError) as caught:
-        app._compile_routes()
+        _session_app(global_scope=False)
     message = str(caught.value)
-    # The remedy has to be in the message: the failure it replaces was a 401,
-    # which says nothing about middleware ordering.
-    assert "add_global_middleware" in message
-    assert "SessionMiddleware" in message
-    assert "SessionIdentityBackend" in message
+    assert "configure_http_policy" in message
+    assert "HttpPolicy" in message
+    assert "SessionPolicy" in message
 
 
 def test_the_correct_registration_is_not_refused() -> None:
@@ -287,7 +332,7 @@ class _Answering:
 
 @pytest.mark.asyncio
 async def test_a_composite_backend_stops_at_the_first_identity() -> None:
-    """"First one wins" is the whole ordering contract, and nothing held it.
+    """ "First one wins" is the whole ordering contract, and nothing held it.
 
     A composite is written bearer-first so a request carrying a token is not
     also charged a session decode -- and, more than cost, so a caller holding
@@ -407,11 +452,11 @@ def test_a_bearer_only_app_may_still_use_route_scoped_sessions() -> None:
     miss or a static file never decodes the cookie. Refusing that too would have
     made the check a blanket ban rather than a statement about ordering.
     """
-    from wreath.middleware import SessionMiddleware
+    from wreath.policy import SessionPolicy
 
     app = Wreath()
     app.configure_auth(BearerTokenBackend({"t": Identity(id="bo", type="User")}))
-    app.add_middleware(SessionMiddleware(secret="x" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="x" * 32, secure=False)))
 
     @app.get("/me")
     @authenticated()
@@ -485,7 +530,9 @@ async def test_the_same_requirement_is_refused_by_mcp() -> None:
         opened = await client.post(
             "/mcp",
             json={
-                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
                 "params": {"protocolVersion": PROTOCOL_VERSION},
             },
             headers=headers,
@@ -494,7 +541,9 @@ async def test_the_same_requirement_is_refused_by_mcp() -> None:
         answer = await client.post(
             "/mcp",
             json={
-                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
                 "params": {"name": "wipe", "arguments": {}},
             },
             headers={**headers, "mcp-session-id": session},
