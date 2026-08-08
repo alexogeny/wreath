@@ -7,7 +7,7 @@ import asyncio
 
 import pytest
 
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy.sessions import SessionPolicy
 
 _SECRET = "s" * 32
 _OLD = "o" * 32
@@ -46,7 +46,7 @@ class TestAnonymousResponsesStayClean:
     also makes the response uncacheable."""
 
     async def test_no_cookie_in_and_no_session_means_no_cookie_out(self):
-        middleware = SessionMiddleware(secret=_SECRET)
+        middleware = SessionPolicy(secret=_SECRET)
         request = _Request()
         await middleware.before(request)
         response = await middleware.after(request, _Response())
@@ -54,7 +54,7 @@ class TestAnonymousResponsesStayClean:
         assert response.set == []
 
     async def test_an_emptied_session_is_still_cleared(self):
-        middleware = SessionMiddleware(secret=_SECRET)
+        middleware = SessionPolicy(secret=_SECRET)
         request = _Request()
         await middleware.before(request)
         request.state.session["a"] = 1
@@ -75,26 +75,26 @@ class TestSecretRotation:
     every user out."""
 
     async def test_a_cookie_signed_with_a_previous_secret_is_accepted(self):
-        old = SessionMiddleware(secret=_OLD)
+        old = SessionPolicy(secret=_OLD)
         request = _Request()
         await old.before(request)
         request.state.session["who"] = "ann"
         response = await old.after(request, _Response())
         _name, cookie = response.set[0]
 
-        rotated = SessionMiddleware(secret=_SECRET, previous_secrets=[_OLD])
+        rotated = SessionPolicy(secret=_SECRET, previous_secrets=[_OLD])
         carried = _Request(cookies={"wreath_session": cookie})
         await rotated.before(carried)
         assert carried.state.session == {"who": "ann"}
 
     async def test_it_is_re_signed_with_the_current_secret(self):
-        old = SessionMiddleware(secret=_OLD)
+        old = SessionPolicy(secret=_OLD)
         request = _Request()
         await old.before(request)
         request.state.session["who"] = "ann"
         _name, cookie = (await old.after(request, _Response())).set[0]
 
-        rotated = SessionMiddleware(secret=_SECRET, previous_secrets=[_OLD])
+        rotated = SessionPolicy(secret=_SECRET, previous_secrets=[_OLD])
         carried = _Request(cookies={"wreath_session": cookie})
         await rotated.before(carried)
         carried.state.session["who"] = "bo"
@@ -102,19 +102,19 @@ class TestSecretRotation:
         assert reissued.set, "the session must be re-signed with the current secret"
 
         # And the reissued cookie verifies under the *new* secret alone.
-        current_only = SessionMiddleware(secret=_SECRET)
+        current_only = SessionPolicy(secret=_SECRET)
         again = _Request(cookies={"wreath_session": reissued.set[0][1]})
         await current_only.before(again)
         assert again.state.session == {"who": "bo"}
 
     async def test_an_unknown_secret_is_still_rejected(self):
-        old = SessionMiddleware(secret=_OLD)
+        old = SessionPolicy(secret=_OLD)
         request = _Request()
         await old.before(request)
         request.state.session["who"] = "ann"
         _name, cookie = (await old.after(request, _Response())).set[0]
 
-        stranger = SessionMiddleware(secret="z" * 32)
+        stranger = SessionPolicy(secret="z" * 32)
         carried = _Request(cookies={"wreath_session": cookie})
         await stranger.before(carried)
         assert carried.state.session == {}
@@ -175,15 +175,15 @@ class TestIdempotencyKeyEdges:
     handler ran. R-08: a non-str `identity.id` reaches `dedup_key` and raises."""
 
     def test_a_header_with_a_nul_byte_is_not_stored(self):
-        from wreath.middleware.idempotency import _replayable_headers
+        from wreath.policy.idempotency import _replayable_headers
 
         stored = _replayable_headers([(b"x-note", b"a\x00b"), (b"x-fine", b"ok")])
         assert stored == ((b"x-fine", b"ok"),)
 
     def test_a_non_string_identity_id_still_keys(self):
-        from wreath.middleware.idempotency import IdempotencyMiddleware
+        from wreath.policy.idempotency import IdempotencyPolicy
 
-        middleware = IdempotencyMiddleware()
+        middleware = IdempotencyPolicy()
 
         class _Identity:
             id = 7          # an integer primary key is an ordinary choice

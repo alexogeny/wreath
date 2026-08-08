@@ -41,8 +41,8 @@ to load-and-publish with concurrent callers coalesced into one load.
 
 **`wreath.cache_control`** is about the HTTP `Cache-Control` header — typed
 policy objects that describe how *clients and proxies* should cache a response.
-It stores nothing itself. Apply those policies to responses with
-`CacheControlMiddleware` from the [middleware](middleware.md) module.
+It stores nothing itself. Apply those policies with first-class
+`wreath.policy.CachePolicy`; a static default is frozen into native egress.
 
 Reach for the first when you want to keep computed data close; reach for the
 second when you want to tell the network what it may keep.

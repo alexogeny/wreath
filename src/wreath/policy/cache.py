@@ -1,16 +1,17 @@
-"""Global response cache-control policy middleware."""
+"""First-class response cache-control policy."""
 
 from __future__ import annotations
 
 from .._webpolicy import find_response_header
-from ..cache_control import PRIVATE_NO_STORE, CacheControl, CachePolicy
+from ..cache_control import PRIVATE_NO_STORE, CacheControl
+from ..cache_control import CachePolicy as CacheSelector
 from ..request import Request
 
 
-class CacheControlMiddleware:
+class CachePolicy:
     """Set a default `Cache-Control` on responses that do not already carry one.
 
-    Global middleware, so it covers route misses, static files, and error
+    Global policy, so it covers route misses, static files, and error
     responses as well as routed ones. It never overrides: a response that
     already has a `Cache-Control` header, from the handler or from a static
     mount, is returned untouched. This is the floor for everything that did not
@@ -29,13 +30,12 @@ class CacheControlMiddleware:
         policy: Called with the request and response to choose per response.
     """
 
-    global_scope = True
     __slots__ = ("default", "policy")
 
     def __init__(
         self,
         default: CacheControl | None = None,
-        policy: CachePolicy | None = None,
+        policy: CacheSelector | None = None,
     ) -> None:
         self.default = default
         self.policy = policy
@@ -45,9 +45,9 @@ class CacheControlMiddleware:
 
         A `policy` chooses per response, so the value is only a constant when
         `default` alone is in play. Documenting a const that a policy can
-        override would be a claim this middleware cannot keep.
+        override would be a claim this policy cannot keep.
         """
-        from .base import HeaderSpec, MiddlewareContract
+        from .base import HeaderSpec, PolicyContract
 
         fixed = (
             self.default.to_header().decode("latin-1")
@@ -55,8 +55,8 @@ class CacheControlMiddleware:
             else None
         )
         if self.default is None and self.policy is None:
-            return MiddlewareContract()
-        return MiddlewareContract(
+            return PolicyContract()
+        return PolicyContract(
             response_headers=(
                 (
                     None,
@@ -88,4 +88,4 @@ class CacheControlMiddleware:
         return response
 
 
-__all__ = ["CacheControlMiddleware"]
+__all__ = ["CachePolicy"]

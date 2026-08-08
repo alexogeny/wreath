@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from wreath import Wreath
 from wreath.auth import Identity
-from wreath.middleware.idempotency import IdempotencyMiddleware
+from wreath.policy import HttpPolicy
+from wreath.policy.idempotency import IdempotencyPolicy
 from wreath.response import Response
 from wreath.response_cache import cached
 from wreath.testing import TestClient
@@ -22,7 +23,7 @@ class _Backend:
 def _app_with_idempotency(handler_factory):
     app = Wreath()
     app.configure_auth(_Backend())
-    app.add_middleware(IdempotencyMiddleware())
+    app.configure_http_policy(HttpPolicy(idempotency=IdempotencyPolicy()))
     from wreath.auth import authenticated
 
     @app.post("/orders")
@@ -96,11 +97,11 @@ class TestIdempotencyReplayPolicy:
 
     async def test_an_in_flight_conflict_says_when_to_retry(self):
         """G-04: the 409 carries no Retry-After."""
-        from wreath.middleware.idempotency import MemoryIdempotencyStore
+        from wreath.policy.idempotency import MemoryIdempotencyStore
 
         store = MemoryIdempotencyStore()
         await store.reserve("k")  # claim it, leaving it in flight
-        middleware = IdempotencyMiddleware(store=store)
+        middleware = IdempotencyPolicy(store=store)
 
         class _Request:
             method = "POST"

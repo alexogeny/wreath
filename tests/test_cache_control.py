@@ -6,7 +6,7 @@ import pytest
 
 from wreath import Response, Wreath
 from wreath.cache_control import CacheControl
-from wreath.middleware import CacheControlMiddleware
+from wreath.policy import CachePolicy, HttpPolicy
 from wreath.request import Request
 from wreath.testing import TestClient
 
@@ -73,7 +73,7 @@ def _request() -> Request:
 
 @pytest.mark.asyncio
 async def test_cache_middleware_preserves_one_explicit_header() -> None:
-    middleware = CacheControlMiddleware(CacheControl(public=True))
+    middleware = CachePolicy(CacheControl(public=True))
     response = Response(b"ok", headers=[(b"cache-control", b"no-cache")])
     original_headers = response.headers.copy()
 
@@ -85,7 +85,7 @@ async def test_cache_middleware_preserves_one_explicit_header() -> None:
 
 @pytest.mark.asyncio
 async def test_cache_middleware_policy_wins_over_default() -> None:
-    middleware = CacheControlMiddleware(
+    middleware = CachePolicy(
         CacheControl(public=True),
         policy=lambda request, response: CacheControl(private=True),
     )
@@ -98,7 +98,7 @@ async def test_cache_middleware_policy_wins_over_default() -> None:
 
 @pytest.mark.asyncio
 async def test_cache_middleware_declining_policy_uses_default() -> None:
-    middleware = CacheControlMiddleware(
+    middleware = CachePolicy(
         CacheControl(no_cache=True),
         policy=lambda request, response: None,
     )
@@ -111,7 +111,7 @@ async def test_cache_middleware_declining_policy_uses_default() -> None:
 
 @pytest.mark.asyncio
 async def test_cache_middleware_without_a_policy_or_default_is_a_noop() -> None:
-    middleware = CacheControlMiddleware()
+    middleware = CachePolicy()
     response = Response(b"ok", headers=[(b"x-test", b"kept")])
     original_headers = response.headers.copy()
 
@@ -123,7 +123,7 @@ async def test_cache_middleware_without_a_policy_or_default_is_a_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_public_cache_policy_without_a_cookie_stays_public() -> None:
-    middleware = CacheControlMiddleware(CacheControl(public=True))
+    middleware = CachePolicy(CacheControl(public=True))
     response = Response(b"ok")
 
     await middleware.after(_request(), response)
@@ -133,7 +133,7 @@ async def test_public_cache_policy_without_a_cookie_stays_public() -> None:
 
 @pytest.mark.asyncio
 async def test_private_cache_policy_with_a_cookie_stays_private() -> None:
-    middleware = CacheControlMiddleware(CacheControl(private=True))
+    middleware = CachePolicy(CacheControl(private=True))
     response = Response(b"ok", headers=[(b"set-cookie", b"session=x")])
 
     await middleware.after(_request(), response)
@@ -142,9 +142,11 @@ async def test_private_cache_policy_with_a_cookie_stays_private() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_middleware_preserves_explicit_and_protects_set_cookie() -> None:
+async def test_cache_policy_preserves_explicit_and_protects_set_cookie() -> None:
     app = Wreath()
-    app.add_middleware(CacheControlMiddleware(CacheControl(public=True, max_age=60)))
+    app.configure_http_policy(
+        HttpPolicy(cache_control=CachePolicy(CacheControl(public=True, max_age=60)))
+    )
 
     @app.get("/cookie")
     async def cookie(request: Any) -> Response:

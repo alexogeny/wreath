@@ -10,7 +10,7 @@ Related material:
 - `docs/native/README.md`
 - `benchmarks/README.md`
 - `src/neo/middleware/security.py`
-- `src/neo/middleware/sessions.py`
+- `src/wreath/policy/sessions.py`
 - `src/neo/middleware/cors.py`
 
 ## Goal
@@ -334,7 +334,7 @@ Unsafe request behavior:
 
 Use `request.scope.get("scheme", "http")`, Host from `request.header("host")`, and the native/pure origin matcher. Never consume the request body. Header transport is the supported first-version submission mechanism; automatic multipart/form token extraction is intentionally excluded because it forces body buffering before routing.
 
-CSRF remains independent of `SessionMiddleware`, so login and session-creation POSTs are protected. SameSite is defense-in-depth, not a substitute for token validation.
+CSRF remains independent of `SessionPolicy`, so login and session-creation POSTs are protected. SameSite is defense-in-depth, not a substitute for token validation.
 
 Tests cover tampering, expiry boundaries, wrong/missing header, hostile subdomain cookie injection, Origin/Referer mismatches, default ports, IPv6 hosts, `Origin: null`, trusted origins, exemptions, early errors, login-style unauthenticated POST, cookie attributes, and no secret/token disclosure.
 
@@ -383,7 +383,7 @@ Files:
 
 ```text
 src/neo/cache.py
-src/neo/middleware/cache.py
+src/wreath/policy/cache.py
 src/neo/middleware/__init__.py
 src/neo/response.py
 src/neo/staticfiles.py
@@ -406,7 +406,7 @@ It removes all existing Cache-Control fields and appends the deterministic seria
 Middleware API:
 
 ```python
-CacheControlMiddleware(
+CachePolicy(
     default: CacheControl | None = None,
     policy: CachePolicy | None = None,
 )
@@ -507,11 +507,11 @@ Run the existing sanitizer policy plus repeated create/compress/finish/close/dea
 Files:
 
 ```text
-src/neo/middleware/compression.py
+src/wreath/policy/compression.py
 src/neo/middleware/__init__.py
 src/neo/compression.py
 src/neo/webpolicy.py
-tests/test_compression_middleware.py
+tests/test_compression_policy.py
 tests/test_request_pipeline.py
 docs/guides/compression.md
 docs/reference/middleware.md
@@ -520,7 +520,7 @@ docs/reference/middleware.md
 API:
 
 ```python
-CompressionMiddleware(
+CompressionPolicy(
     *,
     minimum_size: int = 1024,
     gzip_level: int = 5,
@@ -594,7 +594,7 @@ src/neo/middleware/base.py (tests first; production change only if needed)
 tests/test_request_pipeline.py
 tests/test_csrf_middleware.py
 tests/test_cache_control.py
-tests/test_compression_middleware.py
+tests/test_compression_policy.py
 tests/test_security_middleware.py
 ```
 
@@ -602,8 +602,8 @@ Recommended priority ordering, from low to high:
 
 ```text
 SecurityHeadersPolicy     0
-CompressionMiddleware        10
-CacheControlMiddleware       20
+CompressionPolicy        10
+CachePolicy       20
 Session/CsrfPolicy       30
 ```
 
@@ -646,8 +646,8 @@ src/neo/response.py
 src/neo/staticfiles.py
 src/neo/app.py
 src/neo/middleware/__init__.py
-src/neo/middleware/cache.py
-src/neo/middleware/compression.py
+src/wreath/policy/cache.py
+src/wreath/policy/compression.py
 src/neo/middleware/csrf.py
 src/neo/middleware/security.py
 src/neo/_pure/compression.py
@@ -664,7 +664,7 @@ tests/test_security_middleware.py
 tests/test_cache_control.py
 tests/test_compression_parity.py
 tests/test_compression_native.py
-tests/test_compression_middleware.py
+tests/test_compression_policy.py
 tests/test_request_pipeline.py
 tests/test_client_sessions_forms.py
 tests/test_native_perf.py
@@ -689,7 +689,7 @@ Focused checks:
 uv run pytest tests/test_webpolicy_parity.py tests/test_native_perf.py
 uv run pytest tests/test_csrf_middleware.py tests/test_security_middleware.py
 uv run pytest tests/test_cache_control.py tests/test_client_sessions_forms.py
-uv run pytest tests/test_compression_parity.py tests/test_compression_middleware.py
+uv run pytest tests/test_compression_parity.py tests/test_compression_policy.py
 NEO_BUILD_COMPRESSION=1 uv run pytest tests/test_compression_native.py
 uv run pytest tests/test_request_pipeline.py
 ```
@@ -707,7 +707,7 @@ uv run --group docs mkdocs build --strict
 Build-matrix checks:
 
 ```bash
-NEO_PURE=1 uv run pytest tests/test_webpolicy_parity.py tests/test_csrf_middleware.py tests/test_cache_control.py tests/test_compression_middleware.py
+NEO_PURE=1 uv run pytest tests/test_webpolicy_parity.py tests/test_csrf_middleware.py tests/test_cache_control.py tests/test_compression_policy.py
 NEO_BUILD_COMPRESSION=1 uv sync --group dev
 ```
 
