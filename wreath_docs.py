@@ -253,6 +253,7 @@ nav = Nav(
         Page("Request", "reference/request.md"),
         Page("Responses", "reference/response.md"),
         Page("Binding and validation", "reference/binding.md"),
+        Page("HTTP policy", "reference/policy.md"),
         Page("Middleware", "reference/middleware.md"),
         Page("Authentication", "reference/auth.md"),
         Page("Authorization", "reference/authorization.md"),
