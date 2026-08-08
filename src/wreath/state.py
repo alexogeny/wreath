@@ -6,6 +6,14 @@ from typing import Any
 
 _MISSING = object()
 
+#: Where a middleware parks a whole-body integrity check for `Request.body()`
+#: and `Request.stream()` to spend. Named here rather than in either module
+#: because both ends need the same string and neither imports the other:
+#: `wreath.signatures` writes `(algorithm, digest)` when an RFC 9421 signature
+#: covered a `Content-Digest`, and the body readers are the only place that can
+#: check it -- global middleware runs before the body has arrived.
+BODY_CHECK_SLOT = "_signature_body_digest"
+
 
 class State:
     """A small attribute-accessible namespace with explicit ownership.
