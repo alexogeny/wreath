@@ -21,9 +21,9 @@ from wreath.auth import (
     authenticated,
 )
 from wreath.binding import File, Form
-from wreath.middleware.compression import CompressionMiddleware
-from wreath.middleware.sessions import SessionMiddleware
 from wreath.policy import HttpPolicy, TrustedHostPolicy, WebSocketOriginPolicy
+from wreath.policy.compression import CompressionPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.templates import Template, TemplateSyntaxError
 from wreath.testing import TestClient
 from wreath.users import user_router
@@ -103,7 +103,7 @@ def test_a_validly_signed_pickle_gadget_is_never_deserialized(tmp_path: Path) ->
     """Knowing the session secret must not expose a pickle-shaped RCE sink."""
     canary = tmp_path / "pickle-rce"
     payload = pickle.dumps(_PickleGadget(canary))
-    middleware = SessionMiddleware(secret="s" * 32, secure=False)
+    middleware = SessionPolicy(secret="s" * 32, secure=False)
     cookie = middleware._sign(payload, int(time.time()))
 
     assert middleware._load(cookie) is None
@@ -190,8 +190,8 @@ async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
 
     sessions = MemorySessions()
     app = Wreath()
-    app.add_global_middleware(
-        SessionMiddleware(secret="s" * 32, store=sessions, secure=False)
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=sessions, secure=False))
     )
     app.include_router(user_router(InMemoryUserStore(), secret="u" * 32))
 
@@ -270,8 +270,8 @@ async def test_cookie_authenticated_websocket_requires_an_allowed_origin() -> No
 async def test_websocket_authentication_can_load_the_global_session() -> None:
     sessions = MemorySessions()
     app = Wreath()
-    app.add_global_middleware(
-        SessionMiddleware(secret="s" * 32, store=sessions, secure=False)
+    app.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=sessions, secure=False))
     )
     app.configure_auth(SessionIdentityBackend())
 
@@ -380,7 +380,7 @@ async def test_encoded_path_separators_are_rejected_before_routing() -> None:
 async def test_authenticated_responses_are_not_compressed_by_default() -> None:
     app = Wreath()
     app.configure_auth(BearerTokenBackend(lambda _token: Identity(id="u1")))
-    app.add_middleware(CompressionMiddleware(minimum_size=0))
+    app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=0)))
 
     @app.get("/secret")
     @authenticated()

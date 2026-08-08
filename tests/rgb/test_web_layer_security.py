@@ -244,11 +244,11 @@ class TestSessionCookieDefaults:
     default."""
 
     def test_secure_is_the_default(self):
-        from wreath.middleware.sessions import SessionMiddleware
+        from wreath.policy.sessions import SessionPolicy
 
-        assert SessionMiddleware(secret="s" * 32)._secure is True
+        assert SessionPolicy(secret="s" * 32)._secure is True
 
     def test_it_can_still_be_turned_off_for_local_http(self):
-        from wreath.middleware.sessions import SessionMiddleware
+        from wreath.policy.sessions import SessionPolicy
 
-        assert SessionMiddleware(secret="s" * 32, secure=False)._secure is False
+        assert SessionPolicy(secret="s" * 32, secure=False)._secure is False
