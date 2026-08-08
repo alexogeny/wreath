@@ -110,7 +110,7 @@ under [What is genuinely different](#what-is-genuinely-different).
 | Session dependency you wrote yourself | `Annotated[Session, FromORM("main")]` | Request-scoped, lazy, closed for you; see [the ORM page](sqlmodel.md) |
 | `background_tasks: BackgroundTasks` parameter | `response.background = BackgroundTask(fn, *args)` | Bound to the response, runs after the body is flushed |
 | `FastAPI(lifespan=...)` context manager | `@app.on_startup` / `@app.on_shutdown` | Handlers take the app; run in registration order |
-| `app.add_middleware(CORSMiddleware, allow_origins=[...])` | `app.add_middleware(CORSMiddleware(allow_origins=[...]))` | An instance, not class + kwargs; global middleware via `add_global_middleware` |
+| `app.add_middleware(CORSMiddleware, allow_origins=[...])` | `Wreath(http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=[...])))` | Standard controls are first-class policy, not middleware |
 | `@app.exception_handler(SomeError)` | `@app.exception_handler(SomeError)` | Plus `add_status_handler(404, ...)` keyed by status |
 | `raise HTTPException(status_code=404, detail=...)` | `raise NotFound("...")` | One class per status in `wreath.exceptions`; rendered as RFC 9457 problem+json |
 | `app.mount("/service", child)` | `app.mount("/service", child)` | Generic ASGI child; `app.static()` is the optimized filesystem form |
@@ -263,11 +263,11 @@ onto this surface.
 sequences its own resources around yours: databases and ORM registries start
 before your startup handlers, and shut down after your shutdown handlers.
 
-**Middleware are instances, and there are two tiers.** You construct the
-middleware yourself — `CORSMiddleware(allow_origins=[...])` — and route
-middleware wraps matched handlers while global middleware runs on every request,
-including 404s. [The middleware guide](../guides/middleware.md) explains why the
-distinction earns its keep.
+**Standard HTTP controls are policy, not middleware.** Configure CORS, CSRF,
+proxy trust, host validation, rate limits, request IDs, security headers, and
+timing together with `HttpPolicy`. The custom-hook API remains for application
+code that genuinely wraps a handler. [The middleware guide](../guides/middleware.md)
+shows the boundary.
 
 **The test client is async.** `async with TestClient(app)` runs the lifespan;
 every call is awaited; responses expose `.status`, `.json()`, `.text`, and
