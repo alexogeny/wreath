@@ -697,7 +697,7 @@ class TenancyMiddleware:
     """Resolve the request's tenant and bind it for the rest of the request.
 
     **Global middleware, not route middleware**, and for the same reason
-    `SessionMiddleware` is: the binding has to exist before a route's own tape
+    `SessionPolicy` is: the binding has to exist before a route's own tape
     runs, because an authorization hook that reads tenant-scoped data would
     otherwise run unbound. `wreath.app` already refuses the wrong spelling for
     sessions and the same argument applies here.
