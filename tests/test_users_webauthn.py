@@ -60,7 +60,8 @@ from wreath._webauthn import (
     parse_cose_key,
     unpack_credential,
 )
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 from wreath.users import (
     InMemoryUserStore,
@@ -1046,7 +1047,7 @@ def _app(
     **options: Any,
 ) -> Wreath:
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
@@ -1273,7 +1274,7 @@ async def test_beginning_again_abandons_the_previous_challenge() -> None:
 async def test_a_challenge_is_single_use_with_no_stores_configured_at_all() -> None:
     """The property the deleted warning used to disclaim.
 
-    No `enrolments=`, no `challenges=`, and a cookie-backed `SessionMiddleware`
+    No `enrolments=`, no `challenges=`, and a cookie-backed `SessionPolicy`
     -- the exact deployment the old warning said was only as single-use as the
     cookie. It is single-use now, because the challenge is not in the cookie:
     the default `ChallengeStore` holds it and the consume spends it.
@@ -1780,7 +1781,7 @@ async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
     """An application that does not want passkeys gets no passkey endpoints."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
     app.include_router(second_factor_router(users, factors, clock=clock))
     async with TestClient(app) as client:
@@ -1913,7 +1914,7 @@ async def test_a_localhost_router_accepts_a_ported_ceremony_with_no_origins_name
 def test_a_router_built_without_a_store_warns_about_nothing() -> None:
     """The warning this replaced could only name *half* its condition.
 
-    It fired on `enrolments=None` and then had to say "if your SessionMiddleware
+    It fired on `enrolments=None` and then had to say "if your SessionPolicy
     also has no store=, that means a cookie", because a router built before any
     application exists cannot see the middleware. A warning nobody can act on
     with certainty is one people learn to ignore. There is nothing to warn about

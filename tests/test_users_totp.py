@@ -36,8 +36,9 @@ from wreath._secondfactor import (
 )
 from wreath.auth import Identity, SessionIdentityBackend
 from wreath.binding import Body
-from wreath.middleware.sessions import SessionMiddleware
 from wreath.orm.registry import Registry
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 from wreath.users import (
     InMemorySecondFactorStore,
@@ -555,7 +556,7 @@ def _app(
     **options: Any,
 ) -> Wreath:
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
@@ -1321,7 +1322,7 @@ def _unwired_app(
     another application whose login has no second factor at all.
     """
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
     router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
     app.include_router(router)
@@ -1578,7 +1579,7 @@ def _router_only_app(
 ) -> Wreath:
     """The second-factor router mounted alone, with the session middleware optional.
 
-    `_app` above always installs `SessionMiddleware`, which is why the
+    `_app` above always installs `SessionPolicy`, which is why the
     `session is None` arm had never run: with the middleware there is always a
     session, and the only way to reach that arm is an application that mounted the
     router and forgot it. That is a real deployment mistake and the router answers
@@ -1586,7 +1587,7 @@ def _router_only_app(
     """
     app = Wreath()
     if sessions:
-        app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         second_factor_router(
             users,
@@ -1688,7 +1689,7 @@ async def test_a_malformed_principal_is_not_signed_in(
     assert user.id == "1", "the fixture ids changed; the principals below hard-code one"
 
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
     app.include_router(router)
 

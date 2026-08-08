@@ -13,7 +13,7 @@ in the stdlib-only `wreath._userkit`; this module is the thin wreath glue.
     store = InMemoryUserStore()            # or an ORM-backed UserStore
     app.include_router(user_router(store, secret=SECRET, base_url="https://app"))
 
-`SessionMiddleware` is required for login: without it `POST /login` answers 500
+`SessionPolicy` is required for login: without it `POST /login` answers 500
 rather than signing anyone in. `POST /logout` and `GET /me` degrade instead --
 logout reports success having cleared nothing, and `/me` answers 401.
 
@@ -69,7 +69,7 @@ from ._webauthn import (
 )
 from .binding import Body, Path
 from .cache import BoundedCache
-from .middleware.sessions import rotate_session
+from .policy.sessions import rotate_session
 from .response import JSONResponse
 from .router import Router
 
@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 #: Namespace for a begun-but-unconfirmed enrolment held in a `SessionStore`.
-#: Session ids from `SessionMiddleware` are random tokens with no prefix, so a
+#: Session ids from `SessionPolicy` are random tokens with no prefix, so a
 #: namespaced key cannot collide with one and an enrolment row can never be
 #: loaded as if it were somebody's session.
 _ENROLMENT_PREFIX = "wreath.2fa.enrolment."
@@ -664,7 +664,7 @@ def user_router(
     Mounts, under `prefix`, `POST /register`, `/login`, `/logout`, `/verify`,
     `/forgot-password` and `/reset-password`, plus `GET /verify/{token}` and
     `GET /me`. Login writes the session principal the auth stack already reads,
-    so it requires `SessionMiddleware`; without it `/login` answers 500 with
+    so it requires `SessionPolicy`; without it `/login` answers 500 with
     `{"error": "session_middleware_required"}` and signs nobody in.
 
     `secret` signs the action tokens (use a stable app secret). `link_builder`
@@ -1066,7 +1066,7 @@ def second_factor_router(
         pending_ttl: seconds a pending login may wait for its second factor.
         step_up_ttl: seconds a proved factor counts as *recent* for `DELETE`.
         enrolments: a `wreath.session_store.SessionStore` -- pass the same one
-            `SessionMiddleware` was given. With it, a begun enrolment lives
+            `SessionPolicy` was given. With it, a begun enrolment lives
             server-side under an opaque id and the cookie carries only that id;
             without it the unconfirmed secret rides in the session itself, which
             is a cookie unless the session middleware also has a store. The
@@ -1138,7 +1138,7 @@ def second_factor_router(
     #
     # This replaces a `UserWarning` that could only name *half* its condition:
     # it fired on `enrolments=None` and then had to say "if your
-    # SessionMiddleware also has no store=, that means a cookie", because a
+    # SessionPolicy also has no store=, that means a cookie", because a
     # router built before any application exists cannot see the middleware. A
     # warning nobody can act on with certainty is a warning people learn to
     # ignore. The property now simply holds: single-use is enforced by an

@@ -33,7 +33,8 @@ from wreath._secondfactor import (
 from wreath.auth import Identity, SessionIdentityBackend, authenticated, second_factor
 from wreath.authorization import CedarAuthorizer, CedarPolicies, EntityUid, authorize
 from wreath.binding import Query
-from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 from wreath.users import (
     InMemorySecondFactorStore,
@@ -155,7 +156,7 @@ def _sign_in_routes(app: Wreath) -> None:
 
 def _guarded_app(window: float = 300.0) -> Wreath:
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.configure_auth(SessionIdentityBackend())
 
     @app.get("/vault")
@@ -217,7 +218,7 @@ when { context has second_factor_age && context.second_factor_age <= 300 };
 
 def _policy_app() -> Wreath:
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.configure_auth(
         SessionIdentityBackend(),
         CedarAuthorizer(engine=CedarPolicies(STEP_UP_POLICY)),
@@ -276,7 +277,7 @@ def _app(
     **options: Any,
 ) -> Wreath:
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
