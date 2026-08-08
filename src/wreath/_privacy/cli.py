@@ -2,7 +2,7 @@
 
 `_cli.py` is shared by every subcommand, so the implementation lives here and
 only the parser registration and one dispatch clause live there --
-`_infra_cli`, `_migrations_cli` and `_docs_cli` set that precedent. Nothing
+`infra.cli`, `_migrations.cli` and `_docs.cli` set that precedent. Nothing
 here decides anything: it resolves a `wreath.privacy.Privacy` object, calls it
 once, and prints the rendering.
 
@@ -87,7 +87,7 @@ def _load(spec: str) -> Any:
         raise ValueError(
             f"module {module_name!r} has no attribute {attribute!r}"
         ) from error
-    from .privacy import Privacy
+    from ..privacy import Privacy
 
     if not isinstance(target, Privacy):
         raise ValueError(

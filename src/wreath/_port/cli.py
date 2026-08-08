@@ -1,4 +1,4 @@
-"""Thin presentation layer for `wreath port` (mirrors `_migrations_cli`).
+"""Thin presentation layer for `wreath port` (mirrors `_migrations.cli`).
 
 All analysis lives in the `_port` core; this only parses the namespace, drives
 `analyze_all`, and renders.

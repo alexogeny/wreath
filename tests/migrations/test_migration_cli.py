@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from wreath import _migrations_cli
 from wreath._cli import build_parser, main
+from wreath._migrations import cli as _migrations_cli
 from wreath.migrations import (
     MigrationDetection,
     MigrationGeneration,

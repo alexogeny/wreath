@@ -358,8 +358,8 @@ def build_parser() -> argparse.ArgumentParser:
     migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_down.add_argument("--json", action="store_true")
 
-    from ._infra_cli import add_infra_parser
-    from ._privacy_cli import add_privacy_parser
+    from ._privacy.cli import add_privacy_parser
+    from .infra.cli import add_infra_parser
 
     add_infra_parser(commands)
     add_privacy_parser(commands)
@@ -2238,8 +2238,8 @@ def execute_doctor_preflight(namespace: argparse.Namespace) -> int:
     """
     import json as _json
 
-    from ._infra_cli import _settings_models, _suppliers
     from .doctor import preflight, preflight_as_dict, render_preflight
+    from .infra.cli import _settings_models, _suppliers
 
     models = _settings_models(namespace.settings)
     supplied, dotenv = _suppliers(namespace.env, environ=namespace.environ)
@@ -3183,28 +3183,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, KeyError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "migrations":
-            from ._migrations_cli import execute as execute_migrations
+            from ._migrations.cli import execute as execute_migrations
 
             try:
                 return execute_migrations(namespace, load_application)
             except (OSError, RuntimeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "infra":
-            from ._infra_cli import execute as execute_infra
+            from .infra.cli import execute as execute_infra
 
             try:
                 return execute_infra(namespace, load_application)
             except (OSError, TypeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "privacy":
-            from ._privacy_cli import execute as execute_privacy
+            from ._privacy.cli import execute as execute_privacy
 
             try:
                 return execute_privacy(namespace)
             except (OSError, TypeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "docs":
-            from ._docs_cli import execute as execute_docs
+            from ._docs.cli import execute as execute_docs
 
             return execute_docs(namespace)
         if namespace.command == "port":

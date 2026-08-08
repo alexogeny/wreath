@@ -2,7 +2,7 @@
 
 `_cli.py` is shared by every subcommand, so the implementation lives here and
 only the parser registration and one dispatch clause live there --
-`_migrations_cli` and `_docs_cli` set that precedent. Nothing in this module
+`_migrations.cli` and `_docs.cli` set that precedent. Nothing in this module
 decides anything: it resolves the arguments into the objects
 `wreath.infra.infer` takes, calls it once, and prints the rendering.
 """
@@ -101,7 +101,7 @@ def _suppliers(paths: list[str], *, environ: bool) -> tuple[dict[str, str], dict
     this application, and worthless for the several hundred unrelated keys a
     shell carries.
     """
-    from .config import parse_dotenv, read_osenv
+    from ..config import parse_dotenv, read_osenv
 
     supplied: dict[str, str] = {}
     dotenv: dict[str, str] = {}
@@ -135,7 +135,7 @@ def execute(
     nothing supplies is a deployment that will start and die, and a CI step that
     runs this should fail on it rather than print it.
     """
-    from .infra import infer, render_json, render_text
+    from . import infer, render_json, render_text
 
     if namespace.infra_action != "infer":  # pragma: no cover - argparse rejects first
         raise ValueError(f"unknown infra action {namespace.infra_action!r}")

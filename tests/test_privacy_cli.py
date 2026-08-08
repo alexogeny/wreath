@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from wreath._privacy_cli import add_privacy_parser, execute
+from wreath._privacy.cli import add_privacy_parser, execute
 from wreath.orm import Mapped, Model, column
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
@@ -151,7 +151,7 @@ def test_a_target_that_is_not_module_colon_attribute_is_refused(
     """Each half of the spelling check, because each half is a different typo."""
     import argparse
 
-    from wreath._privacy_cli import execute as run
+    from wreath._privacy.cli import execute as run
 
     namespace = argparse.Namespace(
         target=spec, privacy_action="retention", subject="4711"

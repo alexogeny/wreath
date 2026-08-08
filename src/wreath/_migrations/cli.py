@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .migrations import (
+from ..migrations import (
     _build_native_artifact,
     _load_native_artifact,
     _qualified_history_table,
@@ -34,7 +34,7 @@ async def _pending_passes(connection: Any) -> list[dict[str, Any]]:
     that out from a failed deploy is worse than reading it here. Absent ledger
     table means no passes, which is the ordinary case for most applications.
     """
-    from ._passes import ledger as _pass_ledger
+    from .._passes import ledger as _pass_ledger
 
     table = _pass_ledger.table_name("wreath")
     exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
@@ -102,7 +102,7 @@ def _transitional_findings(registry: Any) -> list[dict[str, Any]]:
     detection. This is new machinery, and it needs no connection, so it runs
     beside the drift check rather than inside it.
     """
-    from ._migrations.scan import scan_application
+    from .scan import scan_application
 
     return [
         {

@@ -13,9 +13,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import logging as _log
-from ._docs import build
-from ._docs.config import Site
+from .. import logging as _log
+from . import build
+from .config import Site
 
 
 def _load_site(config_path: str) -> Site | None:
@@ -186,8 +186,8 @@ def preview_app(directory: Path) -> Any:
     no way to reproduce, because the thing being previewed was not the thing
     being audited.
     """
-    from .app import Wreath
-    from .middleware.base import MiddlewareHooks
+    from ..app import Wreath
+    from ..middleware.base import MiddlewareHooks
 
     app = Wreath()
     app.add_global_middleware(
@@ -213,8 +213,8 @@ def _serve(site: Site, root: Path, directory: Path, port: int, *, reload: bool) 
     """
     import asyncio
 
-    from .server import ServerConfig, serve
-    from .telemetry import Mode, TelemetryConfig
+    from ..server import ServerConfig, serve
+    from ..telemetry import Mode, TelemetryConfig
 
     # A recorder, because `wreath.logging` rides its ring: without one there is
     # no ring for a record and no projector to correlate it, so every `log.*`
