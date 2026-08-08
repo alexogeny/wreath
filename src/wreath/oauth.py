@@ -67,7 +67,7 @@ import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 __all__ = [
     "AuthorizationServer",
@@ -147,6 +147,31 @@ class _Refresh:
 
 def _b64(raw: bytes) -> str:
     return urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+#: An unpadded base64url SHA-256 digest is exactly this long. RFC 7636 §4.2
+#: allows a `code_challenge` of 43-128 characters, but that range exists to
+#: accommodate `plain`, where the challenge *is* the verifier -- and `plain` is
+#: refused here. Under S256 there is one length, and anything else is either a
+#: verifier sent in the challenge's place or a value nothing produced.
+_S256_CHALLENGE_LENGTH: Final = 43
+
+
+def _check_challenge(challenge: str) -> None:
+    """Refuse a `code_challenge` that is not an S256 digest.
+
+    An empty one is the case this was written for: it used to be the default,
+    and `redeem` skipped PKCE entirely on it, so the control the module
+    docstring calls required was optional in practice.
+    """
+    if len(challenge) != _S256_CHALLENGE_LENGTH or not challenge.isascii():
+        raise OAuthRefusal(
+            "weak-pkce",
+            "code_challenge must be an unpadded base64url SHA-256 digest of the "
+            f"verifier, {_S256_CHALLENGE_LENGTH} characters; PKCE is required and "
+            "'plain' is refused, because a challenge that is the verifier protects "
+            "nothing",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,8 +262,9 @@ class AuthorizationServer:
     """An OAuth 2.1 authorization server over wreath's own JWT vocabulary."""
 
     __slots__ = (
-        "_chains", "_clients", "_codes", "_issued", "_issuer", "_lifetime",
-        "_refresh", "_revoked", "_secret", "_signer", "_signing_seconds",
+        "_chains", "_clients", "_code_ttl", "_codes", "_issued", "_issuer",
+        "_lifetime", "_refresh", "_revoked", "_secret", "_signer",
+        "_signing_seconds", "_spent",
     )
 
     def __init__(
@@ -248,6 +274,7 @@ class AuthorizationServer:
         secret: bytes | str = b"",
         clients: Iterable[ClientRegistration] = (),
         lifetime: float = 3600.0,
+        code_ttl: float = 60.0,
         signer: Any = None,
     ) -> None:
         self._issuer = issuer
@@ -258,10 +285,15 @@ class AuthorizationServer:
         self._secret = raw or secrets.token_bytes(32)
         self._clients = {client.client_id: client for client in clients}
         self._lifetime = lifetime
+        self._code_ttl = code_ttl
         self._signer = signer
         self._codes: dict[str, _Code] = {}
         self._refresh: dict[str, _Refresh] = {}
         self._chains: dict[str, list[str]] = {}
+        #: Refresh token -> the chain it belonged to, kept after rotation spends
+        #: it. Without this a reused token's chain is unknowable: `rotate` pops
+        #: the record, so the reuse branch has nothing to revoke.
+        self._spent: dict[str, str] = {}
         self._revoked: set[str] = set()
         self._issued = 0
         self._signing_seconds = 0.0
@@ -334,13 +366,35 @@ class AuthorizationServer:
         *,
         client_id: str,
         subject: str,
+        challenge: str,
+        redirect_uri: str,
         scope: Iterable[str] = (),
-        challenge: str = "",
-        redirect_uri: str = "",
         tenant: str = "",
         now: float | None = None,
     ) -> str:
+        """Mint one authorization code, bound to a client, a URI and a challenge.
+
+        `challenge` and `redirect_uri` carry **no defaults**, and that is the
+        fix for a defect rather than a style: they used to default to `""`, and
+        `redeem` skipped both checks on an empty value. A deployment that simply
+        did not pass a challenge got a PKCE-free authorization-code flow, which
+        the module docstring says cannot exist. An optional security parameter
+        is an optional security control.
+
+        Raises:
+            OAuthRefusal: unknown client, a scope outside its registration, a
+                `redirect_uri` it did not register, or a challenge that is not
+                an S256 digest.
+        """
         client = self._client(client_id)
+        _check_challenge(challenge)
+        # The same exact match `authorize` makes, made again here: `authorize`
+        # is a separate call and nothing obliges a caller to have made it.
+        if redirect_uri not in client.redirect_uris:
+            raise OAuthRefusal(
+                "redirect_uri-mismatch",
+                f"redirect_uri {redirect_uri!r} is not one this client registered",
+            )
         wanted = tuple(scope)
         outside = sorted(set(wanted) - set(client.scopes))
         if outside:
@@ -358,8 +412,29 @@ class AuthorizationServer:
         )
         return code
 
-    def redeem(self, code: str, *, verifier: str = "", now: float | None = None) -> IssuedToken:
-        """Exchange a code once. A second exchange revokes what the first issued."""
+    def redeem(
+        self,
+        code: str,
+        *,
+        verifier: str,
+        client_id: str,
+        redirect_uri: str,
+        now: float | None = None,
+    ) -> IssuedToken:
+        """Exchange a code once. A second exchange revokes what the first issued.
+
+        Every parameter is required, and each one is a check RFC 6749 §4.1.3
+        asks of the token endpoint. `_Code` carried `client_id`, `redirect_uri`
+        and `issued_at` from the beginning; none of the three was read, so a
+        leaked code was redeemable indefinitely, by any registered client,
+        against any URI.
+
+        Raises:
+            OAuthRefusal: no such code, a code already redeemed (which revokes
+                the token the first redemption issued), a code older than
+                `code_ttl`, a different client, a different `redirect_uri`, or a
+                verifier that does not match the challenge.
+        """
         record = self._codes.get(code)
         if record is None:
             raise OAuthRefusal(
@@ -376,14 +451,43 @@ class AuthorizationServer:
                 "by the first redemption has been revoked, because two parties holding "
                 "one code means one of them is not the client",
             )
-        if record.challenge:
-            offered = _b64(hashlib.sha256(verifier.encode("ascii")).digest())
-            if not hmac.compare_digest(offered, record.challenge):
-                raise OAuthRefusal(
-                    "pkce-mismatch",
-                    "the code_verifier does not match the challenge this code was "
-                    "issued against",
-                )
+        moment = time.time() if now is None else now
+        if moment - record.issued_at > self._code_ttl:
+            # An authorization code is a bearer credential that travels through
+            # a browser redirect, so it reaches referrer headers, proxy logs and
+            # history. RFC 6749 §4.1.2 puts its maximum lifetime at ten minutes
+            # and recommends one; this defaults to sixty seconds, which is
+            # generous for a redirect that is already in flight.
+            del self._codes[code]
+            raise OAuthRefusal(
+                "code-expired",
+                "this authorization code has expired; it was issued more than "
+                f"{self._code_ttl:g}s ago, and a code that never goes stale is a "
+                "password in a browser log",
+            )
+        if record.client_id != client_id:
+            raise OAuthRefusal(
+                "client-mismatch",
+                "this authorization code was issued to a different client; a code "
+                "redeemable by any registered client is a code the interceptor can "
+                "redeem",
+            )
+        if record.redirect_uri != redirect_uri:
+            raise OAuthRefusal(
+                "redirect_uri-mismatch",
+                "this authorization code was issued for a different redirect_uri",
+            )
+        # Unconditional. The `if record.challenge:` this replaces meant an empty
+        # challenge skipped PKCE altogether, and `issue_code` now refuses to mint
+        # one -- but the check being unconditional is what makes that true for a
+        # code minted by an older build, too.
+        offered = _b64(hashlib.sha256(verifier.encode("ascii")).digest())
+        if not hmac.compare_digest(offered, record.challenge):
+            raise OAuthRefusal(
+                "pkce-mismatch",
+                "the code_verifier does not match the challenge this code was "
+                "issued against",
+            )
         token = self.issue_access(
             subject=record.subject, audience=record.client_id, scope=record.scope,
             tenant=record.tenant, now=now, with_refresh=True,
@@ -425,11 +529,19 @@ class AuthorizationServer:
             claims["scope"] = " ".join(wanted)
         if tenant:
             claims["tenant"] = tenant
-        refresh = ""
+        refresh = chain = ""
         if with_refresh and subject is not None:
-            refresh = self.issue_refresh(subject=subject, now=moment).token
+            minted = self.issue_refresh(subject=subject, now=moment)
+            refresh, chain = minted.token, minted.chain
+        access = self._encode(claims)
+        if chain:
+            # **Into the chain it seeded.** `issue_refresh` starts a chain empty
+            # and the token minted alongside it used to stay outside, so
+            # `revoke_chain` returned 0 for a freshly redeemed code and left the
+            # one token that grant had actually issued live.
+            self._chains.setdefault(chain, []).append(access)
         return IssuedToken(
-            access_token=self._encode(claims),
+            access_token=access,
             subject=subject, audience=audience, scope=wanted,
             expires_at=expires, tenant=tenant, refresh_token=refresh,
         )
@@ -476,6 +588,15 @@ class AuthorizationServer:
         token = refresh if isinstance(refresh, str) else refresh.token
         record = self._refresh.pop(token, None)
         if record is None:
+            # **The revocation the message promises, performed.** This branch
+            # used to be the `raise` alone, so an operator reading "every token
+            # in its chain has been revoked" believed the incident was contained
+            # while the thief kept rotating. `_spent` is what makes the chain
+            # knowable here: `pop` above has already removed the record by the
+            # time a second presentation arrives.
+            chain = self._spent.get(token)
+            if chain is not None:
+                self.revoke_chain(chain)
             raise OAuthRefusal(
                 "refresh-reused",
                 "this refresh token has already been rotated or was never issued; "
@@ -489,6 +610,7 @@ class AuthorizationServer:
             chain=record.chain, issued_at=time.time(),
         )
         self._refresh[successor.token] = successor
+        self._spent[token] = record.chain
         self._chains.setdefault(record.chain, []).append(issued.access_token)
         return IssuedToken(
             access_token=issued.access_token, subject=issued.subject,
@@ -503,6 +625,12 @@ class AuthorizationServer:
         for token, record in list(self._refresh.items()):
             if record.chain == chain:
                 del self._refresh[token]
+        # Spent tokens go too, or a third presentation of an already-revoked
+        # token would try to revoke a chain that is no longer there and read as
+        # a fresh incident.
+        for token, spent_chain in list(self._spent.items()):
+            if spent_chain == chain:
+                del self._spent[token]
         return len(issued)
 
     def is_revoked(self, access_token: str) -> bool:
