@@ -34,7 +34,11 @@ from typing import Any
 
 from wreath import Response, Wreath
 from wreath._devtools.measure import Arm, _ordered, report, run, scope
-from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES, build_realistic_app
+from wreath._devtools.sample_app import (
+    POLICY_FACTORIES,
+    build_realistic_app,
+    policy_from_components,
+)
 from wreath._json import dumps as _dumps
 from wreath.binding import _compile_jsonable, _compile_response_check
 
@@ -48,9 +52,11 @@ def _tape_app(count: int) -> Wreath:
     two of seven pays for two. Which two is a policy question; what it saves is
     not, and that is what this measures.
     """
-    app = Wreath()
-    for factory in MIDDLEWARE_FACTORIES[:count]:
-        app.add_middleware(factory())
+    app = Wreath(
+        http_policy=policy_from_components(
+            [factory() for factory in POLICY_FACTORIES[:count]]
+        ) if count else None
+    )
 
     @app.get("/i/{x}")
     async def item(request: Any) -> Response:
@@ -69,13 +75,12 @@ def _observer_split_app() -> Wreath:
     out; the middleware that can *refuse* the request cannot. This arm is the
     former deleted rather than deferred, which is the ceiling of deferring it.
     """
-    app = Wreath()
-    for factory in MIDDLEWARE_FACTORIES:
-        middleware = factory()
-        # A decider is anything that can answer instead of the handler. On this
-        # protocol that is exactly a middleware exposing a `before` hook.
-        if getattr(middleware, "before_sync", None) or getattr(middleware, "before", None):
-            app.add_middleware(middleware)
+    components = []
+    for factory in POLICY_FACTORIES:
+        component = factory()
+        if getattr(component, "_ingress_sync", None) or getattr(component, "_ingress", None):
+            components.append(component)
+    app = Wreath(http_policy=policy_from_components(components))
 
     @app.get("/i/{x}")
     async def item(request: Any) -> Response:
@@ -173,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         startup_cost()
         return 0
 
-    full = len(MIDDLEWARE_FACTORIES)
+    full = len(POLICY_FACTORIES)
     arms = [
         Arm("tape: all 7 (baseline)", app=_tape_app(full)),
         Arm("compartments: 2 of 7", app=_tape_app(2)),

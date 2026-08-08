@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
-from typing import Any, cast
+from typing import Any
 
 from benchmarks.lifecycle_routes import (
     API_PREFIX_TEMPLATE,
@@ -121,18 +121,17 @@ class _AsyncpgDatabase:
 if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from wreath import JSONResponse, Router, Wreath
     from wreath.auth import BearerTokenBackend, Identity
-    from wreath.middleware import Middleware, SecurityHeadersMiddleware
+    from wreath.policy import HttpPolicy, SecurityHeadersPolicy
     from wreath.postgres import Database, PoolConfig
 
-    app = Wreath(routing=os.environ.get("WREATH_BENCH_ROUTING", "decision"))
-    app.add_middleware(
-        cast(
-            Middleware,
-            SecurityHeadersMiddleware(
+    app = Wreath(
+        routing=os.environ.get("WREATH_BENCH_ROUTING", "decision"),
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
                 content_security_policy=CONTENT_SECURITY_POLICY,
                 permissions_policy="camera=(), microphone=(), geolocation=()",
-            ),
-        )
+            )
+        ),
     )
 
     _wreath_database = Database(

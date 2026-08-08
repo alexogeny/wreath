@@ -41,7 +41,7 @@ Arms are cumulative, so each adjacent difference is one layer:
     params      + a path parameter to extract
     bound       + typed parameter binding
     validated   + a return annotation, so the response is validated
-    middleware  + the seven-middleware global tape
+    policy      + the seven first-class native HTTP controls
 
 ## Running it
 
@@ -173,13 +173,18 @@ def _validated(tick: Any) -> tuple[Wreath, bytes]:
     return app, _request("/i/42")
 
 
-def _middleware(tick: Any) -> tuple[Wreath, bytes]:
-    from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES
+def _policy(tick: Any) -> tuple[Wreath, bytes]:
+    from wreath._devtools.sample_app import (
+        POLICY_FACTORIES,
+        policy_from_components,
+    )
 
-    app = Wreath()
+    app = Wreath(
+        http_policy=policy_from_components(
+            [factory() for factory in POLICY_FACTORIES]
+        )
+    )
     body = Response(_BODY)
-    for factory in MIDDLEWARE_FACTORIES:
-        app.add_middleware(factory())
 
     @app.get("/plain")
     async def plain(request: Any) -> Response:
@@ -433,7 +438,7 @@ ARMS: dict[str, Any] = {
     "params": _params,
     "bound": _bound,
     "validated": _validated,
-    "middleware": _middleware,
+    "policy": _policy,
     # The tape's own cost, separated from what the shipped hooks do.
     "hooks-0": _empty_hooks(0),
     "hooks-1": _empty_hooks(1),

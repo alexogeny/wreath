@@ -1,14 +1,14 @@
 """Does per-route compartmentalization capture its own ceiling?
 
-`bench_biomimetic_paths.py` prices the ceiling by *truncating* the stack: an
-application built with two middlewares instead of seven. That is what the saving
+This benchmark prices custom-hook compartmentalization by *truncating* the stack:
+an application built with two hooks instead of seven. That is what the saving
 would be if deciding which two were free, and it says nothing about whether a
 mechanism can collect it -- the earlier attempt at one measured -0.05us and was
 reverted, against a CORS body now known to cost 4.1-4.7us.
 
 So three arms, and the gap between the middle two is the whole question:
 
-    full            seven middlewares, every route running all of them
+    full            seven custom hooks, every route running all of them
     compartments    seven registered, two applying to the measured route
     ceiling         two middlewares registered at all
 
@@ -35,7 +35,6 @@ from typing import Any
 
 from wreath import Response, Wreath
 from wreath._devtools.measure import Arm, _ordered, report, run, scope
-from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES
 
 #: The measured route runs these two; the other five decline it.
 KEEP = (0, 1)
@@ -45,8 +44,23 @@ COLD = "/everything/{x}"
 _BODY = Response(b'{"ok":1}', media_type=b"application/json")
 
 
+class _CustomHook:
+    """A minimal application-defined global hook with observable work."""
+
+    global_scope = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def before_sync(self, request: Any) -> None:
+        self.calls += 1
+
+
+CUSTOM_HOOK_FACTORIES = tuple(_CustomHook for _ in range(7))
+
+
 class _Scoped:
-    """A shipped middleware wrapped so it declines every route but `COLD`.
+    """A custom hook wrapper that declines every route but `COLD`.
 
     Delegation by attribute rather than by subclass: the hooks a middleware
     exposes decide how `_hook_program` compiles it, and copying that decision
@@ -86,14 +100,14 @@ def _routes(app: Wreath) -> Wreath:
 
 def _full() -> Wreath:
     app = Wreath()
-    for factory in MIDDLEWARE_FACTORIES:
+    for factory in CUSTOM_HOOK_FACTORIES:
         app.add_middleware(factory())
     return _routes(app)
 
 
 def _compartments() -> Wreath:
     app = Wreath()
-    for index, factory in enumerate(MIDDLEWARE_FACTORIES):
+    for index, factory in enumerate(CUSTOM_HOOK_FACTORIES):
         instance = factory()
         app.add_middleware(instance if index in KEEP else _Scoped(instance))
     return _routes(app)
@@ -102,7 +116,7 @@ def _compartments() -> Wreath:
 def _ceiling() -> Wreath:
     app = Wreath()
     for index in KEEP:
-        app.add_middleware(MIDDLEWARE_FACTORIES[index]())
+        app.add_middleware(CUSTOM_HOOK_FACTORIES[index]())
     return _routes(app)
 
 

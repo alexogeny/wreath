@@ -70,7 +70,7 @@ EXPECTED_SECURITY_HEADERS = {
     # No HSTS: this scenario runs over cleartext HTTP, and RFC 6797 says a
     # sender should not emit Strict-Transport-Security over a non-secure
     # transport and a browser must ignore it if it arrives. Wreath's
-    # SecurityHeadersMiddleware implements that (it emits HSTS only when
+    # SecurityHeadersPolicy implements that (it emits HSTS only when
     # scheme == "https"), so requiring the header here skipped both Wreath arms
     # while Sanic and BlackSheep passed by emitting it unconditionally -- which
     # is both wrong and one header of extra work Wreath was not doing. Dropping it

@@ -35,7 +35,7 @@ from typing import Any
 
 from wreath import Response, Wreath
 from wreath._devtools.measure import Arm, measure_apps, report, report_cpu, scope
-from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES
+from wreath._devtools.sample_app import POLICY_FACTORIES, policy_from_components
 
 #: A t4g.small: 2 vCPU, 20% sustained baseline. The comparison every other
 #: cloud's burstable tier is a rescaling of.
@@ -44,25 +44,10 @@ BASELINE_VCPU = 0.4
 _BODY = Response(b'{"ok":1}', media_type=b"application/json")
 
 
-class _Scoped:
-    """A shipped middleware that declines every route but `/cold`."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        for name in ("before_sync", "before", "after_inplace", "after_sync", "after"):
-            attribute = getattr(inner, name, None)
-            if attribute is not None:
-                setattr(self, name, attribute)
-        self.global_scope = True
-
-    def applies_to(self, method: str, path: str) -> bool:
-        return path == "/cold"
-
-
-def _app(middleware: list[Any]) -> Wreath:
-    app = Wreath()
-    for item in middleware:
-        app.add_middleware(item)
+def _app(components: list[Any]) -> Wreath:
+    app = Wreath(
+        http_policy=policy_from_components(components) if components else None
+    )
 
     @app.get("/i/{x}")
     async def hot(request: Any) -> Response:
@@ -81,16 +66,11 @@ def _bare() -> Wreath:
 
 
 def _full() -> Wreath:
-    return _app([factory() for factory in MIDDLEWARE_FACTORIES])
+    return _app([factory() for factory in POLICY_FACTORIES])
 
 
-def _compartments() -> Wreath:
-    return _app(
-        [
-            factory() if index < 2 else _Scoped(factory())
-            for index, factory in enumerate(MIDDLEWARE_FACTORIES)
-        ]
-    )
+def _ceiling() -> Wreath:
+    return _app([factory() for factory in POLICY_FACTORIES[:2]])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,9 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     arms = [
-        Arm("full: 7 middlewares", app=_full()),
-        Arm("compartments: 2 of 7", app=_compartments()),
-        Arm("bare: no middleware", app=_bare()),
+        Arm("full: 7 policy components", app=_full()),
+        Arm("ceiling: 2 of 7", app=_ceiling()),
+        Arm("bare: no policy", app=_bare()),
         Arm("A/A control", app=_full()),
     ]
     template = scope("GET", "/i/42", {"host": "example.com"})
@@ -114,9 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"python {platform.python_version()} on {platform.platform()}")
     print(f"rounds={args.rounds} iterations={args.iterations}\n")
     print("── wall clock: what the caller waits for ──\n")
-    wall = report(arms, "full: 7 middlewares", "A/A control")
+    wall = report(arms, "full: 7 policy components", "A/A control")
     print("\n── CPU: what the instance is billed for ──\n")
-    cpu = report_cpu(arms, "full: 7 middlewares", "A/A control")
+    cpu = report_cpu(arms, "full: 7 policy components", "A/A control")
 
     print("\n── sustained throughput on one t4g.small (0.4 vCPU baseline) ──\n")
     print(f"  {'arm':32s} {'req/s at baseline':>18s}")
