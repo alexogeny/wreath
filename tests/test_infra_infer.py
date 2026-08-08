@@ -365,7 +365,7 @@ def test_every_shared_subsystem_is_listed_whether_or_not_it_is_used() -> None:
         "wreath.jobs",
         "wreath.messaging",
         "wreath.session_store",
-        "wreath.middleware.ratelimit",
+        "wreath.policy.ratelimit",
         "wreath.middleware.idempotency",
         "wreath.workflows",
         "wreath.progress",
@@ -456,17 +456,18 @@ def test_an_unregisterable_subsystem_is_unobservable_not_absent() -> None:
 
 
 def test_a_middleware_owned_table_is_reported_as_the_same_postgresql() -> None:
-    from wreath.middleware.ratelimit import PostgresRateLimitStore, RateLimitMiddleware
+    from wreath.policy import HttpPolicy
+    from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
     app = build()
     store = PostgresRateLimitStore(app._databases["main"])
-    app.add_global_middleware(RateLimitMiddleware(limit=10, window=1.0, store=store))
+    app.configure_http_policy(
+        HttpPolicy(rate_limit=RateLimitPolicy(limit=10, window=1.0, store=store))
+    )
     plan = plan_for(app)
     rows = {row.module: row for row in plan.subsystems}
-    assert rows["wreath.middleware.ratelimit"].presence is Presence.DECLARED
-    assert rows["wreath.middleware.ratelimit"].detail == (
-        "RateLimitMiddleware on database 'main'"
-    )
+    assert rows["wreath.policy.ratelimit"].presence is Presence.DECLARED
+    assert rows["wreath.policy.ratelimit"].detail == "HttpPolicy on database 'main'"
     # The other two middleware-owned subsystems must stay absent: one store's
     # claim must not be read as a claim by all three.
     assert rows["wreath.session_store"].presence is Presence.ABSENT
@@ -486,12 +487,13 @@ def test_the_framework_collects_a_middleware_owned_table() -> None:
     itself, so it answers `schema_owners` with the store that does, and the
     claim is attributed to the store's own database.
     """
-    from wreath.middleware.ratelimit import PostgresRateLimitStore, RateLimitMiddleware
+    from wreath.policy import HttpPolicy
+    from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
     app = build()
     store = PostgresRateLimitStore(app._databases["main"])
-    middleware = RateLimitMiddleware(limit=10, window=1.0, store=store)
-    app.add_global_middleware(middleware)
+    middleware = RateLimitPolicy(limit=10, window=1.0, store=store)
+    app.configure_http_policy(HttpPolicy(rate_limit=middleware))
     assert not hasattr(middleware, "component")
     assert middleware.schema_owners == (store,)
     assert [claim.name for claim in app.schema_components()] == ["ratelimit"]

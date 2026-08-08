@@ -53,7 +53,7 @@ _SUBSYSTEM_CATALOGUE: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("message bus", "wreath.messaging", ("Kafka", "RabbitMQ", "SNS + SQS"), "PostgreSQL"),
     ("webhook inbox/outbox", "wreath.webhooks", ("SQS", "Celery"), "PostgreSQL"),
     ("sessions", "wreath.session_store", ("Redis", "Memcached"), "PostgreSQL"),
-    ("rate limits", "wreath.middleware.ratelimit", ("Redis",), "PostgreSQL"),
+    ("rate limits", "wreath.policy.ratelimit", ("Redis",), "PostgreSQL"),
     ("idempotency", "wreath.middleware.idempotency", ("Redis",), "PostgreSQL"),
     ("workflows", "wreath.workflows", ("Temporal", "Airflow"), "PostgreSQL"),
     ("chunked passes", "wreath.passes", ("Celery", "a bespoke backfill script"), "PostgreSQL"),
@@ -75,7 +75,7 @@ _SUBSYSTEM_CATALOGUE: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
 #: subsystem a claim belongs to.
 _STORE_COMPONENTS: Mapping[str, str] = {
     "session": "wreath.session_store",
-    "ratelimit": "wreath.middleware.ratelimit",
+    "ratelimit": "wreath.policy.ratelimit",
     "idempotency": "wreath.middleware.idempotency",
 }
 
