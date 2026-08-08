@@ -136,7 +136,7 @@ h3_resolve_send_waiter(WreathH3Stream *s)
         return -1;
     }
     if (!is_done) {
-        PyObject *result = PyObject_CallMethod(waiter, "set_result", "O", Py_None);
+        PyObject *result = PyObject_CallMethod(waiter, "set_result", "(O)", Py_None);
         if (result == NULL) {
             Py_DECREF(waiter);
             return -1;
@@ -296,8 +296,11 @@ h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         PyErr_SetString(PyExc_RuntimeError, "HTTP/3 stream has no event loop");
         return NULL;
     }
+    int native = s->conn != NULL && s->conn->endpoint->native_app != NULL;
     if (s->conn == NULL || s->disconnected) {
-        PyObject *msg = Py_BuildValue("{s:s}", "type", "http.disconnect");
+        PyObject *msg = native
+            ? PyTuple_Pack(3, Py_None, Py_False, Py_True)
+            : Py_BuildValue("{s:s}", "type", "http.disconnect");
         if (msg == NULL) return NULL;
         PyObject *f = resolved_future(loop, msg);
         Py_DECREF(msg);
@@ -311,9 +314,11 @@ h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
             return NULL;
         }
         int more = !s->request_ended;
-        PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
-                                      "body", body, "more_body",
-                                      more ? Py_True : Py_False);
+        PyObject *msg = native
+            ? PyTuple_Pack(3, body, more ? Py_True : Py_False, Py_False)
+            : Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
+                            "body", body, "more_body",
+                            more ? Py_True : Py_False);
         Py_DECREF(body);
         if (msg == NULL) return NULL;
         PyObject *f = resolved_future(loop, msg);
@@ -321,8 +326,10 @@ h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         return f;
     }
     if (s->request_ended) {
-        PyObject *msg = Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
-                                      "body", "", 0, "more_body", Py_False);
+        PyObject *msg = native
+            ? PyTuple_Pack(3, Py_None, Py_False, Py_False)
+            : Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
+                            "body", "", 0, "more_body", Py_False);
         if (msg == NULL) return NULL;
         PyObject *f = resolved_future(loop, msg);
         Py_DECREF(msg);
@@ -739,7 +746,7 @@ h3_release_receiver(WreathH3Stream *s)
     if (!is_done) {
         PyObject *msg = Py_BuildValue("{s:s}", "type", "http.disconnect");
         if (msg != NULL) {
-            PyObject *r = PyObject_CallMethod(w, "set_result", "O", msg);
+            PyObject *r = PyObject_CallMethod(w, "set_result", "(O)", msg);
             Py_XDECREF(r);
             Py_DECREF(msg);
         }
@@ -858,19 +865,59 @@ h3_stream_wreath_response(
     WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs
 )
 {
-    if (nargs != 3) {
+    if (nargs != 3 && nargs != 4) {
         PyErr_Format(
-            PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
+            PyExc_TypeError, "_wreath_response expected 3 or 4 arguments, got %zd", nargs
         );
         return NULL;
     }
     if (self->conn == NULL) {
         return self->loop ? resolved_future(self->loop, Py_None) : NULL;
     }
+    PyObject *body = Py_NewRef(args[2]);
+    int authenticated = nargs == 4 ? PyObject_IsTrue(args[3]) : 0;
+    if (authenticated < 0 || (self->conn->endpoint->policy.response_transform &&
+        wreath_policy_response(
+            &self->conn->endpoint->policy, &self->policy_state,
+            args[0], args[1], &body, authenticated) < 0)) {
+        Py_DECREF(body);
+        return NULL;
+    }
     PyObject *started = h3_response_start(self, args[0], args[1]);
-    if (started == NULL) return NULL;
+    if (started == NULL) {
+        Py_DECREF(body);
+        return NULL;
+    }
     Py_DECREF(started);
-    return h3_response_body(self, args[2], 0);
+    PyObject *result = h3_response_body(self, body, 0);
+    Py_DECREF(body);
+    return result;
+}
+
+static PyObject *
+h3_stream_wreath_start(
+    WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_wreath_stream_start expected 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    return h3_response_start(self, args[0], args[1]);
+}
+
+static PyObject *
+h3_stream_wreath_body(
+    WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_wreath_stream_body expected 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    int more = PyObject_IsTrue(args[1]);
+    if (more < 0) return NULL;
+    return h3_response_body(self, args[0], more);
 }
 
 
@@ -878,6 +925,10 @@ static PyMethodDef h3_stream_methods[] = {
     {"_receive", h3_stream_receive, METH_NOARGS, NULL},
     {"_send", h3_stream_send, METH_O, NULL},
     {"_wreath_response", (PyCFunction)(void (*)(void))h3_stream_wreath_response,
+     METH_FASTCALL, NULL},
+    {"_wreath_stream_start", (PyCFunction)(void (*)(void))h3_stream_wreath_start,
+     METH_FASTCALL, NULL},
+    {"_wreath_stream_body", (PyCFunction)(void (*)(void))h3_stream_wreath_body,
      METH_FASTCALL, NULL},
     {"_done", h3_stream_done, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -912,7 +963,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->scope = NULL;
     s->task = NULL;
     s->receive_callable = s->send_callable = s->done_callable = NULL;
-    s->header_list = PyList_New(0);
+    s->header_list = wreath_header_block_new_objects(16);
     s->body_buffer = PyByteArray_FromStringAndSize(NULL, 0);
     s->body_received = 0;
     s->body_frames = 0;
@@ -963,7 +1014,8 @@ recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
     (void)conn; (void)stream_id; (void)token; (void)flags; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL || s->disconnected) return 0;
-    if (PyList_GET_SIZE(s->header_list) >= s->conn->endpoint->max_header_count) {
+    if (wreath_headers_count(s->header_list) >=
+        s->conn->endpoint->max_header_count) {
         h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
         return 0;
     }
@@ -975,11 +1027,9 @@ recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
         Py_XDECREF(pn); Py_XDECREF(pv);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
-    PyObject *pair = PyTuple_Pack(2, pn, pv);
-    Py_DECREF(pn); Py_DECREF(pv);
-    if (pair == NULL) return NGHTTP3_ERR_CALLBACK_FAILURE;
-    int rc = PyList_Append(s->header_list, pair);
-    Py_DECREF(pair);
+    int rc = wreath_header_block_append_objects(s->header_list, pn, pv);
+    Py_DECREF(pn);
+    Py_DECREF(pv);
     return rc < 0 ? NGHTTP3_ERR_CALLBACK_FAILURE : 0;
 }
 
@@ -1074,16 +1124,24 @@ start_request(WreathH3Stream *s)
     PyObject *method = NULL, *path = NULL, *scheme = NULL, *authority = NULL;
     PyObject *host = NULL;
     PyObject *traceparent = NULL;  /* borrowed; captured in the one header pass */
-    PyObject *scope_headers = PyList_New(0);
+    PyObject *scope_headers = wreath_header_block_new_objects(16);
     if (scope_headers == NULL) return -1;
     int has_host = 0;
-    Py_ssize_t n = PyList_GET_SIZE(s->header_list);
+    Py_ssize_t n = wreath_headers_count(s->header_list);
     for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject *pair = PyList_GET_ITEM(s->header_list, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        char *np; Py_ssize_t nl;
-        PyBytes_AsStringAndSize(name, &np, &nl);
+        const char *np;
+        const char *vp;
+        Py_ssize_t nl;
+        Py_ssize_t vl;
+        if (wreath_headers_view(s->header_list, i, &np, &nl, &vp, &vl) < 0) {
+            Py_DECREF(scope_headers);
+            return -1;
+        }
+        PyObject *value = wreath_headers_value_borrowed(s->header_list, i);
+        if (value == NULL) {
+            Py_DECREF(scope_headers);
+            return -1;
+        }
         if (nl > 0 && np[0] == ':') {
             if (nl == 7 && memcmp(np, ":method", 7) == 0) method = value;
             else if (nl == 5 && memcmp(np, ":path", 5) == 0) path = value;
@@ -1101,7 +1159,14 @@ start_request(WreathH3Stream *s)
         /* Capture the recorder correlation header in this same pass, so a
          * traceparent never costs a second header walk. */
         else if (nl == 11 && memcmp(np, "traceparent", 11) == 0) traceparent = value;
-        if (PyList_Append(scope_headers, pair) < 0) { Py_DECREF(scope_headers); return -1; }
+        PyObject *name = wreath_headers_name_object(s->header_list, i);
+        PyObject *owned_value = wreath_headers_value_object(s->header_list, i);
+        int append_result = name != NULL && owned_value != NULL
+            ? wreath_header_block_append_objects(scope_headers, name, owned_value)
+            : -1;
+        Py_XDECREF(name);
+        Py_XDECREF(owned_value);
+        if (append_result < 0) { Py_DECREF(scope_headers); return -1; }
     }
     if (authority != NULL) {
         H3Authority parsed;
@@ -1120,11 +1185,11 @@ start_request(WreathH3Stream *s)
             goto message_err;
         }
         if (!has_host) {
-            PyObject *hp = PyTuple_Pack(2, k_host_name, authority);
-            if (hp == NULL) { Py_DECREF(scope_headers); return -1; }
-            int inserted = PyList_Insert(scope_headers, 0, hp);
-            Py_DECREF(hp);
-            if (inserted < 0) { Py_DECREF(scope_headers); return -1; }
+            if (wreath_header_block_append_objects(
+                    scope_headers, k_host_name, authority) < 0) {
+                Py_DECREF(scope_headers);
+                return -1;
+            }
         }
     }
     else if (host != NULL) {
@@ -1160,7 +1225,9 @@ start_request(WreathH3Stream *s)
         return -1;
     }
     PyObject *scope;
+    PyObject *policy_headers = NULL;
     if (c->endpoint->native_app != NULL) {
+        policy_headers = Py_NewRef(scope_headers);
         scope = wreath_request_context_new(
             c->endpoint->scope_type, c->endpoint->scope_asgi,
             c->endpoint->scope_http_version, method_str, scheme_str, path_str,
@@ -1172,18 +1239,27 @@ start_request(WreathH3Stream *s)
         Py_DECREF(scope_headers);
     }
     else {
+        PyObject *asgi_headers = wreath_headers_materialize(scope_headers);
+        if (asgi_headers == NULL) {
+            Py_DECREF(path_str); Py_DECREF(raw_path); Py_DECREF(query);
+            Py_DECREF(method_str); Py_DECREF(scheme_str); Py_DECREF(scope_headers);
+            return -1;
+        }
         scope = Py_BuildValue(
             "{s:s,s:s,s:N,s:N,s:N,s:N,s:N,s:O}",
             "type", "http", "http_version", "3",
             "scheme", scheme_str, "method", method_str, "path", path_str,
-            "raw_path", raw_path, "query_string", query, "headers", scope_headers);
+            "raw_path", raw_path, "query_string", query, "headers", asgi_headers);
+        Py_DECREF(asgi_headers);
         Py_DECREF(scope_headers);
     }
     if (scope == NULL) return -1;
     s->scope = scope;
 
     if (c->endpoint->policy.descriptor != NULL) {
-        PyObject *policy_headers = PyObject_GetAttrString(scope, "headers");
+        if (policy_headers == NULL) {
+            policy_headers = PyObject_GetAttrString(scope, "headers");
+        }
         PyObject *policy_method = PyObject_GetAttrString(scope, "method");
         PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
         PyObject *policy_client = PyObject_GetAttrString(scope, "client");
@@ -1200,6 +1276,7 @@ start_request(WreathH3Stream *s)
             &c->endpoint->policy, &s->policy_state, policy_method,
             policy_scheme, policy_client, policy_headers, &reply);
         Py_DECREF(policy_headers);
+        policy_headers = NULL;
         Py_DECREF(policy_method);
         Py_DECREF(policy_scheme);
         Py_DECREF(policy_client);
@@ -1223,6 +1300,7 @@ start_request(WreathH3Stream *s)
         }
         wreath_policy_reply_clear(&reply);
     }
+    Py_CLEAR(policy_headers);
 
     s->receive_callable = PyObject_GetAttrString((PyObject *)s, "_receive");
     s->send_callable = PyObject_GetAttrString((PyObject *)s, "_send");
@@ -1387,13 +1465,15 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     if (s->receive_waiter != NULL) {
         PyObject *body = h3_take_buffered_body(s);
         if (body == NULL) return NGHTTP3_ERR_CALLBACK_FAILURE;
-        PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
-                                      "body", body, "more_body", Py_True);
+        PyObject *msg = s->conn != NULL && s->conn->endpoint->native_app != NULL
+            ? PyTuple_Pack(3, body, Py_True, Py_False)
+            : Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
+                            "body", body, "more_body", Py_True);
         Py_DECREF(body);
         if (msg == NULL) return NGHTTP3_ERR_CALLBACK_FAILURE;
         PyObject *w = s->receive_waiter;
         s->receive_waiter = NULL;
-        PyObject *r = PyObject_CallMethod(w, "set_result", "O", msg);
+        PyObject *r = PyObject_CallMethod(w, "set_result", "(O)", msg);
         Py_XDECREF(r);
         Py_DECREF(w);
         Py_DECREF(msg);
@@ -1409,12 +1489,14 @@ end_stream_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     if (s == NULL) return 0;
     s->request_ended = 1;
     if (s->receive_waiter != NULL) {
-        PyObject *msg = Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
-                                      "body", "", 0, "more_body", Py_False);
+        PyObject *msg = s->conn != NULL && s->conn->endpoint->native_app != NULL
+            ? PyTuple_Pack(3, Py_None, Py_False, Py_False)
+            : Py_BuildValue("{s:s,s:y#,s:O}", "type", "http.request",
+                            "body", "", 0, "more_body", Py_False);
         if (msg != NULL) {
             PyObject *w = s->receive_waiter;
             s->receive_waiter = NULL;
-            PyObject *r = PyObject_CallMethod(w, "set_result", "O", msg);
+            PyObject *r = PyObject_CallMethod(w, "set_result", "(O)", msg);
             Py_XDECREF(r);
             Py_DECREF(w);
             Py_DECREF(msg);

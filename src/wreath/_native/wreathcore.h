@@ -4,6 +4,8 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "activate.h"
+#include "header_block.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -22,6 +24,12 @@
 
 /* authz.c */
 PyObject *wreath_build_capability_mask(PyObject *self, PyObject *args);
+PyObject *wreath_build_compiled_capability_mask(PyObject *self, PyObject *args);
+PyObject *wreath_compiled_capability_mask(PyObject *descriptor, PyObject *roles,
+                                          PyObject *permissions);
+int wreath_compiled_capability_word(PyObject *descriptor, PyObject *roles,
+                                    PyObject *permissions,
+                                    unsigned long long *mask_out);
 PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args);
 
 /* cedar.c */
@@ -79,6 +87,7 @@ PyObject *wreath_build_header_map(PyObject *self, PyObject *args);
 
 /* validate.c */
 PyObject *wreath_run_validation(PyObject *self, PyObject *args);
+PyObject *wreath_run_validation_json(PyObject *self, PyObject *args);
 
 /* orm_shape.c */
 PyObject *wreath_orm_shape(PyObject *self, PyObject *args);

@@ -36,12 +36,22 @@ wreath_decode_json_validation_tape(PyObject *Py_UNUSED(self), PyObject *args)
 
 
 static PyMethodDef core_methods[] = {
+    {"activate_path", wreath_activate_path, METH_VARARGS,
+     "activate_path(params, plan) -> (kwargs, errors)\n"
+     "Execute a startup-compiled path-scalar binding plan."},
+    {"activate_path_call",
+     (PyCFunction)(void (*)(void))wreath_activate_path_call, METH_FASTCALL,
+     "activate_path_call(handler, request, plan, error_type) -> result\n"
+     "Activate path scalars and vectorcall the handler."},
     {"parse_dotenv", wreath_parse_dotenv, METH_O,
      "parse_dotenv(data) -> dict[str, str]"},
     {"read_osenv", wreath_read_osenv, METH_NOARGS,
      "read_osenv() -> dict[str, str]"},
     {"run_validation", wreath_run_validation, METH_VARARGS,
      "run_validation(plan, value, loc) -> (result, errors)"},
+    {"run_validation_json", wreath_run_validation_json, METH_VARARGS,
+     "run_validation_json(plan, value, loc) -> (body | None, errors)\n"
+     "Validate a response value and serialize its successful JSON form."},
     {"decode_json_validation_tape", wreath_decode_json_validation_tape, METH_VARARGS,
      "decode_json_validation_tape(data, plan, loc) -> (result, errors)"},
     {"orm_shape", wreath_orm_shape, METH_VARARGS,
@@ -74,6 +84,9 @@ static PyMethodDef core_methods[] = {
      "format_server_timing(name, seconds) -> bytes"},
     {"build_capability_mask", wreath_build_capability_mask, METH_VARARGS,
      "build_capability_mask(capabilities, roles, permissions) -> int"},
+    {"build_compiled_capability_mask", wreath_build_compiled_capability_mask,
+     METH_VARARGS,
+     "build_compiled_capability_mask(descriptor, roles, permissions) -> int"},
     {"normalize_authorization_decision", wreath_normalize_authorization_decision,
      METH_VARARGS,
      "normalize_authorization_decision(result, decision_type) -> decision"},

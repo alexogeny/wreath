@@ -92,15 +92,6 @@ header_name_object(const uint8_t *lowered, Py_ssize_t len)
     return PyBytes_FromStringAndSize((const char *)lowered, len);
 }
 
-/* Header construction is a replaceable parser sink. Keeping allocation outside
- * the request-line/state machine lets the server substitute a lazy raw-header
- * sink without duplicating syntax validation. */
-static PyObject *
-new_request_header_sink(void)
-{
-    return PyList_New(0);
-}
-
 int
 wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
@@ -157,7 +148,10 @@ wreath_http_parse_request_parts(
     }
     minor_version = p[7] - '0';
     p += 10;
-    headers = new_request_header_sink();
+    /* One owned copy keeps validated spans alive after the protocol consumes
+     * its connection buffer.  Names are lowercased in that private copy and
+     * the ASGI list is not built unless Python actually asks for it. */
+    headers = wreath_header_block_new_raw(data, *consumed_out);
     if (headers == NULL) goto error;
     while (p < end) {
         if (++header_count > max_headers) {
@@ -168,9 +162,6 @@ wreath_http_parse_request_parts(
         const uint8_t *value_start;
         const uint8_t *value_end;
         Py_ssize_t name_len;
-        PyObject *name;
-        PyObject *value;
-        PyObject *pair;
         if (*p == ' ' || *p == '\t') {
             malformed("obsolete header line folding is not supported");
             goto error;
@@ -220,45 +211,19 @@ wreath_http_parse_request_parts(
          * and then deleted. Recorded here rather than in a commit message
          * because this is where the next person will think of it.
          * (2026-08-01, 11 interleaved rounds against an A/A control.) */
-        if (name_len <= 64) {
-            uint8_t lowered[64];
-            for (Py_ssize_t i = 0; i < name_len; i++) {
-                uint8_t c = name_start[i];
-                lowered[i] = c >= 'A' && c <= 'Z'
-                    ? (uint8_t)(c + ('a' - 'A')) : c;
-            }
-            name = header_name_object(lowered, name_len);
-        } else {
-            /* Allocate uninitialised and fill. Copying the source in and
-             * lowercasing in place is only safe while `name_len > 64` holds:
-             * `PyBytes_FromStringAndSize` with a non-NULL source returns the
-             * interpreter's immortal singleton for a length-1 string, and
-             * writing through it corrupts `b"A"` process-wide. That is a live
-             * defect elsewhere in this tree, reached through multipart. Passing
-             * NULL always allocates, so this branch stays correct on its own
-             * terms rather than on the guard above it. */
-            name = PyBytes_FromStringAndSize(NULL, name_len);
-            if (name != NULL) {
-                uint8_t *name_buf = (uint8_t *)PyBytes_AS_STRING(name);
-                for (Py_ssize_t i = 0; i < name_len; i++) {
-                    uint8_t c = name_start[i];
-                    name_buf[i] = (c >= 'A' && c <= 'Z')
-                        ? (uint8_t)(c + ('a' - 'A')) : c;
-                }
+        Py_ssize_t name_offset = name_start - data;
+        Py_ssize_t value_offset = value_start - data;
+        char *owned = wreath_header_block_raw_data(headers);
+        if (owned == NULL) goto error;
+        for (Py_ssize_t i = 0; i < name_len; i++) {
+            unsigned char c = (unsigned char)owned[name_offset + i];
+            if (c >= 'A' && c <= 'Z') {
+                owned[name_offset + i] = (char)(c + ('a' - 'A'));
             }
         }
-        if (name == NULL) goto error;
-        value = PyBytes_FromStringAndSize(
-            (const char *)value_start, value_end - value_start
-        );
-        pair = value != NULL ? PyTuple_Pack(2, name, value) : NULL;
-        Py_DECREF(name);
-        Py_XDECREF(value);
-        if (pair == NULL || PyList_Append(headers, pair) < 0) {
-            Py_XDECREF(pair);
-            goto error;
-        }
-        Py_DECREF(pair);
+        if (wreath_header_block_append_span(
+                headers, name_offset, name_len, value_offset,
+                value_end - value_start) < 0) goto error;
     }
     method = method_object(method_start, method_len);
     target = method != NULL
@@ -304,6 +269,16 @@ wreath_http_parse_request(PyObject *Py_UNUSED(self), PyObject *arg)
     PyBuffer_Release(&view);
     if (status < 0) return NULL;
     if (status == 0) Py_RETURN_NONE;
+    {
+        PyObject *materialized = wreath_headers_materialize(headers);
+        if (materialized == NULL) {
+            Py_DECREF(method);
+            Py_DECREF(target);
+            Py_DECREF(headers);
+            return NULL;
+        }
+        Py_SETREF(headers, materialized);
+    }
     minor = PyLong_FromLong(minor_version);
     consumed_obj = minor != NULL ? PyLong_FromSsize_t(consumed) : NULL;
     result = consumed_obj != NULL ? PyTuple_New(5) : NULL;
