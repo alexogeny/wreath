@@ -766,6 +766,22 @@ def test_a_path_marker_naming_a_placeholder_the_route_lacks_is_refused() -> None
     compile_binder(handler, "/items/{item_id}")
 
 
+async def test_an_async_native_path_adapter_keeps_the_async_call_convention() -> None:
+    """Outer response wrappers must await the endpoint before inspecting it."""
+    import inspect as _inspect
+
+    from wreath.request import Request
+
+    async def handler(request: Any, item_id: int) -> int:
+        return item_id
+
+    bound = compile_binder(handler, "/items/{item_id}")
+    request = Request(scope_for("/items/7"), None, {"item_id": "7"})
+
+    assert _inspect.iscoroutinefunction(bound)
+    assert await bound(request) == 7
+
+
 def test_two_body_parameters_are_refused_in_both_spellings() -> None:
     """Explicit `Body()`, and the implicit dataclass-annotation form."""
     async def explicit(
