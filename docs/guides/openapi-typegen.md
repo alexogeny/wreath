@@ -87,7 +87,7 @@ contain `null`. Neither module ships for an application that declares neither.
 
 First-class policy and custom hooks [describe themselves](middleware.md#what-policy-and-custom-hooks-tell-the-document),
 so the document carries more than shapes. An operation guarded by
-`IdempotencyMiddleware` is documented as reading an `Idempotency-Key`; one
+`IdempotencyPolicy` is documented as reading an `Idempotency-Key`; one
 behind a rate limiter is documented as answering `429` with a `Retry-After`.
 
 Alongside the header and response documentation, each operation carries the

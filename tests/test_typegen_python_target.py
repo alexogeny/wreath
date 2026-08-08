@@ -17,6 +17,7 @@ from wreath import Wreath
 from wreath.binding import Body, Header, Query
 from wreath.openapi import generate_openapi
 from wreath.pagination import Page
+from wreath.policy import HttpPolicy
 from wreath.temporal import Instant
 from wreath.typegen.inspect import build_api_model
 from wreath.typegen.targets.python import render_python, spec_digest
@@ -204,10 +205,10 @@ def test_an_extra_field_on_the_wire_is_refused() -> None:
 
 def test_a_declared_idempotency_key_reaches_the_generated_method() -> None:
     """The behaviour the tape declared is what makes the client send a key."""
-    from wreath.middleware import IdempotencyMiddleware
+    from wreath.policy import IdempotencyPolicy
 
     app = _app()
-    app.add_middleware(IdempotencyMiddleware())
+    app.configure_http_policy(HttpPolicy(idempotency=IdempotencyPolicy()))
     source = render_python(
         build_api_model(app), document=generate_openapi(app), class_name="LlamaClient"
     )["client.py"]
@@ -302,10 +303,10 @@ def test_an_idempotency_key_coexists_with_keyword_parameters() -> None:
     """
     import ast
 
-    from wreath.middleware import IdempotencyMiddleware
+    from wreath.policy import IdempotencyPolicy
 
     app = _rich_app()
-    app.add_middleware(IdempotencyMiddleware())
+    app.configure_http_policy(HttpPolicy(idempotency=IdempotencyPolicy()))
     source = render_python(
         build_api_model(app), document=generate_openapi(app), class_name="LlamaClient"
     )["client.py"]
