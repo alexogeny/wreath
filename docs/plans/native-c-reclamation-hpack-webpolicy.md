@@ -287,7 +287,7 @@ Add a seeded bounded differential corpus generating names, casing variants, dupl
 
 Extend `benchmarks/bench_web_policy_compression.py` with an `append-missing-headers` scenario for 64, 128, 256, and 512 existing headers and proportionally sized additions. Include controlled hit rates and duplicate additions.
 
-Measure native and pure implementations, and retain the ordinary `SecurityHeadersMiddleware` shape as a separate small-input control.
+Measure native and pure implementations, and retain the ordinary `SecurityHeadersPolicy` shape as a separate small-input control.
 
 Acceptance:
 

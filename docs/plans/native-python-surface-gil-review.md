@@ -70,7 +70,7 @@ Two qualifications matter. First, `SessionMiddleware` intentionally exposes `req
 
 `Request` is designed to retain the native `_RequestContext` and materialize a scope dictionary lazily. Direct `method`, `path`, `query_string`, and `headers` properties read native context attributes without creating the dictionary.
 
-`ProxyHeadersMiddleware._peer_trusted()` instead uses `request.scope.get("client")`, and its mutation path obtains `request.scope` before changing client/scheme. On the native path this calls `_RequestContext._asgi_scope()` and constructs the full ASGI dictionary even though the built-in middleware needs only client, scheme, and header mutation.
+`ProxyPolicy._peer_trusted()` instead uses `request.scope.get("client")`, and its mutation path obtains `request.scope` before changing client/scheme. On the native path this calls `_RequestContext._asgi_scope()` and constructs the full ASGI dictionary even though the built-in middleware needs only client, scheme, and header mutation.
 
 The trace shows three `Request.scope` frames before activation. Once materialized, the request loses much of the allocation benefit of the native context.
 

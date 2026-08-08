@@ -37,7 +37,7 @@ Inspection overturned several assumptions in the brief:
 - **Middleware already exists as a proper subpackage.** `neo/middleware/`:
   `base` (`Middleware`, `MiddlewareRoute`, `compile_middleware`), `cors`,
   `security`, `compression`, `cache`, `ratelimit`, `request_id`, `timing`,
-  `proxy`, plus `CSRFMiddleware`, `SessionMiddleware`, `TrustedHostMiddleware`.
+  `proxy`, plus `CsrfPolicy`, `SessionMiddleware`, `TrustedHostPolicy`.
 - **`router` vs `routing` is a real public/private split, not an alias.**
   `router.py` = public composition (`Router`, `RouteDefinition`, `.get/.post/…`
   decorators, inclusion into the app). `routing.py` = the low-level `Router`
@@ -152,7 +152,7 @@ from .binding import Depends
 `wreath.websocket`.
 
 Matches the brief's intended imports, e.g. `from wreath.response import
-ProblemResponse`, `from wreath.middleware import CORSMiddleware`, `from
+ProblemResponse`, `from wreath.policy import CorsPolicy`, `from
 wreath.postgres import Pool`, `from wreath.testing import TestClient`.
 
 ---
