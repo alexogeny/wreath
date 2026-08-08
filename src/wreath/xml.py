@@ -70,11 +70,10 @@ belong to the layer above.
 
 from __future__ import annotations
 
-import importlib
-import os
 from typing import TYPE_CHECKING, Any
 
 from ._native import _core as _core_module
+from ._native import extension as _extension
 from ._pure import xml as _reference
 from ._pure.xml import (
     ID_ATTRIBUTES,
@@ -104,11 +103,11 @@ __all__ = [
     "parse",
 ]
 
-_FORCE_PURE = os.environ.get("WREATH_PURE") == "1"
+# `WREATH_PURE=1` is not re-read here: `wreath._native` is the one place that
+# gate lives, and it hands back `_core is None` in that mode. The `hasattr` is
+# the *other* question -- a build compiled without `xml.c`.
 _native: Any = (
-    _core_module
-    if not _FORCE_PURE and _core_module is not None and hasattr(_core_module, "xml_parse")
-    else None
+    _core_module if _core_module is not None and hasattr(_core_module, "xml_parse") else None
 )
 
 #: Which implementation this process resolved to. Read by the parity suite,
@@ -116,28 +115,21 @@ _native: Any = (
 #: proving nothing.
 BACKEND = "native" if _native is not None else "pure"
 
-#: The compiled module's import path. Resolved through `importlib` rather than
-#: through `wreath._native._core`, because that package attribute is `None`
-#: under `WREATH_PURE=1` by design -- and the entry points below are the ones
-#: that must reach the C code *whatever* mode the process is in.
-_CORE_MODULE_NAME = "wreath._native._core"
-
 
 def _require_native(symbol: str) -> Any:
     """The compiled module, or `RuntimeError` if this build has no C parser.
 
-    Importing the submodule directly is what makes `WREATH_PURE=1` irrelevant
-    here: the gate lives on the *package* attribute, not on the extension. A
-    build compiled without `xml.c` still fails, which is the case the error
-    message is about.
+    `ignore_pure` is what makes `WREATH_PURE=1` irrelevant here: the parity
+    suite has to reach the C parser in the very mode that hides it, or it would
+    compare the pure twin against itself and pass while proving nothing. A build
+    compiled without `xml.c` still fails, which is the case the error message is
+    about.
     """
-    try:
-        module = importlib.import_module(_CORE_MODULE_NAME)
-    except ImportError:
-        module = None
+    module = _extension("_core", ignore_pure=True)
     if module is None or not hasattr(module, symbol):
         raise RuntimeError("the C XML parser is not available in this build")
     return module
+
 
 if _native is not None:  # pragma: no branch - both arms are covered by the suite
     _core_module.xml_configure(XMLRefusal)
