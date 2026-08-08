@@ -355,7 +355,11 @@ async def test_cedar_context_always_carries_a_boolean():
         unsigned = (await client.get("/ctx")).json()
         signed = (await client.get("/ctx", headers=signed_headers(clock=now, path="/ctx"))).json()
     assert unsigned == {"signature_verified": False}
-    assert signed == {"signature_verified": True, "signature_agent": DIRECTORY}
+    assert signed == {
+        "signature_verified": True,
+        "signature_agent": DIRECTORY,
+        "signature_covered": ["@method", "@authority", "@path", "@query"],
+    }
 
 
 async def test_facts_are_resolved_once_per_request():
@@ -698,7 +702,7 @@ async def test_a_signature_with_no_alg_parameter_still_verifies():
     now = 1_700_000_000.0
     signatures = build(clock=lambda: now)
     key = ed25519.Ed25519PrivateKey.from_private_bytes(PRIVATE)
-    components = (("@method", {}), ("@authority", {}), ("@path", {}))
+    components = (("@method", {}), ("@authority", {}), ("@path", {}), ("@query", {}))
     params = {"created": int(now), "keyid": KEY_ID}
     message = RequestMessage(
         method="GET",
@@ -711,7 +715,8 @@ async def test_a_signature_with_no_alg_parameter_still_verifies():
     headers = {
         "Host": HOST,
         "Signature-Input": (
-            f'sig1=("@method" "@authority" "@path");created={int(now)};keyid="{KEY_ID}"'
+            f'sig1=("@method" "@authority" "@path" "@query");'
+            f'created={int(now)};keyid="{KEY_ID}"'
         ),
         "Signature": f"sig1=:{base64.b64encode(signature).decode()}:",
         "Signature-Agent": DIRECTORY,
@@ -719,3 +724,202 @@ async def test_a_signature_with_no_alg_parameter_still_verifies():
     async with TestClient(app_with(signatures)) as client:
         body = (await client.get("/probe", headers=headers)).json()
     assert body["verified"] is True
+
+
+# --- what the signature actually covers -------------------------------------
+#
+# A signature over method+authority+path is a signature over an *endpoint*, not
+# over a request: everything a caller can vary without touching those three --
+# the query string and the whole body -- rides along uncovered. Both halves are
+# reachable by anyone who observes one signed request.
+
+
+def app_with_echo(signatures: Signatures) -> Wreath:
+    """`app_with`, plus a route that reads the body the way a handler does."""
+    app = app_with(signatures)
+
+    @app.post("/echo")
+    async def echo(request) -> dict:
+        payload = await request.body()
+        return {
+            "verified": signatures.facts(request).verified,
+            "reason": signatures.facts(request).reason,
+            "body": payload.decode(),
+        }
+
+    return app
+
+
+async def test_a_signed_request_is_not_replayable_against_another_query():
+    """`@query` is required, so the query string is part of what was signed."""
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(), method="GET", url=f"https://{HOST}/probe?x=1", created=int(now)
+    )
+    headers["Host"] = HOST
+    async with TestClient(app_with(signatures)) as client:
+        honest = (await client.get("/probe?x=1", headers=headers)).json()
+        replayed = (await client.get("/probe?admin=1", headers=headers)).json()
+    assert honest["verified"] is True
+    assert replayed["verified"] is False
+    assert replayed["reason"] == "signature does not verify"
+
+
+async def test_a_signature_that_omits_the_query_is_refused():
+    """The completeness check names it, rather than verifying a partial cover."""
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(),
+        method="GET",
+        url=f"https://{HOST}/probe",
+        components=("@method", "@authority", "@path"),
+        created=int(now),
+    )
+    headers["Host"] = HOST
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body["reason"] == "signature does not cover @query"
+
+
+async def test_a_signed_post_must_cover_a_content_digest():
+    """A body nothing covers is a body anyone may swap."""
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url=f"https://{HOST}/echo",
+        components=("@method", "@authority", "@path", "@query"),
+        created=int(now),
+    )
+    headers["Host"] = HOST
+    async with TestClient(app_with_echo(signatures)) as client:
+        body = (await client.post("/echo", content=b"honest", headers=headers)).json()
+    assert body["verified"] is False
+    assert body["reason"] == "signature does not cover content-digest"
+
+
+async def test_a_swapped_body_under_a_covered_digest_is_refused():
+    """Covering the header is worth nothing unless the digest is recomputed.
+
+    The whole attack: `Content-Digest` is a header like any other, so a
+    canonicalizer that copies its *text* into the base proves only that the
+    sender typed it. The bytes have to be hashed.
+    """
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url=f"https://{HOST}/echo",
+        body=b"honest",
+        created=int(now),
+    )
+    headers["Host"] = HOST
+    async with TestClient(app_with_echo(signatures)) as client:
+        honest = await client.post("/echo", content=b"honest", headers=headers)
+        swapped = await client.post("/echo", content=b"forged", headers=headers)
+    assert honest.status == 200, honest.json()
+    assert honest.json()["verified"] is True
+    assert swapped.status == 400
+
+
+async def test_the_covered_component_set_reaches_a_policy():
+    """A policy reading `signature_verified` must be able to ask what was signed."""
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url=f"https://{HOST}/context",
+        body=b"honest",
+        created=int(now),
+    )
+    headers["Host"] = HOST
+    app = app_with_echo(signatures)
+
+    seen: dict = {}
+
+    @app.post("/context")
+    async def context(request) -> dict:
+        seen.update(signatures.cedar_context(request))
+        return {"ok": True}
+
+    async with TestClient(app) as client:
+        await client.post("/context", content=b"honest", headers=headers)
+    assert seen["signature_verified"] is True
+    assert "content-digest" in seen["signature_covered"]
+    assert "@query" in seen["signature_covered"]
+
+
+# --- the nonce ledger is a bounded resource ---------------------------------
+
+
+async def test_an_unverifiable_signature_does_not_fill_the_nonce_ledger():
+    """`saml.py:1213-1219` states the rule this module has to follow.
+
+    A ledger is reachable by anyone who can name a `keyid`, and a `keyid` is
+    published in the operator's directory. Claiming before the signature
+    verifies makes the replay defence a denial-of-service primitive against the
+    agents it protects.
+    """
+    now = 1_700_000_000.0
+    ledger = NonceLedger(max_entries=4, ttl=300.0)
+    signatures = build(nonces=ledger, clock=lambda: now)
+    async with TestClient(app_with(signatures)) as client:
+        for index in range(8):
+            headers = signed_headers(clock=now, nonce=f"flood-{index}")
+            headers["Signature"] = "sig1=:" + base64.b64encode(b"\x00" * 64).decode() + ":"
+            refused = (await client.get("/probe", headers=headers)).json()
+            assert refused["reason"] == "signature does not verify"
+    assert ledger.size == 0
+    assert ledger.refusals == 0
+
+
+async def test_a_nonce_cannot_be_burned_by_an_unverifiable_request():
+    """The sharper form: pre-spending the identifier a real agent is about to use."""
+    now = 1_700_000_000.0
+    ledger = NonceLedger(max_entries=8, ttl=300.0)
+    signatures = build(nonces=ledger, clock=lambda: now)
+    honest = signed_headers(clock=now, nonce="n-victim")
+    forged = dict(honest)
+    forged["Signature"] = "sig1=:" + base64.b64encode(b"\x00" * 64).decode() + ":"
+    async with TestClient(app_with(signatures)) as client:
+        assert (await client.get("/probe", headers=forged)).json()["verified"] is False
+        assert (await client.get("/probe", headers=honest)).json()["verified"] is True
+
+
+async def test_a_streaming_handler_gets_the_same_body_guarantee():
+    """The digest is hashed chunk by chunk, so streaming is not a way around it.
+
+    A handler that never materialises the body would otherwise read forged bytes
+    with a verified signature beside them -- the same defect, reachable by
+    choosing the other reader.
+    """
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url=f"https://{HOST}/drain",
+        body=b"honest",
+        created=int(now),
+    )
+    headers["Host"] = HOST
+    app = app_with(signatures)
+
+    @app.post("/drain")
+    async def drain(request) -> dict:
+        seen = 0
+        async for chunk in request.stream():
+            seen += len(chunk)
+        return {"seen": seen}
+
+    async with TestClient(app) as client:
+        honest = await client.post("/drain", content=b"honest", headers=headers)
+        swapped = await client.post("/drain", content=b"forged", headers=headers)
+    assert honest.status == 200, honest.json()
+    assert honest.json() == {"seen": 6}
+    assert swapped.status == 400

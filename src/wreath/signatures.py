@@ -27,6 +27,28 @@ an unverified caller may reach:
 request. It says nothing about whether that agent is welcome, and conflating the
 two rebuilds the `User-Agent` allow-list with extra steps and more code.
 
+## What "this request" means, exactly
+
+A signature covers the components the caller listed, and **anything it does not
+list rides along unauthenticated.** That is the protocol working as designed,
+and it is why the required set here is not the minimum the RFC permits:
+
+* `@method`, `@authority`, `@path` and **`@query`** are demanded of every
+  signature. Without the query the signature is over an *endpoint*, so `?x=1`
+  and `?admin=1` produce identical bases and anyone who observes one signed
+  request replays it with the parameters of their choosing.
+* **`content-digest` is demanded of any request that carries a body**, and the
+  digest is *recomputed from the bytes*. Covering the header alone is worth
+  nothing: it canonicalizes as a string like any other header, so a signature
+  over it proves only that the sender typed it. The body has not arrived when
+  this middleware runs, so the expectation is parked on `request.state` and
+  `Request.body()`/`Request.stream()` spend it -- a mismatch is a 400 there.
+
+`SignatureFacts.covered` and the `signature_covered` context key publish the
+component list, so a policy can require an end-to-end signature
+(`context.signature_covered.contains("content-digest")`) instead of reading
+`signature_verified` and assuming what it covered.
+
 ## What it does not do on the request path
 
 **It never fetches a key.** Key material comes from a directory refreshed off
@@ -85,6 +107,7 @@ change with its own measurement.
 from __future__ import annotations
 
 import base64
+import hashlib
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -95,6 +118,7 @@ from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
 from ._reqcache import resolve_once
 from .exceptions import HTTPException
 from .kv import KV
+from .state import BODY_CHECK_SLOT
 from .temporal import Duration
 
 __all__ = [
@@ -134,7 +158,28 @@ _ALGORITHMS: Final = frozenset({"ed25519"})
 #: host; binding method, authority and path is what makes it a signature over
 #: *this* request. Refusing rather than accepting-and-noting, because a caller
 #: that omits them has not made a weaker claim, it has made a different one.
-_REQUIRED_COMPONENTS: Final = ("@method", "@authority", "@path")
+#:
+#: `@query` is in the set because leaving it out makes this a signature over an
+#: **endpoint** rather than a request: `?x=1` and `?admin=1` produce the same
+#: base, so anyone who observes one signed request replays it against any query
+#: string they like. RFC 9421 §2.2.7 covers the absolute query including the
+#: leading `?`, so a request with no query is still distinguishable from one
+#: with an empty one.
+_REQUIRED_COMPONENTS: Final = ("@method", "@authority", "@path", "@query")
+
+#: The component that covers the body, and the other half of the same hole.
+#: Required of any request that carries one -- see `_BODY_METHODS` below.
+_DIGEST_COMPONENT: Final = "content-digest"
+
+#: `Content-Digest` algorithms this module will check, per RFC 9530 §3. An
+#: allow-list rather than a lookup into `hashlib`: `sha-1` and `md5` are
+#: registered spellings, and accepting one would let a caller choose a digest
+#: nobody should be relying on for integrity.
+_DIGEST_ALGORITHMS: Final = ("sha-256", "sha-512")
+
+#: Where the deferred body check waits between ingress and the first read of the
+#: body. See `Signatures._verify_headers` and `Request._check_body`.
+_DIGEST_SLOT: Final = BODY_CHECK_SLOT
 
 #: Ceiling on the two signature headers together. They are attacker-supplied and
 #: parsed before anything is verified, so the parse has to be bounded by
@@ -488,6 +533,51 @@ def signature_base(
 
 
 # --------------------------------------------------------------------------
+# The body -- covered by reference, checked when it arrives
+# --------------------------------------------------------------------------
+
+
+def _carries_body(headers: Mapping[bytes, bytes]) -> bool:
+    """Whether this request has a body a signature would have to cover.
+
+    Read off the framing headers rather than the method, because the method is
+    not what decides: a `DELETE` may carry a body and a `POST` may not. A caller
+    who *adds* a body to a bodyless signed request has to add the framing for it
+    too, which is what makes this the honest test rather than a heuristic.
+    """
+    length = headers.get(b"content-length")
+    if length is not None and length.strip() not in (b"", b"0"):
+        return True
+    return headers.get(b"transfer-encoding") is not None
+
+
+def _digest_expectation(raw: bytes | None) -> tuple[str, bytes]:
+    """The one algorithm and digest a covered `Content-Digest` commits to.
+
+    RFC 9530 §3: a structured dictionary of byte sequences keyed by algorithm.
+    A sender may list several; this takes the strongest it recognises and
+    refuses a header that names none of them, because a digest nobody checks is
+    the defect this exists to close.
+    """
+    if raw is None:
+        raise SignatureError("covered header 'content-digest' is not present")
+    parsed = _parse_dictionary(raw.decode("latin-1"), inner_list=False)
+    for algorithm in reversed(_DIGEST_ALGORITHMS):
+        entry = parsed.get(algorithm)
+        if entry is None:
+            continue
+        value = entry[0]
+        if not isinstance(value, bytes):
+            raise SignatureError("content-digest value must be a byte sequence")
+        return algorithm, value
+    raise SignatureError("content-digest names no supported algorithm")
+
+
+def _digest(algorithm: str, body: bytes) -> bytes:
+    return hashlib.new(algorithm.replace("-", ""), body).digest()
+
+
+# --------------------------------------------------------------------------
 # Replay
 # --------------------------------------------------------------------------
 
@@ -541,6 +631,20 @@ class NonceLedger:
     def size(self) -> int:
         """Live nonces, expired ones excluded."""
         return len(self._table)
+
+    def seen(self, nonce: str, *, now: float | None = None) -> bool:
+        """Whether `nonce` is already spent. Records nothing, counts a replay.
+
+        The read half of `claim`, split out so a verifier can refuse a replay
+        before paying for a signature check without letting an unverified caller
+        write to the ledger. A full ledger is **not** a hit here: refusing on
+        fullness is `claim`'s job, and doing it in the lookup would restore the
+        exhaustion this split exists to remove.
+        """
+        if self._table.peek(nonce, None, now) is None:
+            return False
+        self.replays += 1
+        return True
 
     def claim(self, nonce: str, *, now: float | None = None) -> bool:
         """Whether `nonce` is fresh. Records it when it is.
@@ -665,12 +769,18 @@ class SignatureFacts:
         reason: Why an unverified request was not verified. For logs and
             `doctor`, never for the client -- telling a caller which check
             failed hands them an oracle.
+        covered: The component identifiers the signature covered, lowercased and
+            in the order the caller listed them. **A policy that cares what was
+            signed has to be able to ask**: `verified` alone says a signature
+            checked out, not what it was a signature over, and the two answers
+            differ by exactly the components a caller chose to leave out.
     """
 
     verified: bool = False
     agent: str | None = None
     key_id: str | None = None
     reason: str | None = None
+    covered: tuple[str, ...] = ()
 
 
 #: The answer for a request that carried no signature at all. Shared rather than
@@ -808,11 +918,18 @@ class Signatures:
         `when` and `unless` shapes read the same on an unsigned request;
         `signature_agent` is absent when there is none, so a policy testing it
         with `has` fails closed rather than matching an empty string.
+
+        `signature_covered` is the covered component set, present whenever the
+        signature verified. A policy that needs a request signed *end to end* --
+        `context.signature_covered.contains("content-digest")` -- can say so,
+        rather than reading `signature_verified` and hoping.
         """
         facts = self.facts(request)
         context: dict[str, object] = {"signature_verified": facts.verified}
-        if facts.verified and facts.agent is not None:
-            context["signature_agent"] = facts.agent
+        if facts.verified:
+            context["signature_covered"] = list(facts.covered)
+            if facts.agent is not None:
+                context["signature_agent"] = facts.agent
         return context
 
     def before_sync(self, request: Any) -> None:
@@ -883,10 +1000,25 @@ class Signatures:
         if not isinstance(raw_bytes, bytes):
             raise SignatureError("signature value must be a byte sequence")
 
-        covered = {name.lower() for name, _ in components}
+        covered_order = tuple(name.lower() for name, _ in components)
+        covered = set(covered_order)
         missing = [name for name in self._required if name not in covered]
         if missing:
             raise SignatureError(f"signature does not cover {missing[0]}")
+        if _carries_body(headers) and _DIGEST_COMPONENT not in covered:
+            # Not in `_required`, because a bodyless GET has nothing to digest
+            # and demanding one would refuse every well-formed crawler request.
+            # A request that *does* carry a body and covers no digest has signed
+            # a message the body is not part of, which is the same hole as the
+            # uncovered query one line up.
+            raise SignatureError(f"signature does not cover {_DIGEST_COMPONENT}")
+        # Parsed before the verify below, with the rest of the cheap refusals: a
+        # malformed digest is a refusal that costs ~17us here and ~2.5ms there.
+        expected_digest = (
+            _digest_expectation(headers.get(b"content-digest"))
+            if _DIGEST_COMPONENT in covered
+            else None
+        )
 
         created = params.get("created")
         if not isinstance(created, int):
@@ -924,10 +1056,23 @@ class Signatures:
             raise SignatureError("unknown signing key")
 
         nonce = params.get("nonce")
+        ledger_key = None
         if self.nonces is not None:
             if not isinstance(nonce, str):
                 raise SignatureError("signature has no nonce")
-            if not self.nonces.claim(f"{key_id}\x00{nonce}", now=None):
+            ledger_key = f"{key_id}\x00{nonce}"
+            # **Looked up here; spent below the verify.** A ledger is a bounded
+            # resource reachable by anyone who can name a `keyid`, and a `keyid`
+            # is published in the operator's directory. Claiming here would let
+            # an unauthenticated caller fill it with garbage signatures until it
+            # fails closed on every legitimate agent -- and, worse, burn the
+            # nonce a real agent is about to present. `saml.py:1213-1219` states
+            # the same rule for the same problem; this module used to take the
+            # opposite position.
+            #
+            # The *lookup* stays here because it is cheap and refuses a genuine
+            # replay without paying for the verify -- see the cost note below.
+            if self.nonces.seen(ledger_key):
                 raise SignatureError("signature nonce was already used")
 
         # ------------------------------------------------------------------
@@ -957,7 +1102,27 @@ class Signatures:
 
         if not verify_ed25519(key.public, base, raw_bytes):
             raise SignatureError("signature does not verify")
-        return SignatureFacts(verified=True, agent=agent, key_id=key_id)
+        if ledger_key is not None and self.nonces is not None:
+            # Spent last, and only once everything above has passed. The window
+            # between the lookup and here is one verification wide and closes on
+            # the same answer, so a genuine racing replay is still refused.
+            if not self.nonces.claim(ledger_key, now=None):
+                raise SignatureError("signature nonce was already used")
+        if expected_digest is not None:
+            # **The body is not here yet.** This is global middleware and runs
+            # before the first `receive`; draining the body here would break
+            # streaming for every request in the application to check a header
+            # almost none of them carry. So the expectation is parked and
+            # `Request.body()`/`stream()` spend it -- the only places that can.
+            #
+            # A mismatch raises there rather than downgrading the facts here,
+            # because by the time a handler reads the body the authorization
+            # decision has already been made on a signature that turns out not
+            # to cover these bytes. There is no honest way to continue.
+            request.state.__setattr__(_DIGEST_SLOT, expected_digest)
+        return SignatureFacts(
+            verified=True, agent=agent, key_id=key_id, covered=covered_order
+        )
 
     def _key(self, agent: str | None, key_id: str) -> OkpPublicKey | None:
         """The named key from the agent's directory, or from any configured one.
@@ -1055,7 +1220,8 @@ def sign_request(
     method: str,
     url: str,
     headers: Mapping[str, str] | None = None,
-    components: Sequence[str] = ("@method", "@authority", "@path"),
+    body: bytes | None = None,
+    components: Sequence[str] = _REQUIRED_COMPONENTS,
     created: int | None = None,
     expires_in: int | None = None,
     nonce: str | None = None,
@@ -1072,6 +1238,17 @@ def sign_request(
     await client.get("/v1/x", headers=headers)
     ```
 
+    **Pass `body` when there is one.** It is hashed into a `Content-Digest`
+    header, which is added to both the returned headers and the covered set, and
+    that is the only thing that makes the signature a signature over the payload
+    rather than over the endpoint. A verifier configured with this module's
+    default required set refuses a bodied request that omits it.
+
+    Args:
+        body: The request body, hashed into `Content-Digest` and covered.
+        components: What to cover. Defaults to the required set; `content-digest`
+            is appended when `body` is given and is not already listed.
+
     Raises:
         SignatureError: A component cannot be built from the given request.
         ValueError: `url` is not absolute.
@@ -1086,6 +1263,14 @@ def sign_request(
         for name, value in (headers or {}).items()
     }
     raw.setdefault(b"host", authority.encode("latin-1"))
+    digest_header: str | None = None
+    if body is not None:
+        digest_header = (
+            "sha-256=:" + base64.b64encode(_digest("sha-256", body)).decode("ascii") + ":"
+        )
+        raw[b"content-digest"] = digest_header.encode("ascii")
+        if _DIGEST_COMPONENT not in {name.lower() for name in components}:
+            components = (*components, _DIGEST_COMPONENT)
     message = RequestMessage(
         method=method,
         scheme=scheme,
@@ -1112,6 +1297,8 @@ def sign_request(
         "Signature-Input": f"{label}=({serialized}){_serialize_params(params)}",
         "Signature": f"{label}=:{base64.b64encode(signature).decode('ascii')}:",
     }
+    if digest_header is not None:
+        out["Content-Digest"] = digest_header
     if key.agent is not None:
         out["Signature-Agent"] = _serialize_string(key.agent)
     return out
