@@ -38,10 +38,11 @@ from wreath._mcp.registry import build_tool
 from wreath.auth import Identity, SessionIdentityBackend, second_factor
 from wreath.authorization import CedarAuthorizer
 from wreath.mcp import MCP, PROTOCOL_VERSION, ToolRateLimit, expose_routes
-from wreath.middleware.sessions import SessionMiddleware
 from wreath.orm import Mapped, Model, column
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text, TsVector, Vector
+from wreath.policy import HttpPolicy
+from wreath.policy.sessions import SessionPolicy
 from wreath.queries import Param, Queries, fuse, query
 from wreath.testing import TestClient
 
@@ -192,7 +193,7 @@ async def test_the_stamp_wreath_users_writes_is_the_claim_the_tool_reads() -> No
     """
     ran: list[str] = []
     app = Wreath()
-    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.configure_auth(SessionIdentityBackend())
 
     @app.post("/sessions", tags=("public",))

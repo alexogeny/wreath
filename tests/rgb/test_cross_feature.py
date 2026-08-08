@@ -119,9 +119,9 @@ class TestIdempotencyIgnoredSignal:
     "appears to work" right up until it matters."""
 
     async def test_an_ignored_key_says_so(self):
-        from wreath.middleware.idempotency import IdempotencyMiddleware
+        from wreath.policy.idempotency import IdempotencyPolicy
 
-        middleware = IdempotencyMiddleware()
+        middleware = IdempotencyPolicy()
 
         class _State:
             def get(self, name, default=None):
@@ -151,10 +151,10 @@ class TestIdempotencyIgnoredSignal:
 
     async def test_a_guarded_request_says_nothing(self):
         from wreath.auth import Identity
-        from wreath.middleware.idempotency import IdempotencyMiddleware
+        from wreath.policy.idempotency import IdempotencyPolicy
         from wreath.response import JSONResponse
 
-        middleware = IdempotencyMiddleware()
+        middleware = IdempotencyPolicy()
 
         class _State:
             def __init__(self):
