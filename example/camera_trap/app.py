@@ -26,8 +26,8 @@ from __future__ import annotations
 from wreath.app import Wreath
 from wreath.auth import SessionIdentityBackend
 from wreath.authorization import CedarAuthorizer, permissions_router
-from wreath.middleware import SessionMiddleware
 from wreath.orm import Session
+from wreath.policy import HttpPolicy, SessionPolicy
 from wreath.progress import ProgressRegistry
 
 from . import tasks
@@ -75,15 +75,13 @@ def build(*, validate_schema: str = "error") -> Wreath:
 
     # --- who you are ---------------------------------------------------------
     #
-    # `add_global_middleware`, not `add_middleware`. Route middleware is
-    # compiled into a route's tape and runs *after* authentication has decided,
-    # while `SessionIdentityBackend` reads `request.state.session` *during*
-    # authentication -- so the route-middleware spelling hands every protected
-    # route a 401 with a perfectly valid cookie in hand. The framework now
-    # refuses that combination at route-compile time and names this call in the
-    # message, so the ordering is enforced rather than remembered.
-    application.add_global_middleware(
-        SessionMiddleware(secret=SETTINGS.session_secret(), secure=SETTINGS.session_secure)
+    # Session state is a first-class activation policy, fixed before identity.
+    application.configure_http_policy(
+        HttpPolicy(
+            session=SessionPolicy(
+                secret=SETTINGS.session_secret(), secure=SETTINGS.session_secure
+            )
+        )
     )
     application.configure_auth(
         SessionIdentityBackend(),

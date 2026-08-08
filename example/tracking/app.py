@@ -23,7 +23,7 @@ from __future__ import annotations
 from wreath.app import Wreath
 from wreath.auth import SessionIdentityBackend
 from wreath.authorization import CedarAuthorizer
-from wreath.middleware import SessionMiddleware
+from wreath.policy import HttpPolicy, SessionPolicy
 from wreath.rooms import RoomRegistry
 
 from .config import SCHEMA, SETTINGS
@@ -76,12 +76,9 @@ def build(*, validate_schema: str = "error", cross_worker: bool = True) -> Wreat
 
     # --- who you are ---------------------------------------------------------
     #
-    # `add_global_middleware`, not `add_middleware`: route middleware runs
-    # *after* authentication has decided, and `SessionIdentityBackend` reads
-    # `request.state.session` *during* it. The framework refuses the wrong
-    # spelling at route-compile time and names this call in the message.
-    application.add_global_middleware(
-        SessionMiddleware(secret=SETTINGS.session_secret())
+    # Session state is a first-class activation policy, fixed before identity.
+    application.configure_http_policy(
+        HttpPolicy(session=SessionPolicy(secret=SETTINGS.session_secret()))
     )
     # The same engine `tracking.policies.precision_for` queries directly. One
     # policy set, one evaluator, two entry points -- the route decorators go

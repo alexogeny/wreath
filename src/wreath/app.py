@@ -26,7 +26,7 @@ from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from . import telemetry as _telemetry
-from ._auth.backends import AuthenticationBackend, AuthorizationProvider
+from ._auth.backends import AuthenticationBackend, AuthorizationProvider, BearerTokenBackend
 from ._auth.models import Identity
 from ._auth.requirements import (
     AuthRequirement,
@@ -45,6 +45,9 @@ from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
 from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
+from ._pure.authz import (
+    build_compiled_capability_mask as _pure_build_compiled_capability_mask,
+)
 from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
 from ._routing import Router as CompiledRouter
 from .binding import (
@@ -74,6 +77,7 @@ from .logging import finish_session as _log_finish_session
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
+    _CONTENT_LENGTHS,
     FileResponse,
     JSONResponse,
     PreparedResponse,
@@ -82,6 +86,8 @@ from .response import (
     Send,
     StreamingResponse,
     TextResponse,
+    _coerce_encoded_json,
+    _EncodedJSON,
     coerce_bytes,
     coerce_json,
     coerce_text,
@@ -93,10 +99,19 @@ from .websocket import WebSocket, WebSocketDisconnect
 _build_capability_mask = (
     _pure_build_capability_mask if _core is None else _core.build_capability_mask
 )
+_build_compiled_capability_mask = (
+    _pure_build_compiled_capability_mask
+    if _core is None
+    else _core.build_compiled_capability_mask
+)
 
 # Baseline Response.__call__ used to detect subclasses that override sending;
 # only unmodified responses ride the one-shot "wreath.response" server extension.
 _RESPONSE_CALL = Response.__call__
+# Shared immutable half of the direct native JSON header list. The dynamic
+# content-length pair is still built per body so HTTP/2 preserves the same
+# observable headers as an ordinary JSONResponse.
+_NATIVE_JSON_TYPE_HEADER = (b"content-type", JSONResponse.media_type)
 
 
 def _arm_cancel_on_disconnect(send: Any, enabled: bool) -> None:
@@ -227,19 +242,6 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
     return _capture_dependency
 
 
-def _first_session_publisher(middleware: Iterable[Any]) -> Any | None:
-    """The first item in `middleware` that publishes `request.state.session`.
-
-    Keyed on the `publishes_session` attribute rather than on
-    `SessionMiddleware` itself, so a replacement session middleware is covered
-    by `_reject_session_after_authentication` too.
-    """
-    for item in middleware:
-        if getattr(item, "publishes_session", False):
-            return item
-    return None
-
-
 def walk_claims(holders: Iterable[Any]) -> Iterator[tuple[Any, Any, Any]]:
     """`(holder, candidate, claim)` for everything in `holders` that owns tables.
 
@@ -279,7 +281,11 @@ MAX_ACCESS_CLAUSES = 64
 #: OpenAPI document. Anything not named here -- including the default,
 #: "production" -- gets neither route and no existence leak.
 NON_PRODUCTION_ENVIRONMENTS: tuple[str, ...] = (
-    "dev", "development", "local", "test", "testing",
+    "dev",
+    "development",
+    "local",
+    "test",
+    "testing",
 )
 
 ExceptionHandler = Callable[[Request, Exception], Awaitable[Any]]
@@ -356,7 +362,7 @@ class _StaticMatcher:
             if path == prefix.rstrip("/"):
                 return handler, {"path": ""}
             if path.startswith(prefix):
-                return handler, {"path": path[len(prefix):]}
+                return handler, {"path": path[len(prefix) :]}
         return None
 
 
@@ -415,9 +421,7 @@ def _hook_program(
     after_hooks: list[tuple[Any, int]] = []
     for item in middleware:
         before_sync = getattr(item, "before_sync", None)
-        before = (
-            before_sync if before_sync is not None else getattr(item, "before", None)
-        )
+        before = before_sync if before_sync is not None else getattr(item, "before", None)
         after_sync = getattr(item, "after_sync", None)
         after_inplace = getattr(item, "after_inplace", None)
         after = (
@@ -430,9 +434,7 @@ def _hook_program(
             mode = 2 if after_inplace is not None else (1 if after_sync is not None else 0)
             after_hooks.append((after, mode))
         if before is not None:
-            before_hooks.append(
-                (before, before_sync is not None, error_afters, len(after_hooks))
-            )
+            before_hooks.append((before, before_sync is not None, error_afters, len(after_hooks)))
     return tuple(before_hooks), tuple(after_hooks)
 
 
@@ -455,9 +457,7 @@ class _DynamicMatcher:
     __slots__ = ("_routes",)
 
     def __init__(self) -> None:
-        self._routes: list[
-            tuple[str, re.Pattern[str], re.Pattern[str] | None, Handler]
-        ] = []
+        self._routes: list[tuple[str, re.Pattern[str], re.Pattern[str] | None, Handler]] = []
 
     def add(self, path: str, method: str, host: str | None, handler: Handler) -> None:
         self._routes.append(
@@ -513,9 +513,7 @@ class _MountedResponse(Response):
                 return
             parent_names = {name.lower() for name, _value in self.headers}
             child_headers = [
-                pair
-                for pair in message.get("headers", ())
-                if pair[0].lower() not in parent_names
+                pair for pair in message.get("headers", ()) if pair[0].lower() not in parent_names
             ]
             child_headers.extend(self.headers)
             forwarded = dict(message)
@@ -572,10 +570,13 @@ class Wreath:
         "_all_capability_mask",
         "_application_image",
         "_auth_backend",
+        "_bearer_verifier",
+        "_bearer_verifier_is_async",
         "_app_scope",
         "_authorizer",
         "_cancel_on_disconnect",
         "_capabilities",
+        "_capability_descriptor",
         "_classify",
         "_compile_lock",
         "_crud_enabled",
@@ -621,6 +622,7 @@ class Wreath:
         "_preflight_fallback",
         "_probe",
         "_resolve",
+        "_resolve_identity",
         "_route_methods",
         "_routes",
         "_routing",
@@ -692,9 +694,12 @@ class Wreath:
         self._match = self.router._table.match
         self._classify = getattr(self.router._table, "classify", None)
         self._resolve = getattr(self.router._table, "resolve", None)
+        self._resolve_identity = getattr(self.router._table, "resolve_identity", None)
         self._probe = getattr(self.router._table, "probe", None)
         self.debug = debug
         self._auth_backend: AuthenticationBackend | None = None
+        self._bearer_verifier: Any = None
+        self._bearer_verifier_is_async = False
         self._authorizer: AuthorizationProvider | None = None
         # Values from `Depends(..., scope="app")`. Owned by this application
         # and torn down by its lifespan shutdown -- never a module global, so
@@ -702,6 +707,11 @@ class Wreath:
         self._app_scope = AppScope()
         self._validation_formatter: Any = None
         self._capabilities: dict[str, int] = {"authenticated": 1}
+        self._capability_descriptor: tuple[int, dict[str, int], dict[str, int]] = (
+            1,
+            {},
+            {},
+        )
         self._all_capability_mask = 1
         self._fallback_exception_handler: ExceptionHandler | None = None
         self._preflight_fallback: Callable[[Request], Awaitable[Any]] | None = None
@@ -1031,9 +1041,7 @@ class Wreath:
         if name in self._object_stores:
             raise ValueError(f"duplicate object store: {name}")
         if backend == "local":
-            store: Any = LocalObjectStore(
-                options["root"], url_secret=options.get("url_secret")
-            )
+            store: Any = LocalObjectStore(options["root"], url_secret=options.get("url_secret"))
         elif backend == "s3":
             import os
             from urllib.parse import urlsplit
@@ -1063,8 +1071,15 @@ class Wreath:
             client = HTTPClient(f"objects:{name}", base_url=base_url)
             self._http_clients[f"__objects_{name}"] = client
             store = S3ObjectStore(
-                client, bucket=bucket, region=region, access_key=ak, secret_key=sk,
-                session_token=token, host=host, scheme=scheme, path_style=path_style,
+                client,
+                bucket=bucket,
+                region=region,
+                access_key=ak,
+                secret_key=sk,
+                session_token=token,
+                host=host,
+                scheme=scheme,
+                path_style=path_style,
             )
         else:
             raise ValueError(f"unknown object-store backend: {backend!r}")
@@ -1194,9 +1209,15 @@ class Wreath:
             known = ", ".join(sorted(self._databases)) or "none"
             raise KeyError(f"unknown database {database!r}; configured: {known}")
         runner = JobRunner(
-            self._databases[database], name=name, workload=workload,
-            concurrency=concurrency, lease=lease, poll_interval=poll_interval,
-            schema=schema, batch=batch, progress=progress,
+            self._databases[database],
+            name=name,
+            workload=workload,
+            concurrency=concurrency,
+            lease=lease,
+            poll_interval=poll_interval,
+            schema=schema,
+            batch=batch,
+            progress=progress,
         )
         self._job_runners[name] = runner
         self._declared_databases[id(runner)] = (runner, self._databases[database])
@@ -1250,7 +1271,6 @@ class Wreath:
         self._dirty = True
         return store
 
-
     def entities(
         self,
         name: str = "default",
@@ -1281,8 +1301,12 @@ class Wreath:
             known = ", ".join(sorted(self._message_buses)) or "none"
             raise KeyError(f"unknown message bus {bus!r}; configured: {known}")
         registry = EntityRegistry(
-            self._databases[database], self._message_buses[bus],
-            channel=channel, table=table, lease=lease, max_pending=max_pending,
+            self._databases[database],
+            self._message_buses[bus],
+            channel=channel,
+            table=table,
+            lease=lease,
+            max_pending=max_pending,
         )
         self._entity_registries[name] = registry
         self._declared_databases[id(registry)] = (registry, self._databases[database])
@@ -1310,8 +1334,12 @@ class Wreath:
             known = ", ".join(sorted(self._databases)) or "none"
             raise KeyError(f"unknown database {database!r}; configured: {known}")
         bus = MessageBus(
-            self._databases[database], name=name, workload=workload, schema=schema,
-            poll_interval=poll_interval, lease=lease,
+            self._databases[database],
+            name=name,
+            workload=workload,
+            schema=schema,
+            poll_interval=poll_interval,
+            lease=lease,
         )
         self._message_buses[name] = bus
         self._declared_databases[id(bus)] = (bus, self._databases[database])
@@ -1338,9 +1366,7 @@ class Wreath:
 
         if database not in self._databases:
             known = ", ".join(sorted(self._databases)) or "none"
-            raise ValueError(
-                f"unknown PostgreSQL database: {database!r}; configured: {known}"
-            )
+            raise ValueError(f"unknown PostgreSQL database: {database!r}; configured: {known}")
         if database in self._orm_registries:
             raise ValueError(f"duplicate ORM registry for database: {database!r}")
         registry = Registry(
@@ -1402,7 +1428,11 @@ class Wreath:
         return router
 
     def metrics(
-        self, source: Any, *, path: str = "/metrics", namespace: str = "wreath",
+        self,
+        source: Any,
+        *,
+        path: str = "/metrics",
+        namespace: str = "wreath",
         route_labels: Any = None,
     ) -> Any:
         """Mount a Prometheus scrape endpoint rendering `source.snapshot()`."""
@@ -1419,7 +1449,7 @@ class Wreath:
         `wreath.users.user_router`'s keyword arguments. `secret` signs the
         verification and password-reset tokens, so it must be stable across
         restarts. Login writes the session principal the auth stack reads, which
-        requires `SessionMiddleware`: without it `/login` answers 500 and signs
+        requires `SessionPolicy`: without it `/login` answers 500 and signs
         nobody in.
         """
         from .users import user_router
@@ -1548,9 +1578,7 @@ class Wreath:
         if not 100 <= status_code <= 599:
             raise ValueError("status_code must be between 100 and 599")
         response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
-        route_security = tuple(
-            (name, tuple(scopes)) for name, scopes in (security or {}).items()
-        )
+        route_security = tuple((name, tuple(scopes)) for name, scopes in (security or {}).items())
 
         def register(handler: Handler) -> Handler:
             check_placeholders(path)
@@ -1747,6 +1775,12 @@ class Wreath:
         routes for recompilation.
         """
         self._auth_backend = backend
+        if type(backend) is BearerTokenBackend:
+            self._bearer_verifier = backend._verifier
+            self._bearer_verifier_is_async = backend._verifier_is_async
+        else:
+            self._bearer_verifier = None
+            self._bearer_verifier_is_async = False
         self._authorizer = authorizer
         self._dirty = True
 
@@ -1788,7 +1822,7 @@ class Wreath:
         if is_policy_component(middleware):
             raise TypeError(
                 f"{type(middleware).__name__} is first-class HTTP policy, not "
-                "middleware; configure it through Wreath(http_policy=HttpPolicy(...))"
+                "middleware; pass HttpPolicy(...) to Wreath.configure_http_policy()"
             )
         if getattr(middleware, "global_scope", False):
             self.add_global_middleware(middleware, priority=priority)
@@ -1804,9 +1838,7 @@ class Wreath:
         if type(policy) is not HttpPolicy:
             raise TypeError("policy must be an exact HttpPolicy")
         self._http_policy = (
-            policy
-            if self._http_policy is None
-            else self._http_policy.merged(policy)
+            policy if self._http_policy is None else self._http_policy.merged(policy)
         )
         self._dirty = True
 
@@ -1837,12 +1869,16 @@ class Wreath:
         if is_policy_component(middleware):
             raise TypeError(
                 f"{type(middleware).__name__} is first-class HTTP policy, not "
-                "middleware; configure it through Wreath(http_policy=HttpPolicy(...))"
+                "middleware; pass HttpPolicy(...) to Wreath.configure_http_policy()"
             )
         if not any(
             hasattr(middleware, name)
             for name in (
-                "before", "before_sync", "before_websocket", "after", "after_sync",
+                "before",
+                "before_sync",
+                "before_websocket",
+                "after",
+                "after_sync",
                 "after_inplace",
             )
         ):
@@ -1936,9 +1972,7 @@ class Wreath:
 
         mount_root = prefix.strip("/")
         normalized = f"/{mount_root}/" if mount_root else "/"
-        handler = StaticFiles(
-            directory, html_index=html_index, cache_control=cache_control
-        )
+        handler = StaticFiles(directory, html_index=html_index, cache_control=cache_control)
         self._static_matcher.add(normalized, cast("Handler", handler))
 
     def websocket(self, path: str) -> Callable[[WebSocketHandler], WebSocketHandler]:
@@ -1972,9 +2006,7 @@ class Wreath:
 
         return register
 
-    def add_exception_handler(
-        self, error_type: type[Exception], handler: ExceptionHandler
-    ) -> None:
+    def add_exception_handler(self, error_type: type[Exception], handler: ExceptionHandler) -> None:
         """Handle `error_type` and its subclasses with `handler`.
 
         `handler(request, error)` is awaited and may return anything a route handler
@@ -2083,16 +2115,20 @@ class Wreath:
                 await self._lifespan(receive, send)
                 return
             raise ValueError(f"unsupported ASGI scope: {scope_type!r}")
-        await self._dispatch_http(
-            scope, receive, send, scope["method"], scope["path"], False
-        )
+        await self._dispatch_http(scope, receive, send, scope["method"], scope["path"], False)
 
-    async def _wreath_http(self, context: Any, receive: Any, send: Send) -> None:
-        """Wreath-server entry point using a lazily materialized ASGI scope."""
+    def _wreath_http(self, context: Any, receive: Any, send: Send) -> Awaitable[None]:
+        """Return the compiled native-server dispatch coroutine directly.
+
+        The protocol eagerly drives the returned coroutine.  Making this seam
+        another ``async def`` wrapped that dispatcher in a second coroutine
+        whose only operation was ``await``; generic ASGI still enters through
+        :meth:`__call__` and keeps its ordinary asynchronous contract.
+        """
         if self._dirty:
             self._compile_routes()
         method = context.method
-        await self._dispatch_http(context, receive, send, method, context.path, True)
+        return self._dispatch_http(context, receive, send, method, context.path, True)
 
     @property
     def _wreath_policy(self) -> Any:
@@ -2111,17 +2147,47 @@ class Wreath:
         requests -- they are fixed the moment routes compile.
 
         So the shape is decided here instead. `_handle_http_plain` exists only
-        for the shape whose branches are all statically false, and it is
-        selected only when they are. Anything else keeps the general path; there
-        is no partially-specialized third dispatcher, because two
-        implementations of dispatch is already the most this is worth.
+        for the shape whose branches are all statically false. Its authenticated
+        sibling owns the same shape plus the one unavoidable activation seam;
+        without it a protected route classified once here, discarded that
+        answer, then entered the universal dispatcher and classified again while
+        walking every absent feature branch. The distinction is measured in
+        `native_architecture_hunt_2026-08-08.json`, not speculative cloning.
         """
+        policy = self._http_policy
+        fast_policy = policy is not None and not (
+            policy._dynamic_always or policy._has_activation or policy._has_post_auth
+        )
         if (
-            self._http_policy is None
+            (policy is None or fast_policy)
             and not self._has_global_http_hooks
             and self._dynamic_matcher is None
         ):
-            self._dispatch_http = self._handle_http_plain
+            self._dispatch_http = (
+                (
+                    self._handle_http_plain_auth_sync
+                    if policy is None
+                    and self._bearer_verifier is not None
+                    and not self._bearer_verifier_is_async
+                    and all(
+                        not _iscoroutinefunction(handler)
+                        and requirement.second_factor is None
+                        and not requirement.policies
+                        for handler, requirement in self._handler_requirements.items()
+                    )
+                    else self._handle_http_plain_auth
+                )
+                if self._auth_handlers and self._classify is not None and self._resolve is not None
+                else (
+                    self._handle_http_plain_sync
+                    if policy is None
+                    and all(
+                        not _iscoroutinefunction(handler)
+                        for handler in self._handler_requirements
+                    )
+                    else self._handle_http_plain
+                )
+            )
         elif (
             self._route_programs is not None
             and self._dynamic_matcher is None
@@ -2137,6 +2203,240 @@ class Wreath:
         else:
             self._dispatch_http = self._handle_http
 
+    def _handle_http_plain_auth_sync(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> Awaitable[None]:
+        """Activate a synchronous bearer route without a dispatcher coroutine.
+
+        Startup proves the verifier and every handler synchronous, and proves
+        no route needs an asynchronous policy or second-factor continuation.
+        Portable ASGI still uses the ordinary dispatcher because only Wreath's
+        native request context can scan and verify the bearer token before a
+        Python :class:`Request` exists.
+        """
+        if not native_response:
+            return self._handle_http_plain_auth(
+                scope, receive, send, method, path, native_response
+            )
+        classify = cast(Any, self._classify)
+        classification, payload = classify(method, path)
+        if classification == 0 or scope.flight:
+            return self._handle_http(scope, receive, send, method, path, native_response)
+
+        identity: Identity | None = None
+        matched = payload if classification == 1 else None
+        needs_auth = classification == 2 or payload[0] in self._auth_handlers
+        backend = self._auth_backend
+        if needs_auth and backend is not None:
+            try:
+                verified = scope._bearer_verify(self._bearer_verifier)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                return self._finish_http_plain_auth_sync_error(
+                    scope, receive, send, method, native_response, error
+                )
+            if verified is None:
+                identity = None
+            elif isinstance(verified, Identity):
+                identity = verified
+            elif isawaitable(verified):
+                return self._finish_http_plain_auth_sync_identity(
+                    scope,
+                    receive,
+                    send,
+                    method,
+                    native_response,
+                    classification,
+                    payload,
+                    needs_auth,
+                    verified,
+                )
+            else:
+                identity = cast(Identity | None, verified)
+        return self._activate_http_plain_auth_sync(
+            scope,
+            receive,
+            send,
+            method,
+            native_response,
+            classification,
+            payload,
+            matched,
+            needs_auth,
+            backend,
+            identity,
+        )
+
+    async def _finish_http_plain_auth_sync_identity(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+        classification: int,
+        payload: Any,
+        needs_auth: bool,
+        verified: Awaitable[Identity | None],
+    ) -> None:
+        """Continue when a verifier declared synchronous returns an awaitable."""
+        try:
+            identity = await verified
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            await self._finish_http_plain_auth_sync_error(
+                scope, receive, send, method, native_response, error
+            )
+            return
+        await self._activate_http_plain_auth_sync(
+            scope,
+            receive,
+            send,
+            method,
+            native_response,
+            classification,
+            payload,
+            payload if classification == 1 else None,
+            needs_auth,
+            self._auth_backend,
+            identity,
+        )
+
+    def _activate_http_plain_auth_sync(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+        classification: int,
+        payload: Any,
+        matched: Any,
+        needs_auth: bool,
+        backend: Any,
+        identity: Identity | None,
+    ) -> Awaitable[None]:
+        """Resolve and invoke after synchronous native bearer identification."""
+        if classification == 2:
+            resolve = cast(Any, self._resolve)
+            matched = (
+                resolve(payload, 0)
+                if identity is None
+                else cast(Any, self._resolve_identity)(
+                    payload,
+                    self._capability_descriptor,
+                    identity.roles,
+                    identity.permissions,
+                )
+            )
+            if matched is None:
+                return self._finish_http_plain_auth_sync_denial(
+                    scope,
+                    receive,
+                    send,
+                    method,
+                    native_response,
+                    backend,
+                    identity,
+                    None,
+                )
+        if matched is None:
+            raise RuntimeError("classified authentication resolved without a route")
+        handler, path_params = matched
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
+        request = Request(scope, receive, path_params, self._limits, app=self)
+        if _telemetry.PROPAGATING:
+            _telemetry.bind_propagation(request)
+        request._set_identity(identity)
+        if needs_auth:
+            requirement = self._handler_requirements[handler]
+            if identity is None and requirement.access_level > 0:
+                return self._finish_http_plain_auth_sync_denial(
+                    scope,
+                    receive,
+                    send,
+                    method,
+                    native_response,
+                    backend,
+                    identity,
+                    request,
+                )
+        json_body: bytes | None = None
+        try:
+            value = handler(request)
+            if value.__class__ is _COROUTINE:
+                return self._finish_http_plain_await_value(
+                    request, value, send, method, scope, native_response
+                )
+            if method != "HEAD" and value.__class__ is dict:
+                json_body = _json_dumps(value)
+                response = None
+            elif method != "HEAD" and value.__class__ is _EncodedJSON:
+                json_body = value.body
+                response = None
+            else:
+                response = value if value.__class__ is Response else _coerce_response(value)
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            return self._finish_http_plain_error(
+                request, error, send, method, scope, native_response
+            )
+        if json_body is not None:
+            protocol = cast(Any, send).__self__
+            size = len(json_body)
+            length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
+            headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
+            return protocol._wreath_response(200, headers, json_body)
+        return self._finish_http_plain(response, send, method, scope, native_response)
+
+    async def _finish_http_plain_auth_sync_error(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+        error: Exception,
+    ) -> None:
+        """Put verifier failures through the ordinary application boundary."""
+        request = Request(scope, receive, limits=self._limits, app=self)
+        response = await self._handle_exception(request, error)
+        await self._finish_http_plain(response, send, method, scope, native_response)
+
+    async def _finish_http_plain_auth_sync_denial(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+        backend: Any,
+        identity: Identity | None,
+        request: Request | None,
+    ) -> None:
+        """Materialize a request only for an authenticated route's refusal."""
+        if request is None:
+            request = Request(scope, receive, limits=self._limits, app=self)
+            request._set_identity(identity)
+        try:
+            error: HTTPException = (
+                Unauthorized(challenge=None if backend is None else backend.challenge(request))
+                if identity is None
+                else Forbidden("Forbidden")
+            )
+        except Exception as raised:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, raised)
+        else:
+            response = await self._handle_exception(request, error)
+        await self._finish_http_plain(response, send, method, scope, native_response)
+
     async def _handle_http_plain(
         self,
         scope: Any,
@@ -2146,7 +2446,13 @@ class Wreath:
         path: str,
         native_response: bool,
     ) -> None:
-        """Dispatch for an application with no global middleware and no dynamic routes.
+        """Dispatch for an app with no custom hooks or dynamic routes.
+
+        A stateless first-class policy may use this path only when the native
+        server compiled and ran it.  A conforming third-party ASGI server, or a
+        policy option the native descriptor refused, delegates to the general
+        dispatcher before this method has any effect.  This keeps policy a
+        server feature on the native path without weakening the portable path.
 
         Every delegation back to `_handle_http` is decided **before** this method
         has any effect a second dispatch would repeat -- before the `Request`
@@ -2161,18 +2467,20 @@ class Wreath:
         none of which are the path this exists for, and all of which already
         cost more than a lookup elsewhere.
         """
+        policy = self._http_policy
+        if policy is not None and (
+            not native_response or not getattr(scope, "policy_native", False)
+        ):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
         if not native_response and _ambiguous_request_path(scope, path):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
-        classify = self._classify
-        if classify is None:
-            matched = self._match(method, path)
-        else:
-            # A classifying table answers 1 for a route this caller may have
-            # without presenting an identity. 2 is a ticket wanting
-            # authentication and 0 is a miss; both belong to the general path.
-            classification, payload = classify(method, path)
-            matched = payload if classification == 1 else None
+        # `_select_dispatch` assigns every application containing an auth route
+        # to `_handle_http_plain_auth`, so every route reachable here is public.
+        # Asking a classifying table to package `(1, match)` only to unpack it
+        # again was a remnant of the former shared dispatcher, not useful work.
+        matched = self._match(method, path)
         if matched is None or matched[0] in self._auth_handlers:
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
@@ -2194,6 +2502,7 @@ class Wreath:
         request = Request(scope, receive, path_params, self._limits, app=self)
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
+        json_body: bytes | None = None
         try:
             # Called, then awaited only if calling produced something to await.
             # An `async def` route pays one `is` test for that; a `def` route
@@ -2201,17 +2510,343 @@ class Wreath:
             # unwind. See `_ensure_response` for where the convention survives
             # the wrappers.
             value = handler(request)
-            response = _coerce_response(
-                await value if value.__class__ is _COROUTINE else value
-            )
+            value = await value if value.__class__ is _COROUTINE else value
+            if (
+                native_response
+                and policy is None
+                and method != "HEAD"
+                and value.__class__ is dict
+            ):
+                json_body = _json_dumps(value)
+                response = None
+            elif (
+                native_response
+                and policy is None
+                and method != "HEAD"
+                and value.__class__ is _EncodedJSON
+            ):
+                json_body = value.body
+                response = None
+            else:
+                response = value if value.__class__ is Response else _coerce_response(value)
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
         # `active_global` is 0 rather than omitted: this application has no
         # global after hooks to unwind, so `_finish_http` skips its loop and
         # both dispatchers keep one response-emission path between them.
-        await self._finish_http(
-            request, response, send, method, scope, native_response, 0
-        )
+        if policy is None:
+            if json_body is not None:
+                protocol = cast(Any, send).__self__
+                size = len(json_body)
+                length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
+                headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
+                await protocol._wreath_response(200, headers, json_body)
+                return
+            await self._finish_http_plain(response, send, method, scope, native_response)
+        else:
+            await self._finish_http(request, response, send, method, scope, native_response, 0)
+
+    def _handle_http_plain_sync(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> Awaitable[None]:
+        """Return a sync handler's native egress without a dispatcher coroutine.
+
+        Startup selects this only when every route handler is synchronous and
+        the application has no policy, hook, dynamic route or auth seam.  The
+        success path therefore has nothing to await between the server and the
+        response one-shot. A sync function may still deliberately return a
+        coroutine, and failures still use the ordinary exception boundary; the
+        uncommon continuation below owns those two cases.
+        """
+        if not native_response and _ambiguous_request_path(scope, path):
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        matched = self._match(method, path)
+        if matched is None:
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        if scope.flight if native_response else ("_wreath_flight" in scope):
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        handler, path_params = matched
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
+        request = Request(scope, receive, path_params, self._limits, app=self)
+        if _telemetry.PROPAGATING:
+            _telemetry.bind_propagation(request)
+        json_body: bytes | None = None
+        try:
+            value = handler(request)
+            if value.__class__ is _COROUTINE:
+                return self._finish_http_plain_await_value(
+                    request, value, send, method, scope, native_response
+                )
+            if native_response and method != "HEAD" and value.__class__ is dict:
+                json_body = _json_dumps(value)
+                response = None
+            elif native_response and method != "HEAD" and value.__class__ is _EncodedJSON:
+                json_body = value.body
+                response = None
+            else:
+                response = value if value.__class__ is Response else _coerce_response(value)
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            return self._finish_http_plain_error(
+                request, error, send, method, scope, native_response
+            )
+        if json_body is not None:
+            protocol = cast(Any, send).__self__
+            size = len(json_body)
+            length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
+            headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
+            return protocol._wreath_response(200, headers, json_body)
+        return self._finish_http_plain(response, send, method, scope, native_response)
+
+    async def _finish_http_plain_await_value(
+        self,
+        request: Request,
+        value: Awaitable[Any],
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+    ) -> None:
+        """Complete a coroutine deliberately returned by a synchronous route."""
+        try:
+            resolved = await value
+            response = (
+                resolved
+                if resolved.__class__ is Response
+                else _coerce_response(resolved)
+            )
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        await self._finish_http_plain(response, send, method, scope, native_response)
+
+    async def _finish_http_plain_error(
+        self,
+        request: Request,
+        error: Exception,
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+    ) -> None:
+        """Keep the ordinary exception boundary off successful sync requests."""
+        response = await self._handle_exception(request, error)
+        await self._finish_http_plain(response, send, method, scope, native_response)
+
+    async def _handle_http_plain_auth(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> None:
+        """Dispatch a protected route without entering the universal pipeline.
+
+        Selected only for a classifying router with no custom global hooks,
+        dynamic matcher, activation policy, post-auth policy or stage hook. A
+        recorder, an ambiguous portable path, a miss, or portable execution of
+        a native policy delegates before this method has any effect.
+
+        On the native server an exact built-in bearer backend scans and invokes
+        its verifier directly from the request context. A successful caller is
+        therefore known before a Python ``Request`` exists; the object is first
+        materialized when the resolved route is activated. Custom backends and
+        portable ASGI retain their request-based authentication definition.
+        """
+        policy = self._http_policy
+        if policy is not None and (
+            not native_response or not getattr(scope, "policy_native", False)
+        ):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        if not native_response and _ambiguous_request_path(scope, path):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+
+        classify = cast(Any, self._classify)
+        classification, payload = classify(method, path)
+        if classification == 0:
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        if scope.flight if native_response else ("_wreath_flight" in scope):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+
+        request: Request | None = None
+        identity: Identity | None = None
+        matched = payload if classification == 1 else None
+        needs_auth = classification == 2 or payload[0] in self._auth_handlers
+        backend = self._auth_backend
+        if needs_auth and backend is not None:
+            try:
+                verifier = self._bearer_verifier
+                if verifier is not None and native_response:
+                    verified = scope._bearer_verify(verifier)
+                    if verified is None:
+                        identity = None
+                    elif self._bearer_verifier_is_async:
+                        identity = await cast(Awaitable[Identity | None], verified)
+                    elif isinstance(verified, Identity):
+                        identity = verified
+                    elif isawaitable(verified):
+                        identity = await verified
+                    else:
+                        identity = cast(Identity | None, verified)
+                else:
+                    request = Request(scope, receive, limits=self._limits, app=self)
+                    if _telemetry.PROPAGATING:
+                        _telemetry.bind_propagation(request)
+                    if verifier is None:
+                        identity = await backend.authenticate(request)
+                    else:
+                        verified = request._bearer_verify(verifier)
+                        if verified is None:
+                            identity = None
+                        elif self._bearer_verifier_is_async:
+                            identity = await cast(Awaitable[Identity | None], verified)
+                        elif isinstance(verified, Identity):
+                            identity = verified
+                        elif isawaitable(verified):
+                            identity = await verified
+                        else:
+                            identity = cast(Identity | None, verified)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                if request is None:
+                    request = Request(scope, receive, limits=self._limits, app=self)
+                response = await self._handle_exception(request, error)
+                await self._finish_http(request, response, send, method, scope, native_response, 0)
+                return
+
+        if classification == 2:
+            resolve = cast(Any, self._resolve)
+            matched = (
+                resolve(payload, 0)
+                if identity is None
+                else cast(Any, self._resolve_identity)(
+                    payload,
+                    self._capability_descriptor,
+                    identity.roles,
+                    identity.permissions,
+                )
+            )
+            if matched is None:
+                if request is None:
+                    request = Request(scope, receive, limits=self._limits, app=self)
+                request._set_identity(identity)
+                try:
+                    error: HTTPException = (
+                        Unauthorized(
+                            challenge=None if backend is None else backend.challenge(request)
+                        )
+                        if identity is None
+                        else Forbidden("Forbidden")
+                    )
+                except Exception as raised:  # noqa: BLE001 -- see _handle_exception
+                    response = await self._handle_exception(request, raised)
+                else:
+                    response = await self._handle_exception(request, error)
+                await self._finish_http(request, response, send, method, scope, native_response, 0)
+                return
+
+        if matched is None:
+            raise RuntimeError("classified authentication resolved without a route")
+        handler, path_params = matched
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
+        if request is None:
+            request = Request(scope, receive, path_params, self._limits, app=self)
+            if _telemetry.PROPAGATING:
+                _telemetry.bind_propagation(request)
+        else:
+            request.path_params = path_params or {}
+        request._set_identity(identity)
+
+        if needs_auth:
+            requirement = self._handler_requirements[handler]
+            if identity is None and requirement.access_level > 0:
+                try:
+                    challenge = None if backend is None else backend.challenge(request)
+                    response = await self._handle_exception(
+                        request, Unauthorized(challenge=challenge)
+                    )
+                except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                    response = await self._handle_exception(request, error)
+                await self._finish_http(request, response, send, method, scope, native_response, 0)
+                return
+            if requirement.second_factor is not None or requirement.policies:
+                try:
+                    stage_response = await self._authorize_request(
+                        request,
+                        requirement,
+                        authentication_attempted=True,
+                        access_resolved=classification == 2,
+                    )
+                except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                    response = await self._handle_exception(request, error)
+                    await self._finish_http(
+                        request, response, send, method, scope, native_response, 0
+                    )
+                    return
+                if stage_response is not None:
+                    await self._finish_http(
+                        request,
+                        stage_response,
+                        send,
+                        method,
+                        scope,
+                        native_response,
+                        0,
+                    )
+                    return
+
+        json_body: bytes | None = None
+        try:
+            value = handler(request)
+            value = await value if value.__class__ is _COROUTINE else value
+            if (
+                native_response
+                and policy is None
+                and method != "HEAD"
+                and value.__class__ is dict
+            ):
+                json_body = _json_dumps(value)
+                response = None
+            elif (
+                native_response
+                and policy is None
+                and method != "HEAD"
+                and value.__class__ is _EncodedJSON
+            ):
+                json_body = value.body
+                response = None
+            else:
+                response = value if value.__class__ is Response else _coerce_response(value)
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        if policy is None:
+            if json_body is not None:
+                protocol = cast(Any, send).__self__
+                size = len(json_body)
+                length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
+                headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
+                await protocol._wreath_response(200, headers, json_body)
+                return
+            await self._finish_http_plain(response, send, method, scope, native_response)
+        else:
+            await self._finish_http(request, response, send, method, scope, native_response, 0)
 
     async def _handle_http_compartment(
         self,
@@ -2323,9 +2958,8 @@ class Wreath:
             request._set_route_outcome("route")
         try:
             value = handler(request)
-            response = _coerce_response(
-                await value if value.__class__ is _COROUTINE else value
-            )
+            value = await value if value.__class__ is _COROUTINE else value
+            response = value if value.__class__ is Response else _coerce_response(value)
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
         await self._finish_http(
@@ -2349,11 +2983,12 @@ class Wreath:
         native_response: bool,
     ) -> None:
         request: Request | None = None
+        policy_activated = False
+        authentication_attempted = False
+        access_resolved = False
         policy = self._http_policy
         policy_native = bool(
-            policy is not None
-            and native_response
-            and getattr(scope, "policy_native", False)
+            policy is not None and native_response and getattr(scope, "policy_native", False)
         )
         if policy is not None and not policy_native:
             request = Request(scope, receive, limits=self._limits, app=self)
@@ -2451,6 +3086,27 @@ class Wreath:
                 ticket = payload
                 if request is None:
                     request = Request(scope, receive, limits=self._limits, app=self)
+                # A classifying router authenticates before it resolves the
+                # route.  First-class activation policy (notably sessions) must
+                # therefore run here, before the backend reads request state;
+                # the ordinary resolved-route activation below is too late for
+                # this branch.
+                if policy is not None and policy._has_activation:
+                    try:
+                        await policy._reference_activation(request)
+                        policy_activated = True
+                    except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                        response = await self._handle_exception(request, error)
+                        await self._finish_http(
+                            request,
+                            response,
+                            send,
+                            method,
+                            scope,
+                            native_response,
+                            active_global,
+                        )
+                        return
                 backend = self._auth_backend
                 if backend is None:
                     if global_hooks:
@@ -2479,11 +3135,24 @@ class Wreath:
                 # Armed-only AUTH phase. `flight == 2` only on the native path
                 # with a recorder attached and this request sampled into
                 # Detailed; every other request pays just the member read.
-                auth_start = (
-                    _monotonic_ns() if native_response and scope.flight == 2 else 0
-                )
+                auth_start = _monotonic_ns() if native_response and scope.flight == 2 else 0
                 try:
-                    identity = await backend.authenticate(request)
+                    verifier = self._bearer_verifier
+                    if verifier is None:
+                        identity = await backend.authenticate(request)
+                    else:
+                        verified = request._bearer_verify(verifier)
+                        if verified is None:
+                            identity = None
+                        elif self._bearer_verifier_is_async:
+                            identity = await cast(Awaitable[Identity | None], verified)
+                        elif isinstance(verified, Identity):
+                            identity = verified
+                        elif isawaitable(verified):
+                            identity = await verified
+                        else:
+                            identity = cast(Identity | None, verified)
+                    authentication_attempted = True
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
                     # On a classifying table authentication runs *here*, before
                     # the route is resolved, and this is the error boundary it
@@ -2511,9 +3180,7 @@ class Wreath:
                     )
                     return
                 if auth_start:
-                    scope._flight_phase(
-                        _PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start
-                    )
+                    scope._flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
                 request._set_identity(identity)
                 stage_response = (
                     await self._run_stage("identity", request)
@@ -2531,8 +3198,16 @@ class Wreath:
                         active_global,
                     )
                     return
-                caller_mask = self._identity_mask(identity)
-                matched = resolve(ticket, caller_mask)
+                matched = (
+                    resolve(ticket, 0)
+                    if identity is None
+                    else cast(Any, self._resolve_identity)(
+                        ticket,
+                        self._capability_descriptor,
+                        identity.roles,
+                        identity.permissions,
+                    )
+                )
                 if matched is None:
                     error: HTTPException
                     if identity is None:
@@ -2549,8 +3224,13 @@ class Wreath:
                                 request._set_route_outcome("protected")
                             response = await self._handle_exception(request, raised)
                             await self._finish_http(
-                                request, response, send, method, scope,
-                                native_response, active_global,
+                                request,
+                                response,
+                                send,
+                                method,
+                                scope,
+                                native_response,
+                                active_global,
                             )
                             return
                     else:
@@ -2562,6 +3242,7 @@ class Wreath:
                         request, response, send, method, scope, native_response, active_global
                     )
                     return
+                access_resolved = True
         elif matched is None:
             # Trie routes are selected without capability filtering; the common
             # authorization stage below checks the compiled route requirement.
@@ -2581,9 +3262,7 @@ class Wreath:
             if global_hooks:
                 request._set_route_outcome("miss")
             stage_response = (
-                await self._run_stage("miss", request)
-                if "miss" in self._stage_hooks
-                else None
+                await self._run_stage("miss", request) if "miss" in self._stage_hooks else None
             )
             if stage_response is not None:
                 await self._finish_http(
@@ -2630,9 +3309,7 @@ class Wreath:
                 # the case people register one for. With nothing registered this
                 # produces the same response it always did.
                 if allow:
-                    response = await self._handle_exception(
-                        request, MethodNotAllowed(allow=allow)
-                    )
+                    response = await self._handle_exception(request, MethodNotAllowed(allow=allow))
                 else:
                     response = (
                         _NOT_FOUND
@@ -2729,6 +3406,15 @@ class Wreath:
                 _capture_marker.set(_make_dependency_capturer(scope, dep_rule))
         if global_hooks and request._get_route_outcome() in (None, "ingress"):
             request._set_route_outcome("route")
+        if policy is not None and policy._has_activation and not policy_activated:
+            try:
+                await policy._reference_activation(request)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
+                await self._finish_http(
+                    request, response, send, method, scope, native_response, active_global
+                )
+                return
         # `_auth_handlers` is `needs_backend` decided once, at compile time: the
         # answer cannot change between requests, and asking a requirement per
         # request costs a property call and several attribute reads on the path
@@ -2736,20 +3422,26 @@ class Wreath:
         # `wreath-request-trace` reads it to learn which compiled endpoints are
         # route code.
         requirement = (
-            self._handler_requirements.get(handler)
-            if handler in self._auth_handlers
-            else None
+            self._handler_requirements.get(handler) if handler in self._auth_handlers else None
         )
         if requirement is not None:
             try:
                 if flight_phase is None:
-                    stage_response = await self._authorize_request(request, requirement)
+                    stage_response = await self._authorize_request(
+                        request,
+                        requirement,
+                        authentication_attempted=authentication_attempted,
+                        access_resolved=access_resolved,
+                    )
                 else:
                     auth_start = _monotonic_ns()
-                    stage_response = await self._authorize_request(request, requirement)
-                    flight_phase(
-                        _PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start
+                    stage_response = await self._authorize_request(
+                        request,
+                        requirement,
+                        authentication_attempted=authentication_attempted,
+                        access_resolved=access_resolved,
                     )
+                    flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 response = await self._handle_exception(request, error)
                 await self._finish_http(
@@ -2767,8 +3459,8 @@ class Wreath:
                     active_global,
                 )
                 return
-        if self._http_policy is not None:
-            stage_response = await self._http_policy._reference_post_auth(request)
+        if policy is not None and policy._has_post_auth:
+            stage_response = await policy._reference_post_auth(request)
             if stage_response is not None:
                 await self._finish_http(
                     request,
@@ -2781,9 +3473,7 @@ class Wreath:
                 )
                 return
         stage_response = (
-            await self._run_stage("action", request)
-            if "action" in self._stage_hooks
-            else None
+            await self._run_stage("action", request) if "action" in self._stage_hooks else None
         )
         if stage_response is not None:
             await self._finish_http(
@@ -2795,20 +3485,16 @@ class Wreath:
                 value = handler(request)
                 if value.__class__ is _COROUTINE:
                     value = await value
-                response = _coerce_response(value)
+                response = value if value.__class__ is Response else _coerce_response(value)
             else:
                 handler_start = _monotonic_ns()
                 value = handler(request)
                 if value.__class__ is _COROUTINE:
                     value = await value
-                flight_phase(
-                    _PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start
-                )
+                flight_phase(_PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start)
                 serialize_start = _monotonic_ns()
-                response = _coerce_response(value)
-                flight_phase(
-                    _PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start
-                )
+                response = value if value.__class__ is Response else _coerce_response(value)
+                flight_phase(_PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start)
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
 
@@ -2848,9 +3534,7 @@ class Wreath:
                     after(request, response)
                 else:
                     candidate = (
-                        after(request, response)
-                        if mode == 1
-                        else await after(request, response)
+                        after(request, response) if mode == 1 else await after(request, response)
                     )
                     response = _coerce_response(candidate)
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2858,14 +3542,18 @@ class Wreath:
 
         policy = self._http_policy
         policy_native = bool(
-            policy is not None
-            and native_response
-            and getattr(scope, "policy_native", False)
+            policy is not None and native_response and getattr(scope, "policy_native", False)
         )
-        if policy is not None and not policy_native:
-            response = _coerce_response(
-                await policy._reference_egress(request, response)
-            )
+        if policy is not None:
+            native_one_shot = type(response).__call__ is _RESPONSE_CALL
+            if not policy_native:
+                response = _coerce_response(await policy._reference_egress(request, response))
+            elif policy._dynamic_always or (policy.compression is not None and not native_one_shot):
+                response = _coerce_response(
+                    await policy._reference_dynamic_egress(
+                        request, response, native_one_shot=native_one_shot
+                    )
+                )
 
         # Close this request's log scope before the response goes out, so its
         # records are published while the recorder still holds the context they
@@ -2881,7 +3569,15 @@ class Wreath:
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
             plain = cast(Response, response)
             protocol = cast(Any, send).__self__
-            await protocol._wreath_response(plain.status, plain.headers, plain.body)
+            if policy is not None and policy.compression is not None:
+                await protocol._wreath_response(
+                    plain.status,
+                    plain.headers,
+                    plain.body,
+                    request.identity is not None,
+                )
+            else:
+                await protocol._wreath_response(plain.status, plain.headers, plain.body)
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -2921,14 +3617,96 @@ class Wreath:
                 self.background_errors += 1
                 raise
 
+    def _finish_http_plain(
+        self,
+        response: Response | StreamingResponse | FileResponse | PreparedResponse,
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+    ) -> Awaitable[None]:
+        """Return emission directly for the compile-proved plain shape.
+
+        The ordinary response has no work after its native one-shot send.  An
+        ``async def`` wrapper around that awaitable created and drove a second
+        coroutine per response merely because egress had traditionally been a
+        pipeline stage. Background work still needs sequencing and takes the
+        slow coroutine below.
+        """
+        if response.background is not None:
+            return self._finish_http_plain_background(
+                response, send, method, scope, native_response
+            )
+        extensions = None if native_response else scope.get("extensions")
+        if method == "HEAD":
+            return response(_head_send(send))
+        if type(response).__call__ is _RESPONSE_CALL and native_response:
+            plain = cast(Response, response)
+            protocol = cast(Any, send).__self__
+            return protocol._wreath_response(plain.status, plain.headers, plain.body)
+        if type(response).__call__ is _RESPONSE_CALL and (
+            extensions is not None and "wreath.response" in extensions
+        ):
+            plain = cast(Response, response)
+            return send(
+                {
+                    "type": "wreath.response",
+                    "status": plain.status,
+                    "headers": plain.headers,
+                    "body": plain.body,
+                }
+            )
+        return response(send)
+
+    async def _finish_http_plain_background(
+        self,
+        response: Response | StreamingResponse | FileResponse | PreparedResponse,
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+    ) -> None:
+        """Emit a plain response, then supervise its uncommon background job."""
+        background = response.background
+        if background is None:
+            raise RuntimeError("plain background emission has no background job")
+        extensions = None if native_response else scope.get("extensions")
+        if method == "HEAD":
+            await response(_head_send(send))
+        elif type(response).__call__ is _RESPONSE_CALL and native_response:
+            plain = cast(Response, response)
+            protocol = cast(Any, send).__self__
+            await protocol._wreath_response(plain.status, plain.headers, plain.body)
+        elif type(response).__call__ is _RESPONSE_CALL and (
+            extensions is not None and "wreath.response" in extensions
+        ):
+            plain = cast(Response, response)
+            await send(
+                {
+                    "type": "wreath.response",
+                    "status": plain.status,
+                    "headers": plain.headers,
+                    "body": plain.body,
+                }
+            )
+        else:
+            await response(send)
+        try:
+            async with _asyncio_timeout(self._background_timeout):
+                await background()
+        except TimeoutError:
+            self.background_timeouts += 1
+            raise
+        except Exception:
+            self.background_errors += 1
+            raise
+
     async def _handle_websocket(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if _ambiguous_request_path(scope, scope["path"]):
             await send({"type": "websocket.close", "code": 1008})
             return
         router = self._ws_router
-        matched = (
-            router.match("WEBSOCKET", scope["path"]) if router is not None else (None, None)
-        )
+        matched = router.match("WEBSOCKET", scope["path"]) if router is not None else (None, None)
         handler, path_params = matched
         if handler is None:
             # No route: reject the handshake (the server answers with 403).
@@ -2976,6 +3754,12 @@ class Wreath:
             if policy is not None and not policy_native:
                 candidate = await policy._reference_websocket(request)
                 if candidate is not None:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+            if policy is not None and policy._has_activation:
+                try:
+                    await policy._reference_activation(request)
+                except Exception:  # noqa: BLE001 -- security ingress fails closed
                     await send({"type": "websocket.close", "code": 1008})
                     return
             for before, is_sync in websocket_hooks:
@@ -3074,9 +3858,7 @@ class Wreath:
                 )
             return ProblemResponse(status=500, detail="Internal Server Error")
 
-    def _allowed_methods(
-        self, method: str, path: str, host: str = ""
-    ) -> tuple[str, ...]:
+    def _allowed_methods(self, method: str, path: str, host: str = "") -> tuple[str, ...]:
         """Methods other than `method` that this `path` does answer, for `Allow`.
 
         Called only after the route table, the static mounts and the CORS
@@ -3163,65 +3945,8 @@ class Wreath:
         # where `_dirty` is already False.
         with self._compile_lock:
             if not self._dirty:
-                return          # another caller compiled while we waited
+                return  # another caller compiled while we waited
             self._compile_routes_locked()
-
-    def _reject_session_after_authentication(self, app_middleware: tuple[Any, ...]) -> None:
-        """Refuse a session-reading backend behind route-scoped session middleware.
-
-        `SessionIdentityBackend` reads `request.state.session` during
-        authentication. `SessionMiddleware` is route middleware by design, so it
-        is compiled into a route's tape and runs *after* authorization has
-        already passed -- deliberately, so a miss or a static file never pays to
-        decode a cookie. Register the two together and the session the backend
-        needs is published after the backend has been asked for an identity, so
-        a caller holding a perfectly valid session cookie is refused on every
-        protected route.
-
-        The failure is a 401, which reads as "my login is broken" rather than
-        "these two are wired in the wrong order", and nothing else in the request
-        distinguishes it from a genuine anonymous call. So it is refused here,
-        naming the remedy, rather than left to be discovered in production.
-
-        **Every route-scoped registration is examined, not just
-        `add_middleware()`.** This used to read `self._middleware` alone, so
-        `Router(middleware=[SessionMiddleware(...)])` -- and
-        `@app.get(..., middleware=[...])`, and `include_router(middleware=[...])`
-        -- walked past a refusal that had nothing to look at and shipped the
-        exact 401 it exists to prevent: sign-in answered 200 and `/me` answered
-        401. A refusal that holds on one supported wiring and not another reports
-        safety while providing none (docs/decisions/0024). Nesting needs no
-        special case: `Router.routes` folds an included router's middleware into
-        each route before the application ever sees it, so a session middleware
-        three routers deep arrives in that route's own tuple.
-
-        Raises:
-            TypeError: The authentication backend needs a session and the session
-                middleware is registered on a route pipeline -- the application's,
-                a router's, or one route's.
-        """
-        backend = self._auth_backend
-        if backend is None or not getattr(backend, "requires_session", False):
-            return
-        offender = _first_session_publisher(app_middleware)
-        where = "add_middleware()"
-        if offender is None:
-            for definition in self._routes:
-                offender = _first_session_publisher(definition.middleware)
-                if offender is not None:
-                    where = f"middleware=[...] on {definition.path}"
-                    break
-        if offender is None:
-            return
-        name = type(offender).__name__
-        raise TypeError(
-            f"{type(backend).__name__} reads request.state.session during "
-            f"authentication, but {name} was registered with {where}, "
-            "which runs it after authorization -- every protected route would "
-            f"answer 401 with a valid session cookie. Register it with "
-            f"add_global_middleware({name}(...)) so the session is published "
-            "before authentication runs."
-        )
 
     def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
@@ -3231,10 +3956,8 @@ class Wreath:
             item[2] for item in sorted(self._middleware, key=lambda item: (item[0], item[1]))
         )
         global_middleware = tuple(
-            item[2]
-            for item in sorted(self._global_middleware, key=lambda item: (item[0], item[1]))
+            item[2] for item in sorted(self._global_middleware, key=lambda item: (item[0], item[1]))
         )
-        self._reject_session_after_authentication(app_middleware)
         # Dense directional programs: request dispatch never scans a missing
         # before/after slot. Each before records the exact after-prefix active
         # before and after it completes, preserving partial unwind semantics.
@@ -3359,9 +4082,7 @@ class Wreath:
                     )
                 )
                 if definition.host is not None or ":path}" in definition.path:
-                    dynamic_matcher.add(
-                        definition.path, method, definition.host, compiled
-                    )
+                    dynamic_matcher.add(definition.path, method, definition.host, compiled)
                 else:
                     router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
@@ -3435,8 +4156,7 @@ class Wreath:
 
         image = build_metadata_image(self)
         by_route: dict[tuple[str, str], tuple[int, int]] = {
-            (route.method, route.path): (route.route_id, route.plan_id)
-            for route in image.routes
+            (route.method, route.path): (route.route_id, route.plan_id) for route in image.routes
         }
         mapping: dict[Any, tuple[int, int]] = {
             handler: ids
@@ -3478,9 +4198,7 @@ class Wreath:
         self._flight_capture_plan = plan
         self._flight_arm_registry = registry
 
-    def _capture_headers(
-        self, capture: Any, arms: Any, headers: Any, field_class: int
-    ) -> None:
+    def _capture_headers(self, capture: Any, arms: Any, headers: Any, field_class: int) -> None:
         """Capture the headers both the ceiling and an active arm permit.
 
         The descriptor id comes from the startup ceiling plan (that is the
@@ -3538,13 +4256,13 @@ class Wreath:
             if disposition is None:
                 continue
             capture(
-                _CAP_QUERY_PARAM, ceiling_rule.descriptor_id, int(disposition),
+                _CAP_QUERY_PARAM,
+                ceiling_rule.descriptor_id,
+                int(disposition),
                 value.encode("utf-8"),
             )
 
-    def _capture_completion(
-        self, scope: Any, request: Request, response: Any, arms: Any
-    ) -> None:
+    def _capture_completion(self, scope: Any, request: Request, response: Any, arms: Any) -> None:
         """Capture policy-approved response headers and request/response bodies.
 
         Called only when `_capture_request()` found active arms, so the match
@@ -3562,7 +4280,7 @@ class Wreath:
             self._capture_headers(capture, arms, headers, _CAP_RESPONSE_HEADER)
         request_body = _narrow_body(arms, _FC_REQUEST_BODY)
         if request_body is not None:
-            buffered = request._body
+            buffered = getattr(request, "_body", None)
             if isinstance(buffered, (bytes, bytearray)):
                 _capture_body(capture, _CAP_REQUEST_BODY, request_body, buffered)
         response_body = _narrow_body(arms, _FC_RESPONSE_BODY)
@@ -3584,9 +4302,20 @@ class Wreath:
                 names.update(f"role:{value}" for value in check.values)
             for check in requirement.permission_checks:
                 names.update(f"permission:{value}" for value in check.values)
-        self._capabilities = {
-            name: 1 << index for index, name in enumerate(sorted(names))
-        }
+        self._capabilities = {name: 1 << index for index, name in enumerate(sorted(names))}
+        self._capability_descriptor = (
+            self._capabilities["authenticated"],
+            {
+                name.removeprefix("role:"): mask
+                for name, mask in self._capabilities.items()
+                if name.startswith("role:")
+            },
+            {
+                name.removeprefix("permission:"): mask
+                for name, mask in self._capabilities.items()
+                if name.startswith("permission:")
+            },
+        )
         self._all_capability_mask = (1 << len(self._capabilities)) - 1
 
     def _requirement_clauses(self, requirement: AuthRequirement) -> tuple[int, ...]:
@@ -3596,9 +4325,7 @@ class Wreath:
             ("permission", requirement.permission_checks),
         ):
             for check in checks:
-                masks = [
-                    self._capabilities[f"{prefix}:{value}"] for value in check.values
-                ]
+                masks = [self._capabilities[f"{prefix}:{value}"] for value in check.values]
                 if check.mode == "all":
                     combined = 0
                     for mask in masks:
@@ -3640,7 +4367,9 @@ class Wreath:
     def _identity_mask(self, identity: Identity | None) -> int:
         if identity is None:
             return 0
-        return _build_capability_mask(self._capabilities, identity.roles, identity.permissions)
+        return _build_compiled_capability_mask(
+            self._capability_descriptor, identity.roles, identity.permissions
+        )
 
     async def _run_stage(
         self, stage: str, request: Request
@@ -3655,7 +4384,13 @@ class Wreath:
         return None
 
     async def _authorize_request(
-        self, request: Request, requirement: AuthRequirement, backend: Any = None
+        self,
+        request: Request,
+        requirement: AuthRequirement,
+        backend: Any = None,
+        *,
+        authentication_attempted: bool = False,
+        access_resolved: bool = False,
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse | None:
         """Run authentication and authorization before route middleware.
 
@@ -3665,13 +4400,27 @@ class Wreath:
         """
         auth_backend = backend if backend is not None else self._auth_backend
         identity = request.identity
-        if identity is None:
+        if identity is None and not authentication_attempted:
             if "pre_auth" in self._stage_hooks:
                 stage_response = await self._run_stage("pre_auth", request)
                 if stage_response is not None:
                     return stage_response
             if auth_backend is not None:
-                identity = await auth_backend.authenticate(request)
+                verifier = self._bearer_verifier if backend is None else None
+                if verifier is None:
+                    identity = await auth_backend.authenticate(request)
+                else:
+                    verified = request._bearer_verify(verifier)
+                    if verified is None:
+                        identity = None
+                    elif self._bearer_verifier_is_async:
+                        identity = await cast(Awaitable[Identity | None], verified)
+                    elif isinstance(verified, Identity):
+                        identity = verified
+                    elif isawaitable(verified):
+                        identity = await verified
+                    else:
+                        identity = cast(Identity | None, verified)
                 request._set_identity(identity)
                 if "identity" in self._stage_hooks:
                     stage_response = await self._run_stage("identity", request)
@@ -3688,9 +4437,7 @@ class Wreath:
                 # decorator would have set is refused here, rather than admitted
                 # anonymously with its checks silently skipped.
                 return None
-            challenge = (
-                None if auth_backend is None else auth_backend.challenge(request)
-            )
+            challenge = None if auth_backend is None else auth_backend.challenge(request)
             raise Unauthorized(challenge=challenge)
         if requirement.second_factor is not None:
             # Step-up, checked before roles and policies: the question "did this
@@ -3701,12 +4448,13 @@ class Wreath:
             age = second_factor_age(identity, _wall_clock())
             if age is None or age > requirement.second_factor:
                 raise Forbidden("second_factor_required")
-        for check in requirement.role_checks:
-            if not _check_set(identity.roles, check):
-                raise Forbidden("Forbidden")
-        for check in requirement.permission_checks:
-            if not _check_set(identity.permissions, check):
-                raise Forbidden("Forbidden")
+        if not access_resolved:
+            for check in requirement.role_checks:
+                if not _check_set(identity.roles, check):
+                    raise Forbidden("Forbidden")
+            for check in requirement.permission_checks:
+                if not _check_set(identity.permissions, check):
+                    raise Forbidden("Forbidden")
         if requirement.policies:
             authorizer = self._authorizer
             if authorizer is None:
@@ -3845,9 +4593,7 @@ class Wreath:
         def _scoped(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
             async def guarded_handler(request: Request) -> Any:
                 if needs_guard:
-                    denied = await self._authorize_request(
-                        request, docs_requirement, backend=auth
-                    )
+                    denied = await self._authorize_request(request, docs_requirement, backend=auth)
                     if denied is not None:
                         return denied
                 return await handler(request)
@@ -3897,9 +4643,7 @@ class Wreath:
         self._shutdown_handlers.append(handler)
         return handler
 
-    async def _close_all(
-        self, steps: list[tuple[str, Callable[[], Any]]]
-    ) -> BaseException | None:
+    async def _close_all(self, steps: list[tuple[str, Callable[[], Any]]]) -> BaseException | None:
         """Run every teardown step in order, even when one of them raises.
 
         Releasing resources on a failing path is the one place where stopping at
@@ -3997,11 +4741,7 @@ class Wreath:
                     # Supervised jobs/messaging start after their dependencies
                     # (databases, clients) and before user startup handlers, so a
                     # startup handler may enqueue onto a running runner.
-                    if (
-                        self._job_runners
-                        or self._message_buses
-                        or self._entity_registries
-                    ):
+                    if self._job_runners or self._message_buses or self._entity_registries:
                         from .services import Supervisor
 
                         supervisor = Supervisor()
@@ -4051,9 +4791,7 @@ class Wreath:
                     await self._close_all(steps)
                     # The original failure is what the server needs to see; a
                     # close that also refused is on `lifespan_teardown_errors`.
-                    await send(
-                        {"type": "lifespan.startup.failed", "message": f"{error!r}"}
-                    )
+                    await send({"type": "lifespan.startup.failed", "message": f"{error!r}"})
                     return
                 await send({"type": "lifespan.startup.complete"})
             elif message_type == "lifespan.shutdown":
@@ -4104,9 +4842,7 @@ class Wreath:
                 if failure is None:
                     failure = teardown_failure
                 if failure is not None:
-                    await send(
-                        {"type": "lifespan.shutdown.failed", "message": f"{failure!r}"}
-                    )
+                    await send({"type": "lifespan.shutdown.failed", "message": f"{failure!r}"})
                     return
                 await send({"type": "lifespan.shutdown.complete"})
                 return
@@ -4161,6 +4897,11 @@ def _coerce_response(
     for JSON) that the exact-type tests miss.
     """
     kind = type(value)
+    if kind is _EncodedJSON:
+        body = value.body
+        if status == 200:
+            return _coerce_encoded_json(body)
+        return Response(body, status=status, media_type=JSONResponse.media_type)
     if kind is str:
         return coerce_text(value) if status == 200 else TextResponse(value, status=status)
     if kind is dict:
