@@ -33,7 +33,7 @@ DEFAULT_VIA_NAME = "wreath"
 #: several times, so sending one twice cannot create a second order.
 #:
 #: `POST` is absent and stays absent. A client that knows its POST is safe to
-#: repeat says so with `Idempotency-Key`, which `wreath.middleware.idempotency`
+#: repeat says so with `Idempotency-Key`, which `wreath.policy.idempotency`
 #: already speaks -- and that is a claim only the client can make.
 IDEMPOTENT: frozenset[str] = frozenset(
     {"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"}

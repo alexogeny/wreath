@@ -183,7 +183,7 @@ Only the idempotent methods qualify — `GET`, `HEAD`, `PUT`, `DELETE`,
 reached the origin is indistinguishable from one before it, so retrying risks a
 second order rather than a second attempt. A client that knows its POST is safe
 to repeat says so with `Idempotency-Key` — a claim only the client can make, and
-one [`wreath.middleware.idempotency`](../reference/middleware.md) already
+one [`wreath.policy.idempotency`](../reference/middleware.md) already
 speaks.
 
 ## What the proxy does to headers
