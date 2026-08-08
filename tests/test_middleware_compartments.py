@@ -6,7 +6,7 @@ without it, so declining costs nothing per request -- there is no gate to
 evaluate, the hook is simply absent from the tape that route runs.
 
 That reordering is the whole risk. `_handle_http` runs the global tape *before*
-routing, deliberately: `ProxyHeadersMiddleware` rewrites a forwarded Host that
+routing, deliberately: `ProxyPolicy` rewrites a forwarded Host that
 host-routing then matches on, and a rate limiter is documented to count a flood
 of 404s. `_handle_http_compartment` routes first, so every request shape where
 that would change an answer has to fall back -- and the tests that matter here
@@ -137,7 +137,7 @@ async def test_the_compartment_dispatcher_is_selected_only_when_it_is_safe() -> 
 
 @pytest.mark.asyncio
 async def test_a_host_routed_application_keeps_the_general_dispatcher() -> None:
-    """Host routing matches on a Host `ProxyHeadersMiddleware` may rewrite."""
+    """Host routing matches on a Host `ProxyPolicy` may rewrite."""
     events: list[str] = []
     app = Wreath()
     app.add_middleware(Recorder("cold-only", events, only="/cold"))

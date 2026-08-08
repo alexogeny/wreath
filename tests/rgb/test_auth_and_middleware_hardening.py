@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.middleware.csrf import CSRFMiddleware
 from wreath.middleware.sessions import SessionMiddleware
+from wreath.policy.csrf import CsrfPolicy
 
 _SECRET = "k" * 32
 
 
 class TestSecretStrength:
-    """R-53 / R-62: `CSRFMiddleware` requires a 32-byte secret; the session
+    """R-53 / R-62: `CsrfPolicy` requires a 32-byte secret; the session
     cookie and a bare-string JWT key -- both of which sign credentials -- accept
     anything."""
 
@@ -40,7 +40,7 @@ class TestCsrfHostileCookie:
     raises, turning attacker-controlled input into a 500 rather than a 403."""
 
     async def test_a_non_ascii_cookie_is_a_refusal_not_a_crash(self):
-        middleware = CSRFMiddleware(_SECRET, secure=False)
+        middleware = CsrfPolicy(_SECRET, secure=False)
 
         class _Request:
             method = "POST"
@@ -56,7 +56,7 @@ class TestCsrfHostileCookie:
             def _index_headers(self):
                 return {b"host": b"example.com", b"x-csrf-token": "café".encode()}
 
-        response = await middleware.before(_Request())
+        response = await middleware._ingress(_Request())
         assert response is not None and response.status == 403
 
 
@@ -84,11 +84,11 @@ class TestCsrfMissingOrigin:
         return _Request()
 
     def test_the_fallback_is_not_derived_from_the_secure_flag(self):
-        middleware = CSRFMiddleware(_SECRET, secure=False)
+        middleware = CsrfPolicy(_SECRET, secure=False)
         assert middleware._origin_valid(self._request(), {b"host": b"example.com"}) is False
 
     def test_the_fallback_can_be_asked_for_explicitly(self):
-        middleware = CSRFMiddleware(_SECRET, secure=False, allow_missing_origin=True)
+        middleware = CsrfPolicy(_SECRET, secure=False, allow_missing_origin=True)
         assert middleware._origin_valid(self._request(), {b"host": b"example.com"}) is True
 
 

@@ -71,11 +71,11 @@ per-request object graph that having a Python tape forces into existence."~~
 | --- | --- | --- |
 | having *any* global hook at all | 1.11 µs | 1.56 µs — and the tool's own estimate is 0.41 µs |
 | each extra no-op `before`+`after` pair | 0.24 µs | free; six more pairs measured −0.49 µs total |
-| `SecurityHeadersMiddleware` installed alone | +6.54 µs | −0.24 µs, below the floor |
+| `SecurityHeadersPolicy` installed alone | +6.54 µs | −0.24 µs, below the floor |
 | materializing the header index | (the 14 µs) | +0.75 µs |
 | touching `request.state` | (the 14 µs) | +0.15 µs |
 
-`SecurityHeadersMiddleware` was offered as the proof of the object-graph
+`SecurityHeadersPolicy` was offered as the proof of the object-graph
 hypothesis: 0.45 µs of work, +6.54 µs installed. It is the cheapest middleware
 in the stack and its true marginal cost is *at* the noise floor. The 6.54 µs was
 its position in the round.
@@ -144,7 +144,7 @@ most of it. Do not let it justify anything on its own.
   7 is **−27.58 µs against a 34.88 µs request**, comfortably resolved. The
   ceiling was real all along.
 
-  The `applies()` predicate implemented for `CORSMiddleware` measured −0.05 µs
+  The `applies()` predicate implemented for `CorsPolicy` measured −0.05 µs
   and was reverted. That number was taken with the broken harness and should not
   be trusted either way; CORS's body is 4.1–4.7 µs, so a gate that genuinely
   skips it cannot save 0.05 µs. Whether the predicate worked is now an open
@@ -168,7 +168,7 @@ most of it. Do not let it justify anything on its own.
   two arms only against *each other* and reported 27.12 µs captured of a 27.39 µs
   ceiling. Its baseline was answering 500 on every request — the handler
   returned `Response(..., media_type="application/json")` with a `str` where the
-  signature says `bytes`, which `CSRFMiddleware`'s egress rejects — and the
+  signature says `bytes`, which `CsrfPolicy`'s egress rejects — and the
   error path is slower than a served one, so ~8 µs of the "saving" was the gap
   between a 500 and a 200. The mechanism's share was right; the magnitude was
   inflated by 47%.

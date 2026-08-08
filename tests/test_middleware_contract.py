@@ -17,9 +17,19 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.middleware import RateLimitMiddleware
 from wreath.middleware.base import HeaderSpec, MiddlewareContract, MiddlewareHooks
 from wreath.openapi import ResponseSpec, compare_openapi, generate_openapi
+from wreath.policy import (
+    CorsPolicy,
+    CsrfPolicy,
+    HttpPolicy,
+    RateLimitPolicy,
+    RequestIdPolicy,
+    SecurityHeadersPolicy,
+    ServerTimingPolicy,
+    TrustedHostPolicy,
+)
+from wreath.policy.base import PolicyContract
 from wreath.testing import TestClient
 
 
@@ -257,13 +267,15 @@ async def test_the_documented_ratelimit_policy_equals_what_the_runtime_sends() -
 
     Asserted as equality against a live 429, not as a plausible-looking string.
     """
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(
+            rate_limit=RateLimitPolicy(limit=60, window=60.0, burst=1)
+        )
+    )
 
     @app.get("/widgets")
     async def handler(request: Any) -> dict[str, str]:
         return {"ok": "yes"}
-
-    app.add_middleware(RateLimitMiddleware(limit=60, window=60.0, burst=1))
 
     document = generate_openapi(app)
     headers = document["paths"]["/widgets"]["get"]["responses"]["429"]["headers"]
@@ -320,43 +332,37 @@ def test_every_shipped_middleware_that_has_a_contract_declares_one() -> None:
     Two shipped middleware deliberately declare nothing and are named here so
     the omission stays a decision rather than a gap:
 
-    * `ProxyHeadersMiddleware` reads `X-Forwarded-*` from a *proxy*. Declaring
+    * `ProxyPolicy` reads `X-Forwarded-*` from a *proxy*. Declaring
       them as header parameters would invite an API client to send them, which
       is precisely the spoof the middleware's trust configuration exists to
       prevent.
-    * `WebSocketOriginMiddleware` guards handshakes. It covers no HTTP
+    * `WebSocketOriginPolicy` guards handshakes. It covers no HTTP
       operation, so it has nothing to say about one.
     """
     from wreath.cache_control import CacheControl
     from wreath.middleware import (
         CacheControlMiddleware,
         CompressionMiddleware,
-        CORSMiddleware,
-        CSRFMiddleware,
         IdempotencyMiddleware,
-        RequestIDMiddleware,
-        SecurityHeadersMiddleware,
-        ServerTimingMiddleware,
         SessionMiddleware,
-        TrustedHostMiddleware,
     )
 
     described = [
-        RateLimitMiddleware(limit=60, window=60.0),
+        RateLimitPolicy(limit=60, window=60.0),
         IdempotencyMiddleware(),
-        CSRFMiddleware(secret="x" * 32),
-        RequestIDMiddleware(),
+        CsrfPolicy(secret="x" * 32),
+        RequestIdPolicy(),
         CacheControlMiddleware(default=CacheControl(max_age=60)),
         CompressionMiddleware(),
-        CORSMiddleware(allow_origins=["https://example.test"]),
-        SecurityHeadersMiddleware(),
-        ServerTimingMiddleware(),
+        CorsPolicy(allow_origins=["https://example.test"]),
+        SecurityHeadersPolicy(),
+        ServerTimingPolicy(),
         SessionMiddleware(secret="x" * 32),
-        TrustedHostMiddleware(allowed_hosts=["example.test"]),
+        TrustedHostPolicy(allowed_hosts=["example.test"]),
     ]
     for item in described:
         contract = item.describe()
-        assert isinstance(contract, MiddlewareContract)
+        assert isinstance(contract, (MiddlewareContract, PolicyContract))
         # A contract that declares nothing at all is a describe() nobody needed.
         assert (
             contract.request_headers
@@ -369,13 +375,14 @@ def test_every_shipped_middleware_that_has_a_contract_declares_one() -> None:
 def test_a_middleware_configured_to_emit_nothing_declares_nothing() -> None:
     """The contract describes the instance, not the class.
 
-    `ServerTimingMiddleware(emit_header=False)` still times the request for
+    `ServerTimingPolicy(emit_header=False)` still times the request for
     `request.state`, but the client never sees a header -- so documenting one
     would be a claim about an instance that does not make it.
     """
-    from wreath.middleware import CacheControlMiddleware, ServerTimingMiddleware
+    from wreath.middleware import CacheControlMiddleware
+    from wreath.policy import ServerTimingPolicy
 
-    assert ServerTimingMiddleware(emit_header=False).describe().response_headers == ()
+    assert ServerTimingPolicy(emit_header=False).describe().response_headers == ()
     assert CacheControlMiddleware().describe().response_headers == ()
 
 
@@ -443,7 +450,14 @@ def _generated(app: Wreath) -> dict[str, str]:
 
 
 def _one_route_app(*middleware: Any, method: str = "get") -> Wreath:
-    app = Wreath()
+    rate_limit = next(
+        (item for item in middleware if type(item) is RateLimitPolicy), None
+    )
+    app = Wreath(
+        http_policy=HttpPolicy(rate_limit=rate_limit)
+        if rate_limit is not None
+        else None
+    )
     decorator = getattr(app, method)
 
     @decorator("/widgets")
@@ -451,7 +465,8 @@ def _one_route_app(*middleware: Any, method: str = "get") -> Wreath:
         return {"ok": "yes"}
 
     for item in middleware:
-        app.add_middleware(item)
+        if type(item) is not RateLimitPolicy:
+            app.add_middleware(item)
     return app
 
 
@@ -480,7 +495,7 @@ def test_the_generated_retry_is_bounded_and_says_so() -> None:
     """An unbounded retry amplifies an outage; the ceiling must be visible."""
     from wreath.typegen.targets.typescript import RETRY_CEILING
 
-    app = _one_route_app(RateLimitMiddleware(limit=60, window=60.0))
+    app = _one_route_app(RateLimitPolicy(limit=60, window=60.0))
     runtime = _generated(app)["behaviours.ts"]
 
     assert f"export const RETRY_CEILING = {RETRY_CEILING};" in runtime
@@ -490,7 +505,7 @@ def test_the_generated_retry_is_bounded_and_says_so() -> None:
 
 def test_the_generated_runtime_imports_nothing() -> None:
     """Dependency-free: platform globals only, no package in a lockfile."""
-    app = _one_route_app(RateLimitMiddleware(limit=60, window=60.0))
+    app = _one_route_app(RateLimitPolicy(limit=60, window=60.0))
     runtime = _generated(app)["behaviours.ts"]
 
     for line in runtime.splitlines():
@@ -507,7 +522,7 @@ async def test_the_wire_facts_the_generated_retry_relies_on_are_real() -> None:
     verified is the half that can be: that the server really does produce the
     header the runtime is written against, in the form it parses.
     """
-    app = _one_route_app(RateLimitMiddleware(limit=60, window=60.0, burst=1))
+    app = _one_route_app(RateLimitPolicy(limit=60, window=60.0, burst=1))
 
     async with TestClient(app) as client:
         await client.get("/widgets")

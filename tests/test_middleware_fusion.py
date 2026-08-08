@@ -25,14 +25,19 @@ import pytest
 import wreath.app as app_module
 from wreath import Router, Wreath
 from wreath.middleware import (
-    CORSMiddleware,
-    CSRFMiddleware,
     MiddlewareHooks,
     MiddlewareTape,
-    ProxyHeadersMiddleware,
-    RequestIDMiddleware,
-    SecurityHeadersMiddleware,
-    ServerTimingMiddleware,
+)
+from wreath.policy import (
+    CorsPolicy,
+    CsrfPolicy,
+    HttpPolicy,
+    ProxyPolicy,
+    RateLimitPolicy,
+    RequestIdPolicy,
+    SecurityHeadersPolicy,
+    ServerTimingPolicy,
+    TrustedHostPolicy,
 )
 from wreath.response import TextResponse
 
@@ -690,10 +695,13 @@ async def test_included_router_preserves_the_response_only_contract(
 
 @pytest.mark.asyncio
 async def test_reused_response_does_not_accumulate_observability_headers() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware())
-    app.add_middleware(ServerTimingMiddleware())
-    app.add_middleware(SecurityHeadersMiddleware())
+    app = Wreath(
+        http_policy=HttpPolicy(
+            request_id=RequestIdPolicy(),
+            server_timing=ServerTimingPolicy(),
+            security_headers=SecurityHeadersPolicy(),
+        )
+    )
     response = TextResponse("ok")
 
     @app.get("/", response_only=True)
@@ -710,8 +718,9 @@ async def test_reused_response_does_not_accumulate_observability_headers() -> No
 
 @pytest.mark.asyncio
 async def test_reused_response_replaces_its_csrf_cookie() -> None:
-    app = Wreath()
-    app.add_middleware(CSRFMiddleware("x" * 32, secure=False))
+    app = Wreath(
+        http_policy=HttpPolicy(csrf=CsrfPolicy("x" * 32, secure=False))
+    )
     response = TextResponse("ok")
 
     @app.get("/", response_only=True)
@@ -726,79 +735,72 @@ async def test_reused_response_replaces_its_csrf_cookie() -> None:
     assert cookies[0].startswith(b"wreath_csrf=")
 
 
-# --- built-ins actually adopt before_sync ------------------------------------
+# --- built-ins are not middleware hooks --------------------------------------
 
 
-def test_trusted_host_exposes_a_synchronous_before_hook() -> None:
-    from wreath.middleware import TrustedHostMiddleware
-
-    mw = TrustedHostMiddleware(("example.com",))
-    assert hasattr(mw, "before_sync")
-    assert not inspect.iscoroutinefunction(mw.before_sync)
-    assert getattr(mw, "before", None) is None
+def test_trusted_host_exposes_no_public_hook_protocol() -> None:
+    policy = TrustedHostPolicy(("example.com",))
+    assert not hasattr(policy, "before_sync")
+    assert not hasattr(policy, "before")
 
 
-def test_rate_limit_local_store_exposes_a_synchronous_before_hook() -> None:
-    from wreath.middleware import RateLimitMiddleware
-
-    local = RateLimitMiddleware(limit=5)          # default memory store
-    assert getattr(local, "before_sync", None) is not None
-    assert not inspect.iscoroutinefunction(local.before_sync)
-    assert local.before is None
+def test_rate_limit_exposes_no_public_hook_protocol() -> None:
+    local = RateLimitPolicy(limit=5)
+    assert not hasattr(local, "before_sync")
+    assert not hasattr(local, "before")
 
 
 @pytest.mark.parametrize(
     ("middleware", "hooks"),
     (
         pytest.param(
-            lambda: ProxyHeadersMiddleware(trusted=("127.0.0.1",)),
-            ("before_sync",),
+            lambda: ProxyPolicy(trusted=("127.0.0.1",)),
+            ("before", "before_sync", "after", "after_inplace"),
             id="proxy",
         ),
         pytest.param(
-            lambda: CORSMiddleware(allow_origins=("https://example.com",)),
-            ("before_sync", "after_inplace"),
+            lambda: CorsPolicy(allow_origins=("https://example.com",)),
+            ("before", "before_sync", "after", "after_inplace"),
             id="cors",
         ),
         pytest.param(
-            lambda: CSRFMiddleware("x" * 32, secure=False),
-            ("before_sync", "after_inplace"),
+            lambda: CsrfPolicy("x" * 32, secure=False),
+            ("before", "before_sync", "after", "after_inplace"),
             id="csrf",
         ),
         pytest.param(
-            SecurityHeadersMiddleware,
-            ("after_inplace",),
+            SecurityHeadersPolicy,
+            ("before", "before_sync", "after", "after_inplace"),
             id="security-headers",
         ),
         pytest.param(
-            RequestIDMiddleware,
-            ("before_sync", "after_inplace"),
+            RequestIdPolicy,
+            ("before", "before_sync", "after", "after_inplace"),
             id="request-id",
         ),
         pytest.param(
-            ServerTimingMiddleware,
-            ("before_sync", "after_inplace"),
+            ServerTimingPolicy,
+            ("before", "before_sync", "after", "after_inplace"),
             id="server-timing",
         ),
     ),
 )
-def test_non_suspending_builtins_expose_sync_hooks(
+def test_policy_builtins_expose_no_public_hooks(
     middleware: Any, hooks: tuple[str, ...]
 ) -> None:
     instance = middleware()
     for name in hooks:
-        hook = getattr(instance, name, None)
-        assert hook is not None
-        assert not inspect.iscoroutinefunction(hook)
+        assert not hasattr(instance, name)
 
 
 @pytest.mark.asyncio
 async def test_trusted_host_and_rate_limit_still_enforce_through_the_pipeline() -> None:
-    from wreath.middleware import RateLimitMiddleware, TrustedHostMiddleware
-
-    app = Wreath()
-    app.add_middleware(TrustedHostMiddleware(("allowed.test",)))
-    app.add_middleware(RateLimitMiddleware(limit=1))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("allowed.test",)),
+            rate_limit=RateLimitPolicy(limit=1),
+        )
+    )
 
     @app.get("/")
     async def endpoint(request: Any) -> str:

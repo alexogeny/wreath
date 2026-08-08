@@ -1,4 +1,4 @@
-"""RateLimitMiddleware and its stores."""
+"""RateLimitPolicy and its stores."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ import pytest
 from wreath import Wreath
 from wreath._native import _core
 from wreath._pure.ratelimit import TokenBucket as PureTokenBucket
-from wreath.middleware import (
+from wreath.policy import (
+    HttpPolicy,
     MemoryRateLimitStore,
     PostgresRateLimitStore,
-    RateLimitMiddleware,
+    RateLimitPolicy,
 )
 from wreath.testing import TestClient
 
@@ -111,8 +112,7 @@ def test_native_bucket_agrees_with_pure_reference() -> None:
 
 
 def _app(**kwargs: Any) -> Wreath:
-    app = Wreath()
-    app.add_middleware(RateLimitMiddleware(**kwargs), priority=-5)
+    app = Wreath(http_policy=HttpPolicy(rate_limit=RateLimitPolicy(**kwargs)))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -162,8 +162,9 @@ async def test_custom_key_separates_callers() -> None:
 
 
 async def test_limiting_covers_responses_the_router_never_reached() -> None:
-    app = Wreath()
-    app.add_middleware(RateLimitMiddleware(limit=1, window=60.0), priority=-5)
+    app = Wreath(
+        http_policy=HttpPolicy(rate_limit=RateLimitPolicy(limit=1, window=60.0))
+    )
 
     async with TestClient(app) as client:
         first = await client.get("/missing")
@@ -181,14 +182,14 @@ def test_middleware_validates_configuration() -> None:
         {"limit": 1, "burst": 1, "cost": 2.0},
     ):
         with pytest.raises(ValueError):
-            RateLimitMiddleware(**kwargs)
+            RateLimitPolicy(**kwargs)
 
 
 def test_a_store_cannot_be_shared_between_conflicting_policies() -> None:
     store = MemoryRateLimitStore()
-    RateLimitMiddleware(limit=10, window=60.0, store=store)
+    RateLimitPolicy(limit=10, window=60.0, store=store)
     with pytest.raises(ValueError, match="already configured"):
-        RateLimitMiddleware(limit=99, window=60.0, store=store)
+        RateLimitPolicy(limit=99, window=60.0, store=store)
 
 
 def test_memory_store_reports_what_it_tracks() -> None:
@@ -296,7 +297,7 @@ class _FakeConnection:
         return self.rows.pop(0)
 
     # Lifespan startup now creates this store's table, because
-    # `RateLimitMiddleware` answers `schema_owners` with the store it holds and
+    # `RateLimitPolicy` answers `schema_owners` with the store it holds and
     # `Wreath.schema_components` therefore reaches the claim. It did not used
     # to, which is why the double had never been asked either of these: the
     # DDL was emitted by `wreath schema sql` and applied by nothing.
@@ -384,14 +385,13 @@ async def test_middleware_awaits_a_store_without_a_sync_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, database, _connection = _pg_store(monkeypatch, [(2.0, True), (0.0, False)])
-    middleware = RateLimitMiddleware(limit=3, window=3.0, store=store)
+    middleware = RateLimitPolicy(limit=3, window=3.0, store=store)
     # No try_acquire on this store, so the awaiting hook must have been bound.
-    assert middleware.before.__name__ == "_before_remote"
-    assert middleware.before_sync is None
+    assert middleware._ingress.__name__ == "_before_remote"
+    assert middleware._ingress_sync is None
     await database.start()
 
-    app = Wreath()
-    app.add_middleware(middleware, priority=-5)
+    app = Wreath(http_policy=HttpPolicy(rate_limit=middleware))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -403,11 +403,11 @@ async def test_middleware_awaits_a_store_without_a_sync_path(
 
 
 def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
-    middleware = RateLimitMiddleware(limit=1, window=1.0)
+    middleware = RateLimitPolicy(limit=1, window=1.0)
     # The memory store exposes a synchronous before_sync hook (fused, no await)
     # and leaves the awaiting before hook unset.
-    assert middleware.before is None
-    assert middleware.before_sync.__name__ == "_before_local_sync"
+    assert middleware._ingress is None
+    assert middleware._ingress_sync.__name__ == "_before_local_sync"
 
 
 # --- the keyless request, and the limit that cannot work ---------------------
@@ -436,7 +436,7 @@ async def _receive_body() -> dict[str, Any]:
 
 def test_principal_key_is_none_when_there_is_nobody_and_no_address() -> None:
     """A Unix-socket or in-process request has no client tuple to fall back to."""
-    from wreath.middleware import principal_key
+    from wreath.policy import principal_key
     from wreath.request import Request
 
     assert principal_key(Request(_scope(("203.0.113.7", 5000)), _receive_body)) == (
@@ -454,11 +454,11 @@ async def test_a_request_nobody_can_key_is_still_limited() -> None:
     -- and any bug in a custom `key=` that returns None -- a way past the limit
     entirely, which is the opposite of failing closed.
     """
-    middleware = RateLimitMiddleware(limit=1, window=60.0, key=lambda request: None)
+    middleware = RateLimitPolicy(limit=1, window=60.0, key=lambda request: None)
     from wreath.request import Request
 
-    first = middleware.before_sync(Request(_scope(("203.0.113.7", 5000)), _receive_body))
-    second = middleware.before_sync(Request(_scope(("198.51.100.9", 5000)), _receive_body))
+    first = middleware._ingress_sync(Request(_scope(("203.0.113.7", 5000)), _receive_body))
+    second = middleware._ingress_sync(Request(_scope(("198.51.100.9", 5000)), _receive_body))
     assert first is None                       # admitted
     assert second is not None                  # ... and the next one is refused,
     assert second.status == 429                # sharing one bucket rather than none
@@ -466,14 +466,14 @@ async def test_a_request_nobody_can_key_is_still_limited() -> None:
 
 async def test_an_exempt_request_is_the_only_thing_that_skips_the_bucket() -> None:
     """The other side of the same distinction, so neither can absorb the other."""
-    middleware = RateLimitMiddleware(
+    middleware = RateLimitPolicy(
         limit=1, window=60.0, key=lambda request: None,
         exempt=lambda request: True,
     )
     from wreath.request import Request
 
     for _ in range(5):
-        assert middleware.before_sync(
+        assert middleware._ingress_sync(
             Request(_scope(("203.0.113.7", 5000)), _receive_body)
         ) is None
 
@@ -482,4 +482,4 @@ def test_a_limit_that_admits_nobody_is_refused() -> None:
     """Zero is a typo; `exempt` and not mounting it are how "never" is spelled."""
     for limit in (0, -1):
         with pytest.raises(ValueError, match="limit must be positive"):
-            RateLimitMiddleware(limit=limit, window=60.0)
+            RateLimitPolicy(limit=limit, window=60.0)

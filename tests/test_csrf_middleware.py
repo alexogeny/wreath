@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from wreath.middleware import CSRFMiddleware, csrf_token
+from wreath.policy import CsrfPolicy, csrf_token
 from wreath.request import Request
 from wreath.response import Response
 
@@ -29,11 +29,11 @@ def _request(method: str, headers: list[tuple[bytes, bytes]] | None = None) -> R
 
 @pytest.mark.asyncio
 async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> None:
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     safe = _request("GET")
-    assert await middleware.before(safe) is None
+    assert await middleware._ingress(safe) is None
     token = csrf_token(safe)
-    response = await middleware.after(safe, Response(b"ok"))
+    response = await middleware._egress(safe, Response(b"ok"))
     cookie = next(value for name, value in response.headers if name == b"set-cookie")
     assert b"HttpOnly" not in cookie
     assert b"Secure" in cookie
@@ -48,26 +48,26 @@ async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> No
             (b"x-csrf-token", token.encode()),
         ],
     )
-    assert await middleware.before(unsafe) is None
+    assert await middleware._ingress(unsafe) is None
 
 
 @pytest.mark.asyncio
 async def test_unsafe_requests_fail_closed_with_generic_response() -> None:
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     for headers in (
         [(b"host", b"example.test")],
         [(b"host", b"example.test"), (b"origin", b"https://evil.test")],
     ):
-        rejected = await middleware.before(_request("POST", headers))
+        rejected = await middleware._ingress(_request("POST", headers))
         assert rejected.status == 403
         assert b"CSRF validation failed" in rejected.body
 
 
 @pytest.mark.asyncio
 async def test_valid_unsafe_request_indexes_headers_once() -> None:
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     safe = _request("GET")
-    assert await middleware.before(safe) is None
+    assert await middleware._ingress(safe) is None
     token = csrf_token(safe)
     unsafe = _request(
         "POST",
@@ -79,7 +79,7 @@ async def test_valid_unsafe_request_indexes_headers_once() -> None:
         ],
     )
 
-    assert await middleware.before(unsafe) is None
+    assert await middleware._ingress(unsafe) is None
     assert unsafe._header_map is not None
 
 
@@ -94,37 +94,37 @@ async def test_an_exempt_predicate_that_raises_refuses_and_is_counted() -> None:
     def explode(request: Request) -> bool:
         raise AttributeError("typo in the exempt predicate")
 
-    middleware = CSRFMiddleware("s" * 32, exempt=explode)
+    middleware = CsrfPolicy("s" * 32, exempt=explode)
     assert middleware.exempt_errors == 0
 
-    refused = await middleware.before(_request("POST"))
+    refused = await middleware._ingress(_request("POST"))
     assert refused is not None
     assert refused.status == 403
     assert middleware.exempt_errors == 1
 
-    await middleware.before(_request("POST"))
+    await middleware._ingress(_request("POST"))
     assert middleware.exempt_errors == 2
 
 
 @pytest.mark.asyncio
 async def test_a_working_exempt_predicate_counts_nothing() -> None:
     """Guard against 'fixed it by counting every refusal'."""
-    middleware = CSRFMiddleware("s" * 32, exempt=lambda request: True)
-    assert await middleware.before(_request("POST")) is None
+    middleware = CsrfPolicy("s" * 32, exempt=lambda request: True)
+    assert await middleware._ingress(_request("POST")) is None
     assert middleware.exempt_errors == 0
 
     # And a predicate that simply declines still refuses without counting: the
     # request was rejected, the check was not broken.
-    strict = CSRFMiddleware("s" * 32, exempt=lambda request: False)
-    assert (await strict.before(_request("POST"))) is not None
+    strict = CsrfPolicy("s" * 32, exempt=lambda request: False)
+    assert (await strict._ingress(_request("POST"))) is not None
     assert strict.exempt_errors == 0
 
 
 def test_csrf_configuration_validation() -> None:
     with pytest.raises(ValueError):
-        CSRFMiddleware("short")
+        CsrfPolicy("short")
     with pytest.raises(ValueError):
-        CSRFMiddleware("s" * 32, same_site="none", secure=False)
+        CsrfPolicy("s" * 32, same_site="none", secure=False)
 
 
 # --- trusted origins, and the config refusals -------------------------------
@@ -133,12 +133,12 @@ def test_csrf_configuration_validation() -> None:
 # of these refusals UNREACHED across each file that exercises CSRF: no test ever
 # passed `trusted_origins=`, so the whole cross-origin allowlist -- the thing
 # that lets a separate front-end POST to this API at all -- was unexercised.
-# The normaliser is now shared with `WebSocketOriginMiddleware` (they had a
+# The normaliser is now shared with `WebSocketOriginPolicy` (they had a
 # byte-identical copy each), so these cover both callers' input handling.
 
 
 async def _admits(
-    middleware: CSRFMiddleware, *, origin: bytes | None = None,
+    middleware: CsrfPolicy, *, origin: bytes | None = None,
     referer: bytes | None = None, host: bytes | None = b"example.test",
 ) -> bool:
     """Whether a POST carrying a *valid token* is admitted.
@@ -149,7 +149,7 @@ async def _admits(
     which is the one thing these tests exist to notice.
     """
     safe = _request("GET")
-    await middleware.before(safe)
+    await middleware._ingress(safe)
     token = csrf_token(safe)
     headers = [
         (b"cookie", f"wreath_csrf={token}".encode()),
@@ -161,12 +161,12 @@ async def _admits(
         headers.append((b"origin", origin))
     if referer is not None:
         headers.append((b"referer", referer))
-    return (await middleware.before(_request("POST", headers))) is None
+    return (await middleware._ingress(_request("POST", headers))) is None
 
 
 async def test_a_trusted_origin_passes_the_origin_check_and_others_do_not() -> None:
     """The allowlist is what lets a separate front-end origin POST here at all."""
-    middleware = CSRFMiddleware("s" * 32, trusted_origins=["https://app.example"])
+    middleware = CsrfPolicy("s" * 32, trusted_origins=["https://app.example"])
 
     assert await _admits(middleware, origin=b"https://app.example")
     # The request's own origin is always allowed, list or no list.
@@ -183,7 +183,7 @@ async def test_a_trusted_origin_passes_the_origin_check_and_others_do_not() -> N
 
 async def test_a_trusted_origin_is_matched_after_normalisation() -> None:
     """Comparison is exact bytes, so normalisation is the whole correctness story."""
-    middleware = CSRFMiddleware(
+    middleware = CsrfPolicy(
         "s" * 32, trusted_origins=["https://App.Example:443", "http://other.example:8080"],
     )
     assert await _admits(middleware, origin=b"https://app.example")
@@ -194,7 +194,7 @@ async def test_a_trusted_origin_is_matched_after_normalisation() -> None:
 
 async def test_a_trusted_origin_also_covers_the_referer_fallback() -> None:
     """A browser that sends `Referer` and no `Origin` gets the same allowlist."""
-    middleware = CSRFMiddleware("s" * 32, trusted_origins=["https://app.example"])
+    middleware = CsrfPolicy("s" * 32, trusted_origins=["https://app.example"])
     assert await _admits(middleware, referer=b"https://app.example/page?x=1")
     assert not await _admits(middleware, referer=b"https://evil.example/page")
 
@@ -213,7 +213,7 @@ def test_a_trusted_origin_that_is_not_an_origin_is_refused_at_construction(
 ) -> None:
     """A value no browser can send would sit in the list matching nothing."""
     with pytest.raises(ValueError, match="invalid trusted origin"):
-        CSRFMiddleware("s" * 32, trusted_origins=[origin])
+        CsrfPolicy("s" * 32, trusted_origins=[origin])
 
 
 def test_the_shared_normaliser_names_the_setting_each_caller_configured() -> None:
@@ -250,7 +250,7 @@ def test_csrf_settings_that_cannot_work_are_refused(kwargs: dict, match: str) ->
     which looks exactly like a working deployment until a POST is refused.
     """
     with pytest.raises(ValueError, match=match):
-        CSRFMiddleware("s" * 32, **kwargs)
+        CsrfPolicy("s" * 32, **kwargs)
 
 
 async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_from() -> None:
@@ -263,7 +263,7 @@ async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_fr
     it had no test: `wreath mutant` could delete the whole branch and nothing
     noticed.
     """
-    middleware = CSRFMiddleware("s" * 32, trusted_hosts=["example.test"])
+    middleware = CsrfPolicy("s" * 32, trusted_hosts=["example.test"])
 
     assert await _admits(middleware, origin=b"https://example.test")
     # Both sides forged, and both agree with each other. Refused on the Host.
@@ -281,12 +281,12 @@ async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_fr
 
 
 async def test_with_no_trusted_hosts_the_host_check_defers_to_other_middleware() -> None:
-    """Empty means "TrustedHostMiddleware is mounted", not "nothing is checked".
+    """Empty means "TrustedHostPolicy is mounted", not "nothing is checked".
 
     Pinned because the two configurations differ only in whether one branch
     runs, and the permissive one is the default.
     """
-    middleware = CSRFMiddleware("s" * 32)
+    middleware = CsrfPolicy("s" * 32)
     assert await _admits(middleware, host=b"evil.test", origin=b"https://evil.test")
 
 
@@ -297,7 +297,7 @@ def test_csrf_token_says_so_when_no_middleware_prepared_one() -> None:
     ship a form with an empty token that fails on submit; the refusal names the
     two ways it happens -- middleware not installed, or `exempt` excused it.
     """
-    from wreath.middleware import csrf_token
+    from wreath.policy import csrf_token
 
     with pytest.raises(RuntimeError, match="has not prepared a token"):
         csrf_token(_request("GET"))
@@ -316,4 +316,4 @@ def test_csrf_token_says_so_when_no_middleware_prepared_one() -> None:
 def test_cookie_and_header_names_must_be_http_tokens(kwargs: dict) -> None:
     """A name with a separator in it is a header-splitting or cookie-parsing bug."""
     with pytest.raises(ValueError, match="valid HTTP tokens"):
-        CSRFMiddleware("s" * 32, **kwargs)
+        CsrfPolicy("s" * 32, **kwargs)

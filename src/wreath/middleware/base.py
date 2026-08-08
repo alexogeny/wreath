@@ -4,7 +4,7 @@ Wreath accepts middleware in two forms. The *hook* form is an object carrying
 `before` or `before_sync` and/or `after`, `after_sync`, or `after_inplace`
 attributes;
 `MiddlewareHooks` is the canonical container, but any object with those
-attributes qualifies, which is how `CORSMiddleware` and the rest are written.
+attributes qualifies; standard HTTP policy is configured separately through `HttpPolicy`.
 The *legacy* form is the familiar `async def (request, call_next)` callable. An
 object carrying both is rejected with `TypeError` at compile time, because
 which form it is cannot be guessed.

@@ -44,7 +44,7 @@ def rotate_session(request: Request) -> None:
     """
     request.state._session_rotate = True
 
-#: Minimum session-secret length, matching `CSRFMiddleware`. 32 bytes is
+#: Minimum session-secret length, matching `CsrfPolicy`. 32 bytes is
 #: HMAC-SHA256's digest length -- the point past which a longer key adds no
 #: strength, and so the floor a shorter one falls below.
 MIN_SECRET_BYTES = 32
@@ -143,7 +143,7 @@ class SessionMiddleware:
         previous_secrets: Any = (),
     ) -> None:
         if len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
-            # The same floor `CSRFMiddleware` applies. This secret signs the
+            # The same floor `CsrfPolicy` applies. This secret signs the
             # cookie that *is* the session, so a short one is a forgeable
             # session, and "not empty" was not a meaningful bar.
             raise ValueError(
@@ -163,7 +163,7 @@ class SessionMiddleware:
         self._same_site = same_site
         self._secure = secure
         self._http_only = http_only
-        # `secure` defaults to True, matching `CSRFMiddleware`: this cookie *is*
+        # `secure` defaults to True, matching `CsrfPolicy`: this cookie *is*
         # the session, so the weaker default belonged to the less sensitive
         # cookie. Pass secure=False for local plaintext development.
         # With a store the cookie carries only a signed session id and the

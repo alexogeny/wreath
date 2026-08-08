@@ -17,9 +17,8 @@ from wreath.compression import (
 from wreath.middleware import (
     CacheControlMiddleware,
     CompressionMiddleware,
-    CSRFMiddleware,
-    SecurityHeadersMiddleware,
 )
+from wreath.policy import CsrfPolicy, HttpPolicy, SecurityHeadersPolicy
 from wreath.response import Response, StreamingResponse
 from wreath.testing import TestClient
 
@@ -76,13 +75,16 @@ async def test_streaming_compression_does_not_gather_source() -> None:
 
 @pytest.mark.asyncio
 async def test_recommended_policy_order_sees_cookies_before_cache_and_compression() -> None:
-    app = Wreath()
-    app.add_middleware(SecurityHeadersMiddleware(), priority=0)
+    app = Wreath(
+        http_policy=HttpPolicy(
+            csrf=CsrfPolicy("s" * 32, secure=False),
+            security_headers=SecurityHeadersPolicy(),
+        )
+    )
     app.add_middleware(CompressionMiddleware(minimum_size=16), priority=10)
     app.add_middleware(
         CacheControlMiddleware(CacheControl(public=True, max_age=60)), priority=20
     )
-    app.add_middleware(CSRFMiddleware("s" * 32, secure=False), priority=30)
 
     @app.get("/")
     async def index(request: Any) -> JSONResponse:

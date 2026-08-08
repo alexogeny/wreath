@@ -1,4 +1,4 @@
-"""ServerTimingMiddleware: header formatting and the recorded measurement."""
+"""ServerTimingPolicy: header formatting and the recorded measurement."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from typing import Any
 
 import pytest
 
-from wreath import Wreath
+from wreath import Request, Response, Wreath
 from wreath._native import _core
 from wreath._pure.observability import format_server_timing as pure_format
-from wreath.middleware import ServerTimingMiddleware, elapsed
+from wreath.policy import HttpPolicy, ServerTimingPolicy, elapsed
 from wreath.testing import TestClient
 
 _FORMATTERS = [pure_format]
@@ -39,8 +39,7 @@ def test_native_formatter_agrees_with_pure_reference() -> None:
 
 
 async def test_header_reports_a_plausible_duration() -> None:
-    app = Wreath()
-    app.add_middleware(ServerTimingMiddleware(), priority=-1)
+    app = Wreath(http_policy=HttpPolicy(server_timing=ServerTimingPolicy()))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -59,35 +58,29 @@ async def test_header_reports_a_plausible_duration() -> None:
 
 async def test_elapsed_is_recorded_for_later_readers() -> None:
     """The measurement an access log or tracing exporter will read."""
-    app = Wreath()
-    app.add_middleware(ServerTimingMiddleware(emit_header=False), priority=-1)
-    seen: list[float] = []
-
-    @app.get("/")
-    async def index(request: Any) -> str:
-        return "ok"
-
-    async def record(request: Any, response: Any) -> Any:
-        seen.append(elapsed(request))
-        return response
-
-    class Reader:
-        global_scope = True
-        after = staticmethod(record)
-
-    app.add_middleware(Reader(), priority=-2)  # after-hooks run in reverse order
-
-    async with TestClient(app) as client:
-        response = await client.get("/")
-
-    assert response.header("server-timing") is None
-    assert len(seen) == 1
-    assert seen[0] > 0.0
+    policy = HttpPolicy(server_timing=ServerTimingPolicy(emit_header=False))
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "headers": [],
+        },
+        None,
+        None,
+    )
+    await policy._reference_ingress(request)
+    await asyncio.sleep(0)
+    response = await policy._reference_egress(request, Response(b"ok"))
+    assert all(name != b"server-timing" for name, _value in response.headers)
+    assert elapsed(request) > 0.0
 
 
 async def test_custom_metric_name() -> None:
-    app = Wreath()
-    app.add_middleware(ServerTimingMiddleware(metric="app"), priority=-1)
+    app = Wreath(
+        http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="app"))
+    )
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -102,7 +95,7 @@ async def test_custom_metric_name() -> None:
 def test_metric_name_cannot_inject_a_header() -> None:
     for bad in ("", "a b", "total;dur=0", "x" * 65, "a\nb", 'q"'):
         with pytest.raises(ValueError, match="metric must be"):
-            ServerTimingMiddleware(metric=bad)
+            ServerTimingPolicy(metric=bad)
 
 
 def test_elapsed_without_the_middleware_is_an_error() -> None:

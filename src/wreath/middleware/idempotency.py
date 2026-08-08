@@ -579,7 +579,7 @@ class IdempotencyMiddleware:
         runs at *ingress*, which is upstream of authentication, so
         `request.identity` is always None there -- and `_key` returns None for
         an anonymous request, so mounting this as an ingress hook made it
-        silently guard nothing at all. `RateLimitMiddleware` refuses
+        silently guard nothing at all. `RateLimitPolicy` refuses
         `principal_key` at construction for exactly this reason; this middleware
         has no such choice to refuse, so it moves to the stage where the
         principal exists. The `after` half still runs for every response, as it

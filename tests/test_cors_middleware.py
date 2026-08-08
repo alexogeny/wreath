@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.middleware import CORSMiddleware
+from wreath.policy import CorsPolicy, HttpPolicy
 from wreath.request import Request
 from wreath.testing import TestClient
 
@@ -34,9 +34,8 @@ pytestmark = pytest.mark.asyncio
 ALLOWED = "https://app.example"
 
 
-def _app(middleware: CORSMiddleware) -> Wreath:
-    app = Wreath()
-    app.add_middleware(middleware)
+def _app(middleware: CorsPolicy) -> Wreath:
+    app = Wreath(http_policy=HttpPolicy(cors=middleware))
 
     @app.get("/thing")
     async def thing(request) -> dict:
@@ -58,7 +57,7 @@ def _headers(response: Any, name: str) -> list[bytes]:
 
 
 async def test_an_options_request_with_both_headers_is_answered_as_a_preflight() -> None:
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.options(
             "/thing",
@@ -73,7 +72,7 @@ async def test_an_options_request_with_both_headers_is_answered_as_a_preflight()
 
 async def test_a_wildcard_origin_cannot_be_combined_with_credentials() -> None:
     with pytest.raises(ValueError, match="cannot be combined"):
-        CORSMiddleware(allow_origins=["*"], allow_credentials=True)
+        CorsPolicy(allow_origins=["*"], allow_credentials=True)
 
 
 async def test_a_get_carrying_the_preflight_header_is_not_a_preflight() -> None:
@@ -84,7 +83,7 @@ async def test_a_get_carrying_the_preflight_header_is_not_a_preflight() -> None:
     it is a plain header -- would be answered 204 from the middleware and never
     reach the route. `wreath mutant` deleted that branch and nothing objected.
     """
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.get(
             "/thing",
@@ -113,7 +112,7 @@ async def test_an_options_request_missing_either_header_falls_through(
     answers **500** -- which a looser assertion would have accepted as proof
     that the request "fell through".
     """
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.options("/thing", headers=headers)
     assert response.status == 405                       # the route has no OPTIONS
@@ -125,7 +124,7 @@ async def test_an_options_request_missing_either_header_falls_through(
 
 
 async def test_a_disallowed_origin_is_refused_at_the_preflight() -> None:
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.options(
             "/thing",
@@ -142,7 +141,7 @@ async def test_a_disallowed_origin_is_refused_at_the_preflight() -> None:
 
 async def test_a_disallowed_method_is_refused_rather_than_answered_with_the_list() -> None:
     """The preflight *asks* about one method; echoing the list answers nothing."""
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED], allow_methods=["GET"]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_methods=["GET"]))
     async with TestClient(app) as client:
         response = await client.options(
             "/thing",
@@ -156,7 +155,7 @@ async def test_a_disallowed_method_is_refused_rather_than_answered_with_the_list
 async def test_an_origin_matches_case_insensitively_on_scheme_and_host() -> None:
     """RFC 9110 4.2.3: scheme and authority are case-insensitive, and an origin
     is nothing but scheme and authority."""
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.options(
             "/thing",
@@ -170,7 +169,7 @@ async def test_an_origin_matches_case_insensitively_on_scheme_and_host() -> None
 
 async def test_a_disallowed_origin_gets_vary_and_nothing_else_on_a_simple_request() -> None:
     """The browser withholds the body; the cache is told why it may differ."""
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.get("/thing", headers={"origin": "https://evil.example"})
     assert response.status == 200                        # the route still ran
@@ -179,7 +178,7 @@ async def test_a_disallowed_origin_gets_vary_and_nothing_else_on_a_simple_reques
 
 
 async def test_a_request_with_no_origin_is_left_exactly_as_it_was() -> None:
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
         response = await client.get("/thing")
     assert _header(response, "access-control-allow-origin") is None
@@ -188,7 +187,7 @@ async def test_a_request_with_no_origin_is_left_exactly_as_it_was() -> None:
 
 @pytest.mark.parametrize("origin", [ALLOWED, "https://evil.example"])
 async def test_a_headerless_response_is_left_alone_for_any_origin(origin: str) -> None:
-    middleware = CORSMiddleware(allow_origins=[ALLOWED])
+    middleware = CorsPolicy(allow_origins=[ALLOWED])
     request = Request(
         {
             "type": "http",
@@ -201,7 +200,7 @@ async def test_a_headerless_response_is_left_alone_for_any_origin(origin: str) -
         None,
     )
 
-    middleware.after_inplace(request, object())
+    middleware._egress_inplace(request, object())
 
 
 # --- Vary, which is the cache-poisoning control -------------------------------
@@ -216,7 +215,7 @@ async def test_a_named_origin_response_varies_on_origin() -> None:
     says so. `wreath mutant` deleted this on both the preflight and the simple
     path and no test noticed.
     """
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED, "https://other.example"]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED, "https://other.example"]))
     async with TestClient(app) as client:
         preflight = await client.options(
             "/thing",
@@ -236,7 +235,7 @@ async def test_a_pure_wildcard_response_does_not_need_to_vary() -> None:
     somewhere would pass with the condition deleted, so the case that must not
     carry it is pinned too.
     """
-    app = _app(CORSMiddleware(allow_origins=["*"]))
+    app = _app(CorsPolicy(allow_origins=["*"]))
     async with TestClient(app) as client:
         preflight = await client.options(
             "/thing",
@@ -258,8 +257,9 @@ async def test_a_handlers_own_cors_header_is_honoured_rather_than_duplicated() -
     A route that sets its own must win; adding a second turns a working
     endpoint into a blocked one, and the browser blames the site.
     """
-    app = Wreath()
-    app.add_middleware(CORSMiddleware(allow_origins=[ALLOWED]))
+    app = Wreath(
+        http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=[ALLOWED]))
+    )
 
     @app.get("/own")
     async def own(request) -> Any:
@@ -278,7 +278,7 @@ async def test_a_handlers_own_cors_header_is_honoured_rather_than_duplicated() -
 
 async def test_expose_headers_and_credentials_reach_a_simple_response() -> None:
     """Both are configured once and appended per response; neither was asserted."""
-    app = _app(CORSMiddleware(
+    app = _app(CorsPolicy(
         allow_origins=[ALLOWED], allow_credentials=True, expose_headers=["x-total"],
     ))
     async with TestClient(app) as client:
@@ -288,7 +288,7 @@ async def test_expose_headers_and_credentials_reach_a_simple_response() -> None:
 
 
 async def test_allow_headers_reach_a_preflight_and_are_absent_when_unset() -> None:
-    app = _app(CORSMiddleware(allow_origins=[ALLOWED], allow_headers=["x-token"]))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_headers=["x-token"]))
     async with TestClient(app) as client:
         with_headers = await client.options(
             "/thing",
@@ -296,7 +296,7 @@ async def test_allow_headers_reach_a_preflight_and_are_absent_when_unset() -> No
         )
     assert _header(with_headers, "access-control-allow-headers") == "x-token"
 
-    bare = _app(CORSMiddleware(allow_origins=[ALLOWED]))
+    bare = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(bare) as client:
         without = await client.options(
             "/thing",

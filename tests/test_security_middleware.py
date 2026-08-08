@@ -7,7 +7,7 @@ import pytest
 from wreath import Wreath
 from wreath._native import _core
 from wreath._pure.security import host_allowed as pure_host_allowed
-from wreath.middleware import SecurityHeadersMiddleware, TrustedHostMiddleware
+from wreath.policy import HttpPolicy, SecurityHeadersPolicy, TrustedHostPolicy
 from wreath.testing import TestClient
 
 
@@ -35,9 +35,12 @@ def test_trusted_host_matchers_share_their_runtime_type_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_trusted_host_rejects_before_handler_and_accepts_subdomains() -> None:
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("api.example.com", "*.internal.test"))
+        )
+    )
     called = False
-    app.add_middleware(TrustedHostMiddleware(("api.example.com", "*.internal.test")))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -58,9 +61,12 @@ async def test_trusted_host_rejects_before_handler_and_accepts_subdomains() -> N
 
 @pytest.mark.asyncio
 async def test_trusted_host_rejects_authorities_with_userinfo_or_malformed_ports() -> None:
-    app = Wreath()
+    app = Wreath(
+        http_policy=HttpPolicy(
+            trusted_host=TrustedHostPolicy(("good.example", "[::1]"))
+        )
+    )
     called = 0
-    app.add_middleware(TrustedHostMiddleware(("good.example", "[::1]")))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -84,11 +90,12 @@ async def test_trusted_host_rejects_authorities_with_userinfo_or_malformed_ports
 
 @pytest.mark.asyncio
 async def test_security_headers_do_not_replace_handler_values() -> None:
-    app = Wreath()
-    app.add_middleware(
-        SecurityHeadersMiddleware(
-            content_security_policy="default-src 'none'",
-            strict_transport_security="max-age=31536000",
+    app = Wreath(
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
+                content_security_policy="default-src 'none'",
+                strict_transport_security="max-age=31536000",
+            )
         )
     )
 
@@ -110,7 +117,7 @@ async def test_security_headers_do_not_replace_handler_values() -> None:
 
 @pytest.mark.asyncio
 async def test_structured_hsts_is_https_only() -> None:
-    middleware = SecurityHeadersMiddleware(
+    middleware = SecurityHeadersPolicy(
         hsts_max_age=31_536_000,
         hsts_include_subdomains=True,
         hsts_preload=True,
@@ -124,14 +131,14 @@ async def test_structured_hsts_is_https_only() -> None:
     class Response:
         headers: list[tuple[bytes, bytes]] = []
 
-    response = await middleware.after(Request(), Response())
+    response = await middleware._egress(Request(), Response())
     assert response.headers[-1] == (
         b"strict-transport-security",
         b"max-age=31536000; includeSubDomains; preload",
     )
 
     with pytest.raises(ValueError):
-        SecurityHeadersMiddleware(hsts_max_age=10, hsts_preload=True)
+        SecurityHeadersPolicy(hsts_max_age=10, hsts_preload=True)
 
 
 # --- the configuration refusals nothing had ever made fire --------------------
@@ -147,7 +154,7 @@ async def test_structured_hsts_is_https_only() -> None:
 def test_a_trusted_host_list_that_allows_nothing_is_refused() -> None:
     """An empty list would refuse every request; that is a config bug, not a policy."""
     with pytest.raises(ValueError, match="allowed_hosts must not be empty"):
-        TrustedHostMiddleware([])
+        TrustedHostPolicy([])
 
 
 @pytest.mark.parametrize(
@@ -163,7 +170,7 @@ def test_a_trusted_host_list_that_allows_nothing_is_refused() -> None:
 )
 def test_a_trusted_host_pattern_that_is_not_a_host_is_refused(pattern: str) -> None:
     with pytest.raises(ValueError, match="invalid trusted-host pattern"):
-        TrustedHostMiddleware([pattern])
+        TrustedHostPolicy([pattern])
 
 
 @pytest.mark.parametrize("pattern", ["ex*.com", "*example.com", "a.*.com", "**.com"])
@@ -175,27 +182,27 @@ def test_a_wildcard_anywhere_but_a_leading_label_is_refused(pattern: str) -> Non
     refused at construction rather than silently honoured.
     """
     with pytest.raises(ValueError, match="invalid trusted-host pattern"):
-        TrustedHostMiddleware([pattern])
+        TrustedHostPolicy([pattern])
 
 
 def test_the_two_legitimate_wildcard_shapes_are_accepted() -> None:
-    assert TrustedHostMiddleware(["*"]).allowed_hosts == ("*",)
-    assert TrustedHostMiddleware(["*.example.com"]).allowed_hosts == ("*.example.com",)
+    assert TrustedHostPolicy(["*"]).allowed_hosts == ("*",)
+    assert TrustedHostPolicy(["*.example.com"]).allowed_hosts == ("*.example.com",)
 
 
 def test_a_websocket_origin_list_that_allows_nothing_is_refused() -> None:
-    from wreath.middleware.security import WebSocketOriginMiddleware
+    from wreath.policy.security import WebSocketOriginPolicy
 
     with pytest.raises(ValueError, match="origins must not be empty"):
-        WebSocketOriginMiddleware([])
+        WebSocketOriginPolicy([])
 
 
 @pytest.mark.asyncio
 async def test_websocket_origin_requests_are_matched_exactly_and_required() -> None:
-    from wreath.middleware.security import WebSocketOriginMiddleware
+    from wreath.policy.security import WebSocketOriginPolicy
     from wreath.request import Request
 
-    middleware = WebSocketOriginMiddleware(["https://app.example"])
+    middleware = WebSocketOriginPolicy(["https://app.example"])
 
     def request(*origins: bytes) -> Request:
         return Request(
@@ -208,13 +215,13 @@ async def test_websocket_origin_requests_are_matched_exactly_and_required() -> N
             None,
         )
 
-    assert await middleware.before_websocket(request(b"https://app.example")) is None
+    assert await middleware._ingress(request(b"https://app.example")) is None
     for refused in (
         request(),
         request(b"https://evil.example"),
         request(b"https://app.example", b"https://evil.example"),
     ):
-        response = await middleware.before_websocket(refused)
+        response = await middleware._ingress(refused)
         assert response is not None
         assert response.status == 403
 
@@ -239,17 +246,17 @@ def test_an_origin_that_is_not_a_browser_origin_is_refused(origin: str) -> None:
     A value that does not normalise is one no browser will ever send, so it
     would sit in the allow-list matching nothing while looking like cover.
     """
-    from wreath.middleware.security import WebSocketOriginMiddleware
+    from wreath.policy.security import WebSocketOriginPolicy
 
     with pytest.raises(ValueError, match="invalid WebSocket origin"):
-        WebSocketOriginMiddleware([origin])
+        WebSocketOriginPolicy([origin])
 
 
 def test_origins_are_normalised_to_scheme_host_and_non_default_port() -> None:
     """Comparison is exact bytes, so normalisation is what makes it correct."""
-    from wreath.middleware.security import WebSocketOriginMiddleware
+    from wreath.policy.security import WebSocketOriginPolicy
 
-    allowed = WebSocketOriginMiddleware([
+    allowed = WebSocketOriginPolicy([
         "https://App.Example",          # case-folded
         "https://app.example:443",      # the default port is dropped
         "http://app.example:80",
@@ -268,12 +275,12 @@ def test_origins_are_normalised_to_scheme_host_and_non_default_port() -> None:
 def test_hsts_settings_that_contradict_each_other_are_refused() -> None:
     """Two spellings of one header, and a max-age that cannot mean anything."""
     with pytest.raises(ValueError, match="mutually exclusive"):
-        SecurityHeadersMiddleware(
+        SecurityHeadersPolicy(
             hsts_max_age=31_536_000, strict_transport_security="max-age=600",
         )
     for bad in (-1, "31536000", True):
         with pytest.raises(ValueError, match="non-negative integer"):
-            SecurityHeadersMiddleware(hsts_max_age=bad)
+            SecurityHeadersPolicy(hsts_max_age=bad)
 
 
 @pytest.mark.parametrize(
@@ -292,13 +299,13 @@ def test_hsts_preload_requires_each_prerequisite(
     settings: dict[str, Any],
 ) -> None:
     with pytest.raises(ValueError, match="HSTS preload requires"):
-        SecurityHeadersMiddleware(**settings)
+        SecurityHeadersPolicy(**settings)
 
 
 def test_normalize_host_is_the_gate_that_makes_the_shape_check_dead() -> None:
     """Which of the two wildcard checks actually refuses a bad pattern.
 
-    `TrustedHostMiddleware.__init__` refuses a malformed wildcard twice: once
+    `TrustedHostPolicy.__init__` refuses a malformed wildcard twice: once
     because `_normalize_host` returns None, and again in an explicit shape loop.
     `wreath mutant` reported the second one UNREACHED, and it is: `*` survives
     normalisation only as the whole pattern or as a leading `*.` label, so
@@ -310,7 +317,7 @@ def test_normalize_host_is_the_gate_that_makes_the_shape_check_dead() -> None:
     get through. This pins the coupling, so loosening `_normalize_host` turns
     the second check live rather than silently opening a hole.
     """
-    from wreath.middleware.security import _normalize_host
+    from wreath.policy.security import _normalize_host
 
     for bad in ("ex*.com", "*example.com", "a.*.com", "**.com", "*.*.com", "x*"):
         assert _normalize_host(bad, pattern=True) is None, bad

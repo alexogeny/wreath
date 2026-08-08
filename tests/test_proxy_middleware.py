@@ -1,4 +1,4 @@
-"""ProxyHeadersMiddleware: trusted forwarding headers, and the bugs it fixes."""
+"""ProxyPolicy: trusted forwarding headers, and the bugs it fixes."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ import pytest
 from wreath import Wreath
 from wreath._native import _core
 from wreath._pure.proxy import TrustedNetworks as PureTrustedNetworks
-from wreath.middleware import (
-    CSRFMiddleware,
-    ProxyHeadersMiddleware,
-    SecurityHeadersMiddleware,
-    TrustedHostMiddleware,
+from wreath.policy import (
+    CsrfPolicy,
+    HttpPolicy,
+    ProxyPolicy,
+    SecurityHeadersPolicy,
+    TrustedHostPolicy,
 )
 from wreath.request import Request
 
@@ -91,9 +92,9 @@ async def test_native_context_proxy_updates_do_not_materialize_scope() -> None:
 
     context = NativeLikeContext()
     request = Request(context, receive)
-    middleware = ProxyHeadersMiddleware(trusted=("10.0.0.0/8",))
+    middleware = ProxyPolicy(trusted=("10.0.0.0/8",))
 
-    await middleware.before(request)
+    await middleware._ingress(request)
 
     assert context.scope_calls == 0
     assert context.client == ("203.0.113.7", None)
@@ -185,12 +186,13 @@ def test_native_matcher_agrees_with_pure_reference() -> None:
 
 def test_trusted_is_required() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
-        ProxyHeadersMiddleware(trusted=())
+        ProxyPolicy(trusted=())
 
 
 async def test_untrusted_peer_cannot_override_anything() -> None:
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
+    app = Wreath(
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
+    )
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -219,8 +221,9 @@ async def test_untrusted_peer_cannot_override_anything() -> None:
 
 
 async def test_trusted_peer_applies_forwarded_values() -> None:
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
+    app = Wreath(
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
+    )
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -249,10 +252,12 @@ async def test_trusted_peer_applies_forwarded_values() -> None:
 
 
 async def test_individual_overrides_can_be_disabled() -> None:
-    app = Wreath()
-    app.add_middleware(
-        ProxyHeadersMiddleware(trusted=["10.0.0.0/8"], trust_proto=False, trust_host=False),
-        priority=-10,
+    app = Wreath(
+        http_policy=HttpPolicy(
+            proxy=ProxyPolicy(
+                trusted=["10.0.0.0/8"], trust_proto=False, trust_host=False
+            )
+        )
     )
     seen: dict[str, Any] = {}
 
@@ -278,8 +283,9 @@ async def test_individual_overrides_can_be_disabled() -> None:
 
 
 async def test_garbage_forwarded_proto_is_ignored() -> None:
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
+    app = Wreath(
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
+    )
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -299,14 +305,16 @@ async def test_garbage_forwarded_proto_is_ignored() -> None:
 
 
 async def test_hsts_is_silently_dropped_behind_a_proxy_until_proxy_headers_run() -> None:
-    """SecurityHeadersMiddleware gates HSTS on an HTTPS scheme."""
+    """SecurityHeadersPolicy gates HSTS on an HTTPS scheme."""
 
     def build(with_proxy: bool) -> Wreath:
-        app = Wreath()
-        if with_proxy:
-            app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
-        app.add_middleware(
-            SecurityHeadersMiddleware(hsts_max_age=31_536_000, hsts_include_subdomains=True)
+        app = Wreath(
+            http_policy=HttpPolicy(
+                proxy=ProxyPolicy(trusted=["10.0.0.0/8"]) if with_proxy else None,
+                security_headers=SecurityHeadersPolicy(
+                    hsts_max_age=31_536_000, hsts_include_subdomains=True
+                ),
+            )
         )
 
         @app.get("/")
@@ -331,10 +339,12 @@ async def test_csrf_rejects_every_unsafe_request_behind_a_proxy_until_proxy_head
     """
 
     def build(with_proxy: bool) -> Wreath:
-        app = Wreath()
-        if with_proxy:
-            app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
-        app.add_middleware(CSRFMiddleware(_SECRET))
+        app = Wreath(
+            http_policy=HttpPolicy(
+                proxy=ProxyPolicy(trusted=["10.0.0.0/8"]) if with_proxy else None,
+                csrf=CsrfPolicy(_SECRET),
+            )
+        )
 
         @app.get("/")
         async def form(request: Any) -> str:
@@ -375,9 +385,12 @@ async def test_csrf_rejects_every_unsafe_request_behind_a_proxy_until_proxy_head
 
 async def test_trusted_host_validates_the_forwarded_host() -> None:
     """ProxyHeaders overrides Host; TrustedHost still gets to reject it."""
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-10)
-    app.add_middleware(TrustedHostMiddleware(("allowed.example",)), priority=-5)
+    app = Wreath(
+        http_policy=HttpPolicy(
+            proxy=ProxyPolicy(trusted=["10.0.0.0/8"]),
+            trusted_host=TrustedHostPolicy(("allowed.example",)),
+        )
+    )
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -414,8 +427,9 @@ async def test_a_request_with_no_peer_address_is_never_trusted() -> None:
     scope with no client tuple, and treating that as trusted would honour
     `X-Forwarded-For` from an entirely unknown source.
     """
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"]))
+    app = Wreath(
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"]))
+    )
 
     seen: dict[str, Any] = {}
 
@@ -445,8 +459,9 @@ async def test_an_unresolvable_forwarded_for_leaves_the_client_alone() -> None:
     replace a real peer address with nothing, and every downstream
     address-keyed control -- rate limits, audit -- reads it afterwards.
     """
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"]))
+    app = Wreath(
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"]))
+    )
 
     seen: dict[str, Any] = {}
 
@@ -467,12 +482,15 @@ async def test_an_unresolvable_forwarded_for_leaves_the_client_alone() -> None:
 async def test_an_empty_forwarded_host_does_not_blank_the_host_header() -> None:
     """`X-Forwarded-Host: ` must not overwrite `Host` with nothing.
 
-    `TrustedHostMiddleware` and `CSRFMiddleware` both read `Host`, and both
+    `TrustedHostPolicy` and `CsrfPolicy` both read `Host`, and both
     treat an empty one as a refusal -- so writing the empty value through turns
     a stray proxy header into a 400 on every request behind that proxy.
     """
-    app = Wreath()
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"], trust_host=True))
+    app = Wreath(
+        http_policy=HttpPolicy(
+            proxy=ProxyPolicy(trusted=["127.0.0.0/8"], trust_host=True)
+        )
+    )
 
     seen: dict[str, Any] = {}
 

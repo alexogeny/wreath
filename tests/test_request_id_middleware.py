@@ -1,4 +1,4 @@
-"""RequestIDMiddleware: inbound validation, minting, and echo."""
+"""RequestIdPolicy: inbound validation, minting, and echo."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 from wreath import Wreath
 from wreath._native import _core
 from wreath._pure.observability import request_id_valid as pure_request_id_valid
-from wreath.middleware import RequestIDMiddleware, request_id
+from wreath.policy import HttpPolicy, RequestIdPolicy, request_id
 from wreath.testing import TestClient
 
 _VALIDATORS = [pure_request_id_valid]
@@ -48,8 +48,7 @@ def test_native_validator_agrees_with_pure_reference() -> None:
 
 
 async def test_valid_inbound_id_is_reused_and_echoed() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware(), priority=-5)
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
     seen: list[str] = []
 
     @app.get("/")
@@ -65,8 +64,7 @@ async def test_valid_inbound_id_is_reused_and_echoed() -> None:
 
 
 async def test_hostile_inbound_id_is_replaced_not_sanitized() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware(), priority=-5)
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -83,8 +81,9 @@ async def test_hostile_inbound_id_is_replaced_not_sanitized() -> None:
 
 
 async def test_inbound_id_can_be_distrusted_entirely() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware(trust_inbound=False), priority=-5)
+    app = Wreath(
+        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=False))
+    )
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -97,8 +96,9 @@ async def test_inbound_id_can_be_distrusted_entirely() -> None:
 
 
 async def test_ids_are_minted_per_request_and_can_go_unechoed() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware(echo=False), priority=-5)
+    app = Wreath(
+        http_policy=HttpPolicy(request_id=RequestIdPolicy(echo=False))
+    )
     seen: list[str] = []
 
     @app.get("/")
@@ -115,8 +115,7 @@ async def test_ids_are_minted_per_request_and_can_go_unechoed() -> None:
 
 
 async def test_id_covers_responses_the_router_never_reached() -> None:
-    app = Wreath()
-    app.add_middleware(RequestIDMiddleware(), priority=-5)
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
 
     async with TestClient(app) as client:
         response = await client.get("/nope")
@@ -134,9 +133,9 @@ def test_request_id_without_the_middleware_is_an_error() -> None:
 
 def test_configuration_is_validated() -> None:
     with pytest.raises(ValueError):
-        RequestIDMiddleware(header="")
+        RequestIdPolicy(header="")
     with pytest.raises(ValueError):
-        RequestIDMiddleware(max_length=0)
+        RequestIdPolicy(max_length=0)
 
 
 @pytest.mark.skipif(

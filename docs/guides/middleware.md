@@ -1,29 +1,33 @@
-# Middleware
+# HTTP policy and custom middleware
 
-Middleware is code that runs around your handlers — before a request reaches
-them, after a response comes back, or both. It's where cross-cutting concerns
-live: CORS, security headers, compression, rate limiting, request IDs, timing.
-Wreath ships the ones almost every service needs, and lets you write your own
-against a small, honest protocol. (It is called middleware here because that is
-what the rest of the world calls it.)
+Wreath separates two things that are often bundled together. Standard HTTP
+controls are first-class application policy. Custom middleware is application
+code that wraps selected handlers.
+
+Policy has a fixed order and, on Wreath's server, runs in C before a Python
+`Request` exists and after the Python response returns to the protocol. It does
+not enter the middleware tape.
 
 ```python
-from wreath.middleware import (
-    CORSMiddleware, SecurityHeadersMiddleware, CompressionMiddleware,
-    RateLimitMiddleware, RequestIDMiddleware, ServerTimingMiddleware,
-    ProxyHeadersMiddleware, TrustedHostMiddleware, CSRFMiddleware, SessionMiddleware,
+from wreath import Wreath
+from wreath.policy import (
+    CorsPolicy, HttpPolicy, RequestIdPolicy, SecurityHeadersPolicy,
 )
 
-app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
-app.add_middleware(SecurityHeadersMiddleware(content_security_policy="default-src 'none'"))
-app.add_global_middleware(RequestIDMiddleware())
+app = Wreath(http_policy=HttpPolicy(
+    cors=CorsPolicy(allow_origins=["https://app.example"]),
+    security_headers=SecurityHeadersPolicy(
+        content_security_policy="default-src 'none'",
+    ),
+    request_id=RequestIdPolicy(),
+))
 ```
 
-There are two places to add middleware, and the difference matters. **Route
+There are two places to add custom hooks, and the difference matters. **Route
 middleware** wraps matched handlers — it runs when a request lands on a route.
 **Global middleware** runs on every request, including the ones that match
-nothing. Request IDs, security headers, and timing belong at the global level,
-because a `404` needs an ID and its headers just as much as a `200` does.
+nothing. Use first-class policy, not a global hook, for request IDs, security
+headers, timing, and the other standard controls.
 
 ## Synchronous hooks
 
@@ -31,8 +35,7 @@ Use `before_sync` or `after_sync` when a hook never awaits anything. They have
 the same ordering and short-circuit semantics as `before` and `after`, but the
 compiled request path calls them directly instead of creating and awaiting a
 coroutine for every hook. If both forms are present, the synchronous hook takes
-precedence; compatibility wrappers may therefore keep the async spelling for
-callers that invoke a middleware method directly.
+precedence.
 
 When egress only mutates headers or other response state, use `after_inplace`.
 It returns `None`, which also lets the compiled path omit the return-value load,
@@ -86,10 +89,9 @@ declines a route neither inspects its requests nor decorates its responses.
 
 Two limits, both deliberate:
 
-- A request that does not match a route runs the **whole** stack. Compartments
-  need the route to be known, and a miss has none; this also keeps a rate
-  limiter counting the `404`s it is documented to count, and stops the set of
-  middleware that ran from advertising whether a path exists.
+- A request that does not match a route runs the **whole** global custom-hook
+  stack. Compartments need the route to be known, and a miss has none; this
+  also stops the set of hooks that ran from advertising whether a path exists.
 - A route behind authentication runs the whole stack too, because which route a
   ticket resolves to is not known until the identity is.
 
@@ -97,41 +99,22 @@ Two limits, both deliberate:
 security decision often enough that guessing a direction is worse than stopping:
 the safe guess silently discards a policy you believed was in effect.
 
-## Answering CORS preflights without entering Python
+## Native policy execution
 
-A preflight — `OPTIONS` carrying both `Origin` and
-`Access-Control-Request-Method` — is answerable from configuration alone. It has
-no route, no handler and no body, yet by default it costs a full trip through
-the global tape to produce a reply that was decided when the app booted.
+A CORS preflight is answerable from configuration alone. Wreath's server answers
+it before routing and before materializing a Python `Request`:
 
 ```python
-app = Wreath(middleware="native")
-app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+app = Wreath(http_policy=HttpPolicy(
+    cors=CorsPolicy(allow_origins=["https://app.example"]),
+))
 ```
 
-At startup Wreath records every answer your `CORSMiddleware` can give a
-preflight, by asking it. The server then serves them directly — before the tape,
-before routing, before a `Request` object exists. **Measured at 10.89 µs →
-3.32 µs, a 70% saving on preflights**, with byte-identical responses.
-
-Nothing else changes: every other request runs the Python tape exactly as
-before, and a preflight the table does not cover (an origin spelled differently
-from the configured one, say) falls through to `CORSMiddleware` as usual.
-
-It is opt-in rather than automatic because it **changes what earlier middleware
-sees**. A preflight answered by the server never reaches the tape, so middleware
-registered before CORS no longer observes it:
-
-- a rate limiter does not count preflights against the bucket
-- `ProxyHeadersMiddleware` does not rewrite their client address
-
-Neither changes the response a browser receives — `CORSMiddleware` short-circuits
-ahead of the route either way — but both are visible in metrics. If you
-deliberately rate-limit preflights, leave the default `middleware="python"`.
-
-A middleware whose answers are not reproducible is declined and left in Python:
-each probe runs twice at boot, and anything consulting a clock or a counter
-rather than the origin and requested method is not compiled.
+This is not an opt-in middleware mode. Proxy trust, host validation, local rate
+limiting, request IDs, timing, CORS and CSRF execute in their fixed native order.
+Security headers, CSRF cookies, CORS, timing and request IDs are applied natively
+before response serialization. A conforming external ASGI server runs the same
+policy through Wreath's readable reference executor.
 
 ## User story: put a ceiling on abusive clients
 
@@ -140,12 +123,14 @@ rather than the origin and requested method is not compiled.
 > over the line get a clean `429`, without me hand-rolling a token bucket.*
 
 ```python
-from wreath.middleware import RateLimitMiddleware
+from wreath.policy import HttpPolicy, RateLimitPolicy
 
-app.add_middleware(RateLimitMiddleware(limit=100, window=60.0))
+app = Wreath(http_policy=HttpPolicy(
+    rate_limit=RateLimitPolicy(limit=100, window=60.0),
+))
 ```
 
-`middleware.throttled` counts refusals. A limiter that has silently collapsed
+`RateLimitPolicy.throttled` counts refusals. A limiter that has silently collapsed
 every caller into one bucket — see the proxy note above — otherwise looks exactly
 like one with nothing to do.
 
@@ -154,7 +139,7 @@ a socket or an unusual server — lands in one shared bucket rather than skippin
 the limiter. A limiter that lets a request past because it could not identify it
 is not a limiter; use `exempt=` to allow one deliberately.
 
-`CSRFMiddleware` runs two checks, and which one answers depends on the client.
+`CsrfPolicy` runs two checks, and which one answers depends on the client.
 
 **`Sec-Fetch-Site` decides when the browser sent it.** The browser sets this
 header itself and the page making the request cannot forge it, so it settles the
@@ -187,13 +172,13 @@ A response whose cookie behaviour turned on the header carries
 `Vary: Sec-Fetch-Site`, so a shared cache cannot hand a header-carrying client's
 response to one without it.
 
-`CSRFMiddleware(trusted_hosts=[...])` bounds the `Host` header the expected
+`CsrfPolicy(trusted_hosts=[...])` bounds the `Host` header the expected
 origin is derived from, which the token fallback's origin check uses. Without it
-the Host is trusted, so that check depends on `TrustedHostMiddleware` being
-separately mounted — a dependency between two middlewares that nothing used to
-state. Naming the hosts here makes the CSRF check self-contained.
+the Host is trusted, so that check depends on `TrustedHostPolicy` being
+configured alongside it. Naming the hosts here makes the CSRF check
+self-contained.
 
-`TrustedHostMiddleware` validates the whole authority before comparing its host.
+`TrustedHostPolicy` validates the whole authority before comparing its host.
 A numeric port is ignored for matching, but user information, malformed ports,
 and junk after a bracketed IPv6 literal are rejected rather than truncated into
 an allowed hostname. On HTTP/2 the server also rejects a regular `Host` that
@@ -203,13 +188,13 @@ A preflight is checked against `allow_methods` rather than echoing it: asking
 whether `DELETE` is allowed now gets an answer about `DELETE`. Origins compare
 case-insensitively on scheme and host, as an origin should.
 
-`CORSMiddleware` refuses `allow_origins=["*"]` together with
+`CorsPolicy` refuses `allow_origins=["*"]` together with
 `allow_credentials=True` at construction: honouring it means reflecting whatever
 origin asked, alongside `Access-Control-Allow-Credentials: true`, which lets any
 site read authenticated responses from yours. Name the origins that may send
 credentials.
 
-`SessionMiddleware` defaults to `secure=True` (matching `CSRFMiddleware`) and
+`SessionMiddleware` defaults to `secure=True` (matching `CsrfPolicy`) and
 requires a secret of at least 32 bytes. Pass `secure=False` for local plaintext
 development. Rotate the secret without logging everyone out by naming
 the old one:
@@ -228,28 +213,28 @@ sliding rather than absolute.
 
 The default key is the client address, so each caller gets its own bucket; a
 request over the limit gets a `429 Too Many Requests` (an RFC 9457 problem body)
-with a whole-second `Retry-After`. Pass `key=` to bucket by API key or
-authenticated user instead. Rate limiting is inherently global — it registers on
-every request, misses included — so a flood of `404`s counts against the bucket
-too.
+with a whole-second `Retry-After`. Pass `key=` to bucket by an API key known at
+ingress. For an authenticated identity, configure `principal_rate_limit=` so the
+fixed post-authentication stage can use it. Ingress rate limiting covers every
+request, misses included, so a flood of `404`s counts against the bucket too.
 
 ## Behind a proxy
 
 If Wreath runs behind a TLS-terminating proxy or load balancer, requests arrive
 over plain HTTP with the real scheme and client tucked into `X-Forwarded-*`
-headers. Add `ProxyHeadersMiddleware` and Wreath will trust those headers from
+headers. Configure `ProxyPolicy` and Wreath will trust those headers from
 your proxy — quietly fixing HSTS, secure-cookie, and CSRF decisions that would
 otherwise be made as if the connection were insecure. The
 [Deploy behind a proxy](../cookbook/recipes/behind-a-proxy.md) recipe shows the
 full setup.
 
-## What the tape tells the document
+## What policy and custom hooks tell the document
 
 Your application already knows it rate-limits, that it reads an
-`Idempotency-Key`, that it emits a `Cache-Control`. Until a middleware says so,
-none of that reaches your OpenAPI document, and so none of it reaches the client
-you generate from it — every consumer learns it from prose, and the prose stops
-being true the day you change the tape.
+`Idempotency-Key`, and that it emits a `Cache-Control`. `HttpPolicy` components
+and custom hooks can expose those facts as startup contracts, so they reach the
+OpenAPI document and the client generated from it without request-time
+introspection.
 
 A middleware says so by answering `describe()`:
 
@@ -266,30 +251,28 @@ class SignedRequestMiddleware:
         )
 ```
 
-`generate_openapi` collects these by *asking* every middleware on a route's
-tape, the same way `schema_components()` asks for `component()`. There is no
-registry to keep in step: a middleware that offers nothing contributes nothing,
-which is what every middleware did before this existed.
+`generate_openapi` asks each component of the application's fixed `HttpPolicy`,
+then each custom hook covering the route. There is no registry to keep in step:
+a component or hook that offers nothing contributes nothing.
 
 Three properties make the result trustworthy enough to generate a client from.
 
 **A contract describes the instance, not the class.** A
-`RateLimitMiddleware(limit=60, window=60.0)` documents `RateLimit-Policy:
+`RateLimitPolicy(limit=60, window=60.0)` documents `RateLimit-Policy:
 60;w=60`, because `describe()` reads the very tuple the refusal path appends. A
-`ServerTimingMiddleware(emit_header=False)` documents no header at all. The
+`ServerTimingPolicy(emit_header=False)` documents no header at all. The
 document and the wire cannot drift, because there is only one copy of the value.
 
-**Scope is honest.** Global middleware wraps every request, so it decorates
-every operation. Route middleware is filtered by the same `applies_to` predicate
-the tape itself evaluates, so a limiter you mounted on one router never appears
-on a route outside it. This is not fussiness: a document claiming a `429` on an
-operation that cannot answer one teaches a generated client to retry a permanent
-failure.
+**Scope is honest.** First-class HTTP policy covers the whole application.
+Custom route hooks are filtered by the same `applies_to` predicate their
+compiled hook program evaluates, so a hook mounted on one router never appears
+on a route outside it.
 
 **A route's own declaration wins.** A route that documents its own `429` keeps
-its wording; the middleware fills in only what the route left unsaid.
+its wording; policy and hooks fill in only what the route left unsaid.
 
 Because `describe()` runs at startup and never per request, none of this costs a
 request anything — `wreath-request-trace` records no added boundary crossing.
 
-**Reference:** [`wreath.middleware`](../reference/middleware.md).
+**Reference:** [`wreath.policy`](../reference/policy.md) and
+[`wreath.middleware`](../reference/middleware.md).
