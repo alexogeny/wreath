@@ -207,7 +207,7 @@ class TooManyRequests(HTTPException):
     (RFC 9110 §10.2.3, RFC 6585 §4), which is the difference between a client
     that backs off correctly and one that retries immediately. The header is a
     MAY, so omitting it is conformant -- it is just less useful. Raise this from
-    an application's own quota check; `wreath.middleware.ratelimit` does not go
+    an application's own quota check; `wreath.policy.ratelimit` does not go
     through it, building its 429 problem response with the header directly.
 
     Args:
