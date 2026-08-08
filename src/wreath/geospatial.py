@@ -46,18 +46,13 @@ from collections.abc import Iterable, Sequence
 from math import ceil, cos, floor, isfinite, radians
 from typing import Any
 
+from ._native import _core as _core_module
 from ._pure import geospatial as _reference
 
-try:  # pragma: no cover - the native twin is present in a normal build
-    from ._native import _core as _core_module
-except ImportError:  # pragma: no cover - pure-Python fallback
-    _core_module = None  # type: ignore[assignment]
-
-import os
-
-_FORCE_PURE = os.environ.get("WREATH_PURE") == "1"
-
-if not _FORCE_PURE and _core_module is not None and hasattr(_core_module, "geo_haversine"):
+# `WREATH_PURE=1` is not re-read here: `wreath._native` is the one place that
+# gate lives, and it hands back `_core is None` in that mode. The `hasattr` is
+# the *other* question -- a build compiled before `geospatial.c` landed.
+if _core_module is not None and hasattr(_core_module, "geo_haversine"):
     _haversine = _core_module.geo_haversine
 else:  # pragma: no cover - exercised under WREATH_PURE=1
     _haversine = _reference.haversine
