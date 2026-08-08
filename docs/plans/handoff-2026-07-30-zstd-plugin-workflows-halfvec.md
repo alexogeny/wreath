@@ -61,7 +61,7 @@ pass. Only `pytest` is red, and only under `-n 6`.
   `select_content_encoding` now returns `"zstd" | "gzip" | None`. **zstd is offered
   only to a client that named it; a bare `*` still means gzip.** Ties go to zstd.
   The two twins are held equal by `tests/test_webpolicy_parity.py` (22 cases).
-- `src/wreath/middleware/compression.py` — per-coding compressor and ETag suffix
+- `src/wreath/policy/compression.py` — per-coding compressor and ETag suffix
   (`--gzip` / `--zstd`), new `zstd_level` argument.
 - brotli is **deliberately not** offered: it needs a PyPI package.
 - Docs: `docs/guides/compression.md`, `docs/reference/compression.md`. The three
@@ -129,7 +129,7 @@ instead.
    jsonb always decodes to `str`; I had hedged instead of checking.
 2. `if not rows` in that same method was unasserted — `status`/`resume` on an
    unknown key had no test.
-3. `middleware/compression.py`'s ETag header scan would have rewritten
+3. `policy/compression.py`'s ETag header scan would have rewritten
    `content-type` instead of the ETag.
 4. `orm/types.py` had **29 survivors and 20 unreached**, every one a
    declaration-time *validation* refusal with no test at all. Added
@@ -748,7 +748,7 @@ shift; nothing ever ran one. Every branch deciding whether a pass continues,
 halts or fails was `unreached` — a pass that silently stopped after one chunk
 would have looked exactly like a passing suite, and this is the mechanism that
 keeps the purge and rewrite passes behind `session_store`, `webhooks`,
-`middleware/idempotency` and `middleware/ratelimit` making progress.
+`policy/idempotency` and `policy/ratelimit` making progress.
 
 The test set mattered twice more, both pitfall #1: the manifest's list omits
 `tests/rgb/` (7 files import `wreath.jobs`, all unattributed), and `tests/passes/`
@@ -939,7 +939,7 @@ Pitfall #1 was worth 14 mutants again here. The manifest's `users` subsystem omi
 - **Every route's first two guards.** Each handler opens with `session is None` → 500
   `session_middleware_required` and `user is None` → 401 `not_authenticated`, and the
   suite reached them only through the happy path. The 500 arm needs an application that
-  mounted the router and **forgot `SessionMiddleware`** — a real deployment mistake, and
+  mounted the router and **forgot `SessionPolicy`** — a real deployment mistake, and
   a shape the existing `_app` helper cannot produce because it always installs it. Two
   parametrised tests over all eight routes killed thirteen of these at once.
 

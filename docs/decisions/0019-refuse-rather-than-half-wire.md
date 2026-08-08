@@ -17,7 +17,7 @@ The instances that produced this record:
 
 - `limit: int = Query(20)` bound nothing, ignored its constraints, and passed
   the `Query` object through **as the value**.
-- `SessionMiddleware` registered with `add_middleware` runs after
+- `SessionPolicy` registered with `add_middleware` runs after
   authentication, so `SessionIdentityBackend` read nothing and **every protected
   route answered 401 with a valid session cookie**.
 - `Depends(page_params)` returned 500; the `Annotated` spelling returned **400
