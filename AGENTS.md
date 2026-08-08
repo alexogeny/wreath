@@ -205,8 +205,8 @@ while a sibling is running tests produces failures nobody can attribute.
   it stands. Growth there is a trade-off, not automatically a defect -- a
   feature can be worth crossings -- but it should be a decision someone made and
   wrote down, not drift. Re-record with `--update-baseline` and say why.
-- A crossing count is not a cost. `uv run wreath-tape-decomp` prices the global
-  middleware tape and `uv run wreath-decomp` prices everything else -- lifecycle
+- A crossing count is not a cost. `uv run wreath-policy-decomp` prices first-class
+  HTTP policy and `uv run wreath-decomp` prices everything else -- lifecycle
   stages, one ORM read, and the ns-per-frame constant that converts crossing
   counts into microseconds. Both report a measured A/A noise floor and refuse to
   attribute any delta that does not clear it; on a powersave governor, per-hook
@@ -341,7 +341,7 @@ uv run wreath-port-golden --update    # ... rewrite what drifted, on purpose
 uv run wreath-dup-scan           # function bodies sharing a structure (a report, not a gate)
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
 uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
-uv run wreath-tape-decomp        # what the global middleware tape costs a request
+uv run wreath-policy-decomp      # what first-class HTTP policy costs a request
 uv run wreath-decomp             # request stages, ORM internals, ns/frame calibration
 ```
 
