@@ -167,7 +167,7 @@ time is, and the fusion would have traded a lot of clarity for it.
 ## The same syscall, in a second place
 
 `uv run wreath-tape-decomp` prices the global middleware tape, and it put
-`RequestIDMiddleware` at **+6.77 µs** — for generating a correlation id. Almost
+`RequestIdPolicy` at **+6.77 µs** — for generating a correlation id. Almost
 all of it was one line:
 
 ```python
