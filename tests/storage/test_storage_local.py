@@ -465,3 +465,26 @@ def test_memory_list_matches_the_prefix_it_was_given(tmp_path):
         assert [o.key async for o in s.list()] == ["a/1.txt", "a/2.txt", "b/3.txt"]
 
     _run(go())
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "é",                         # one non-ASCII character
+        "deadbeefé",            # a real signature with one appended
+        "١" * 64,               # Arabic-Indic digits: `isdigit()` is True
+    ],
+)
+def test_a_non_ascii_signature_is_refused_rather_than_raised(signature):
+    """**`hmac.compare_digest` raises `TypeError` on a non-ASCII `str`.**
+
+    The signature is a query parameter, so this is unauthenticated input on the
+    documented recipe's own handler, and the refusal it should get is a 403.
+    `_secondfactor.py:261-266` guards exactly this hazard and its comment says
+    what happens without the guard -- the endpoint answers 500 instead of
+    refusing. Learned in one module, applied here.
+    """
+    store = MemoryObjectStore(url_secret=_SECRET)
+    assert not store.verify_local_url(
+        "reports/q3.csv", method="GET", expires=1_000_900, signature=signature
+    )

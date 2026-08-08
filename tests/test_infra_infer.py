@@ -728,7 +728,7 @@ def test_inference_imports_no_cloud_sdk() -> None:
     """
     program = (
         "import sys, json\n"
-        "import wreath.infra, wreath._infra_cli\n"
+        "import wreath.infra, wreath.infra.cli\n"
         "print(json.dumps(sorted(m for m in sys.modules if m.split('.')[0] in "
         f"{ {name.split('.')[0] for name in _FORBIDDEN_SDKS}!r} )))\n"
     )

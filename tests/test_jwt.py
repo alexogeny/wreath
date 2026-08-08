@@ -624,3 +624,117 @@ def test_each_pss_structural_check_refuses_its_own_forgery(rsa_keypair, perturb)
     private, pem = rsa_keypair
     token, _ = _pss_forgery(private, perturb)
     assert _rsa_verifier(pem, "PS256")(token) is None
+
+
+async def test_an_issuer_that_publishes_no_usable_keys_revokes_the_cached_ones():
+    """**Zero keys is an answer, not a failure.**
+
+    `if keys:` retained the previous set on an empty result, which is right for
+    a transient error and wrong for a 200 carrying `{"keys": []}` -- that is an
+    issuer saying every key it had is withdrawn. Retaining them meant anyone
+    holding a token signed by a revoked key kept authenticating for the process
+    lifetime, and the TTL was re-armed on the way past, so nothing ever
+    reconsidered.
+    """
+    import json as _json
+
+    from wreath._auth.jwks import JwksCache
+
+    documents = [
+        {"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]},
+        {"keys": []},
+    ]
+
+    class _Response:
+        def __init__(self, body):
+            self.status = 200
+            self.body = body
+
+        def header(self, name, default=None):
+            return default
+
+    class _Client:
+        async def get(self, path):
+            # The last document repeats: an empty cache makes `resolve` try to
+            # refresh again, which is the correct behaviour and would otherwise
+            # run this stub out of responses.
+            served = documents.pop(0) if len(documents) > 1 else documents[0]
+            return _Response(_json.dumps(served).encode())
+
+    cache = JwksCache(http_client=_Client(), jwks_path="/jwks", min_refresh_interval=0.0)
+    await cache.prefetch()
+    assert await cache.resolve("k1") is not None
+
+    await cache.prefetch()
+    # Counted before the lookup: an empty cache makes `resolve` refresh again,
+    # which finds the same empty document and counts a second revocation.
+    assert cache.empty_documents == 1
+    assert await cache.resolve("k1") is None
+
+
+async def test_a_transient_error_still_keeps_the_cached_keys():
+    """The control the clearing must not cost.
+
+    A non-200 is the case the retain-on-failure comment was written for, and it
+    is a different thing from an issuer publishing an empty set.
+    """
+    from wreath._auth.jwks import JwksCache
+
+    class _Response:
+        def __init__(self, status, body):
+            self.status = status
+            self.body = body
+
+        def header(self, name, default=None):
+            return default
+
+    responses = [
+        _Response(200, b'{"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]}'),
+        _Response(503, b""),
+    ]
+
+    class _Client:
+        async def get(self, path):
+            return responses.pop(0)
+
+    cache = JwksCache(http_client=_Client(), jwks_path="/jwks", min_refresh_interval=0.0)
+    await cache.prefetch()
+    await cache.prefetch()
+    assert await cache.resolve("k1") is not None
+    assert cache.empty_documents == 0
+
+
+async def test_a_document_of_only_encryption_keys_also_revokes():
+    """The same state reached the other way: 200, keys present, none usable."""
+    import json as _json
+
+    from wreath._auth.jwks import JwksCache
+
+    documents = [
+        {"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]},
+        {"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1", "use": "enc"}]},
+    ]
+
+    class _Response:
+        def __init__(self, body):
+            self.status = 200
+            self.body = body
+
+        def header(self, name, default=None):
+            return default
+
+    class _Client:
+        async def get(self, path):
+            # The last document repeats: an empty cache makes `resolve` try to
+            # refresh again, which is the correct behaviour and would otherwise
+            # run this stub out of responses.
+            served = documents.pop(0) if len(documents) > 1 else documents[0]
+            return _Response(_json.dumps(served).encode())
+
+    cache = JwksCache(http_client=_Client(), jwks_path="/jwks", min_refresh_interval=0.0)
+    await cache.prefetch()
+    await cache.prefetch()
+    # Counted before the lookup: an empty cache makes `resolve` refresh again,
+    # which finds the same empty document and counts a second revocation.
+    assert cache.empty_documents == 1
+    assert await cache.resolve("k1") is None

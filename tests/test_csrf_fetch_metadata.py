@@ -251,3 +251,36 @@ async def test_a_clean_run_leaves_the_refusal_counter_at_zero() -> None:
     await middleware.before(_unsafe(b"same-origin"))
     await middleware.before(_request("GET", [(b"sec-fetch-site", b"same-origin")]))
     assert middleware.cross_site_refusals == 0
+
+
+# --- what a handler on the trusted-unsafe path can ask for -------------------
+
+
+@pytest.mark.parametrize("site", [b"same-origin", b"none"])
+@pytest.mark.asyncio
+async def test_a_handler_can_still_mint_a_token_on_a_trusted_unsafe_request(
+    site: bytes,
+) -> None:
+    """The ordinary re-render-the-form pattern, on every browser since 2023.
+
+    A `POST` that fails validation and re-renders its form calls
+    `csrf_token(request)` for the new form. On the Fetch Metadata path that
+    request passed no token check, so `_STATE_TOKEN` is absent -- and the branch
+    recorded no minter either, so `csrf_token` raised `RuntimeError` and the
+    handler answered 500. Not attacker-driven: a self-inflicted outage on the
+    exact clients the header path was added for.
+    """
+    middleware = CSRFMiddleware(SECRET)
+    request = _unsafe(site)
+    assert await middleware.before(request) is None
+    assert csrf_token(request).startswith("v1.")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cross_site_request_prepares_no_minter() -> None:
+    """The control: only a request that was *allowed* gets one."""
+    middleware = CSRFMiddleware(SECRET)
+    request = _unsafe(b"cross-site")
+    assert (await middleware.before(request)) is not None
+    with pytest.raises(RuntimeError, match="has not prepared a token"):
+        csrf_token(request)

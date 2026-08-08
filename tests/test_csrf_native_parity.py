@@ -115,6 +115,14 @@ def test_a_wrong_secret_is_rejected() -> None:
         "v1.1700000000." + "n" * 43 + "." + "s" * 43 + ".extra",
         "v1..." ,
         "v1.1700000000." + "n" * 43 + "." + "s" * 43 + "\x00",
+        # **Interior** NULs, in the stamp. `strtoll` halts at one and reports the
+        # prefix as consumed whole, so `*end == '\0'` reads as success while the
+        # pure twin's `\Z`-anchored regex refuses. The corpus had a NUL only on
+        # the end of the whole token, which `component_valid` rejects for a
+        # different reason -- so the divergence had no case at all.
+        "v1.1700000000\x00junk." + "n" * 43 + "." + "s" * 43,
+        "v1.1700000000\x00." + "n" * 43 + "." + "s" * 43,
+        "v1.\x001700000000." + "n" * 43 + "." + "s" * 43,
         "v1.99999999999999999999999999." + "n" * 43 + "." + "s" * 43,
         "v1.-1700000000." + "n" * 43 + "." + "s" * 43,
         "....",
@@ -331,3 +339,18 @@ def test_a_token_minted_under_one_secret_is_refused_under_another() -> None:
 
     assert validate(b"a" * 32, token, NOW, MAX_AGE)[0] is True
     assert validate(b"b" * 32, token, NOW, MAX_AGE)[0] is False
+
+
+def test_a_valid_token_with_a_nul_in_its_stamp_is_refused_by_both() -> None:
+    """The sharper form: the signature still matches.
+
+    The C twin rebuilds the signed message from the *parsed* `issued` value, so
+    everything after the NUL vanishes before the HMAC is recomputed and the
+    token verifies. A malformed-token corpus entry cannot show that -- the
+    signature has to be real for the comparison to be reached at all.
+    """
+    _sign, new, validate = _native()
+    parts = new(SECRET, NOW).split(".")
+    tampered = ".".join([parts[0], parts[1] + "\x00rubbish", parts[2], parts[3]])
+    assert pure.csrf_validate(SECRET, tampered, NOW, MAX_AGE) == (False, 0)
+    assert validate(SECRET, tampered, NOW, MAX_AGE) == (False, 0)

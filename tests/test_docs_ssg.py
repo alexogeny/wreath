@@ -612,7 +612,7 @@ def test_chart_source_is_published(tmp_path) -> None:
 
 
 def test_cli_build_end_to_end(tmp_path) -> None:
-    from wreath._docs_cli import execute
+    from wreath._docs.cli import execute
 
     src = tmp_path / "docs"
     src.mkdir()
@@ -2197,7 +2197,7 @@ async def test_the_preview_serves_through_wreaths_own_static_files(tmp_path) -> 
     the class: an `ETag` and a 304 are things the stdlib handler cannot produce,
     so this fails if anyone swaps the server back.
     """
-    from wreath._docs_cli import preview_app
+    from wreath._docs.cli import preview_app
     from wreath.testing import TestClient
 
     assert build(_site(tmp_path), root=tmp_path).ok
@@ -2226,7 +2226,7 @@ async def test_the_preview_resolves_a_directory_to_its_index(tmp_path) -> None:
     will ever do, so a preview that offered it was teaching a behaviour that
     does not exist in production.
     """
-    from wreath._docs_cli import preview_app
+    from wreath._docs.cli import preview_app
     from wreath.testing import TestClient
 
     src = tmp_path / "docs"
@@ -2303,7 +2303,7 @@ def test_the_header_links_are_named_rather_than_guessed_at(tmp_path) -> None:
 
 def _access_flags(status: int, path: str) -> int:
     """Encode the access record exactly as the ring would, and return its flags."""
-    from wreath._docs_cli import _short
+    from wreath._docs.cli import _short
     from wreath._flight_schema import (
         LOG_FLAG_TRUNCATED,
         LogArg,
@@ -2352,7 +2352,7 @@ def test_a_clipped_path_keeps_the_end_that_identifies_it(tmp_path) -> None:
     Clipping the other end yields a screen of `/cookbook/recipes/` lines nobody
     can tell apart, which is the same as not logging the path at all.
     """
-    from wreath._docs_cli import _short
+    from wreath._docs.cli import _short
 
     assert _short("/guides/routing.html") == "/guides/routing.html"   # fits whole
     clipped = _short("/cookbook/recipes/serve-a-grpc-method.html")
@@ -2376,7 +2376,7 @@ def test_the_preview_logs_one_line_per_request(tmp_path) -> None:
     """
     import inspect
 
-    from wreath import _docs_cli
+    from wreath._docs import cli as _docs_cli
 
     source = inspect.getsource(_docs_cli._serve)
     assert "TelemetryConfig" in source and "Mode.PULSE" in source
