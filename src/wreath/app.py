@@ -72,8 +72,6 @@ from .logging import begin_request_seeded as _log_begin_seeded
 from .logging import finish_request_for as _log_finish_request
 from .logging import finish_session as _log_finish_session
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
-from .middleware.tape import compile_tape as _compile_tape
-from .middleware.tape import preflight_answer as _preflight_answer
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
     FileResponse,
@@ -604,8 +602,7 @@ class Wreath:
         "_has_global_http_hooks",
         "_global_middleware",
         "_route_programs",
-        "_middleware_mode",
-        "_native_preflight",
+        "_http_policy",
         "_auth_handlers",
         "_handler_requirements",
         "_hardening",
@@ -652,7 +649,7 @@ class Wreath:
         routing: RoutingMode = "bitset",
         limits: RequestLimits = DEFAULT_LIMITS,
         background_timeout: float | None = 30.0,
-        middleware: str = "python",
+        http_policy: Any = None,
         signatures: Any = None,
         hardening: str = "warn",
     ) -> None:
@@ -667,12 +664,15 @@ class Wreath:
 
         self._hardening = _resolve_hardening(hardening)
         self._routing = routing
-        #: Where the global middleware tape runs. See `middleware.tape`.
-        #: `native` is opt-in because it changes what the Python tape sees:
-        #: a CORS preflight answered by the server never reaches middleware
-        #: registered before CORS, so a rate limiter stops counting them.
-        self._middleware_mode = middleware
-        self._native_preflight: Any = None
+        if http_policy is not None:
+            from .policy import HttpPolicy
+
+            if type(http_policy) is not HttpPolicy:
+                raise TypeError("http_policy must be an exact HttpPolicy instance")
+        # First-class policy is compiled independently of the custom middleware
+        # tape. The native server reads its frozen descriptor once per protocol;
+        # a generic ASGI server runs the independent reference executor.
+        self._http_policy = http_policy
         self._limits = limits
         if background_timeout is not None and background_timeout <= 0:
             raise ValueError("background_timeout must be positive, or None for no limit")
@@ -862,6 +862,7 @@ class Wreath:
         came to be emitted by `wreath schema sql` and applied by nothing.
         """
         return (
+            *((self._http_policy,) if self._http_policy is not None else ()),
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
@@ -969,7 +970,7 @@ class Wreath:
         * **`schema_database`, which the owner opts into.** One documented name,
           for an owner the application never constructed and so never saw a
           database for -- a `PostgresRateLimitStore` a caller built and handed
-          to `RateLimitMiddleware`.
+          to `RateLimitPolicy`.
 
         None means the owner genuinely holds no database: a webhook inbox is
         given a session per call and never sees one. The caller resolves that.
@@ -1752,13 +1753,11 @@ class Wreath:
     def add_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
         """Register middleware, routed by its own scope to one of two pipelines.
 
-        Middleware carrying a truthy `global_scope` attribute -- `PipelineHooks`, and
-        the shipped CORS, CSRF, compression, rate-limit, request-id, security,
-        timing and idempotency middlewares -- goes to `add_global_middleware()` and
-        wraps the whole request, routing misses and static files included. Anything
-        else is route middleware: it is compiled into each route's tape and runs
-        only once a route has matched and its authorization has passed, so it never
-        sees a 404 or a 401.
+        This API is exclusively for application-defined hooks. Standard HTTP
+        behavior is configured through `wreath.policy.HttpPolicy` and
+        never enters a middleware tape. A custom object carrying a truthy
+        `global_scope` goes to `add_global_middleware()`; anything else is
+        route-scoped and runs after matching and authorization.
 
         Route middleware is either the hook form (`before`, `before_sync`, `after`,
         or a `MiddlewareHooks`) or the legacy `(request, call_next)` callable. An
@@ -1784,6 +1783,13 @@ class Wreath:
         Args:
             priority: Lower runs earlier and further out. Ties keep registration order.
         """
+        from .policy import is_policy_component
+
+        if is_policy_component(middleware):
+            raise TypeError(
+                f"{type(middleware).__name__} is first-class HTTP policy, not "
+                "middleware; configure it through Wreath(http_policy=HttpPolicy(...))"
+            )
         if getattr(middleware, "global_scope", False):
             self.add_global_middleware(middleware, priority=priority)
             return
@@ -1791,10 +1797,23 @@ class Wreath:
         self._middleware_order += 1
         self._dirty = True
 
+    def configure_http_policy(self, policy: Any) -> None:
+        """Install the application's first-class HTTP policy before startup."""
+        from .policy import HttpPolicy
+
+        if type(policy) is not HttpPolicy:
+            raise TypeError("policy must be an exact HttpPolicy")
+        self._http_policy = (
+            policy
+            if self._http_policy is None
+            else self._http_policy.merged(policy)
+        )
+        self._dirty = True
+
     def add_global_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
         """Register hook middleware around routing and all HTTP responses.
 
-        Global middleware must expose `before`, `before_sync`, and/or
+        Global custom middleware must expose `before`, `before_sync`, and/or
         `after` hooks. Unlike route middleware, it covers misses, static
         files, and authorization failures, so it is suitable for ingress checks
         and response headers.
@@ -1813,6 +1832,13 @@ class Wreath:
             TypeError: `middleware` exposes none of the three hooks.
             ValueError: A second `handle_preflight` middleware was registered.
         """
+        from .policy import is_policy_component
+
+        if is_policy_component(middleware):
+            raise TypeError(
+                f"{type(middleware).__name__} is first-class HTTP policy, not "
+                "middleware; configure it through Wreath(http_policy=HttpPolicy(...))"
+            )
         if not any(
             hasattr(middleware, name)
             for name in (
@@ -2066,20 +2092,13 @@ class Wreath:
         if self._dirty:
             self._compile_routes()
         method = context.method
-        # Before the tape, before routing, before a `Request` exists. A CORS
-        # preflight is answerable from configuration alone, and every answer was
-        # recorded at boot -- so this is a dict lookup and a write. `method` is
-        # tested first because it is one attribute read and it is false for
-        # every request that is not an OPTIONS.
-        if method == "OPTIONS" and self._native_preflight is not None:
-            answer = _preflight_answer(self._native_preflight, context.headers)
-            if answer is not None:
-                # Same handoff `_finish_http` uses for a plain response on
-                # the native path: the protocol writes status, headers and
-                # body without a Response object existing at all.
-                await cast(Any, send).__self__._wreath_response(*answer)
-                return
         await self._dispatch_http(context, receive, send, method, context.path, True)
+
+    @property
+    def _wreath_policy(self) -> Any:
+        """Frozen descriptor consumed once by Wreath's native protocols."""
+        policy = self._http_policy
+        return None if policy is None else policy._native_descriptor
 
     def _select_dispatch(self) -> None:
         """Choose this application's dispatcher once, at compile time.
@@ -2097,13 +2116,18 @@ class Wreath:
         is no partially-specialized third dispatcher, because two
         implementations of dispatch is already the most this is worth.
         """
-        if not self._has_global_http_hooks and self._dynamic_matcher is None:
+        if (
+            self._http_policy is None
+            and not self._has_global_http_hooks
+            and self._dynamic_matcher is None
+        ):
             self._dispatch_http = self._handle_http_plain
         elif (
             self._route_programs is not None
             and self._dynamic_matcher is None
             and self._classify is not None
             and not self._stage_hooks
+            and self._http_policy is None
         ):
             # Some route runs fewer global middleware than the stack declares,
             # and this application's shape lets the route be known before the
@@ -2201,7 +2225,7 @@ class Wreath:
         """Dispatch running only the global middleware the matched route needs.
 
         `_handle_http` runs the global tape *before* it routes, because hooks
-        that rewrite the request (`ProxyHeadersMiddleware` on a forwarded Host)
+        that rewrite the request (`ProxyPolicy` on a forwarded Host)
         or refuse it (a rate limiter counting a flood of 404s) have to see
         requests that never match. Compartments need the opposite order, and the
         reconciliation is that the route is knowable without a `Request`:
@@ -2212,7 +2236,7 @@ class Wreath:
         only for the shape where doing so changes nothing:
 
         * **no dynamic matcher** -- host routing consults a Host that
-          `ProxyHeadersMiddleware` may rewrite, so the match would be taken from
+          `ProxyPolicy` may rewrite, so the match would be taken from
           a header the tape had not corrected yet.
         * **a classifying table**, since that is what answers without a Request.
         * **no stage hooks** -- `miss`, `pre_auth`, `identity` and `action` fire
@@ -2325,17 +2349,41 @@ class Wreath:
         native_response: bool,
     ) -> None:
         request: Request | None = None
+        policy = self._http_policy
+        policy_native = bool(
+            policy is not None
+            and native_response
+            and getattr(scope, "policy_native", False)
+        )
+        if policy is not None and not policy_native:
+            request = Request(scope, receive, limits=self._limits, app=self)
+            request._route_outcome = "ingress"
+            if _telemetry.PROPAGATING:
+                _telemetry.bind_propagation(request)
+            candidate = await policy._reference_ingress(request)
+            if candidate is not None:
+                await self._finish_http(
+                    request,
+                    _coerce_response(candidate),
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    0,
+                )
+                return
         before_hooks = self._global_before_hooks
         after_hooks = self._global_after_hooks
         global_hooks = self._has_global_http_hooks
         active_global = len(after_hooks)
         if global_hooks:
-            request = Request(scope, receive, limits=self._limits, app=self)
-            request._route_outcome = "ingress"
+            if request is None:
+                request = Request(scope, receive, limits=self._limits, app=self)
+                request._route_outcome = "ingress"
             # Bind before the first `before` hook: a global middleware may itself
             # call out (an auth introspection, a feature-flag fetch), and that
             # call is caused by this request exactly as a handler's is.
-            if _telemetry.PROPAGATING:
+            if _telemetry.PROPAGATING and request._policy_mask == 0:
                 _telemetry.bind_propagation(request)
             for before, is_sync, error_afters, success_afters in before_hooks:
                 try:
@@ -2719,6 +2767,19 @@ class Wreath:
                     active_global,
                 )
                 return
+        if self._http_policy is not None:
+            stage_response = await self._http_policy._reference_post_auth(request)
+            if stage_response is not None:
+                await self._finish_http(
+                    request,
+                    stage_response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return
         stage_response = (
             await self._run_stage("action", request)
             if "action" in self._stage_hooks
@@ -2794,6 +2855,17 @@ class Wreath:
                     response = _coerce_response(candidate)
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 response = await self._handle_exception(request, error)
+
+        policy = self._http_policy
+        policy_native = bool(
+            policy is not None
+            and native_response
+            and getattr(scope, "policy_native", False)
+        )
+        if policy is not None and not policy_native:
+            response = _coerce_response(
+                await policy._reference_egress(request, response)
+            )
 
         # Close this request's log scope before the response goes out, so its
         # records are published while the recorder still holds the context they
@@ -2888,7 +2960,9 @@ class Wreath:
         needs_auth = requirement.needs_backend
         websocket_hooks = self._websocket_hooks
         request: Request | None = None
-        if websocket_hooks or needs_auth:
+        policy = self._http_policy
+        policy_native = bool(scope.get("_wreath_policy_native", False))
+        if websocket_hooks or needs_auth or (policy is not None and not policy_native):
             # The handshake is a GET. Keep one Request for ingress and auth so
             # session state published by middleware reaches the backend.
             request = Request(
@@ -2899,6 +2973,11 @@ class Wreath:
                 app=self,
             )
         if request is not None:
+            if policy is not None and not policy_native:
+                candidate = await policy._reference_websocket(request)
+                if candidate is not None:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
             for before, is_sync in websocket_hooks:
                 try:
                     candidate = before(request) if is_sync else await before(request)
@@ -3316,9 +3395,6 @@ class Wreath:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
         self._route_programs = route_programs or None
-        # Recompiled every time routes are, so adding a CORS middleware after
-        # the first compile is picked up and removing one stops being answered.
-        self._native_preflight = _compile_tape(self._middleware_mode, global_middleware)
         self._auth_handlers = frozenset(
             compiled
             for compiled, requirement in handler_requirements.items()

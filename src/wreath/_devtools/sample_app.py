@@ -25,17 +25,18 @@ from wreath._auth.backends import BearerTokenBackend
 from wreath._auth.decorators import authorize, permissions, roles
 from wreath._auth.models import AuthorizationDecision, Identity
 from wreath._auth.requirements import PolicyRequirement
-from wreath.middleware.cors import CORSMiddleware
-from wreath.middleware.csrf import CSRFMiddleware
-from wreath.middleware.proxy import ProxyHeadersMiddleware
-from wreath.middleware.ratelimit import RateLimitMiddleware
-from wreath.middleware.request_id import RequestIDMiddleware
-from wreath.middleware.security import SecurityHeadersMiddleware
-from wreath.middleware.timing import ServerTimingMiddleware
 from wreath.orm import Mapped, Model, column, relationship
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
 from wreath.orm.types import Int64, Text, Timestamp
+from wreath.policy import HttpPolicy
+from wreath.policy.cors import CorsPolicy
+from wreath.policy.csrf import CsrfPolicy
+from wreath.policy.proxy import ProxyPolicy
+from wreath.policy.ratelimit import RateLimitPolicy
+from wreath.policy.request_id import RequestIdPolicy
+from wreath.policy.security import SecurityHeadersPolicy
+from wreath.policy.timing import ServerTimingPolicy
 from wreath.request import Request
 
 CSRF_SECRET = "x" * 32
@@ -138,29 +139,47 @@ class _Authorizer:
 # Ordered as a deployment would be: trust the proxy before anything reads a
 # forwarded Host, and rate-limit before doing real work for the caller.
 #
-# Factories, not instances. Middleware carries per-request state -- a token
+# Factories, not instances. Policy carries mutable operational state -- a token
 # bucket above all -- and sharing one instance across benchmark arms drains it,
 # after which the "measurement" is of 429 responses. Callers that need several
-# independent stacks (`wreath-tape-decomp`) build a fresh one per arm from these.
-#
-# Typed as Any because the public `Middleware` union cannot currently describe
-# Wreath's own shipped middleware: `MiddlewareHooks` is a dataclass rather than a
-# protocol, so hook-shaped classes like `CORSMiddleware` only match by duck
-# typing at compile time. Not this module's to fix.
-MIDDLEWARE_FACTORIES: tuple[Any, ...] = (
-    lambda: ProxyHeadersMiddleware(trusted=["127.0.0.1"]),
+# independent policies (`wreath-policy-decomp`) build a fresh one per arm.
+POLICY_FACTORIES: tuple[Any, ...] = (
+    lambda: ProxyPolicy(trusted=["127.0.0.1"]),
     # Deliberately unreachable: a benchmark drives millions of requests through
     # one bucket, and a limit it can exhaust turns the arm into a 429 path.
-    lambda: RateLimitMiddleware(limit=1_000_000_000),
-    lambda: CORSMiddleware(allow_origins=["https://example.com"]),
-    lambda: CSRFMiddleware(CSRF_SECRET, secure=False),
-    lambda: SecurityHeadersMiddleware(
+    lambda: RateLimitPolicy(limit=1_000_000_000),
+    lambda: CorsPolicy(allow_origins=["https://example.com"]),
+    lambda: CsrfPolicy(CSRF_SECRET, secure=False),
+    lambda: SecurityHeadersPolicy(
         content_security_policy="default-src 'self'; frame-ancestors 'none'",
         permissions_policy="geolocation=()",
     ),
-    lambda: RequestIDMiddleware(),
-    lambda: ServerTimingMiddleware(),
+    lambda: RequestIdPolicy(),
+    lambda: ServerTimingPolicy(),
 )
+
+
+def policy_from_components(components: list[Any] | tuple[Any, ...]) -> HttpPolicy:
+    """Build the fixed first-class policy from independently measured parts."""
+    fields: dict[str, Any] = {}
+    for component in components:
+        if type(component) is ProxyPolicy:
+            fields["proxy"] = component
+        elif type(component) is RateLimitPolicy:
+            fields["rate_limit"] = component
+        elif type(component) is CorsPolicy:
+            fields["cors"] = component
+        elif type(component) is CsrfPolicy:
+            fields["csrf"] = component
+        elif type(component) is SecurityHeadersPolicy:
+            fields["security_headers"] = component
+        elif type(component) is RequestIdPolicy:
+            fields["request_id"] = component
+        elif type(component) is ServerTimingPolicy:
+            fields["server_timing"] = component
+        else:
+            raise TypeError(f"not a built-in HTTP policy component: {component!r}")
+    return HttpPolicy(**fields)
 
 
 def build_realistic_app() -> tuple[Wreath, dict[str, str], str, str]:
@@ -182,9 +201,11 @@ def build_realistic_app() -> tuple[Wreath, dict[str, str], str, str]:
             permissions=frozenset({"users:read", "users:write"}),
         )
 
-    app = Wreath()
-    for factory in MIDDLEWARE_FACTORIES:
-        app.add_middleware(factory())
+    app = Wreath(
+        http_policy=policy_from_components(
+            [factory() for factory in POLICY_FACTORIES]
+        )
+    )
     app.configure_auth(BearerTokenBackend(verify), _Authorizer())
 
     # A route table with enough shape that classification is a real decision:
