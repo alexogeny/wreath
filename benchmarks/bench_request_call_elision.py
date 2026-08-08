@@ -15,6 +15,10 @@ The response arm prices the ``response_only=True`` route contract. Both arms
 run one route middleware hook and return the same response; the specialized arm
 omits the otherwise necessary coercion wrapper around the handler.
 
+The frozen arm prices a stronger startup contract: a route whose complete
+``PreparedResponse`` is immutable.  The control still performs ordinary route
+activation, while the frozen route goes from matching directly to emission.
+
 Arms are interleaved and carry an A/A control through Wreath's shared
 measurement harness. A delta below twice that measured floor is unresolved.
 """
@@ -33,6 +37,7 @@ from wreath import Response, Wreath
 from wreath._devtools import measure
 from wreath.middleware import MiddlewareHooks
 from wreath.request import Request
+from wreath.response import PreparedResponse
 from wreath.server import ServerConfig
 
 
@@ -223,11 +228,33 @@ def _response_arms() -> list[measure.Arm]:
     ]
 
 
+def _frozen_app(*, frozen: bool) -> Wreath:
+    app = Wreath()
+    response = PreparedResponse.text("hello, world")
+    if frozen:
+        app.frozen("/", response)
+    else:
+
+        @app.get("/", response_only=True)
+        async def endpoint(request: Any) -> PreparedResponse:
+            return response
+
+    return app
+
+
+def _frozen_arms() -> list[measure.Arm]:
+    return [
+        measure.Arm("ordinary prepared route", _frozen_app(frozen=False)),
+        measure.Arm("frozen response route", _frozen_app(frozen=True)),
+        measure.Arm("control ordinary prepared", _frozen_app(frozen=False)),
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("request", "after", "inplace", "response", "all"),
+        choices=("request", "after", "inplace", "response", "frozen", "all"),
         default="all",
     )
     parser.add_argument("--hooks", type=int, default=10)
@@ -301,6 +328,22 @@ def main() -> int:
             arms, "ordinary response route", "control ordinary response"
         )
         measured_arms["response"] = arms
+
+    if args.suite in ("frozen", "all"):
+        arms = _frozen_arms()
+        asyncio.run(
+            measure.measure_apps(
+                arms,
+                measure.scope(),
+                rounds=args.rounds,
+                iterations=args.iterations,
+                warmup=args.warmup,
+            )
+        )
+        results["frozen"] = measure.report(
+            arms, "ordinary prepared route", "control ordinary prepared"
+        )
+        measured_arms["frozen"] = arms
 
     document = {
         "metadata": {

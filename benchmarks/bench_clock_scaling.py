@@ -92,13 +92,16 @@ _BODY = b'{"ok":1}'
 class _Transport(asyncio.Transport):
     """Counts bytes and nothing else, so the arm measures the framework."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_write: Any = None) -> None:
         super().__init__()
         self.bytes_written = 0
         self.closed = False
+        self.on_write = on_write
 
     def write(self, data: Any) -> None:
         self.bytes_written += len(data)
+        if self.on_write is not None:
+            self.on_write()
 
     def writelines(self, list_of_data: Any) -> None:
         for chunk in list_of_data:
@@ -722,6 +725,41 @@ def _native_request(tick: Any) -> tuple[Any, bytes]:
     return App(), _request("/plain")
 
 
+def _native_no_request_route(tick: Any) -> tuple[Any, bytes]:
+    """Architectural ablation: route and activate without a Request carrier.
+
+    This is deliberately not a public framework path yet. It prices the upper
+    bound for a startup-proved zero-argument route: native router lookup and a
+    synchronous handler remain, while Request construction and the dispatcher
+    coroutine are removed. A retained implementation must still preserve the
+    ordinary ASGI path; this arm exists to decide whether that work is worth
+    building before touching the framework.
+    """
+    app = Wreath()
+    body = PreparedResponse(_BODY, media_type=b"application/json")
+
+    @app.get("/plain")
+    def plain() -> PreparedResponse:
+        tick()
+        return body
+
+    app._compile_routes()
+    match = app._match
+
+    class App:
+        def _wreath_http(self, context: Any, receive: Any, send: Any) -> Any:
+            matched = match(context.method, context.path)
+            if matched is None:
+                raise RuntimeError("benchmark route did not match")
+            handler, _path_params = matched
+            response = handler()
+            return send.__self__._wreath_response(
+                response.status, response.headers, response.body
+            )
+
+    return App(), _request("/plain")
+
+
 def _sync_handler(tick: Any) -> tuple[Wreath, bytes]:
     """`static`, but the handler is `def`. No coroutine object per request.
 
@@ -766,6 +804,14 @@ def _prepared_response(tick: Any) -> tuple[Wreath, bytes]:
     return app, _request("/plain")
 
 
+def _frozen_response(tick: Any) -> tuple[Wreath, bytes]:
+    """Startup-fixed route: routing remains, request/handler activation does not."""
+    app = Wreath()
+    body = PreparedResponse(_BODY, media_type=b"application/json")
+    app.frozen("/plain", body)
+    return app, _request("/plain")
+
+
 def _prepared_policy_response(tick: Any) -> tuple[Wreath, bytes]:
     """Reusable response with static cache policy compiled into native egress."""
     from wreath.cache_control import CacheControl
@@ -802,10 +848,12 @@ ARMS: dict[str, Any] = {
     "raw-asgi": _raw_asgi,
     "native-bridge": _native_bridge,
     "native-request": _native_request,
+    "native-no-request-route": _native_no_request_route,
     "static": _static,
     "sync-handler": _sync_handler,
     "fresh-response": _fresh_response,
     "prepared-response": _prepared_response,
+    "frozen-response": _frozen_response,
     "prepared-policy-response": _prepared_policy_response,
     "dict-return": _dict_return,
     "auth-public": _auth_public,
@@ -880,7 +928,7 @@ async def _drive(arm: str, requests: int) -> tuple[float, int, int]:
         app._compile_routes()
     loop = asyncio.get_running_loop()
     protocol = HttpProtocol(app, ServerConfig(), loop, set())
-    transport = _Transport()
+    transport = _Transport(tick if arm == "frozen-response" else None)
     protocol.connection_made(transport)
 
     started = time.perf_counter()
@@ -904,7 +952,7 @@ def _check(arm: str) -> None:
         """Keeps the bytes, so the status line can be read back."""
 
         def __init__(self) -> None:
-            super().__init__()
+            super().__init__(done.set if arm == "frozen-response" else None)
             self.seen: list[bytes] = []
 
         def write(self, data: Any) -> None:

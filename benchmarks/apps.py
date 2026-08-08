@@ -46,7 +46,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         authenticated,
     )
     from wreath.authorization import roles
-    from wreath.response import StreamingResponse, TextResponse
+    from wreath.response import PreparedResponse, StreamingResponse, TextResponse
 
     # Default routing mode unless asked otherwise, so this app tracks whatever
     # Wreath's default is. Set WREATH_BENCH_ROUTING to A/B a backend end-to-end.
@@ -87,6 +87,12 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     @app.get("/")
     async def plaintext(request):
         return TextResponse("hello, world")
+
+    # Wreath-only architectural ablation: the representation is fixed at
+    # startup, so the native path can compile ingress-to-egress work instead of
+    # constructing a Request and activating a handler merely to rediscover the
+    # same object. `plaintext` remains the ordinary lifecycle control.
+    app.frozen("/frozen", PreparedResponse.text("hello, world"))
 
     @app.get("/json")
     async def json_response(request):

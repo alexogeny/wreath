@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "python": "3.14.6",
+    "platform": "Linux-7.1.6-1-cachyos-x86_64-with-glibc2.44",
+    "observed_governor": "performance",
+    "method": "medians of repeated trials; pinned server CPU 0 for socket runs; load generator on CPUs 2-15",
+    "caveat": "The governor and observed clock did not match the requested balanced-battery state. Instruction counts are reported as the stable counter; cycles and IPC are retained only in the raw files and are not attributed."
+  },
+  "frozen_response": {
+    "portable_asgi_aa_ab": {
+      "rounds": 11,
+      "iterations_per_round": 10000,
+      "ordinary_prepared_us": 2.158,
+      "aa_floor_us": 0.097,
+      "resolution_threshold_us": 0.194,
+      "frozen_us": 1.426,
+      "delta_us": -0.732,
+      "delta_percent": -33.92,
+      "raw": "frozen_response_aa_2026-08-09.json"
+    },
+    "native_http1_micro_ab": {
+      "trials": 7,
+      "requests_per_trial": 50000,
+      "warmup_requests": 5000,
+      "forward": {
+        "ordinary_ns": 2391.535,
+        "frozen_ns": 1400.497,
+        "latency_delta_percent": -41.44,
+        "ordinary_instructions": 23463.284,
+        "frozen_instructions": 13996.787,
+        "instruction_delta_percent": -40.35
+      },
+      "reverse": {
+        "ordinary_ns": 2444.895,
+        "frozen_ns": 1387.799,
+        "latency_delta_percent": -43.24,
+        "ordinary_instructions": 23523.174,
+        "frozen_instructions": 13876.889,
+        "instruction_delta_percent": -41.01
+      },
+      "raw": [
+        "frozen_response_micro_ab_2026-08-09.json",
+        "frozen_response_micro_ba_2026-08-09.json"
+      ]
+    },
+    "native_http1_socket": {
+      "connections": 64,
+      "measured_requests_per_trial": 350000,
+      "warmup_requests": 50000,
+      "forward_7_trials": {
+        "ordinary_rps": 72368.73,
+        "frozen_rps": 79755.17,
+        "throughput_delta_percent": 10.21,
+        "ordinary_p99_ms": 2.671,
+        "frozen_p99_ms": 1.716,
+        "p99_delta_percent": -35.75
+      },
+      "reverse_5_trials": {
+        "ordinary_rps": 72002.3,
+        "frozen_rps": 79289.24,
+        "throughput_delta_percent": 10.12,
+        "ordinary_p99_ms": 3.359,
+        "frozen_p99_ms": 1.838,
+        "p99_delta_percent": -45.28
+      },
+      "errors": 0,
+      "raw": [
+        "frozen_response_socket_2026-08-09.json/latest.json",
+        "frozen_response_socket_reverse_2026-08-09/latest.json"
+      ]
+    }
+  },
+  "http2_eager_dispatch": {
+    "protocol": "TLS HTTP/2 via h2load 1.69.0",
+    "connections": 32,
+    "max_streams_per_connection": 32,
+    "trials": 5,
+    "measured_requests_per_trial": 250000,
+    "warmup_requests": 30000,
+    "ordinary_route": {
+      "before_rps": 59854.19,
+      "after_rps": 83206.69,
+      "throughput_delta_percent": 39.02,
+      "before_p99_ms": 59.433,
+      "after_p99_ms": 17.049,
+      "p99_delta_percent": -71.31
+    },
+    "frozen_route": {
+      "before_rps": 62775.44,
+      "after_rps": 94574.88,
+      "throughput_delta_percent": 50.66,
+      "before_p99_ms": 69.969,
+      "after_p99_ms": 14.67,
+      "p99_delta_percent": -79.03
+    },
+    "task_allocations": {
+      "immediately_completing_app_before": 1,
+      "immediately_completing_app_after": 0,
+      "actually_suspending_app_after": 1
+    },
+    "errors": 0,
+    "raw": [
+      "frozen_response_h2_before_2026-08-09/latest.json",
+      "h2_eager_dispatch_after_2026-08-09/latest.json"
+    ]
+  },
+  "http2_one_shot_flush_fusion": {
+    "ordinary_route": {
+      "before_rps": 83206.69,
+      "after_rps": 97838.32,
+      "throughput_delta_percent": 17.58,
+      "before_p99_ms": 17.049,
+      "after_p99_ms": 13.637,
+      "p99_delta_percent": -20.01
+    },
+    "frozen_route": {
+      "before_rps": 94574.88,
+      "after_rps": 109666.44,
+      "throughput_delta_percent": 15.96,
+      "before_p99_ms": 14.67,
+      "after_p99_ms": 13.449,
+      "p99_delta_percent": -8.32
+    },
+    "transport_writes_per_one_shot_response": {
+      "before": 2,
+      "after": 1
+    },
+    "errors": 0,
+    "raw": "h2_fused_response_after_2026-08-09/latest.json"
+  },
+  "http2_batch_owned_emission": {
+    "ordinary_route": {
+      "before_rps": 97838.32,
+      "after_rps": 134130.68,
+      "throughput_delta_percent": 37.09,
+      "before_p99_ms": 13.637,
+      "after_p99_ms": 11.052,
+      "p99_delta_percent": -18.96
+    },
+    "frozen_route": {
+      "before_rps": 109666.44,
+      "after_rps": 154023.11,
+      "throughput_delta_percent": 40.45,
+      "before_p99_ms": 13.449,
+      "after_p99_ms": 10.326,
+      "p99_delta_percent": -23.22
+    },
+    "deterministic_ablation": "Two native one-shot streams arriving in one parser batch now share one transport write.",
+    "errors": 0,
+    "raw": "h2_batched_response_after_2026-08-09/latest.json"
+  },
+  "http2_combined_from_original": {
+    "ordinary_route": {
+      "before_rps": 59854.19,
+      "after_rps": 134130.68,
+      "throughput_multiplier": 2.241,
+      "throughput_delta_percent": 124.09,
+      "before_p99_ms": 59.433,
+      "after_p99_ms": 11.052,
+      "p99_delta_percent": -81.41
+    },
+    "frozen_route": {
+      "before_rps": 62775.44,
+      "after_rps": 154023.11,
+      "throughput_multiplier": 2.453,
+      "throughput_delta_percent": 145.36,
+      "before_p99_ms": 69.969,
+      "after_p99_ms": 10.326,
+      "p99_delta_percent": -85.24
+    }
+  }
+}

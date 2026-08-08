@@ -273,6 +273,7 @@ class Scenario:
 
 SCENARIOS = {
     "plaintext": Scenario("GET", "/"),
+    "frozen-response": Scenario("GET", "/frozen", frameworks=_WREATH_ONLY),
     "e2e": Scenario(
         # The whole stack orchestrated in one request: bearer authentication,
         # a wreath.postgres round trip, and a wreath.http_client fetch against
