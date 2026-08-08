@@ -76,6 +76,7 @@ from typing import Any
 from wreath import Response, Wreath
 from wreath._devtools import cpu_probe as _cpu_probe
 from wreath.request import Request
+from wreath.response import PreparedResponse
 from wreath.server import ServerConfig
 
 _native_server: Any = importlib.import_module("wreath._native._server")
@@ -458,6 +459,34 @@ def _policy_subset(index: int) -> Any:
     return build
 
 
+def _policy_prefix(count: int) -> Any:
+    """The first ``count`` native controls, preserving deployment order.
+
+    Single-component arms price one policy in isolation.  These cumulative
+    arms expose interaction costs such as repeatedly searching a growing
+    response-header list, which isolated arms cannot show.
+    """
+
+    def build(tick: Any) -> tuple[Wreath, bytes]:
+        from wreath._devtools.sample_app import (
+            POLICY_FACTORIES,
+            policy_from_components,
+        )
+
+        components = [factory() for factory in POLICY_FACTORIES[:count]]
+        app = Wreath(http_policy=policy_from_components(components))
+        body = Response(_BODY)
+
+        @app.get("/plain")
+        async def plain(request: Any) -> Response:
+            tick()
+            return body
+
+        return app, _request("/plain")
+
+    return build
+
+
 def _policy_empty(tick: Any) -> tuple[Wreath, bytes]:
     """The fixed native policy-program dispatch with no configured controls."""
     from wreath.policy import HttpPolicy
@@ -724,6 +753,39 @@ def _fresh_response(tick: Any) -> tuple[Wreath, bytes]:
     return app, _request("/plain")
 
 
+def _prepared_response(tick: Any) -> tuple[Wreath, bytes]:
+    """Immutable reusable response through Wreath's selected dispatcher."""
+    app = Wreath()
+    body = PreparedResponse(_BODY, media_type=b"application/json")
+
+    @app.get("/plain")
+    async def plain(request: Any) -> PreparedResponse:
+        tick()
+        return body
+
+    return app, _request("/plain")
+
+
+def _prepared_policy_response(tick: Any) -> tuple[Wreath, bytes]:
+    """Reusable response with static cache policy compiled into native egress."""
+    from wreath.cache_control import CacheControl
+    from wreath.policy import CachePolicy, HttpPolicy
+
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cache_control=CachePolicy(CacheControl(public=True, max_age=60))
+        )
+    )
+    body = PreparedResponse(_BODY, media_type=b"application/json")
+
+    @app.get("/plain")
+    async def plain(request: Any) -> PreparedResponse:
+        tick()
+        return body
+
+    return app, _request("/plain")
+
+
 def _dict_return(tick: Any) -> tuple[Wreath, bytes]:
     """`static`, but returning a dict for the framework to serialize."""
     app = Wreath()
@@ -743,6 +805,8 @@ ARMS: dict[str, Any] = {
     "static": _static,
     "sync-handler": _sync_handler,
     "fresh-response": _fresh_response,
+    "prepared-response": _prepared_response,
+    "prepared-policy-response": _prepared_policy_response,
     "dict-return": _dict_return,
     "auth-public": _auth_public,
     "auth-identify-direct": _auth_identify_direct,
@@ -775,6 +839,13 @@ ARMS: dict[str, Any] = {
     "policy-security": _policy_subset(4),
     "policy-request-id": _policy_subset(5),
     "policy-timing": _policy_subset(6),
+    "policy-prefix-1": _policy_prefix(1),
+    "policy-prefix-2": _policy_prefix(2),
+    "policy-prefix-3": _policy_prefix(3),
+    "policy-prefix-4": _policy_prefix(4),
+    "policy-prefix-5": _policy_prefix(5),
+    "policy-prefix-6": _policy_prefix(6),
+    "policy-prefix-7": _policy_prefix(7),
     # The tape's own cost, separated from what the shipped hooks do.
     "hooks-0": _empty_hooks(0),
     "hooks-1": _empty_hooks(1),
