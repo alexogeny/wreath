@@ -1,9 +1,9 @@
-"""IdempotencyMiddleware: first response is stored and replayed for the same key."""
+"""IdempotencyPolicy: first response is stored and replayed for the same key."""
 from __future__ import annotations
 
 import pytest
 
-from wreath.middleware import IdempotencyMiddleware
+from wreath.policy import IdempotencyPolicy
 from wreath.request import Request
 from wreath.response import Response
 
@@ -43,7 +43,7 @@ def _request(
 
 
 async def test_first_call_passes_through_then_replays() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
 
     first = _request()
     assert await mw.action(first) is None            # not seen -> proceed
@@ -57,7 +57,7 @@ async def test_first_call_passes_through_then_replays() -> None:
 
 
 async def test_concurrent_duplicate_gets_409() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     first = _request()
     assert await mw.action(first) is None            # reserves the key (in-flight)
     # A second identical request arrives before the first's `after` runs.
@@ -66,7 +66,7 @@ async def test_concurrent_duplicate_gets_409() -> None:
 
 
 async def test_5xx_is_not_cached_and_stays_retryable() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     first = _request()
     await mw.action(first)
     await mw.after(first, Response(b"boom", status=500))
@@ -75,7 +75,7 @@ async def test_5xx_is_not_cached_and_stays_retryable() -> None:
 
 
 async def test_safe_method_and_missing_key_are_ignored() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     assert await mw.action(_request(method="GET")) is None
     assert await mw.action(_request(key=None)) is None
     # Neither reserved a key, so `after` is a passthrough.
@@ -84,7 +84,7 @@ async def test_safe_method_and_missing_key_are_ignored() -> None:
 
 
 async def test_key_is_scoped_by_principal() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     alice = _request(principal="alice")
     await mw.action(alice)
     await mw.after(alice, Response(b"alice-order", status=201))
@@ -95,7 +95,7 @@ async def test_key_is_scoped_by_principal() -> None:
 
 
 async def test_scope_components_cannot_shift_across_principals() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     victim = _request(path="/resource/a b", principal="c")
     await mw.action(victim)
     await mw.after(victim, Response(b"victim-secret", status=201))
@@ -105,7 +105,7 @@ async def test_scope_components_cannot_shift_across_principals() -> None:
 
 
 async def test_same_id_in_different_principal_types_has_a_distinct_scope() -> None:
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
     user = _request(principal="42", principal_type="User")
     await mw.action(user)
     await mw.after(user, Response(b"user-secret", status=201))
@@ -123,7 +123,7 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
     to be handed back someone else's response. So an anonymous request is simply
     not idempotency-guarded: the handler runs, exactly as without the middleware.
     """
-    mw = IdempotencyMiddleware()
+    mw = IdempotencyPolicy()
 
     first = _request(path="/signup", principal=None)
     assert await mw.action(first) is None
@@ -155,11 +155,11 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
 
 async def test_a_shared_store_replays_across_workers() -> None:
     """Two middlewares, one store: worker B replays what worker A stored."""
-    from wreath.middleware import MemoryIdempotencyStore
+    from wreath.policy import MemoryIdempotencyStore
 
     store = MemoryIdempotencyStore()
-    worker_a = IdempotencyMiddleware(store=store)
-    worker_b = IdempotencyMiddleware(store=store)
+    worker_a = IdempotencyPolicy(store=store)
+    worker_b = IdempotencyPolicy(store=store)
 
     first = _request()
     assert await worker_a.action(first) is None
@@ -173,7 +173,7 @@ async def test_the_memory_store_reclaims_an_expired_key() -> None:
     """Expiry reclaims a key in memory exactly as it does in Postgres."""
     import asyncio
 
-    from wreath.middleware import MemoryIdempotencyStore
+    from wreath.policy import MemoryIdempotencyStore
 
     store = MemoryIdempotencyStore(ttl=0.02)
     assert await store.reserve("k") == ("fresh", None)
@@ -192,7 +192,7 @@ async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> 
     `store()`, one middleware would honour a key for two different lengths of
     time depending on which store was configured.
     """
-    from wreath.middleware import MemoryIdempotencyStore
+    from wreath.policy import MemoryIdempotencyStore
     from wreath.store import MemoryStore
 
     store = MemoryIdempotencyStore(ttl=10.0)
@@ -211,7 +211,7 @@ async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> 
 
 
 async def test_the_postgres_store_rejects_an_unsafe_table_name() -> None:
-    from wreath.middleware import PostgresIdempotencyStore
+    from wreath.policy import PostgresIdempotencyStore
 
     for bad in ("a; DROP TABLE users", "", "1abc", "sch.ema"):
         with pytest.raises(ValueError, match="plain SQL identifier"):
@@ -219,7 +219,7 @@ async def test_the_postgres_store_rejects_an_unsafe_table_name() -> None:
 
 
 async def test_the_postgres_store_offers_its_schema_as_a_migration() -> None:
-    from wreath.middleware import PostgresIdempotencyStore
+    from wreath.policy import PostgresIdempotencyStore
 
     sql = PostgresIdempotencyStore(object(), table="replays").schema_sql()
     assert "CREATE TABLE IF NOT EXISTS replays" in sql
@@ -245,7 +245,7 @@ class _FakeConnection:
 
 
 async def _pg_store(monkeypatch, rows: list):
-    from wreath.middleware import PostgresIdempotencyStore
+    from wreath.policy import PostgresIdempotencyStore
     from wreath.postgres import Database, PoolConfig
 
     connection = _FakeConnection(rows)

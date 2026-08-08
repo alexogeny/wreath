@@ -18,7 +18,7 @@ import threading
 
 from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity, authenticated
-from wreath.middleware import IdempotencyMiddleware
+from wreath.policy import HttpPolicy, IdempotencyPolicy
 from wreath.reactor import metal_event_loop
 from wreath.server import Server, ServerConfig
 
@@ -76,7 +76,7 @@ def main() -> int:
     }
     app = Wreath()
     app.configure_auth(BearerTokenBackend(principals.get))
-    app.add_middleware(IdempotencyMiddleware())
+    app.configure_http_policy(HttpPolicy(idempotency=IdempotencyPolicy()))
 
     @app.post("/resource/{slug}")
     @authenticated()

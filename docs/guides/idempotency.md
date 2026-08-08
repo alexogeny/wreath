@@ -4,7 +4,7 @@ Networks retry. A user double-clicks, a proxy resends, a mobile client reconnect
 and replays the last request. For a `GET` that's harmless; for a `POST /orders`
 it charges the card twice.
 
-`IdempotencyMiddleware` makes a retry safe: when a request carries an
+`IdempotencyPolicy` makes a retry safe: when a request carries an
 `Idempotency-Key`, the first response is remembered and replayed for any repeat
 of that key — from a small, bounded, in-process store. No Redis, no external
 state to run.
@@ -16,9 +16,11 @@ state to run.
 > not create a second order.*
 
 ```python
-from wreath.middleware import IdempotencyMiddleware
+from wreath.policy import HttpPolicy, IdempotencyPolicy
 
-app.add_global_middleware(IdempotencyMiddleware(ttl=24 * 60 * 60))
+app.configure_http_policy(
+    HttpPolicy(idempotency=IdempotencyPolicy(ttl=24 * 60 * 60))
+)
 ```
 
 The client generates a key per logical operation and sends it:
@@ -109,10 +111,10 @@ The default store is in-process, so that retry re-runs the handler. Give the
 middleware a shared store and every worker honours every key:
 
 ```python
-from wreath.middleware import IdempotencyMiddleware, PostgresIdempotencyStore
+from wreath.policy import HttpPolicy, IdempotencyPolicy, PostgresIdempotencyStore
 
 store = PostgresIdempotencyStore(app.postgres("app", dsn=...))
-app.add_global_middleware(IdempotencyMiddleware(store=store))
+app.configure_http_policy(HttpPolicy(idempotency=IdempotencyPolicy(store=store)))
 ```
 
 One table, no Redis. Apply `store.schema_sql()` as a migration and call
@@ -128,7 +130,7 @@ disagree about when a key expires.
 
 ## What this does and does not guarantee
 
-`IdempotencyMiddleware` is **response replay**. It saves the work and keeps the
+`IdempotencyPolicy` is **response replay**. It saves the work and keeps the
 answer consistent. What makes the *effect* happen once is a unique index on
 something durable — the `key` you pass to `jobs.enqueue`, or a unique column on
 the row you write.
@@ -142,7 +144,7 @@ hop by hop, from the client's retry to the message bus.
 ## Tuning
 
 ```python
-IdempotencyMiddleware(
+IdempotencyPolicy(
     ttl=60 * 60,                 # how long a key is honoured (default 24h)
     max_entries=4096,            # hard ceiling; LRU eviction past it
     methods=("POST", "PATCH"),   # which methods to guard
