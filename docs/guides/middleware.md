@@ -194,13 +194,13 @@ origin asked, alongside `Access-Control-Allow-Credentials: true`, which lets any
 site read authenticated responses from yours. Name the origins that may send
 credentials.
 
-`SessionMiddleware` defaults to `secure=True` (matching `CsrfPolicy`) and
+`SessionPolicy` defaults to `secure=True` (matching `CsrfPolicy`) and
 requires a secret of at least 32 bytes. Pass `secure=False` for local plaintext
 development. Rotate the secret without logging everyone out by naming
 the old one:
 
 ```python
-SessionMiddleware(secret=NEW, previous_secrets=[OLD])
+SessionPolicy(secret=NEW, previous_secrets=[OLD])
 ```
 
 Cookies verify under either; new ones are signed with `secret`, and a session

@@ -10,10 +10,10 @@ Every name below is re-exported from `wreath.middleware`.
 
 ::: wreath.middleware.base
 
-::: wreath.middleware.cache
+::: wreath.policy.cache
 
-::: wreath.middleware.compression
+::: wreath.policy.compression
 
-::: wreath.middleware.idempotency
+::: wreath.policy.idempotency
 
-::: wreath.middleware.sessions
+::: wreath.policy.sessions

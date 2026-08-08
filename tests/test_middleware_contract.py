@@ -340,24 +340,24 @@ def test_every_shipped_middleware_that_has_a_contract_declares_one() -> None:
       operation, so it has nothing to say about one.
     """
     from wreath.cache_control import CacheControl
-    from wreath.middleware import (
-        CacheControlMiddleware,
-        CompressionMiddleware,
-        IdempotencyMiddleware,
-        SessionMiddleware,
+    from wreath.policy import (
+        CachePolicy,
+        CompressionPolicy,
+        IdempotencyPolicy,
+        SessionPolicy,
     )
 
     described = [
         RateLimitPolicy(limit=60, window=60.0),
-        IdempotencyMiddleware(),
+        IdempotencyPolicy(),
         CsrfPolicy(secret="x" * 32),
         RequestIdPolicy(),
-        CacheControlMiddleware(default=CacheControl(max_age=60)),
-        CompressionMiddleware(),
+        CachePolicy(default=CacheControl(max_age=60)),
+        CompressionPolicy(),
         CorsPolicy(allow_origins=["https://example.test"]),
         SecurityHeadersPolicy(),
         ServerTimingPolicy(),
-        SessionMiddleware(secret="x" * 32),
+        SessionPolicy(secret="x" * 32),
         TrustedHostPolicy(allowed_hosts=["example.test"]),
     ]
     for item in described:
@@ -379,11 +379,10 @@ def test_a_middleware_configured_to_emit_nothing_declares_nothing() -> None:
     `request.state`, but the client never sees a header -- so documenting one
     would be a claim about an instance that does not make it.
     """
-    from wreath.middleware import CacheControlMiddleware
-    from wreath.policy import ServerTimingPolicy
+    from wreath.policy import CachePolicy, ServerTimingPolicy
 
     assert ServerTimingPolicy(emit_header=False).describe().response_headers == ()
-    assert CacheControlMiddleware().describe().response_headers == ()
+    assert CachePolicy().describe().response_headers == ()
 
 
 def test_the_hooks_container_accepts_a_contract() -> None:
@@ -450,12 +449,20 @@ def _generated(app: Wreath) -> dict[str, str]:
 
 
 def _one_route_app(*middleware: Any, method: str = "get") -> Wreath:
+    from wreath.policy import IdempotencyPolicy
+
     rate_limit = next(
         (item for item in middleware if type(item) is RateLimitPolicy), None
     )
+    idempotency = next(
+        (item for item in middleware if type(item) is IdempotencyPolicy), None
+    )
     app = Wreath(
-        http_policy=HttpPolicy(rate_limit=rate_limit)
-        if rate_limit is not None
+        http_policy=HttpPolicy(
+            rate_limit=rate_limit,
+            idempotency=idempotency,
+        )
+        if rate_limit is not None or idempotency is not None
         else None
     )
     decorator = getattr(app, method)
@@ -465,7 +472,7 @@ def _one_route_app(*middleware: Any, method: str = "get") -> Wreath:
         return {"ok": "yes"}
 
     for item in middleware:
-        if type(item) is not RateLimitPolicy:
+        if type(item) not in (RateLimitPolicy, IdempotencyPolicy):
             app.add_middleware(item)
     return app
 
@@ -476,9 +483,9 @@ def test_an_app_with_no_declared_behaviour_ships_no_runtime() -> None:
 
 
 def test_the_generated_runtime_carries_the_declared_behaviours() -> None:
-    from wreath.middleware import IdempotencyMiddleware
+    from wreath.policy import IdempotencyPolicy
 
-    app = _one_route_app(IdempotencyMiddleware(), method="post")
+    app = _one_route_app(IdempotencyPolicy(), method="post")
     files = _generated(app)
     assert "behaviours.ts" in files
     runtime = files["behaviours.ts"]

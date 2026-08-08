@@ -674,9 +674,22 @@ def compile_middleware(
     Raises:
         TypeError: A middleware defines both `__call__` and hook attributes.
     """
+    registered = tuple(middleware)
+    # Standard policy owns fixed framework/server lifecycle slots.  Refuse it
+    # here as well as in Wreath.add_middleware(), because router- and
+    # decorator-scoped middleware reaches this compiler directly.
+    from ..policy import is_policy_component
+
+    for current in registered:
+        if is_policy_component(current):
+            raise TypeError(
+                f"{type(current).__name__} is first-class HTTP policy, not "
+                "middleware; configure it through HttpPolicy and "
+                "Wreath.configure_http_policy()"
+            )
     applicable = tuple(
         current
-        for current in middleware
+        for current in registered
         if route is None
         or (predicate := getattr(current, "applies_to", None)) is None
         or predicate(route)
