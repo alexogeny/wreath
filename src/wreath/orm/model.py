@@ -18,11 +18,10 @@ type rules have one implementation rather than two that can drift.
 
 from __future__ import annotations
 
-import importlib
-import os
 import re
 from typing import Any, ClassVar
 
+from .._native import extension as _extension
 from .constraints import (
     CheckViolation,
     Narrow,
@@ -44,11 +43,8 @@ from .table import Facet, Index, Unique
 
 
 def _load_native() -> Any:
-    if os.environ.get("WREATH_PURE"):
-        return None
-    try:
-        _postgres = importlib.import_module("wreath._native._postgres")
-    except ImportError:
+    _postgres = _extension("_postgres")
+    if _postgres is None:
         return None
     if not hasattr(_postgres, "_compile_model_layout"):
         # An older compiled extension without model storage; the reference
