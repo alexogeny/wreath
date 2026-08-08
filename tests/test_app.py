@@ -4,8 +4,12 @@ from typing import Any
 
 import pytest
 
-from wreath import JSONResponse, Wreath
+import wreath.app as app_module
+from wreath import JSONResponse, Response, Wreath
 from wreath.app import _StaticMatcher
+from wreath.binding import Depends
+from wreath.policy import HttpPolicy
+from wreath.response import PreparedResponse
 
 
 def test_static_matcher_preserves_first_registration_precedence() -> None:
@@ -84,6 +88,8 @@ async def invoke(
     *,
     method: str = "GET",
     body: bytes = b"",
+    raw_path: bytes | None = None,
+    scope_extra: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     messages = iter([{"type": "http.request", "body": body, "more_body": False}])
     sent: list[dict[str, Any]] = []
@@ -101,13 +107,15 @@ async def invoke(
         "method": method,
         "scheme": "http",
         "path": path,
-        "raw_path": path.encode(),
+        "raw_path": path.encode() if raw_path is None else raw_path,
         "query_string": b"",
         "headers": [],
         "server": ("test", 80),
         "client": ("test", 123),
         "root_path": "",
     }
+    if scope_extra is not None:
+        scope.update(scope_extra)
     await app(scope, receive, send)
     return sent
 
@@ -172,6 +180,378 @@ async def test_head_uses_get_headers_without_body() -> None:
     sent = await invoke(app, method="HEAD")
     assert (b"content-length", b"5") in sent[0]["headers"]
     assert sent[1]["body"] == b""
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_replays_a_prepared_response_on_portable_asgi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    response = PreparedResponse.text("ready", headers=((b"x-image", b"fixed"),))
+
+    assert app.frozen("/ready", response) is response
+    app._compile_routes()
+
+    def unexpected_request(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("unambiguous frozen ASGI route constructed Request")
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(app_module, "Request", unexpected_request)
+
+    sent = await invoke(app, "/ready")
+    assert sent == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": list(response.headers),
+        },
+        {"type": "http.response.body", "body": b"ready"},
+    ]
+    assert app._dispatch_http == app._handle_http_frozen
+
+
+@pytest.mark.asyncio
+async def test_frozen_get_answers_head_without_a_body() -> None:
+    app = Wreath()
+    response = PreparedResponse.text("ready")
+    app.frozen("/ready", response)
+
+    sent = await invoke(app, "/ready", method="HEAD")
+
+    assert sent[0]["status"] == 200
+    assert (b"content-length", b"5") in sent[0]["headers"]
+    assert sent[1] == {"type": "http.response.body", "body": b""}
+
+
+def test_frozen_route_requires_an_exact_immutable_response() -> None:
+    app = Wreath()
+
+    with pytest.raises(TypeError, match="exact PreparedResponse"):
+        app.frozen("/mutable", Response(b"mutable"))
+    with pytest.raises(TypeError, match="always response_only"):
+        app.frozen("/duplicate", PreparedResponse(b"fixed"), response_only=True)
+    with pytest.raises(TypeError, match="owns its status_code"):
+        app.frozen("/status", PreparedResponse(b"fixed"), status_code=201)
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_with_a_dependency_keeps_the_request_lifecycle() -> None:
+    app = Wreath()
+    ran: list[str] = []
+
+    def audit(request: Any) -> None:
+        ran.append(request.path)
+
+    app.frozen(
+        "/ready",
+        PreparedResponse.text("ready"),
+        dependencies=(Depends(audit),),
+    )
+
+    sent = await invoke(app, "/ready")
+
+    assert ran == ["/ready"]
+    assert sent[1]["body"] == b"ready"
+    assert app._dispatch_http != app._handle_http_frozen
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_with_route_middleware_keeps_the_lifecycle() -> None:
+    app = Wreath()
+    entered: list[str] = []
+
+    async def around(request: Any, call_next: Any) -> Any:
+        entered.append("before")
+        response = await call_next(request)
+        entered.append("after")
+        return response
+
+    app.frozen(
+        "/ready",
+        PreparedResponse.text("ready"),
+        middleware=(around,),
+    )
+
+    sent = await invoke(app, "/ready")
+
+    assert entered == ["before", "after"]
+    assert sent[1]["body"] == b"ready"
+    assert app._dispatch_http != app._handle_http_frozen
+
+
+def test_frozen_route_preserves_its_control_plane_name() -> None:
+    app = Wreath()
+    app.frozen("/default", PreparedResponse())
+    app.frozen("/named", PreparedResponse(), name="readiness")
+
+    assert app._routes[0].endpoint.__name__ == "frozen_response"
+    assert app._routes[1].endpoint.__name__ == "readiness"
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_miss_uses_the_general_404_lifecycle() -> None:
+    app = Wreath()
+    app.frozen("/ready", PreparedResponse.text("ready"))
+
+    sent = await invoke(app, "/missing")
+
+    assert sent[0]["status"] == 404
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_ambiguous_raw_path_uses_the_general_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen("/ready", PreparedResponse.text("ready"))
+    app._compile_routes()
+    original = app_module.Request
+    constructed = 0
+
+    def observed_request(*args: Any, **kwargs: Any) -> Any:
+        nonlocal constructed
+        constructed += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(app_module, "Request", observed_request)
+    sent = await invoke(app, "/ready", raw_path=b"%2fready")
+
+    assert sent[0]["status"] == 400
+    assert constructed == 1
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_active_trace_uses_the_general_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen("/ready", PreparedResponse.text("ready"))
+    app._compile_routes()
+    original = app_module.Request
+    constructed = 0
+
+    def observed_request(*args: Any, **kwargs: Any) -> Any:
+        nonlocal constructed
+        constructed += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", True)
+    monkeypatch.setattr(app_module, "Request", observed_request)
+    sent = await invoke(app, "/ready")
+
+    assert sent[1]["body"] == b"ready"
+    assert constructed == 1
+
+
+@pytest.mark.asyncio
+async def test_frozen_route_attached_flight_uses_the_general_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen("/ready", PreparedResponse.text("ready"))
+    app._compile_routes()
+    original = app_module.Request
+    constructed = 0
+
+    def observed_request(*args: Any, **kwargs: Any) -> Any:
+        nonlocal constructed
+        constructed += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(app_module, "Request", observed_request)
+    sent = await invoke(app, "/ready", scope_extra={"_wreath_flight": (1, 1)})
+
+    assert sent[1]["body"] == b"ready"
+    assert constructed == 1
+
+
+def test_frozen_dispatch_is_not_selected_for_request_lifecycle_features() -> None:
+    class Hook:
+        global_scope = True
+
+        def before_sync(self, request: Any) -> None:
+            return None
+
+    shapes = []
+
+    policy = Wreath(http_policy=HttpPolicy())
+    policy.frozen("/ready", PreparedResponse())
+    shapes.append(policy)
+
+    hooked = Wreath()
+    hooked.add_middleware(Hook())
+    hooked.frozen("/ready", PreparedResponse())
+    shapes.append(hooked)
+
+    dynamic = Wreath()
+    dynamic.frozen("/ready", PreparedResponse(), host="example.com")
+    shapes.append(dynamic)
+
+    protected = Wreath()
+    protected.frozen("/ready", PreparedResponse(), permissions=("ready:read",))
+    shapes.append(protected)
+
+    mixed = Wreath()
+    mixed.frozen("/ready", PreparedResponse())
+
+    @mixed.get("/ordinary")
+    def ordinary(request: Any) -> PreparedResponse:
+        return PreparedResponse()
+
+    shapes.append(mixed)
+
+    for app in shapes:
+        app._compile_routes()
+        assert app._dispatch_http != app._handle_http_frozen
+
+
+def test_application_without_frozen_routes_has_an_empty_frozen_response_image() -> None:
+    app = Wreath()
+
+    @app.get("/ordinary")
+    async def ordinary(request: Any) -> PreparedResponse:
+        return PreparedResponse()
+
+    app._compile_routes()
+
+    assert app._frozen_responses == {}
+    assert app._dispatch_http != app._handle_http_frozen
+
+
+@pytest.mark.asyncio
+async def test_frozen_native_seam_uses_the_one_shot_without_portable_scope_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    response = PreparedResponse.text("ready")
+    app.frozen("/ready", response)
+    app._compile_routes()
+
+    class NativeScope:
+        flight = 0
+
+    class NativeSend:
+        def __init__(self) -> None:
+            self.responses: list[tuple[int, tuple[tuple[bytes, bytes], ...], bytes]] = []
+
+        async def send(self, message: dict[str, Any]) -> None:
+            raise AssertionError(f"native frozen route emitted ASGI message: {message}")
+
+        def _wreath_response(
+            self,
+            status: int,
+            headers: tuple[tuple[bytes, bytes], ...],
+            body: bytes,
+        ) -> Any:
+            self.responses.append((status, headers, body))
+
+            async def completed() -> None:
+                return None
+
+            return completed()
+
+    def unexpected_arm(*args: Any) -> None:
+        raise AssertionError("undeclared native frozen route armed cancellation")
+
+    def unexpected_general_finisher(*args: Any) -> None:
+        raise AssertionError("native frozen seam entered the general response finisher")
+
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    monkeypatch.setattr(app_module, "_arm_cancel_on_disconnect", unexpected_arm)
+    monkeypatch.setattr(Wreath, "_finish_http_plain", unexpected_general_finisher)
+    sender = NativeSend()
+    await app._handle_http_frozen(
+        NativeScope(), None, sender.send, "GET", "/ready", True
+    )
+
+    assert sender.responses == [(response.status, response.headers, response.body)]
+
+
+@pytest.mark.asyncio
+async def test_frozen_native_seam_falls_back_for_an_attached_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen("/ready", PreparedResponse.text("ready"))
+    app._compile_routes()
+    fell_back: list[str] = []
+
+    class NativeScope:
+        flight = 1
+
+    class NativeSend:
+        async def send(self, message: dict[str, Any]) -> None:
+            return None
+
+    def fallback(
+        self: Wreath,
+        scope: Any,
+        receive: Any,
+        send: Any,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> Any:
+        fell_back.append(path)
+
+        async def completed() -> None:
+            return None
+
+        return completed()
+
+    monkeypatch.setattr(Wreath, "_handle_http", fallback)
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    await app._handle_http_frozen(
+        NativeScope(), None, NativeSend().send, "GET", "/ready", True
+    )
+
+    assert fell_back == ["/ready"]
+
+
+@pytest.mark.asyncio
+async def test_frozen_native_seam_arms_only_the_declared_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    app.frozen(
+        "/declared",
+        PreparedResponse.text("declared"),
+        cancel_on_disconnect=False,
+    )
+    app.frozen("/plain", PreparedResponse.text("plain"))
+    app._compile_routes()
+    armed: list[bool] = []
+
+    class NativeScope:
+        flight = 0
+
+    class NativeSend:
+        async def send(self, message: dict[str, Any]) -> None:
+            return None
+
+        def _wreath_response(self, status: int, headers: Any, body: bytes) -> Any:
+            async def completed() -> None:
+                return None
+
+            return completed()
+
+    monkeypatch.setattr(
+        app_module,
+        "_arm_cancel_on_disconnect",
+        lambda send, enabled: armed.append(enabled),
+    )
+    monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
+    sender = NativeSend()
+    await app._handle_http_frozen(
+        NativeScope(), None, sender.send, "GET", "/plain", True
+    )
+    await app._handle_http_frozen(
+        NativeScope(), None, sender.send, "GET", "/declared", True
+    )
+
+    assert armed == [False]
 
 
 @pytest.mark.asyncio

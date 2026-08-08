@@ -598,6 +598,8 @@ class Wreath:
         "_flight_arm_registry",
         "_limits",
         "_fallback_exception_handler",
+        "_frozen_routes",
+        "_frozen_responses",
         "_global_after_hooks",
         "_global_before_hooks",
         "_has_global_http_hooks",
@@ -714,6 +716,11 @@ class Wreath:
         )
         self._all_capability_mask = 1
         self._fallback_exception_handler: ExceptionHandler | None = None
+        # Explicit constant-response routes. The registration map keys the
+        # small portable endpoint; compilation remaps it to the final handler
+        # identity the native router returns after wrappers are settled.
+        self._frozen_routes: dict[Any, PreparedResponse] = {}
+        self._frozen_responses: dict[Any, PreparedResponse] = {}
         self._preflight_fallback: Callable[[Request], Awaitable[Any]] | None = None
         self.state = State()
         self._ws_router: CompiledRouter | None = None
@@ -1634,6 +1641,56 @@ class Wreath:
         """
         return self.route(path, methods=("GET",), **metadata)
 
+    def frozen(
+        self,
+        path: str,
+        response: PreparedResponse,
+        *,
+        methods: Iterable[str] = ("GET",),
+        **metadata: Any,
+    ) -> PreparedResponse:
+        """Register a response whose complete representation is fixed at startup.
+
+        A frozen route has no handler activation to perform. On Wreath's native
+        HTTP server, an application made entirely of frozen routes resolves
+        the route and emits the prepared response without constructing a
+        `Request`, creating a dispatcher coroutine, or calling Python
+        application code. Generic ASGI servers execute the tiny endpoint below
+        and receive the same ordinary ASGI messages.
+
+        Custom middleware, authentication, dynamic host routing, policy and
+        recording deliberately select the ordinary dispatcher: those features
+        need a request lifecycle, so freezing never silently bypasses them.
+
+        Args:
+            path: Route path, with the same syntax as `route`.
+            response: Exact immutable response to replay.
+            methods: HTTP methods answered by this route; defaults to GET.
+            metadata: The ordinary route metadata accepted by `route`.
+
+        Returns:
+            The supplied response, convenient for later inspection.
+        """
+        if response.__class__ is not PreparedResponse:
+            raise TypeError("frozen response must be an exact PreparedResponse")
+        if "response_only" in metadata:
+            raise TypeError("frozen routes are always response_only")
+        if "status_code" in metadata:
+            raise TypeError("frozen response owns its status_code")
+
+        async def frozen_endpoint(request: Request | None = None) -> PreparedResponse:
+            return response
+
+        frozen_endpoint.__name__ = metadata.get("name") or "frozen_response"
+        self.route(
+            path,
+            methods=methods,
+            response_only=True,
+            **metadata,
+        )(frozen_endpoint)
+        self._frozen_routes[frozen_endpoint] = response
+        return response
+
     def post(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
         """Register a POST route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("POST",), **metadata)
@@ -2158,6 +2215,16 @@ class Wreath:
         fast_policy = policy is not None and not (
             policy._dynamic_always or policy._has_activation or policy._has_post_auth
         )
+        frozen = self._frozen_responses
+        if (
+            policy is None
+            and not self._has_global_http_hooks
+            and self._dynamic_matcher is None
+            and not self._auth_handlers
+            and len(frozen) == len(self._handler_requirements)
+        ):
+            self._dispatch_http = self._handle_http_frozen
+            return
         if (
             (policy is None or fast_policy)
             and not self._has_global_http_hooks
@@ -2206,6 +2273,39 @@ class Wreath:
             self._dispatch_http = self._handle_http_compartment
         else:
             self._dispatch_http = self._handle_http
+
+    def _handle_http_frozen(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> Awaitable[None]:
+        """Resolve and emit a startup-fixed response without a request lifecycle."""
+        if not native_response and _ambiguous_request_path(scope, path):
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        matched = self._match(method, path)
+        if matched is None:
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        if _telemetry.PROPAGATING or (
+            scope.flight if native_response else ("_wreath_flight" in scope)
+        ):
+            return self._handle_http(scope, receive, send, method, path, native_response)
+        handler, _path_params = matched
+        response = self._frozen_responses[handler]
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
+        if native_response:
+            protocol = cast(Any, send).__self__
+            return protocol._wreath_response(
+                response.status, response.headers, response.body
+            )
+        return self._finish_http_plain(response, send, method, scope, native_response)
 
     def _handle_http_plain_auth_sync(
         self,
@@ -4053,6 +4153,7 @@ class Wreath:
         route_programs: dict[Any, tuple[Any, Any]] = {}
         program_cache: dict[frozenset[int], tuple[Any, Any]] = {}
         handler_requirements: dict[Any, AuthRequirement] = {}
+        frozen_responses: dict[Any, PreparedResponse] = {}
         # Compiled handler -> (method, path) so a later telemetry join can map
         # each route to its metadata-image IDs without re-walking the router.
         flight_route_keys: dict[Any, tuple[str, str]] = {}
@@ -4066,6 +4167,7 @@ class Wreath:
         for definition, requirement, binding_spec in zip(
             self._routes, requirements, binding_specs, strict=True
         ):
+            frozen_response = self._frozen_routes.get(definition.endpoint)
             # Typed-signature binding compiles once here; request-only
             # handlers come back unchanged.
             endpoint = compile_binder(
@@ -4135,6 +4237,12 @@ class Wreath:
                 else:
                     router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
+                if (
+                    frozen_response is not None
+                    and not chain
+                    and not definition.dependencies
+                ):
+                    frozen_responses[compiled] = frozen_response
                 flight_route_keys[compiled] = (method, definition.path)
                 if definition.cancel_on_disconnect is not None:
                     cancel_on_disconnect[compiled] = definition.cancel_on_disconnect
@@ -4164,6 +4272,7 @@ class Wreath:
         if self._ws_router is not None:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
+        self._frozen_responses = frozen_responses
         self._route_programs = route_programs or None
         self._auth_handlers = frozenset(
             compiled
