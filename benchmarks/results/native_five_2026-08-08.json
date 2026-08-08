@@ -1,0 +1,59 @@
+{
+  "scenario": "five-native-request-surface-optimizations",
+  "date": "2026-08-08",
+  "baseline_commit": "164fcb5",
+  "machine": "AMD Ryzen 7 7730U, Linux 7.1.6, CPython 3.14.6",
+  "method": {
+    "tool": "wreath-cpu-probe",
+    "requests": 3000,
+    "trials_per_repetition": 2,
+    "warmup": 1000,
+    "repetitions": 3,
+    "affinity": "taskset -c 2",
+    "counter_method": "slope between N and N/2 operations",
+    "comparison": "interleaved pristine worktree and candidate",
+    "governor": "performance",
+    "note": "The first screening run was taken on powersave. The governor changed externally before the final interleaved run, so instruction count is the decision metric; cycles, IPC and wall time are indicative. Values below are medians of three repetitions."
+  },
+  "request_headers": {
+    "arms": "req-hdr-8 minus req-hdr-0",
+    "baseline_instructions": 9252.264,
+    "candidate_instructions": 4556.523,
+    "marginal_instruction_change_percent": -50.752,
+    "total_req_hdr_8_instruction_change_percent": -10.935
+  },
+  "response_headers": {
+    "arms": "resp-hdr-8 minus resp-hdr-0",
+    "baseline_instructions": 3441.053,
+    "candidate_instructions": 3328.329,
+    "marginal_instruction_change_percent": -3.276,
+    "total_resp_hdr_8_instruction_change_percent": -0.634
+  },
+  "route_activation": {
+    "arms": "bound minus static",
+    "baseline_instructions": 8915.351,
+    "candidate_instructions": 7306.859,
+    "marginal_instruction_change_percent": -18.042,
+    "total_bound_instruction_change_percent": -4.445,
+    "validated_total_instruction_change_percent": -2.714
+  },
+  "streaming_receive": {
+    "arm": "stream-8",
+    "definition": "eight 64-byte parsed chunked-body slots drained through Request.stream()",
+    "baseline_instruction_samples": [104497.875, 103447.527, 102230.364],
+    "candidate_instruction_samples": [91230.187, 91380.687, 91263.654],
+    "baseline_median_instructions": 103447.527,
+    "candidate_median_instructions": 91263.654,
+    "instruction_change_percent": -11.778,
+    "baseline_median_ns": 9140.818,
+    "candidate_median_ns": 7954.584,
+    "ns_change_percent": -12.977
+  },
+  "policy_guardrail": {
+    "baseline_policy_instructions": 70805.425,
+    "candidate_policy_instructions": 71423.597,
+    "instruction_change_percent": 0.873,
+    "interpretation": "The expanded first-class policy program adds a small fixed branch cost. The separate middleware-to-native-policy decomposition remains the relevant policy result: 45.445% fewer total instructions and 59.253% less policy overhead.",
+    "related_result": "benchmarks/results/native_http_policy_2026-08-08.json"
+  }
+}

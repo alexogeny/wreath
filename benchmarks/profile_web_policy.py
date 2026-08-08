@@ -10,11 +10,13 @@ from typing import Any
 
 from wreath import JSONResponse, Request, Response
 from wreath.cache_control import CacheControl
-from wreath.middleware import (
-    CacheControlMiddleware,
-    CompressionMiddleware,
+from wreath.policy import (
+    CachePolicy,
+    CompressionPolicy,
+    CsrfPolicy,
+    SecurityHeadersPolicy,
+    csrf_token,
 )
-from wreath.policy import CsrfPolicy, SecurityHeadersPolicy, csrf_token
 
 
 async def _receive() -> dict[str, Any]:
@@ -37,18 +39,18 @@ def _request(method: str = "GET", headers: list[tuple[bytes, bytes]] | None = No
 
 
 async def profile_compression(iterations: int) -> None:
-    middleware = CompressionMiddleware(minimum_size=1024)
+    middleware = CompressionPolicy(minimum_size=1024)
     request = _request()
     payload = {"message": "profile compression" * 1000}
     for _ in range(iterations):
-        await middleware._egress(request, JSONResponse(payload))
+        await middleware.after(request, JSONResponse(payload))
 
 
 async def profile_compression_skip(iterations: int) -> None:
-    middleware = CompressionMiddleware(minimum_size=1024)
+    middleware = CompressionPolicy(minimum_size=1024)
     request = _request(headers=[(b"host", b"example.test")])
     for _ in range(iterations):
-        await middleware._egress(request, Response(b"tiny"))
+        await middleware.after(request, Response(b"tiny"))
 
 
 async def profile_security(iterations: int) -> None:
@@ -57,11 +59,11 @@ async def profile_security(iterations: int) -> None:
     )
     request = _request()
     for _ in range(iterations):
-        await middleware._egress(request, Response(b"ok"))
+        await middleware.after(request, Response(b"ok"))
 
 
 async def profile_cache(iterations: int) -> None:
-    middleware = CacheControlMiddleware(CacheControl(private=True, no_store=True))
+    middleware = CachePolicy(CacheControl(private=True, no_store=True))
     request = _request()
     for _ in range(iterations):
         await middleware._egress(request, Response(b"ok"))

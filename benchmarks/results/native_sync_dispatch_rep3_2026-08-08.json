@@ -1,0 +1,51 @@
+{
+  "observed_mhz": 4227.305,
+  "platform": "Linux-7.1.6-1-cachyos-x86_64-with-glibc2.44",
+  "arms": {
+    "raw-asgi": {
+      "ns": 1980.5433333507003,
+      "counters": {
+        "instructions": 21570.11275,
+        "cycles": 8839.894166666667,
+        "cache-misses": 5.4599166666666665,
+        "branch-misses": 7.290166666666667
+      }
+    },
+    "native-bridge": {
+      "ns": 1188.1999168205462,
+      "counters": {
+        "instructions": 12327.347083333334,
+        "cycles": 5014.757333333333,
+        "cache-misses": -10.199166666666667,
+        "branch-misses": -1.1951666666666667
+      }
+    },
+    "native-request": {
+      "ns": 1426.5987501858035,
+      "counters": {
+        "instructions": 14724.897916666667,
+        "cycles": 5618.068083333334,
+        "cache-misses": 3.92675,
+        "branch-misses": -4.795166666666667
+      }
+    },
+    "static": {
+      "ns": 2449.3448333184156,
+      "counters": {
+        "instructions": 23979.425666666666,
+        "cycles": 9816.832166666667,
+        "cache-misses": -16.026416666666666,
+        "branch-misses": -5.02425
+      }
+    },
+    "sync-handler": {
+      "ns": 2165.2362499177493,
+      "counters": {
+        "instructions": 21542.25175,
+        "cycles": 8682.873666666666,
+        "cache-misses": 1.2403333333333333,
+        "branch-misses": -7.02875
+      }
+    }
+  }
+}

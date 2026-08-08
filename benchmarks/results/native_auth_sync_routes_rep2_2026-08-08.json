@@ -1,0 +1,42 @@
+{
+  "observed_mhz": 2170.903,
+  "platform": "Linux-7.1.6-1-cachyos-x86_64-with-glibc2.44",
+  "arms": {
+    "auth-bearer": {
+      "ns": 6416.8688334878725,
+      "counters": {
+        "instructions": 34253.23291666667,
+        "cycles": 12261.218416666667,
+        "cache-misses": -41.329,
+        "branch-misses": -0.41658333333333336
+      }
+    },
+    "auth-bearer-sync": {
+      "ns": 5901.856083255552,
+      "counters": {
+        "instructions": 31619.098666666665,
+        "cycles": 12457.501416666666,
+        "cache-misses": 7.572,
+        "branch-misses": -6.490833333333334
+      }
+    },
+    "auth-role": {
+      "ns": 6401.497499912996,
+      "counters": {
+        "instructions": 34317.578166666666,
+        "cycles": 13831.57625,
+        "cache-misses": 19.688083333333335,
+        "branch-misses": 1.6141666666666667
+      }
+    },
+    "auth-role-sync": {
+      "ns": 5971.350750163158,
+      "counters": {
+        "instructions": 32050.080833333333,
+        "cycles": 12080.6765,
+        "cache-misses": 16.391416666666668,
+        "branch-misses": 6.694833333333333
+      }
+    }
+  }
+}

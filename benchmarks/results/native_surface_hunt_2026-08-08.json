@@ -1,0 +1,129 @@
+{
+  "scenario": "continued-native-request-surface-hunt",
+  "date": "2026-08-08",
+  "baseline_commit": "164fcb5",
+  "machine": "AMD Ryzen 7 7730U, Linux 7.1.6, CPython 3.14.6",
+  "method": {
+    "tool": "wreath-cpu-probe",
+    "affinity": "taskset -c 2",
+    "governor": "performance",
+    "counter_method": "slope between N and N/2 operations",
+    "repetitions": 3,
+    "auth_and_policy": {
+      "requests": 5000,
+      "trials_per_repetition": 3,
+      "warmup": 1500
+    },
+    "binding_and_validation": {
+      "requests": 8000,
+      "trials_per_repetition": 5,
+      "warmup": 2000
+    },
+    "note": "Instruction count is the decision metric. Each ordinary comparison uses the median of three independent repetitions. The final lazy-error-list ablation was additionally checked as an interleaved A/B against a separately built scratch twin so the live tree was never rewound."
+  },
+  "bearer_authentication": {
+    "definition": "eight realistic request headers; built-in BearerTokenBackend with a synchronous verifier",
+    "baseline_total_instruction_samples": [
+      69693.9636,
+      69807.3564,
+      69489.9484
+    ],
+    "candidate_total_instruction_samples": [
+      53397.7036,
+      53444.44373333333,
+      53444.47893333333
+    ],
+    "baseline_median_instructions": 69693.9636,
+    "candidate_median_instructions": 53444.44373333333,
+    "total_instruction_change_percent": -23.316,
+    "baseline_adapter_median_instructions": 18873.155466666664,
+    "candidate_adapter_median_instructions": 2470.684133333335,
+    "adapter_instruction_change_percent": -86.909,
+    "implementation": "scan the native lazy header block for one non-duplicate Bearer credential and guard ordinary verifier results before inspect.isawaitable"
+  },
+  "fixed_native_policy_dispatch": {
+    "definition": "a stateless first-class HttpPolicy whose ingress and egress are owned by the native server",
+    "baseline_fixed_median_instructions": 5818.537733333334,
+    "candidate_fixed_median_instructions": 2025.9368,
+    "fixed_instruction_change_percent": -65.181,
+    "baseline_full_policy_instruction_samples": [
+      71538.43213333334,
+      71517.91026666667,
+      71551.98346666667
+    ],
+    "candidate_full_policy_instruction_samples": [
+      68416.87946666667,
+      68000.3632,
+      67905.654
+    ],
+    "baseline_full_policy_median_instructions": 71538.43213333334,
+    "candidate_full_policy_median_instructions": 68000.3632,
+    "full_policy_instruction_change_percent": -4.946,
+    "implementation": "select the plain dispatcher when the compiled native policy has no activation, post-auth, or dynamic-always work; portable ASGI and refused native descriptors delegate before effects"
+  },
+  "native_return_validation": {
+    "definition": "one path-bound handler returning dict[str, Any] under a compiled response contract",
+    "isolated_copy_elision": {
+      "baseline_contract_marginal_median_instructions": 9927.03105,
+      "candidate_contract_marginal_median_instructions": 8953.84005,
+      "contract_marginal_instruction_change_percent": -9.803,
+      "baseline_total_median_instructions": 51301.6576,
+      "candidate_total_median_instructions": 50215.99005,
+      "total_instruction_change_percent": -2.116
+    },
+    "baseline_contract_marginal_median_instructions": 9927.03105,
+    "candidate_contract_marginal_median_instructions": 8863.3976,
+    "contract_marginal_instruction_change_percent": -10.715,
+    "baseline_total_instruction_samples": [
+      51015.62065,
+      51431.93185,
+      51301.6576
+    ],
+    "candidate_total_instruction_samples": [
+      48174.3048,
+      48337.7479,
+      48175.2976
+    ],
+    "baseline_total_median_instructions": 51301.6576,
+    "candidate_total_median_instructions": 48175.2976,
+    "total_instruction_change_percent": -6.094,
+    "implementation": "return an unchanged mapping by identity when the native dict plan's child opcode is Any; the final combined samples also include the scalar-activation reductions reported below"
+  },
+  "native_scalar_activation": {
+    "definition": "one int path parameter converted by the startup-compiled native activation plan",
+    "baseline_total_instruction_samples": [
+      36625.0792,
+      36547.1418,
+      36673.1817
+    ],
+    "candidate_total_instruction_samples": [
+      34634.9837,
+      34652.2134,
+      34214.6631
+    ],
+    "baseline_median_instructions": 36625.0792,
+    "candidate_median_instructions": 34634.9837,
+    "total_instruction_change_percent": -5.434,
+    "lazy_error_list_interleaved": {
+      "eager_instruction_samples": [
+        34904.6804,
+        35308.61175,
+        35289.9478
+      ],
+      "lazy_instruction_samples": [
+        34666.92275,
+        34487.5386,
+        34327.015
+      ],
+      "eager_median_instructions": 35289.9478,
+      "lazy_median_instructions": 34487.5386,
+      "instruction_change_percent": -2.274
+    },
+    "implementation": "return the user coroutine directly to the dispatcher, call the activation loop without temporary argument/result tuples, and allocate its error list only after a conversion fails"
+  },
+  "retained_security_work": {
+    "csrf_fetch_metadata_marginal_instructions": 2362.5416,
+    "csrf_cookie_hmac_marginal_instructions": 18444.04746666667,
+    "decision": "retain the legacy cookie/token/HMAC work; its cost is real security processing rather than dispatcher scaffolding"
+  }
+}

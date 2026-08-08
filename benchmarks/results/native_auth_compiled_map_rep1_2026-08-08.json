@@ -1,0 +1,51 @@
+{
+  "observed_mhz": 2170.992,
+  "platform": "Linux-7.1.6-1-cachyos-x86_64-with-glibc2.44",
+  "arms": {
+    "auth-identify-direct": {
+      "ns": 6608.330750168534,
+      "counters": {
+        "instructions": 35403.25033333333,
+        "cycles": 11560.036583333333,
+        "cache-misses": -33.82183333333333,
+        "branch-misses": -8.141833333333333
+      }
+    },
+    "auth-identify-bearer": {
+      "ns": 6498.492249799408,
+      "counters": {
+        "instructions": 34981.964166666665,
+        "cycles": 15857.6365,
+        "cache-misses": -12.899166666666666,
+        "branch-misses": 3.3575
+      }
+    },
+    "auth-direct": {
+      "ns": 7379.18750019162,
+      "counters": {
+        "instructions": 39130.963833333335,
+        "cycles": 14553.167666666666,
+        "cache-misses": -0.8196666666666667,
+        "branch-misses": -3.023083333333333
+      }
+    },
+    "auth-bearer": {
+      "ns": 7188.189333040403,
+      "counters": {
+        "instructions": 38657.99725,
+        "cycles": 17674.692166666668,
+        "cache-misses": 20.851416666666665,
+        "branch-misses": 11.561333333333334
+      }
+    },
+    "auth-role": {
+      "ns": 7298.825166496195,
+      "counters": {
+        "instructions": 38818.58941666667,
+        "cycles": 15018.01675,
+        "cache-misses": -6.619666666666666,
+        "branch-misses": -4.873666666666667
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "observed_mhz": 2170.456,
+  "platform": "Linux-7.1.6-1-cachyos-x86_64-with-glibc2.44",
+  "arms": {
+    "req-hdr-0": {
+      "ns": 4628.953833566306,
+      "counters": {
+        "instructions": 23812.736555555555,
+        "cycles": 10715.987,
+        "cache-misses": 19.034333333333333,
+        "branch-misses": 3.171333333333333
+      }
+    },
+    "req-hdr-8": {
+      "ns": 4084.6743334744433,
+      "counters": {
+        "instructions": 28365.71788888889,
+        "cycles": 10072.176388888889,
+        "cache-misses": -75.30116666666666,
+        "branch-misses": 7.504722222222222
+      }
+    },
+    "req-hdr-20": {
+      "ns": 3242.680222481593,
+      "counters": {
+        "instructions": 35693.37383333333,
+        "cycles": 12197.939833333334,
+        "cache-misses": -3.972111111111111,
+        "branch-misses": -0.31366666666666665
+      }
+    }
+  }
+}

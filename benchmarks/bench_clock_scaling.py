@@ -75,6 +75,7 @@ from typing import Any
 
 from wreath import Response, Wreath
 from wreath._devtools import cpu_probe as _cpu_probe
+from wreath.request import Request
 from wreath.server import ServerConfig
 
 _native_server: Any = importlib.import_module("wreath._native._server")
@@ -121,8 +122,18 @@ class _Transport(asyncio.Transport):
 
 def _request(path: str) -> bytes:
     return (
+        f"GET {path} HTTP/1.1\r\nhost: localhost\r\nuser-agent: wreath-bench\r\naccept: */*\r\n\r\n"
+    ).encode()
+
+
+def _authorization_request(path: str) -> bytes:
+    """Eight realistic fields, including the bearer credential under test."""
+    return (
         f"GET {path} HTTP/1.1\r\nhost: localhost\r\n"
-        "user-agent: wreath-bench\r\naccept: */*\r\n\r\n"
+        "user-agent: wreath-bench\r\naccept: */*\r\n"
+        "accept-encoding: gzip\r\nx-request-id: bench\r\n"
+        "x-forwarded-proto: https\r\ncache-control: no-cache\r\n"
+        "authorization: Bearer valid-token\r\n\r\n"
     ).encode()
 
 
@@ -136,6 +147,199 @@ def _static(tick: Any) -> tuple[Wreath, bytes]:
         return body
 
     return app, _request("/plain")
+
+
+def _auth_public(tick: Any) -> tuple[Wreath, bytes]:
+    """Protected-route control: same eight fields, but no authentication work."""
+    app = Wreath()
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    async def public(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_bearer(tick: Any) -> tuple[Wreath, bytes]:
+    """Built-in bearer extraction plus one synchronous verifier activation."""
+    from wreath.auth import BearerTokenBackend, Identity, authenticated
+
+    identity = Identity("bench")
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: identity if token == "valid-token" else None)
+    )
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @authenticated()
+    async def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_bearer_sync(tick: Any) -> tuple[Wreath, bytes]:
+    """Bearer activation whose verifier and route are both synchronous."""
+    from wreath.auth import BearerTokenBackend, Identity, authenticated
+
+    identity = Identity("bench")
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: identity if token == "valid-token" else None)
+    )
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @authenticated()
+    def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_direct(tick: Any) -> tuple[Wreath, bytes]:
+    """Authentication pipeline with a backend that performs no credential work."""
+    from wreath.auth import Identity, authenticated
+
+    identity = Identity("bench")
+
+    class DirectBackend:
+        async def authenticate(self, request: Any) -> Identity:
+            return identity
+
+        def challenge(self, request: Any) -> str:
+            return "Direct"
+
+    app = Wreath()
+    app.configure_auth(DirectBackend())
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @authenticated()
+    async def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_identify_direct(tick: Any) -> tuple[Wreath, bytes]:
+    """Direct backend activation without a capability-gated resolve."""
+    from wreath.auth import Identity, identify
+
+    identity = Identity("bench")
+
+    class DirectBackend:
+        async def authenticate(self, request: Any) -> Identity:
+            return identity
+
+        def challenge(self, request: Any) -> str:
+            return "Direct"
+
+    app = Wreath()
+    app.configure_auth(DirectBackend())
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @identify()
+    async def identified(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_identify_bearer(tick: Any) -> tuple[Wreath, bytes]:
+    """Native bearer activation without a capability-gated resolve."""
+    from wreath.auth import BearerTokenBackend, Identity, identify
+
+    identity = Identity("bench")
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: identity if token == "valid-token" else None)
+    )
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @identify()
+    async def identified(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_token(tick: Any) -> tuple[Wreath, bytes]:
+    """Direct backend plus only the request's built-in bearer-token extraction."""
+    from wreath.auth import Identity, authenticated
+
+    identity = Identity("bench")
+
+    class TokenBackend:
+        async def authenticate(self, request: Any) -> Identity | None:
+            return identity if request._bearer_token() == "valid-token" else None
+
+        def challenge(self, request: Any) -> str:
+            return "Bearer"
+
+    app = Wreath()
+    app.configure_auth(TokenBackend())
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @authenticated()
+    async def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_role(tick: Any) -> tuple[Wreath, bytes]:
+    """Bearer activation followed by the compiled role-capability resolution."""
+    from wreath.auth import BearerTokenBackend, Identity
+    from wreath.authorization import roles
+
+    identity = Identity("bench", roles=frozenset({"admin"}))
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: identity if token == "valid-token" else None)
+    )
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @roles("admin")
+    async def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
+
+
+def _auth_role_sync(tick: Any) -> tuple[Wreath, bytes]:
+    """Compiled role resolution followed by a synchronous route."""
+    from wreath.auth import BearerTokenBackend, Identity
+    from wreath.authorization import roles
+
+    identity = Identity("bench", roles=frozenset({"admin"}))
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: identity if token == "valid-token" else None)
+    )
+    body = Response(_BODY)
+
+    @app.get("/auth")
+    @roles("admin")
+    def protected(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _authorization_request("/auth")
 
 
 def _params(tick: Any) -> tuple[Wreath, bytes]:
@@ -173,17 +377,55 @@ def _validated(tick: Any) -> tuple[Wreath, bytes]:
     return app, _request("/i/42")
 
 
+def _bound_dict(tick: Any) -> tuple[Wreath, bytes]:
+    """Validated control: same bound handler/result, without a return contract."""
+    app = Wreath()
+
+    @app.get("/i/{x}")
+    async def item(request: Any, x: int):
+        tick()
+        return {"id": x, "ok": True}
+
+    return app, _request("/i/42")
+
+
+def _stream_slots(tick: Any) -> tuple[Wreath, bytes]:
+    """Eight chunked receive slots consumed through `Request.stream()`.
+
+    This prices the native Wreath receive seam rather than socket throughput:
+    one protocol read contains all eight wire chunks, and the handler drains
+    the already-parsed slots.  It catches ASGI message-dict allocation drifting
+    back into the private server/framework path.
+    """
+    app = Wreath()
+    body = Response(_BODY)
+
+    @app.post("/stream")
+    async def stream(request: Any) -> Response:
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+        if total != 512:
+            raise RuntimeError("stream benchmark body was not delivered completely")
+        tick()
+        return body
+
+    piece = b"x" * 64
+    chunks = b"".join(b"40\r\n" + piece + b"\r\n" for _ in range(8))
+    raw = (
+        b"POST /stream HTTP/1.1\r\nhost: localhost\r\n"
+        b"transfer-encoding: chunked\r\n\r\n" + chunks + b"0\r\n\r\n"
+    )
+    return app, raw
+
+
 def _policy(tick: Any) -> tuple[Wreath, bytes]:
     from wreath._devtools.sample_app import (
         POLICY_FACTORIES,
         policy_from_components,
     )
 
-    app = Wreath(
-        http_policy=policy_from_components(
-            [factory() for factory in POLICY_FACTORIES]
-        )
-    )
+    app = Wreath(http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES]))
     body = Response(_BODY)
 
     @app.get("/plain")
@@ -192,6 +434,49 @@ def _policy(tick: Any) -> tuple[Wreath, bytes]:
         return body
 
     return app, _request("/plain")
+
+
+def _policy_subset(index: int) -> Any:
+    """One native policy slot, priced without the other six doing work."""
+
+    def build(tick: Any) -> tuple[Wreath, bytes]:
+        from wreath._devtools.sample_app import (
+            POLICY_FACTORIES,
+            policy_from_components,
+        )
+
+        app = Wreath(http_policy=policy_from_components([POLICY_FACTORIES[index]()]))
+        body = Response(_BODY)
+
+        @app.get("/plain")
+        async def plain(request: Any) -> Response:
+            tick()
+            return body
+
+        return app, _request("/plain")
+
+    return build
+
+
+def _policy_empty(tick: Any) -> tuple[Wreath, bytes]:
+    """The fixed native policy-program dispatch with no configured controls."""
+    from wreath.policy import HttpPolicy
+
+    app = Wreath(http_policy=HttpPolicy())
+    body = Response(_BODY)
+
+    @app.get("/plain")
+    async def plain(request: Any) -> Response:
+        tick()
+        return body
+
+    return app, _request("/plain")
+
+
+def _policy_csrf_fetch(tick: Any) -> tuple[Wreath, bytes]:
+    """CSRF's modern-browser fast path, settled by Fetch Metadata."""
+    app, raw = _policy_subset(3)(tick)
+    return app, raw[:-2] + b"sec-fetch-site: same-origin\r\n\r\n"
 
 
 class _EmptyHook:
@@ -275,9 +560,7 @@ def _sized_headers(count: int, value_bytes: int) -> Any:
             tick()
             return body
 
-        extra = "".join(
-            f"x-pad-{i}: {'v' * value_bytes}\r\n" for i in range(count)
-        )
+        extra = "".join(f"x-pad-{i}: {'v' * value_bytes}\r\n" for i in range(count))
         raw = f"GET /plain HTTP/1.1\r\nhost: localhost\r\n{extra}\r\n".encode()
         return app, raw
 
@@ -302,9 +585,7 @@ def _with_headers(count: int) -> Any:
             return body
 
         extra = "".join(f"x-pad-{i}: {'v' * 24}\r\n" for i in range(count))
-        raw = (
-            f"GET /plain HTTP/1.1\r\nhost: localhost\r\n{extra}\r\n"
-        ).encode()
+        raw = (f"GET /plain HTTP/1.1\r\nhost: localhost\r\n{extra}\r\n").encode()
         return app, raw
 
     return build
@@ -313,8 +594,14 @@ def _with_headers(count: int) -> Any:
 #: The names `http.c` interns. A header using one of these allocates no bytes
 #: object for its name; anything else does.
 _INTERNED = (
-    "accept-encoding", "accept-language", "user-agent", "cache-control",
-    "referer", "origin", "cookie", "authorization",
+    "accept-encoding",
+    "accept-language",
+    "user-agent",
+    "cache-control",
+    "referer",
+    "origin",
+    "cookie",
+    "authorization",
 )
 
 
@@ -379,6 +666,33 @@ def _raw_asgi(tick: Any) -> tuple[Any, bytes]:
     return app, _request("/plain")
 
 
+def _native_bridge(tick: Any) -> tuple[Any, bytes]:
+    """Private server bridge and one-shot egress, without framework dispatch."""
+
+    class App:
+        def _wreath_http(self, context: Any, receive: Any, send: Any) -> Any:
+            tick()
+            return send.__self__._wreath_response(
+                200, [(b"content-type", b"application/json")], _BODY
+            )
+
+    return App(), _request("/plain")
+
+
+def _native_request(tick: Any) -> tuple[Any, bytes]:
+    """Native bridge plus the Python Request carrier, but no routing or Wreath."""
+
+    class App:
+        def _wreath_http(self, context: Any, receive: Any, send: Any) -> Any:
+            Request(context, receive)
+            tick()
+            return send.__self__._wreath_response(
+                200, [(b"content-type", b"application/json")], _BODY
+            )
+
+    return App(), _request("/plain")
+
+
 def _sync_handler(tick: Any) -> tuple[Wreath, bytes]:
     """`static`, but the handler is `def`. No coroutine object per request.
 
@@ -424,10 +738,21 @@ def _dict_return(tick: Any) -> tuple[Wreath, bytes]:
 
 ARMS: dict[str, Any] = {
     "raw-asgi": _raw_asgi,
+    "native-bridge": _native_bridge,
+    "native-request": _native_request,
     "static": _static,
     "sync-handler": _sync_handler,
     "fresh-response": _fresh_response,
     "dict-return": _dict_return,
+    "auth-public": _auth_public,
+    "auth-identify-direct": _auth_identify_direct,
+    "auth-identify-bearer": _auth_identify_bearer,
+    "auth-direct": _auth_direct,
+    "auth-token": _auth_token,
+    "auth-bearer": _auth_bearer,
+    "auth-bearer-sync": _auth_bearer_sync,
+    "auth-role": _auth_role,
+    "auth-role-sync": _auth_role_sync,
     "req-hdr-0": _with_headers(0),
     "req-hdr-8": _with_headers(8),
     "req-hdr-20": _with_headers(20),
@@ -437,8 +762,19 @@ ARMS: dict[str, Any] = {
     "resp-hdr-8": _resp_headers(8),
     "params": _params,
     "bound": _bound,
+    "bound-dict": _bound_dict,
     "validated": _validated,
+    "stream-8": _stream_slots,
+    "policy-empty": _policy_empty,
     "policy": _policy,
+    "policy-proxy": _policy_subset(0),
+    "policy-rate": _policy_subset(1),
+    "policy-cors": _policy_subset(2),
+    "policy-csrf": _policy_subset(3),
+    "policy-csrf-fetch": _policy_csrf_fetch,
+    "policy-security": _policy_subset(4),
+    "policy-request-id": _policy_subset(5),
+    "policy-timing": _policy_subset(6),
     # The tape's own cost, separated from what the shipped hooks do.
     "hooks-0": _empty_hooks(0),
     "hooks-1": _empty_hooks(1),
@@ -554,8 +890,16 @@ def _counted(arm: str, requests: int, trials: int, warmup: int) -> dict[str, flo
     script = str(Path(__file__).resolve())
     return _cpu_probe.per_operation(
         lambda n: [
-            sys.executable, script, "--arm", arm, "--trials", str(trials),
-            "--warmup", str(warmup), "--requests", str(n),
+            sys.executable,
+            script,
+            "--arm",
+            arm,
+            "--trials",
+            str(trials),
+            "--warmup",
+            str(warmup),
+            "--requests",
+            str(n),
         ],
         requests,
         scale=trials,
