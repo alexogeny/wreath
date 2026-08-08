@@ -118,6 +118,11 @@ _KNOWN_ARTIFACTS = (
     # added, so every sanitized run has ended on two failures nobody read.
     "test_dup_scan",
     "test_port_golden",
+    # The generated capability module is copied into the sanitized package,
+    # but its source manifest under docs/ is not.  Only this staleness test
+    # resolves that absent sanitized-tree path; the rest of the capability
+    # suite remains real coverage and must keep running.
+    "test_the_shipped_index_matches_the_manifest_it_is_generated_from",
 )
 
 _SANITIZER_ERROR = re.compile(

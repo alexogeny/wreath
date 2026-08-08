@@ -177,6 +177,7 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     from wreath.orm.compiler import compile_select, shape_of
     from wreath.orm.registry import Registry
     from wreath.orm.session import Session
+    from wreath.queries import Param, Queries, query
 
     from .sample_app import TracedPost, TracedUser, _ScriptedDatabase
 
@@ -187,6 +188,9 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     )
     registry = Registry(database, [TracedUser, TracedPost], validate_schema="off")
     prebuilt = TracedUser.select().where(TracedUser.id == 1)
+
+    class PreparedUsers(Queries[TracedUser]):
+        by_id = query(TracedUser.id == Param("id")).one()
 
     def build_query(n: int) -> None:
         for _ in range(n):
@@ -225,6 +229,17 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
 
         asyncio.run(body())
 
+    def prepared_read(n: int) -> None:
+        async def body() -> None:
+            for _ in range(n):
+                session = Session(registry, "read")
+                try:
+                    await PreparedUsers(session).by_id(id=1)
+                finally:
+                    await session.close()
+
+        asyncio.run(body())
+
     arms = [
         Arm("noop", payload=lambda n: [None for _ in range(n)]),
         Arm("Session() + close()", payload=session_lifecycle),
@@ -233,6 +248,7 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
         Arm("compile_select (prebuilt)", payload=compile_prebuilt),
         Arm("build + compile_select", payload=build_and_compile),
         Arm("full fetch_one", payload=full_read),
+        Arm("prepared declared read", payload=prepared_read),
         Arm("noop (A/A)", payload=lambda n: [None for _ in range(n)]),
     ]
     measure_callables(arms, rounds=rounds, iterations=max(2000, iterations // 2))
@@ -240,6 +256,7 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
 
     medians = {arm.label: arm.median for arm in arms}
     full = medians["full fetch_one"]
+    prepared = medians["prepared declared read"]
     prep = medians["build Select+where"] + medians["compile_select (prebuilt)"]
     path = _hydration_path(database)
     result["hydration_path"] = path
@@ -247,7 +264,9 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
         f"\n  Building the query and deriving its cache key is {prep:.2f}us of a "
         f"{full:.2f}us read ({prep / full * 100:.0f}%).\n"
         f"  The compiled SQL is cached; `shape_of` re-derives the key that finds it,\n"
-        f"  per request, because the query object is rebuilt per request."
+        f"  per request, because the query object is rebuilt per request.\n"
+        f"  The existing declared-query path is {prepared:.2f}us: it binds values\n"
+        f"  into the retained plan without rebuilding the query or its shape key."
     )
     if path != "native":
         print(
