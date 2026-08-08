@@ -168,7 +168,7 @@ wreath-port-golden = "wreath._devtools.port_golden:main"
 wreath-dup-scan = "wreath._devtools.dup_scan:main"
 wreath-mutant = "wreath._mutant.cli:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"
-wreath-tape-decomp = "wreath._devtools.tape_decomp:main"
+wreath-policy-decomp = "wreath._devtools.tape_decomp:main"
 wreath-decomp = "wreath._devtools.decomp:main"
 # Task runners. Each installs the dependency group it needs with
 # `uv sync --inexact`, so switching jobs cannot uninstall the last one.
