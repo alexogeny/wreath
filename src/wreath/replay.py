@@ -33,8 +33,9 @@ import struct
 import zlib
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any
+from typing import Any, cast
 
+from ._native import extension as _extension
 from ._recording_format import AttemptRecord, _build_id
 from ._replay_adapters import (
     AdapterFault,
@@ -711,13 +712,7 @@ async def replay_transport_h2(
 
 
 def _default_h2_protocol_cls() -> type | None:
-    import importlib
-
-    try:
-        native = importlib.import_module("wreath._native._server")
-        return getattr(native, "Http2Protocol", None)
-    except ImportError:
-        return None
+    return getattr(_extension("_server", ignore_pure=True), "Http2Protocol", None)
 
 
 def _fire_timeout(protocol: Any) -> None:
@@ -755,16 +750,26 @@ def _deliver_close(protocol: Any, kind: int) -> None:
 
 
 def _default_protocol_cls() -> type:
-    """The native HTTP/1 protocol when built, else the pure twin."""
-    import importlib
+    """The native HTTP/1 protocol when built, else the pure twin.
 
-    try:
-        native = importlib.import_module("wreath._native._server")
-        return native.Http1Protocol
-    except ImportError:
-        from ._pure.server import Http1Protocol
+    **`ignore_pure` is deliberate, and it is the one place replay disagrees with
+    `wreath.server`.** `WREATH_PURE=1` selects the readable reference driver,
+    which is a reference and not a performance peer -- replaying a recording
+    through it would report the timings of the frameworks Wreath exists not to
+    be, rather than Wreath's own. So replay asks for the compiled driver in
+    both modes while `server._select_protocol` honours the variable.
 
-        return Http1Protocol
+    This used to be the *absence* of a gate rather than the presence of a
+    decision, which is how it went unnoticed. `tests/test_native_loader.py` pins
+    both halves; flip either and it says so.
+    """
+    native = _extension("_server", ignore_pure=True)
+    if native is not None:
+        return cast(type, native.Http1Protocol)
+
+    from ._pure.server import Http1Protocol
+
+    return Http1Protocol
 
 
 # --- fault injection ---------------------------------------------------------
