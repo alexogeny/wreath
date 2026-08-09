@@ -1177,7 +1177,8 @@
         "src/wreath/_native/server_http1.c",
         "src/wreath/_native/server_http2.c",
         "src/wreath/_native/http3_asgi.c",
-        "src/wreath/_scaffold.py"
+        "src/wreath/_scaffold.py",
+        "src/wreath/_ci.py"
       ],
       "tests": [
         "tests/test_server.py",
@@ -1195,7 +1196,8 @@
         "tests/test_devserver.py",
         "tests/http2/",
         "tests/http3/",
-        "tests/test_scaffold.py"
+        "tests/test_scaffold.py",
+        "tests/test_ci.py"
       ],
       "decisions": [
         "docs/decisions/0006-optional-extensions-and-tiers.md",
