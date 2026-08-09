@@ -26,6 +26,7 @@ from wreath.templates import (
 )
 
 _HAS_NATIVE = _core is not None and hasattr(_core, "template_render")
+_HAS_COMPILED = _core is not None and hasattr(_core, "template_render_compiled")
 
 if _HAS_NATIVE:
     # Configure the native engine with the pure types so escaping and error
@@ -54,6 +55,15 @@ PARITY_CASES = [
         "{% for o in items %}[{% for c in o.cs %}{{ c }},{% endfor %}]{% endfor %}",
         {"items": [{"cs": [1, 2]}, {"cs": [3]}]},
     ),
+    (
+        "{% for x in xs %}{{ x }}{% endfor %}|{{ x }}",
+        {"xs": [1, 2], "x": "context"},
+    ),
+    (
+        "{% for x in xs %}{{ x.name }}:{% for x in x.children %}{{ x }}"
+        "{% endfor %}:{{ x.name }};{% endfor %}",
+        {"xs": [{"name": "outer", "children": [1, 2]}]},
+    ),
     ("{{ obj.attr }}", {"obj": Obj(attr="<danger>")}),
     ("café — {{ v }} 日本語", {"v": "héllo—é"}),
     ("{% if a %}{% if b %}AB{% endif %}{% endif %}", {"a": 1, "b": 1}),
@@ -69,6 +79,12 @@ def test_pure_native_byte_parity(source: str, context: dict) -> None:
     if _HAS_NATIVE:
         native = _core.template_render(tape, context, 16 * 1024 * 1024)
         assert native == pure
+    if _HAS_COMPILED:
+        program = _core.template_compile(tape)
+        compiled = _core.template_render_compiled(
+            program, context, 16 * 1024 * 1024
+        )
+        assert compiled == pure
 
 
 class Weird(int):
@@ -140,6 +156,15 @@ def test_error_parity(source: str, context: dict) -> None:
         )
         assert type(native_err) is type(pure_err)
         assert str(native_err) == str(pure_err)
+    if _HAS_COMPILED:
+        program = _core.template_compile(tape)
+        compiled_err = _capture(
+            lambda: _core.template_render_compiled(
+                program, context, 16 * 1024 * 1024
+            )
+        )
+        assert type(compiled_err) is type(pure_err)
+        assert str(compiled_err) == str(pure_err)
 
 
 def test_output_size_overflow_both_engines() -> None:
@@ -149,6 +174,12 @@ def test_output_size_overflow_both_engines() -> None:
     if _HAS_NATIVE:
         assert isinstance(
             _capture(lambda: _core.template_render(tape, context, 10)),
+            TemplateRenderError,
+        )
+    if _HAS_COMPILED:
+        program = _core.template_compile(tape)
+        assert isinstance(
+            _capture(lambda: _core.template_render_compiled(program, context, 10)),
             TemplateRenderError,
         )
 

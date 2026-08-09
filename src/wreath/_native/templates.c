@@ -8,6 +8,8 @@
 
 #include "simd.h"
 
+#include <stdatomic.h>
+
 #define template_render_chunks 256  /* tape instructions between cancellation checks */
 
 /* Owned references installed by template_configure(); the module never imports
@@ -27,6 +29,7 @@ static PyObject *RenderError = NULL;   /* TemplateRenderError */
 #define MAX_LOOP_DEPTH 64
 
 typedef struct {
+    PyObject *owner;  /* owned bytes object whose writable storage is data */
     char *data;
     Py_ssize_t len;
     Py_ssize_t cap;
@@ -36,10 +39,8 @@ typedef struct {
 
 typedef struct {
     PyObject *iterator;   /* owned */
-    PyObject *var;        /* borrowed from the tape */
+    PyObject *current;    /* owned: the loop variable's current value */
     Py_ssize_t body_start;
-    int had_old;
-    PyObject *old_value;  /* owned, or NULL when there was no prior binding */
 } loop_frame;
 
 /* One tape instruction with its operands already out of their Python objects.
@@ -51,10 +52,9 @@ typedef struct {
  * the render's cycles across `PyLong_AsLong` and `PyLong_AsSsize_t`, second
  * only to the renderer itself.
  *
- * Decoding is O(tape) once per render and execution is O(instructions
- * executed), so this pays for any template with a loop in it and costs a tape
- * walk for one without. Every pointer is borrowed from the tape, which the
- * caller holds for the whole render.
+ * Decoding is O(tape) once per Template and execution is O(instructions
+ * executed). Every pointer is borrowed from the tape, which the compiled
+ * program capsule owns.
  *
  * Unknown opcodes are decoded as themselves with no operands, so an invalid one
  * still raises where it is *reached* rather than where it is decoded. */
@@ -64,13 +64,25 @@ typedef struct {
     Py_ssize_t target;  /* OP_IF else-branch, OP_JUMP destination, OP_FOR end */
     PyObject *first;    /* borrowed: text fragment, lookup path, or loop var */
     PyObject *path;     /* borrowed: OP_FOR's iterable path */
+    int binding;        /* lexical loop-frame slot, or -1 for the context */
 } decoded;
+
+typedef struct {
+    PyObject *tape;       /* owned: decoded operands borrow from it */
+    decoded *program;    /* owned */
+    Py_ssize_t length;
+    _Atomic Py_ssize_t output_hint;
+} compiled_template;
+
+#define TEMPLATE_CAPSULE_NAME "wreath.template_program"
 
 #define TAPE_STACK_SLOTS 64  /* tapes at or below this decode without malloc */
 
 static int
 decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
 {
+    PyObject *scope_vars[MAX_LOOP_DEPTH];
+    int scope_depth = 0;
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject *instr = PyTuple_GET_ITEM(tape, i);
         decoded *slot = &out[i];
@@ -78,6 +90,7 @@ decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
         slot->target = 0;
         slot->first = NULL;
         slot->path = NULL;
+        slot->binding = -1;
         long op = PyLong_AsLong(PyTuple_GET_ITEM(instr, 0));
         if (op == -1 && PyErr_Occurred()) {
             return -1;
@@ -111,6 +124,33 @@ decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
         if (PyErr_Occurred()) {
             return -1;
         }
+
+        PyObject *lookup = NULL;
+        if (op == OP_VAR || op == OP_IF) {
+            lookup = slot->first;
+        } else if (op == OP_FOR) {
+            /* The iterable is evaluated outside the new loop variable's
+             * scope: `{% for x in x.children %}` sees the outer x. */
+            lookup = slot->path;
+        }
+        if (lookup != NULL && PyTuple_GET_SIZE(lookup) > 0) {
+            PyObject *root = PyTuple_GET_ITEM(lookup, 0);
+            for (int depth = scope_depth - 1; depth >= 0; depth--) {
+                int equal = PyObject_RichCompareBool(root, scope_vars[depth], Py_EQ);
+                if (equal < 0) {
+                    return -1;
+                }
+                if (equal) {
+                    slot->binding = depth;
+                    break;
+                }
+            }
+        }
+        if (op == OP_FOR && scope_depth < MAX_LOOP_DEPTH) {
+            scope_vars[scope_depth++] = slot->first;
+        } else if (op == OP_ENDFOR && scope_depth > 0) {
+            scope_depth--;
+        }
     }
     return 0;
 }
@@ -125,12 +165,17 @@ outbuf_reserve(outbuf *b, Py_ssize_t extra)
     while (newcap < b->len + extra) {
         newcap *= 2;
     }
-    char *grown = PyMem_Realloc(b->data, (size_t)newcap);
-    if (grown == NULL) {
-        PyErr_NoMemory();
+    if (b->owner == NULL) {
+        b->owner = PyBytes_FromStringAndSize(NULL, newcap);
+        if (b->owner == NULL) {
+            return -1;
+        }
+    } else if (_PyBytes_Resize(&b->owner, newcap) < 0) {
+        b->data = NULL;
+        b->cap = 0;
         return -1;
     }
-    b->data = grown;
+    b->data = PyBytes_AS_STRING(b->owner);
     b->cap = newcap;
     return 0;
 }
@@ -219,12 +264,18 @@ raise_render(int line, PyObject *message)
 /* Resolve a dotted lookup path against ``context``; returns a new reference or
  * NULL with a Python error set. Mirrors wreath._pure.templates._lookup. */
 static PyObject *
-lookup_path(PyObject *context, PyObject *path, int line)
+lookup_path(PyObject *context, PyObject *path, int line,
+            const loop_frame *frames, int binding)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(path);
+    Py_ssize_t start = 0;
     PyObject *current = context; /* borrowed until first hop */
+    if (binding >= 0) {
+        current = frames[binding].current;
+        start = 1;  /* the frame already resolved the root loop variable */
+    }
     PyObject *owned = NULL;
-    for (Py_ssize_t i = 0; i < count; i++) {
+    for (Py_ssize_t i = start; i < count; i++) {
         PyObject *segment = PyTuple_GET_ITEM(path, i);
         PyObject *found = NULL;
         /* Fast path: most contexts and nested nodes are dicts. A direct hash
@@ -282,7 +333,7 @@ lookup_path(PyObject *context, PyObject *path, int line)
         owned = found;
         current = found;
     }
-    return owned;
+    return owned != NULL ? owned : Py_NewRef(current);
 }
 
 static int
@@ -343,55 +394,20 @@ emit_value(outbuf *b, PyObject *value)
     return rc;
 }
 
-/* template_render(tape, context, max_output) -> bytes */
-PyObject *
-wreath_template_render(PyObject *self, PyObject *args)
+static PyObject *
+render_program(const decoded *program, Py_ssize_t n, PyObject *context,
+               Py_ssize_t max_output, _Atomic Py_ssize_t *output_hint)
 {
-    (void)self;
-    PyObject *tape;
-    PyObject *context;
-    Py_ssize_t max_output;
-    if (!PyArg_ParseTuple(args, "OOn", &tape, &context, &max_output)) {
-        return NULL;
-    }
-    if (RenderError == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "templates not configured");
-        return NULL;
-    }
-    if (!PyTuple_Check(tape)) {
-        PyErr_SetString(PyExc_TypeError, "tape must be a tuple");
-        return NULL;
-    }
-    if (!PyDict_Check(context)) {
-        PyErr_SetString(PyExc_TypeError, "context must be a dict");
-        return NULL;
-    }
-
-    Py_ssize_t n = PyTuple_GET_SIZE(tape);
-    decoded stack_program[TAPE_STACK_SLOTS];
-    decoded *program = stack_program;
-    if (n > TAPE_STACK_SLOTS) {
-        program = PyMem_Malloc((size_t)n * sizeof(decoded));
-        if (program == NULL) {
-            return PyErr_NoMemory();
+    outbuf buf = {NULL, NULL, 0, 0, max_output, 0};
+    if (output_hint != NULL && max_output > 0) {
+        Py_ssize_t initial = atomic_load_explicit(output_hint, memory_order_relaxed);
+        if (initial > max_output) {
+            initial = max_output;
+        }
+        if (initial > 0 && outbuf_reserve(&buf, initial) < 0) {
+            return NULL;
         }
     }
-    if (decode_tape(tape, n, program) < 0) {
-        if (program != stack_program) {
-            PyMem_Free(program);
-        }
-        return NULL;
-    }
-
-    PyObject *local = PyDict_Copy(context);
-    if (local == NULL) {
-        if (program != stack_program) {
-            PyMem_Free(program);
-        }
-        return NULL;
-    }
-
-    outbuf buf = {NULL, 0, 0, max_output, 0};
     loop_frame frames[MAX_LOOP_DEPTH];
     Py_ssize_t depth = 0;
     Py_ssize_t ip = 0;
@@ -412,7 +428,8 @@ wreath_template_render(PyObject *self, PyObject *args)
             }
             ip++;
         } else if (op == OP_VAR) {
-            PyObject *value = lookup_path(local, instr->first, instr->line);
+            PyObject *value = lookup_path(context, instr->first, instr->line,
+                                          frames, instr->binding);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -424,7 +441,8 @@ wreath_template_render(PyObject *self, PyObject *args)
             }
             ip++;
         } else if (op == OP_IF) {
-            PyObject *value = lookup_path(local, instr->first, instr->line);
+            PyObject *value = lookup_path(context, instr->first, instr->line,
+                                          frames, instr->binding);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -441,9 +459,9 @@ wreath_template_render(PyObject *self, PyObject *args)
         } else if (op == OP_ENDIF) {
             ip++;
         } else if (op == OP_FOR) {
-            PyObject *var = instr->first;
             int line = instr->line;
-            PyObject *iterable = lookup_path(local, instr->path, line);
+            PyObject *iterable = lookup_path(context, instr->path, line,
+                                             frames, instr->binding);
             if (iterable == NULL) {
                 failed = 1;
                 break;
@@ -483,26 +501,10 @@ wreath_template_render(PyObject *self, PyObject *args)
                 failed = 1;
                 break;
             }
-            PyObject *old = PyDict_GetItemWithError(local, var);
-            if (old == NULL && PyErr_Occurred()) {
-                Py_DECREF(item);
-                Py_DECREF(iterator);
-                failed = 1;
-                break;
-            }
             frames[depth].iterator = iterator;
-            frames[depth].var = var;
+            frames[depth].current = item;
             frames[depth].body_start = ip + 1;
-            frames[depth].had_old = old != NULL;
-            frames[depth].old_value = old;
-            Py_XINCREF(old);
             depth++;
-            int rc = PyDict_SetItem(local, var, item);
-            Py_DECREF(item);
-            if (rc < 0) {
-                failed = 1;
-                break;
-            }
             ip++;
         } else if (op == OP_ENDFOR) {
             loop_frame *frame = &frames[depth - 1];
@@ -512,25 +514,12 @@ wreath_template_render(PyObject *self, PyObject *args)
                     failed = 1;
                     break;
                 }
-                if (frame->had_old) {
-                    if (PyDict_SetItem(local, frame->var, frame->old_value) < 0) {
-                        failed = 1;
-                        break;
-                    }
-                } else if (PyDict_DelItem(local, frame->var) < 0) {
-                    PyErr_Clear();
-                }
-                Py_XDECREF(frame->old_value);
+                Py_DECREF(frame->current);
                 Py_DECREF(frame->iterator);
                 depth--;
                 ip++;
             } else {
-                int rc = PyDict_SetItem(local, frame->var, item);
-                Py_DECREF(item);
-                if (rc < 0) {
-                    failed = 1;
-                    break;
-                }
+                Py_SETREF(frame->current, item);
                 ip = frame->body_start;
             }
         } else {
@@ -551,20 +540,158 @@ wreath_template_render(PyObject *self, PyObject *args)
     /* Unwind any open loop frames (only non-empty on the error path). */
     while (depth > 0) {
         depth--;
-        Py_XDECREF(frames[depth].old_value);
+        Py_DECREF(frames[depth].current);
         Py_DECREF(frames[depth].iterator);
-    }
-    Py_DECREF(local);
-    if (program != stack_program) {
-        PyMem_Free(program);
     }
 
     if (failed) {
-        PyMem_Free(buf.data);
+        Py_XDECREF(buf.owner);
         return NULL;
     }
-    PyObject *result = PyBytes_FromStringAndSize(buf.data, buf.len);
-    PyMem_Free(buf.data);
+    if (output_hint != NULL) {
+        atomic_store_explicit(output_hint, buf.len, memory_order_relaxed);
+    }
+    if (buf.owner == NULL) {
+        return PyBytes_FromStringAndSize("", 0);
+    }
+    if (buf.len != buf.cap && _PyBytes_Resize(&buf.owner, buf.len) < 0) {
+        return NULL;
+    }
+    return buf.owner;
+}
+
+static void
+compiled_template_destroy(PyObject *capsule)
+{
+    compiled_template *compiled =
+        PyCapsule_GetPointer(capsule, TEMPLATE_CAPSULE_NAME);
+    if (compiled == NULL) {
+        PyErr_WriteUnraisable(capsule);
+        return;
+    }
+    Py_DECREF(compiled->tape);
+    PyMem_Free(compiled->program);
+    PyMem_Free(compiled);
+}
+
+/* template_compile(tape) -> opaque program
+ *
+ * The Python parser has already resolved control-flow targets. Decode its
+ * tuple tape once with the Template instead of re-reading every integer and
+ * operand on every request. The capsule owns the tape because each decoded
+ * instruction deliberately borrows its immutable operands from it. */
+PyObject *
+wreath_template_compile(PyObject *self, PyObject *tape)
+{
+    (void)self;
+    if (!PyTuple_Check(tape)) {
+        PyErr_SetString(PyExc_TypeError, "tape must be a tuple");
+        return NULL;
+    }
+    Py_ssize_t n = PyTuple_GET_SIZE(tape);
+    compiled_template *compiled = PyMem_Malloc(sizeof(compiled_template));
+    if (compiled == NULL) {
+        return PyErr_NoMemory();
+    }
+    compiled->tape = Py_NewRef(tape);
+    compiled->program = NULL;
+    compiled->length = n;
+    atomic_init(&compiled->output_hint, 256);
+    if (n > 0) {
+        compiled->program = PyMem_Malloc((size_t)n * sizeof(decoded));
+        if (compiled->program == NULL) {
+            Py_DECREF(compiled->tape);
+            PyMem_Free(compiled);
+            return PyErr_NoMemory();
+        }
+        if (decode_tape(tape, n, compiled->program) < 0) {
+            Py_DECREF(compiled->tape);
+            PyMem_Free(compiled->program);
+            PyMem_Free(compiled);
+            return NULL;
+        }
+    }
+    PyObject *capsule = PyCapsule_New(compiled, TEMPLATE_CAPSULE_NAME,
+                                      compiled_template_destroy);
+    if (capsule == NULL) {
+        Py_DECREF(compiled->tape);
+        PyMem_Free(compiled->program);
+        PyMem_Free(compiled);
+    }
+    return capsule;
+}
+
+/* template_render_compiled(program, context, max_output) -> bytes */
+PyObject *
+wreath_template_render_compiled(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *capsule;
+    PyObject *context;
+    Py_ssize_t max_output;
+    if (!PyArg_ParseTuple(args, "OOn", &capsule, &context, &max_output)) {
+        return NULL;
+    }
+    if (RenderError == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "templates not configured");
+        return NULL;
+    }
+    if (!PyDict_Check(context)) {
+        PyErr_SetString(PyExc_TypeError, "context must be a dict");
+        return NULL;
+    }
+    compiled_template *compiled =
+        PyCapsule_GetPointer(capsule, TEMPLATE_CAPSULE_NAME);
+    if (compiled == NULL) {
+        return NULL;
+    }
+    return render_program(compiled->program, compiled->length, context,
+                          max_output, &compiled->output_hint);
+}
+
+/* template_render(tape, context, max_output) -> bytes */
+PyObject *
+wreath_template_render(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *tape;
+    PyObject *context;
+    Py_ssize_t max_output;
+    if (!PyArg_ParseTuple(args, "OOn", &tape, &context, &max_output)) {
+        return NULL;
+    }
+    if (RenderError == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "templates not configured");
+        return NULL;
+    }
+    if (!PyTuple_Check(tape)) {
+        PyErr_SetString(PyExc_TypeError, "tape must be a tuple");
+        return NULL;
+    }
+    if (!PyDict_Check(context)) {
+        PyErr_SetString(PyExc_TypeError, "context must be a dict");
+        return NULL;
+    }
+
+    Py_ssize_t n = PyTuple_GET_SIZE(tape);
+    decoded stack_program[TAPE_STACK_SLOTS];
+    decoded *program = stack_program;
+    if (n > TAPE_STACK_SLOTS) {
+        program = PyMem_Malloc((size_t)n * sizeof(decoded));
+        if (program == NULL) {
+            return PyErr_NoMemory();
+        }
+    }
+    if (decode_tape(tape, n, program) < 0) {
+        if (program != stack_program) {
+            PyMem_Free(program);
+        }
+        return NULL;
+    }
+    PyObject *result = render_program(program, n, context, max_output, NULL);
+    if (program != stack_program) {
+        PyMem_Free(program);
+    }
     return result;
 }
 

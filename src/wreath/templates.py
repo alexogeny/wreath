@@ -51,17 +51,22 @@ if _core is not None and hasattr(_core, "template_render"):
     # error behaviour exactly; it never imports this module itself.
     _core.template_configure(Markup, TemplateRenderError)
     _native_render = _core.template_render
+    _native_compile = getattr(_core, "template_compile", None)
+    _native_render_compiled = getattr(_core, "template_render_compiled", None)
 else:
     _native_render = None
+    _native_compile = None
+    _native_render_compiled = None
 
 
 class Template:
     """A compiled template. Immutable and safe to render concurrently."""
 
-    __slots__ = ("_tape", "name")
+    __slots__ = ("_program", "_tape", "name")
 
     def __init__(self, tape: tuple[tuple[Any, ...], ...], name: str = "<string>") -> None:
         self._tape = tape
+        self._program = _native_compile(tape) if _native_compile is not None else None
         self.name = name
 
     @classmethod
@@ -77,6 +82,8 @@ class Template:
         self, context: dict[str, Any], max_output: int = MAX_OUTPUT_BYTES
     ) -> bytes:
         """Render to UTF-8 bytes from an explicit context mapping."""
+        if _native_render_compiled is not None and self._program is not None:
+            return _native_render_compiled(self._program, context, max_output)
         if _native_render is not None:
             return _native_render(self._tape, context, max_output)
         return render_tape(self._tape, context, max_output)
