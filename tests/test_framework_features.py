@@ -68,6 +68,44 @@ async def test_html_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zero_argument_handler_needs_no_request_object(monkeypatch) -> None:
+    app = Wreath()
+    monkeypatch.setattr("wreath.app._telemetry.PROPAGATING", False)
+
+    @app.get("/requestless")
+    async def requestless() -> HTMLResponse:
+        return HTMLResponse("<p>facade only</p>")
+
+    def refuse_request(*args: object, **kwargs: object) -> None:
+        raise AssertionError("requestless route materialized Request")
+
+    monkeypatch.setattr("wreath.app.Request", refuse_request)
+    status, _headers, body = await call(app, http_scope("/requestless"))
+
+    assert status == 200
+    assert body == b"<p>facade only</p>"
+
+
+@pytest.mark.asyncio
+async def test_zero_argument_sync_handler_needs_no_request_object(monkeypatch) -> None:
+    app = Wreath()
+    monkeypatch.setattr("wreath.app._telemetry.PROPAGATING", False)
+
+    @app.get("/requestless")
+    def requestless() -> HTMLResponse:
+        return HTMLResponse("<p>sync facade</p>")
+
+    def refuse_request(*args: object, **kwargs: object) -> None:
+        raise AssertionError("requestless route materialized Request")
+
+    monkeypatch.setattr("wreath.app.Request", refuse_request)
+    status, _headers, body = await call(app, http_scope("/requestless"))
+
+    assert status == 200
+    assert body == b"<p>sync facade</p>"
+
+
+@pytest.mark.asyncio
 async def test_redirect_response() -> None:
     app = Wreath()
 
