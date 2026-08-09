@@ -524,6 +524,10 @@ def _pytest_command() -> list[str]:
 #: The gates a change has to pass, in the order that fails cheapest first.
 _CHECKS: tuple[tuple[str, list[str]], ...] = (
     ("map-lint", [sys.executable, "-m", "wreath._devtools.map_lint"]),
+    # Locally as well as in CI: finding a co-authorship trailer at the
+    # ruleset, after the push is refused, is finding it too late to fix
+    # without a rebase.
+    ("hygiene", [sys.executable, "-m", "wreath._devtools.hygiene", "--paths"]),
     ("roadmap-lint", [sys.executable, "-m", "wreath._devtools.roadmap_lint"]),
     # `wreath-build-lint` is deliberately absent: it reports the stale
     # `_http3` artifact today, and a gate that fails on arrival is a gate
