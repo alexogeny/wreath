@@ -88,6 +88,18 @@ def test_default_headers() -> None:
     ]
 
 
+def test_exact_html_headers_materialize_only_when_observed() -> None:
+    response = HTMLResponse(b"hello")
+
+    assert response._headers is None
+    first = response.headers
+    assert first == [
+        (b"content-type", b"text/html; charset=utf-8"),
+        (b"content-length", b"5"),
+    ]
+    assert response.headers is first
+
+
 def test_subclasses_carry_their_media_type() -> None:
     assert TextResponse("hi").headers == [
         (b"content-type", b"text/plain; charset=utf-8"),

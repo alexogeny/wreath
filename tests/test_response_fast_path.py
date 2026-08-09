@@ -60,7 +60,7 @@ def test_fast_paths_produce_a_plain_response_that_emits_natively() -> None:
 def test_response_slots_are_fully_populated_by_the_fast_path() -> None:
     # The fast path sets slots by hand; if Response gains a slot this trips so
     # the shortcut is updated rather than silently leaving it unset.
-    assert Response.__slots__ == ("background", "body", "headers", "status")
+    assert Response.__slots__ == ("_headers", "background", "body", "status")
     response = coerce_text("ok")
     for slot in Response.__slots__:
         assert hasattr(response, slot)

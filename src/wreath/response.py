@@ -47,6 +47,10 @@ _CONTENT_LENGTH_CACHE_SIZE = 2048
 _CONTENT_LENGTHS = tuple(
     str(n).encode("ascii") for n in range(_CONTENT_LENGTH_CACHE_SIZE)
 )
+_HTML_TYPE_HEADER = (_CONTENT_TYPE, b"text/html; charset=utf-8")
+_HTML_HEADERS = tuple(
+    (_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS
+)
 
 
 def _content_length(size: int) -> bytes:
@@ -81,7 +85,7 @@ class Response:
         background: Awaited by the application after the response has been sent.
     """
 
-    __slots__ = ("background", "body", "headers", "status")
+    __slots__ = ("_headers", "background", "body", "status")
 
     media_type = b"application/octet-stream"
     # The default content-type pair never varies per instance, so each class
@@ -160,7 +164,26 @@ class Response:
                 response_headers.append((_CONTENT_TYPE, media_type))
             if not bodyless and not has_length:
                 response_headers.append((_CONTENT_LENGTH, _content_length(len(body))))
-        self.headers = response_headers
+        self._headers = response_headers
+
+    @property
+    def headers(self) -> list[tuple[bytes, bytes]]:
+        """Mutable wire headers, materialized when application code observes them."""
+        headers = self._headers
+        if headers is None:
+            size = len(self.body)
+            cached = (
+                _HTML_HEADERS[size]
+                if size < _CONTENT_LENGTH_CACHE_SIZE
+                else (_HTML_TYPE_HEADER, (_CONTENT_LENGTH, str(size).encode("ascii")))
+            )
+            headers = list(cached)
+            self._headers = headers
+        return headers
+
+    @headers.setter
+    def headers(self, value: list[tuple[bytes, bytes]]) -> None:
+        self._headers = value
 
     async def __call__(self, send: Send) -> None:
         """Emit the response over `send` as `http.response.start` plus one body.
@@ -576,6 +599,12 @@ class HTMLResponse(Response):
             self.status = status
             self.background = background
             size = len(document)
+            if self.__class__ is HTMLResponse:
+                # Native one-shot emission already has the body length and this
+                # exact class's fixed content type. Portable ASGI and application
+                # mutation reach the property above and get the same mutable list.
+                self._headers = None
+                return
             response_headers = [type_header] if type_header is not None else []
             response_headers.append(
                 (
@@ -585,7 +614,7 @@ class HTMLResponse(Response):
                     else str(size).encode("ascii"),
                 )
             )
-            self.headers = response_headers
+            self._headers = response_headers
             return
         super().__init__(document, status=status, background=background)
 
