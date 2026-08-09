@@ -49,6 +49,7 @@ class Options:
     frontend: str = "none"
     database: str = "none"
     tenancy: bool = False
+    forge: str = "none"
 
     @property
     def prefix(self) -> str:
@@ -91,6 +92,11 @@ def plan(options: Options) -> dict[str, str]:
         files["web/index.html"] = _web_index_html(options)
         files["web/src/main.tsx"] = _web_main(options)
         files["web/src/App.tsx"] = _web_app(options)
+    if options.forge != "none":
+        from ._ci import plan as ci_plan
+        from ._ci import render as ci_render
+
+        files.update(ci_render(ci_plan(name), options.forge))
     return files
 
 
@@ -100,7 +106,13 @@ def create(options: Options) -> list[str]:
     Raises `ScaffoldError` before touching the filesystem when the name is not a
     package name or the target directory holds anything at all.
     """
+    from ._ci import FORGES
+
     _check_name(options.name)
+    if options.forge != "none" and options.forge not in FORGES:
+        raise ScaffoldError(
+            f"unknown forge {options.forge!r}; supported: {', '.join(FORGES)}"
+        )
     if options.tenancy and options.database != "postgres":
         raise ScaffoldError(
             "--tenancy needs --database postgres: tenant isolation is a schema and a "
@@ -145,6 +157,12 @@ version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = ["wreath"]
 
+[dependency-groups]
+# Installed by a bare `uv sync`, which is what the CI files run. Not
+# `[project.optional-dependencies]`: a test tool is not something anybody
+# installing this service should be able to ask for.
+dev = ["pytest>=8.4", "ruff>=0.12"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -157,6 +175,18 @@ include = ["{options.name}*"]
 # `sys.path` and `import {options.name}` fails from inside a test.
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# On top of ruff's defaults, which are already the errors worth having.
+# `I` sorts imports, so a merge cannot reorder them into a conflict.
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+# Stated rather than inferred. ruff guesses first-party from the layout, and the
+# guess changes when the package moves under a `src/` directory -- at which
+# point every import block in the project is suddenly mis-sorted by a rule
+# nobody edited.
+known-first-party = ["{options.name}"]
 '''
 
 
@@ -290,7 +320,13 @@ SETTINGS = _environment().bind(Settings, prefix=PREFIX)
 
 
 def _app(options: Options) -> str:
-    database_imports = ""
+    # Assembled as two sorted groups rather than appended in the order the
+    # options happen to be handled. The generated project runs `ruff check .`
+    # with `I` selected, so an import block written in feature order is a
+    # project whose own lint fails on delivery -- and `SETTINGS` is left out
+    # entirely without a database, because `app.py` reads it only for the DSN.
+    wreath_imports = ["from wreath import Wreath"]
+    local_imports = ["from .routers.items import items"]
     database_wiring = ""
     signature = "build() -> Wreath:"
     build_doc = '"""Assemble the application."""'
@@ -308,15 +344,15 @@ def _app(options: Options) -> str:
     schema. Serving always uses the default.
     """'''
     if options.database == "postgres":
-        database_imports = "\nfrom .models import MODELS"
+        local_imports += ["from .config import SETTINGS", "from .models import MODELS"]
         schema_mode = ""
         tenancy_wiring = ""
         if options.tenancy:
-            database_imports += "\nfrom .tenants import tenancy"
-            database_imports += (
-                "\nfrom wreath.orm import SchemaMode"
-                "\nfrom wreath.tenancy import TenancyMiddleware"
-            )
+            local_imports.append("from .tenants import tenancy")
+            wreath_imports += [
+                "from wreath.orm import SchemaMode",
+                "from wreath.tenancy import TenancyMiddleware",
+            ]
             # `isolated`, not `single`: it is what compiles tenant-template
             # models to unqualified SQL, so the search path resolves them and a
             # central-schema model stays qualified.
@@ -352,10 +388,9 @@ application per test, rather than one shared by all of them. `wreath run
 
 from __future__ import annotations
 
-from wreath import Wreath
+{chr(10).join(sorted(wreath_imports))}
 
-from .config import SETTINGS{database_imports}
-from .routers.items import items
+{chr(10).join(sorted(local_imports))}
 
 
 def {signature}
@@ -675,7 +710,7 @@ or a table that stopped being mapped where the migration puts it.
 
 from __future__ import annotations
 
-from {options.name}.models import SCHEMA, MODELS, Item
+from {options.name}.models import MODELS, SCHEMA, Item
 
 
 def test_the_registry_lists_every_model_the_app_compiles():
@@ -778,7 +813,6 @@ request names one.
 from __future__ import annotations
 
 import pytest
-
 from wreath.tenancy import TenantSuspended, UnknownTenant
 
 from {options.name}.tenants import directory, tenancy
