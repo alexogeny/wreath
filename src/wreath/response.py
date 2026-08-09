@@ -619,6 +619,10 @@ class HTMLResponse(Response):
         super().__init__(document, status=status, background=background)
 
 
+if _core is not None and hasattr(_core, "html_response_configure"):
+    _core.html_response_configure(HTMLResponse, Response)
+
+
 class RedirectResponse(Response):
     """A redirect: an empty body and a `location` header.
 
