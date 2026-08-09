@@ -83,6 +83,18 @@ def module(tmp_path: Path) -> Path:
 #: while a run merely competing for the machine is not reported as a failure.
 _NESTED_TIMEOUT = 600
 
+#: What a whole-project nested run passes for `--jobs`. The shipped default is
+#: 1, and it is right for the tool: `wreath mutant` runs beside whatever else is
+#: on the machine. It is wrong for these fixtures, which fork eight to twelve
+#: mutants that each take ~90ms behind ~500ms of serial baseline and planning,
+#: so the run is almost entirely the tail. Measured over three runs each, the
+#: crud project went 2.24s at one job to 1.58s at two and 1.18s at four, and the
+#: cedar project 2.21s to 1.56s to 1.20s -- with byte-identical verdicts at every
+#: setting, which is the part that had to be true before this was allowed. Two,
+#: not four: the saving is mostly in the first step, and these fixtures already
+#: hold an xdist worker while the other seven run.
+_NESTED_JOBS = ("--jobs", "2")
+
 _CRUD_GROUP = pytest.mark.xdist_group(name="mutant_crud")
 _CEDAR_GROUP = pytest.mark.xdist_group(name="mutant_cedar")
 _SAMPLE_GROUP = pytest.mark.xdist_group(name="mutant_sample")
@@ -1078,7 +1090,7 @@ CRUD_PROJECT = {
 def _run_mutant(root: Path, *args: str) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop",
-         "--format", "json", "--quiet", *args],
+         "--format", "json", "--quiet", *_NESTED_JOBS, *args],
         cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
     )
@@ -1268,7 +1280,7 @@ def cedar_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
         target.write_text(body, encoding="utf-8")
     completed = subprocess.run(
         [sys.executable, "-m", "wreath._mutant.cli", "--path", "guard",
-         "--format", "json", "--quiet"],
+         "--format", "json", "--quiet", *_NESTED_JOBS],
         cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
     )
@@ -1634,7 +1646,8 @@ def test_a_run_with_survivors_still_exits_zero(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
     environment = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)}
-    base = [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop", "--quiet"]
+    base = [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop", "--quiet",
+            *_NESTED_JOBS]
     completed = subprocess.run(
         base, cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env=environment,
