@@ -4,9 +4,12 @@ import gc
 import importlib
 import struct
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from wreath._pure.postgres import Connection as PureConnection
 
 from .test_connection import POSTGRES_BACKENDS, FakePostgres
 
@@ -115,6 +118,55 @@ def test_fetchrow_decodes_directly_without_result_list() -> None:
     assert row["number"] == 9
     assert row["name"] == "wreath"
     assert not isinstance(row, list)
+
+
+def test_fetch_batch_owns_decoded_cells_until_python_observes_a_row() -> None:
+    tape = native._FieldTape(2)
+    for value in range(12):
+        tape.append(
+            _data_row((struct.pack("!i", value), f"value-{value}".encode())), 2
+        )
+    plan = native._compile_decoder_plan((23, 25), (1, 1), ("number", "label"))
+    before = native._record_allocation_count()
+
+    rows = native._decode_field_tape(plan, tape, "fetch_batch", 256)
+
+    assert len(rows) == 12
+    assert native._record_allocation_count() == before
+    rows.sort_by("label")
+    assert native._record_allocation_count() == before
+    assert rows[0]["label"] == "value-0"
+    assert native._record_allocation_count() == before + 1
+
+
+def test_fetch_batch_final_flush_extends_the_operation_owned_batch() -> None:
+    class DecodeHarness(PureConnection):
+        _decode_fetch_extend = staticmethod(native._decode_fetch_extend)
+
+    tape = native._FieldTape(2)
+    for value in range(300):
+        tape.append(
+            _data_row((struct.pack("!i", value), f"value-{value}".encode())), 2
+        )
+    operation = SimpleNamespace(
+        decoder_plan=native._compile_decoder_plan(
+            (23, 25), (1, 1), ("number", "label")
+        ),
+        dest=None,
+        discarded=False,
+        error=None,
+        field_tape=tape,
+        mode="fetch_batch",
+        rows=native.RecordBatch(),
+    )
+    connection = object.__new__(DecodeHarness)
+
+    connection._flush_decode_batch(operation)
+    connection._flush_decode_batch(operation)
+
+    assert len(operation.rows) == 300
+    assert operation.rows[0]["number"] == 0
+    assert operation.rows[299]["label"] == "value-299"
 
 
 @requires_native

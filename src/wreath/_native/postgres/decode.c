@@ -432,6 +432,47 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
     Py_ssize_t columns = tape->stored_columns;
     PyObject **records;
     int failed = -1;
+    int batch = wreath_pg_record_batch_check(dest);
+    Py_ssize_t original_size = batch
+        ? wreath_pg_record_batch_size(dest) : PyList_GET_SIZE(dest);
+
+    if (batch) {
+        Py_ssize_t start;
+        if (wreath_pg_record_batch_prepare(
+                dest, plan->names, plan->name_index, columns, rows, &start) < 0) {
+            return -1;
+        }
+        for (Py_ssize_t column = 0; column < columns; column++) {
+            WreathPgColumnDecoder *decoder = &plan->columns[column];
+            for (Py_ssize_t row = 0; row < rows; row++) {
+                WreathPgFieldRef *field = wreath_pg_tape_ref(tape, row, column);
+                PyObject *value;
+                if (field->length == -1) {
+                    value = Py_NewRef(Py_None);
+                } else {
+                    const unsigned char *data =
+                        (const unsigned char *)buffers[
+                            (Py_ssize_t)field->slab_index - tape->owner_head].buf
+                        + field->offset;
+                    value = decoder->decoder(
+                        data, field->length, decoder->format, decoder->oid);
+                }
+                if (value == NULL) {
+                    wreath_pg_record_batch_commit(dest, start + rows);
+                    wreath_pg_record_batch_truncate(dest, start);
+                    return -1;
+                }
+                wreath_pg_record_batch_set_value(
+                    dest, start + row, decoder->destination, value);
+            }
+        }
+        wreath_pg_record_batch_commit(dest, start + rows);
+        if (wreath_pg_tape_consume(tape, rows) < 0) {
+            wreath_pg_record_batch_truncate(dest, start);
+            return -1;
+        }
+        return 0;
+    }
 
     records = PyMem_Calloc((size_t)(rows > 0 ? rows : 1), sizeof(PyObject *));
     if (records == NULL) {
@@ -466,18 +507,26 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
     {
         Py_ssize_t appended = 0;
         for (; appended < rows; appended++) {
-            if (PyList_Append(dest, records[appended]) < 0) break;
+            int result = batch
+                ? wreath_pg_record_batch_append(dest, records[appended])
+                : PyList_Append(dest, records[appended]);
+            if (result < 0) break;
         }
         if (appended < rows) {
-            PyList_SetSlice(
-                dest, PyList_GET_SIZE(dest) - appended, PyList_GET_SIZE(dest), NULL
-            );
+            if (batch) {
+                wreath_pg_record_batch_truncate(dest, original_size);
+            } else {
+                PyList_SetSlice(dest, original_size, PyList_GET_SIZE(dest), NULL);
+            }
             goto done;
         }
     }
     if (wreath_pg_tape_consume(tape, rows) < 0) {
-        Py_ssize_t end = PyList_GET_SIZE(dest);
-        PyList_SetSlice(dest, end - rows, end, NULL);
+        if (batch) {
+            wreath_pg_record_batch_truncate(dest, original_size);
+        } else {
+            PyList_SetSlice(dest, original_size, PyList_GET_SIZE(dest), NULL);
+        }
         goto done;
     }
     failed = 0;
@@ -501,7 +550,7 @@ wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
 
     if (!PyObject_TypeCheck(plan_object, WreathPgDecoderPlanType) ||
         !PyObject_TypeCheck(tape_object, WreathPgFieldTapeType) ||
-        !PyList_Check(dest) || limit <= 0 ||
+        (!PyList_Check(dest) && !wreath_pg_record_batch_check(dest)) || limit <= 0 ||
         tape->stored_columns > plan->column_count) {
         PyErr_SetString(PyExc_ValueError, "invalid field tape decode request");
         return -1;
@@ -567,12 +616,13 @@ decode_field_tape(PyObject *module, PyObject *args)
         if (wreath_pg_tape_consume(tape, tape->row_count) < 0) Py_CLEAR(result);
         goto done;
     }
-    if (strcmp(mode, "fetch") != 0) {
+    if (strcmp(mode, "fetch") != 0 && strcmp(mode, "fetch_batch") != 0) {
         PyErr_SetString(PyExc_ValueError, "unsupported field tape result mode");
         goto done;
     }
 
-    result = PyList_New(0);
+    result = strcmp(mode, "fetch_batch") == 0
+        ? wreath_pg_record_batch_new() : PyList_New(0);
     if (result != NULL && fetch_into(plan, tape, rows, buffers, result) < 0)
         Py_CLEAR(result);
 
@@ -581,9 +631,28 @@ done:
     return result;
 }
 
+static PyObject *
+decode_fetch_extend(PyObject *module, PyObject *args)
+{
+    WreathPgDecoderPlan *plan;
+    WreathPgFieldTape *tape;
+    Py_ssize_t limit;
+    PyObject *dest;
+    (void)module;
+    if (!PyArg_ParseTuple(
+            args, "O!O!nO:_decode_fetch_extend",
+            WreathPgDecoderPlanType, &plan,
+            WreathPgFieldTapeType, &tape,
+            &limit, &dest)) return NULL;
+    if (wreath_pg_decode_fetch_extend(
+            (PyObject *)plan, (PyObject *)tape, limit, dest) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef decode_methods[] = {
     {"_compile_decoder_plan", compile_decoder_plan, METH_VARARGS, NULL},
     {"_decode_field_tape", decode_field_tape, METH_VARARGS, NULL},
+    {"_decode_fetch_extend", decode_fetch_extend, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 

@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from wreath.postgres import Database, PoolConfig, Statement
+from wreath.postgres import Database, PoolConfig, Statement, _implementation
 
 
 class SlowConnection:
@@ -284,15 +284,19 @@ async def test_startup_compiles_a_statement_onto_its_workload_pool() -> None:
         await database.stop()
 
 
-def test_statement_query_methods_return_the_work_coroutine_directly() -> None:
-    """The public method must not wrap `_call` in an empty async frame."""
+def test_statement_query_methods_return_the_backend_work_awaitable_directly() -> None:
+    """Native statements remove `_call`; the pure facade retains its reference."""
     database = Database("t", "postgresql://u:p@localhost/db")
     statement = database.statement("q", "SELECT 1")
-    for name in ("execute", "fetch", "fetchrow", "fetchval"):
+    for name in ("execute", "fetch", "fetch_batch", "fetchrow", "fetchval"):
         awaitable = getattr(statement, name)()
         try:
-            assert inspect.iscoroutine(awaitable)
-            assert awaitable.cr_code is Statement._call.__code__
+            if _implementation == "native":
+                assert not inspect.iscoroutine(awaitable)
+                assert type(awaitable).__name__ == "_StatementAwait"
+            else:
+                assert inspect.iscoroutine(awaitable)
+                assert awaitable.cr_code is Statement._call.__code__
         finally:
             awaitable.close()
 

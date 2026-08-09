@@ -148,6 +148,10 @@ wreath_pg_connection_init(PyObject *module)
     value = PyObject_GetAttrString(module, "_decode_field_tape");
     if (value == NULL || set_backend_hook("_decode_tape", value) < 0) goto error;
     Py_CLEAR(value);
+    value = PyObject_GetAttrString(module, "_decode_fetch_extend");
+    if (value == NULL || set_backend_hook("_decode_fetch_extend", value) < 0)
+        goto error;
+    Py_CLEAR(value);
     /* Lets a caller decode straight into its own destination instead of
        Records; the driver treats that destination as opaque. */
     value = PyObject_GetAttrString(module, "_decode_models");

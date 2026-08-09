@@ -16,11 +16,12 @@ import struct
 import sys
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from decimal import Decimal
-from typing import Any, Literal, NamedTuple, overload
+from operator import itemgetter
+from typing import Any, Literal, NamedTuple, cast, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .._sparsevec import MAX_SPARSEVEC_NNZ, SparseVector
@@ -507,6 +508,16 @@ class Record(Sequence[object]):
 
     def __repr__(self) -> str:
         return f"Record({self._values!r})"
+
+
+class RecordBatch(list[object]):
+    """Mutable result rows with an explicit column-oriented stable sort."""
+
+    __slots__ = ()
+
+    def sort_by(self, column: str | int) -> None:
+        key = cast(Callable[[object], Any], itemgetter(column))
+        self.sort(key=key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1509,6 +1520,7 @@ class Connection:
     _field_tape_type: Any = None
     _compile_decoder_plan: Any = None
     _decode_tape: Any = None
+    _decode_fetch_extend: Any = None
     #: Optional backend hook that decodes rows into a caller-supplied
     #: destination instead of Records. The destination is opaque here.
     _decode_dest: Any = None
@@ -1735,6 +1747,9 @@ class Connection:
 
     async def fetch(self, sql: str, *args: object) -> list[Record]:
         return await self._submit("fetch", sql, args)
+
+    async def fetch_batch(self, sql: str, *args: object) -> RecordBatch:
+        return RecordBatch(await self.fetch(sql, *args))
 
     async def fetchrow(self, sql: str, *args: object) -> Record | None:
         return await self._submit("fetchrow", sql, args)
@@ -2209,7 +2224,7 @@ class Connection:
             return
         selected = 1 if operation.mode == "fetchval" else len(operation.result_oids)
         operation.field_tape.append(payload, selected)
-        if operation.mode == "fetch" and operation.field_tape.row_count >= 256:
+        if operation.mode in {"fetch", "fetch_batch"} and operation.field_tape.row_count >= 256:
             self._flush_decode_batch(operation)
 
     def _flush_decode_batch(self, operation: Operation) -> None:
@@ -2222,16 +2237,23 @@ class Connection:
         if operation.decoder_plan is None:
             raise ProtocolError("DataRow received without a decoder plan")
         if operation.dest is not None:
-            assert operation.rows is not None
+            if operation.rows is None:
+                raise ProtocolError("fetch destination has no result collection")
             self._decode_dest(
                 operation.decoder_plan, tape, operation.dest, 256, operation.rows
             )
+            return
+        if operation.mode == "fetch_batch" and self._decode_fetch_extend is not None:
+            if operation.rows is None:
+                raise ProtocolError("fetch batch has no result collection")
+            self._decode_fetch_extend(operation.decoder_plan, tape, 256, operation.rows)
             return
         decoded = self._decode_tape(
             operation.decoder_plan, tape, operation.mode, 256
         )
         if operation.mode == "fetch":
-            assert operation.rows is not None
+            if operation.rows is None:
+                raise ProtocolError("fetch has no result collection")
             operation.rows.extend(decoded)
         elif operation.mode == "fetchrow":
             operation.one_row = decoded

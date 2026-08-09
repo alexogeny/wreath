@@ -38,6 +38,7 @@ from ._flight_markers import (
     phase_marker as _phase_marker,
 )
 from ._locks import AdvisoryLock, AdvisoryTryLock, SingletonRunner
+from ._native import _core
 from ._native import extension as _extension
 from ._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 
@@ -59,6 +60,17 @@ def _select_backend() -> ModuleType:
 _backend = _select_backend()
 _implementation: str = _backend._implementation
 _NATIVE_STATEMENT_SUBMIT = _implementation == "native"
+_NATIVE_STATEMENT_AWAIT = _NATIVE_STATEMENT_SUBMIT and hasattr(
+    _backend, "_statement_call"
+)
+
+if (
+    _NATIVE_STATEMENT_SUBMIT
+    and _core is not None
+    and hasattr(_backend, "_RECORD_C_API")
+    and hasattr(_core, "template_record_configure")
+):
+    _core.template_record_configure(_backend._RECORD_C_API)
 
 Connection = _backend.Connection
 InterfaceError = _backend.InterfaceError
@@ -67,6 +79,7 @@ PipelineFullError = _backend.PipelineFullError
 PostgresError = _backend.PostgresError
 ProtocolError = _backend.ProtocolError
 Record = _backend.Record
+RecordBatch = _backend.RecordBatch
 connect = _backend.connect
 _DEFAULT_CONNECTOR = connect
 
@@ -825,6 +838,8 @@ class Statement:
                     except asyncio.CancelledError:
                         connection._cancel_operation(operation)
                         raise
+                if method == "fetch_batch" and not hasattr(connection, method):
+                    return RecordBatch(await connection.fetch(self.sql, *args))
                 return await getattr(connection, method)(self.sql, *args)
             finally:
                 if not pool.try_release_shared(connection):
@@ -842,6 +857,8 @@ class Statement:
             )
         try:
             if marker is None:
+                if method == "fetch_batch" and not hasattr(connection, method):
+                    return RecordBatch(await connection.fetch(self.sql, *args))
                 return await getattr(connection, method)(self.sql, *args)
             # Forensic dependency capture rides inside the phase gate: only a
             # Detailed-armed request has a phase marker at all, and only a
@@ -853,7 +870,10 @@ class Statement:
                 capture(_CAP_DB_PARAM, _encode_db_params(args))
             start = _monotonic_ns()
             try:
-                result = await getattr(connection, method)(self.sql, *args)
+                if method == "fetch_batch" and not hasattr(connection, method):
+                    result = RecordBatch(await connection.fetch(self.sql, *args))
+                else:
+                    result = await getattr(connection, method)(self.sql, *args)
                 if capture is not None and method != "execute":
                     capture(_CAP_DB_ROW, _encode_db_rows(result))
                 return result
@@ -881,6 +901,8 @@ class Statement:
         `"UPDATE 3"` — so it is where a row count comes from when there are no
         rows to fetch. Rows the statement does produce are discarded.
         """
+        if _NATIVE_STATEMENT_AWAIT:
+            return _backend._statement_call(self, "execute", args)
         return self._call("execute", args)
 
     def fetch(self, *args: object) -> Awaitable[list[Any]]:
@@ -889,7 +911,21 @@ class Statement:
         The whole result is materialized; there is no cursor here. A statement
         that can match an unbounded number of rows should carry its own `LIMIT`.
         """
+        if _NATIVE_STATEMENT_AWAIT:
+            return _backend._statement_call(self, "fetch", args)
         return self._call("fetch", args)
+
+    def fetch_batch(self, *args: object) -> Awaitable[Any]:
+        """Run the statement into a native row collection.
+
+        The batch keeps the familiar sequence and `append` surface while
+        exposing `sort_by(column)` so sorting does not allocate a Python key
+        callable or dispatch it once per row.  Individual rows remain ordinary
+        `Record` values when Python observes them.
+        """
+        if _NATIVE_STATEMENT_AWAIT:
+            return _backend._statement_call(self, "fetch_batch", args)
+        return self._call("fetch_batch", args)
 
     def fetchrow(self, *args: object) -> Awaitable[Any]:
         """Run the statement and return its first row, or `None` for no rows.
@@ -898,6 +934,8 @@ class Statement:
         statement whose first column can itself be null is better read with
         this than with `fetchval`, which cannot tell the two apart.
         """
+        if _NATIVE_STATEMENT_AWAIT:
+            return _backend._statement_call(self, "fetchrow", args)
         return self._call("fetchrow", args)
 
     def fetchval(self, *args: object) -> Awaitable[Any]:
@@ -906,6 +944,8 @@ class Statement:
         `None` for no rows *and* for a first column that is null — the two are
         indistinguishable here, which is what `fetchrow` is for.
         """
+        if _NATIVE_STATEMENT_AWAIT:
+            return _backend._statement_call(self, "fetchval", args)
         return self._call("fetchval", args)
 
     async def map(
@@ -1359,11 +1399,16 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
     return value if isinstance(value, PoolConfig) else PoolConfig(**value)
 
 
+if _NATIVE_STATEMENT_AWAIT:
+    _backend._statement_configure(Statement, Pool, _phase_marker)
+
+
 __all__ = [
     "MAX_SPARSEVEC_DIM", "MAX_SPARSEVEC_NNZ",
     "AdvisoryLock", "AdvisoryTryLock", "Connection", "Database", "FromDatabase",
     "InterfaceError", "OperationalError", "PipelineFullError", "Pool", "PoolConfig",
-    "PoolSnapshot", "PostgresError", "ProtocolError", "Record", "SingletonRunner",
+    "PoolSnapshot", "PostgresError", "ProtocolError", "Record", "RecordBatch",
+    "SingletonRunner",
     "SparseVector", "Statement",
     "Workload", "connect",
 ]

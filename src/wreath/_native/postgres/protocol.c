@@ -209,7 +209,8 @@ parse_result_mode(PyObject *mode, int *execute)
     value = PyUnicode_AsUTF8(mode);
     if (value == NULL) return -1;
     if (strcmp(value, "execute") == 0) *execute = 1;
-    else if (strcmp(value, "fetch") == 0 || strcmp(value, "fetchrow") == 0 ||
+    else if (strcmp(value, "fetch") == 0 || strcmp(value, "fetch_batch") == 0 ||
+             strcmp(value, "fetchrow") == 0 ||
              strcmp(value, "fetchval") == 0) *execute = 0;
     else {
         PyErr_Format(PyExc_ValueError, "unknown PostgreSQL result mode %R", mode);
@@ -1378,7 +1379,8 @@ buffered_register_operations(WreathPgBufferedProtocol *self, PyObject *operation
         mode = PyUnicode_AsUTF8(mode_object);
         if (mode == NULL) goto context_error;
         if (strcmp(mode, "execute") == 0) mode_code = 0;
-        else if (strcmp(mode, "fetch") == 0) mode_code = 1;
+        else if (strcmp(mode, "fetch") == 0 || strcmp(mode, "fetch_batch") == 0)
+            mode_code = 1;
         else if (strcmp(mode, "fetchrow") == 0) mode_code = 2;
         else if (strcmp(mode, "fetchval") == 0) mode_code = 3;
         else {

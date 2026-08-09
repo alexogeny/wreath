@@ -38,6 +38,7 @@
 
 #include "operation.h"
 #include "plan.h"
+#include "record.h"
 
 #include <string.h>
 
@@ -120,6 +121,11 @@ static PyObject *fn_parse_error = NULL;
 static PyObject *fn_data_fields = NULL;
 static PyObject *fn_build_cold_query_packet = NULL;
 static PyObject *connection_type_ref = NULL;
+static PyObject *statement_type_ref = NULL;
+static PyObject *pool_type_ref = NULL;
+static PyObject *phase_marker_ref = NULL;
+static Py_ssize_t statement_pool_offset;
+static Py_ssize_t statement_sql_offset;
 
 /* Backend hooks, resolved once.
  *
@@ -230,10 +236,18 @@ static PyObject *str_statement_name = NULL;
 static PyObject *str_join = NULL;
 static PyObject *str_publish_completed = NULL;
 static PyObject *str_binary_results = NULL;
+static PyObject *str_call = NULL;
+static PyObject *str_try_acquire_shared = NULL;
+static PyObject *str_try_release_shared = NULL;
+static PyObject *str_release = NULL;
+static PyObject *str_throw = NULL;
+static PyObject *str_close = NULL;
+static PyObject *str_shared = NULL;
 
 /* Mode strings, interned so a mode test is a pointer compare. */
 static PyObject *mode_execute = NULL;
 static PyObject *mode_fetch = NULL;
+static PyObject *mode_fetch_batch = NULL;
 static PyObject *mode_fetchrow = NULL;
 static PyObject *mode_fetchval = NULL;
 
@@ -521,9 +535,18 @@ pipeline_is_transaction_sql(PyObject *module, PyObject *sql)
     return PyBool_FromLong(verdict);
 }
 
+static PyObject *statement_configure(
+    PyObject *module, PyObject *const *args, Py_ssize_t nargs);
+static PyObject *statement_call(
+    PyObject *module, PyObject *const *args, Py_ssize_t nargs);
+
 static PyMethodDef pipeline_module_methods[] = {
     {"_is_transaction_sql", pipeline_is_transaction_sql, METH_O,
      "Whether this SQL is transaction control, as `_submit` decides it."},
+    {"_statement_configure",
+     (PyCFunction)(void (*)(void))statement_configure, METH_FASTCALL, NULL},
+    {"_statement_call",
+     (PyCFunction)(void (*)(void))statement_call, METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL}
 };
 
@@ -578,8 +601,9 @@ operation_init(PyObject *self, PyObject *args, PyObject *kwargs)
     slot_set(self, op_off.error, Py_None);
     slot_set(self, op_off.discarded, Py_False);
 
-    if (mode == mode_fetch) {
-        PyObject *rows = PyList_New(0);
+    if (mode == mode_fetch || mode == mode_fetch_batch) {
+        PyObject *rows = mode == mode_fetch_batch
+            ? wreath_pg_record_batch_new() : PyList_New(0);
         if (rows == NULL) return -1;
         slot_steal(self, op_off.rows, rows);
     } else {
@@ -752,7 +776,7 @@ publish_completed(PyObject *self)
         mode = SLOT(operation, op_off.mode);
         if (mode == mode_execute) {
             value = SLOT(operation, op_off.command);
-        } else if (mode == mode_fetch) {
+        } else if (mode == mode_fetch || mode == mode_fetch_batch) {
             value = SLOT(operation, op_off.rows);
         } else if (mode == mode_fetchrow) {
             value = SLOT(operation, op_off.one_row);
@@ -1809,6 +1833,12 @@ connection_fetch(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 }
 
 static PyObject *
+connection_fetch_batch(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    return connection_query(self, args, nargs, mode_fetch_batch);
+}
+
+static PyObject *
 connection_fetchrow(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
     return connection_query(self, args, nargs, mode_fetchrow);
@@ -1831,6 +1861,474 @@ connection_fetch_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 }
 
 /* ------------------------------------------------------------------ *
+ * Statement awaitable
+ * ------------------------------------------------------------------ */
+
+enum {
+    STATEMENT_INITIAL,
+    STATEMENT_PYTHON,
+    STATEMENT_FUTURE,
+    STATEMENT_RELEASE,
+    STATEMENT_DONE
+};
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *statement;
+    PyObject *mode;
+    PyObject *args;
+    PyObject *pool;
+    PyObject *connection;
+    PyObject *operation;
+    PyObject *iterator;
+    PyObject *result;
+    PyObject *error;
+    int state;
+} StatementAwait;
+
+static PyTypeObject *statement_await_type = NULL;
+
+static int
+statement_await_traverse(StatementAwait *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(self->statement);
+    Py_VISIT(self->mode);
+    Py_VISIT(self->args);
+    Py_VISIT(self->pool);
+    Py_VISIT(self->connection);
+    Py_VISIT(self->operation);
+    Py_VISIT(self->iterator);
+    Py_VISIT(self->result);
+    Py_VISIT(self->error);
+    return 0;
+}
+
+static void
+statement_await_dealloc(StatementAwait *self)
+{
+    PyTypeObject *type = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    Py_CLEAR(self->statement);
+    Py_CLEAR(self->mode);
+    Py_CLEAR(self->args);
+    Py_CLEAR(self->pool);
+    Py_CLEAR(self->connection);
+    Py_CLEAR(self->operation);
+    Py_CLEAR(self->iterator);
+    Py_CLEAR(self->result);
+    Py_CLEAR(self->error);
+    type->tp_free((PyObject *)self);
+    Py_DECREF(type);
+}
+
+static PyObject *
+await_iterator(PyObject *awaitable)
+{
+    PyAsyncMethods *async = Py_TYPE(awaitable)->tp_as_async;
+    if (async != NULL && async->am_await != NULL) {
+        return async->am_await(awaitable);
+    }
+    return PyObject_GetIter(awaitable);
+}
+
+static int
+statement_python_fallback(StatementAwait *self)
+{
+    PyObject *method = PyObject_GetAttr(self->statement, str_call);
+    PyObject *coroutine;
+    if (method == NULL) return -1;
+    coroutine = PyObject_CallFunctionObjArgs(method, self->mode, self->args, NULL);
+    Py_DECREF(method);
+    if (coroutine == NULL) return -1;
+    self->iterator = await_iterator(coroutine);
+    Py_DECREF(coroutine);
+    if (self->iterator == NULL) return -1;
+    self->state = STATEMENT_PYTHON;
+    return 0;
+}
+
+static PyObject *
+statement_generic_query(StatementAwait *self, PyObject *sql)
+{
+    PyObject *method = PyObject_GetAttr(self->connection, self->mode);
+    Py_ssize_t count = PyTuple_GET_SIZE(self->args);
+    PyObject *call_args;
+    PyObject *awaitable;
+    if (method == NULL) return NULL;
+    call_args = PyTuple_New(count + 1);
+    if (call_args == NULL) {
+        Py_DECREF(method);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(call_args, 0, Py_NewRef(sql));
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyTuple_SET_ITEM(
+            call_args, index + 1, Py_NewRef(PyTuple_GET_ITEM(self->args, index)));
+    }
+    awaitable = PyObject_Call(method, call_args, NULL);
+    Py_DECREF(method);
+    Py_DECREF(call_args);
+    return awaitable;
+}
+
+static int statement_release(StatementAwait *self);
+
+/* Preserve the original submission/query failure while honoring the same
+   release guarantee as Statement._call's finally block. */
+static int
+statement_start_error(StatementAwait *self)
+{
+    int released;
+    self->error = PyErr_GetRaisedException();
+    released = statement_release(self);
+    if (released < 0) {
+        Py_CLEAR(self->error);
+        return -1;
+    }
+    if (!released) return 0;
+    PyErr_SetRaisedException(self->error);
+    self->error = NULL;
+    return -1;
+}
+
+static int
+statement_await_start(StatementAwait *self)
+{
+    PyObject *marker;
+    PyObject *connection;
+    PyObject *awaitable;
+    PyObject *future;
+    PyObject *sql;
+
+    marker = PyObject_CallMethodOneArg(phase_marker_ref, str_get, Py_None);
+    if (marker == NULL) return -1;
+    if (marker != Py_None) {
+        Py_DECREF(marker);
+        return statement_python_fallback(self);
+    }
+    Py_DECREF(marker);
+
+    self->pool = Py_XNewRef(SLOT(self->statement, statement_pool_offset));
+    if (self->pool == NULL || self->pool == Py_None ||
+        (PyObject *)Py_TYPE(self->pool) != pool_type_ref) {
+        Py_CLEAR(self->pool);
+        return statement_python_fallback(self);
+    }
+    connection = PyObject_CallMethodNoArgs(self->pool, str_try_acquire_shared);
+    if (connection == NULL) return -1;
+    if (connection == Py_None) {
+        Py_DECREF(connection);
+        Py_CLEAR(self->pool);
+        return statement_python_fallback(self);
+    }
+    self->connection = connection;
+    sql = SLOT(self->statement, statement_sql_offset);
+    if (sql == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "Statement.sql is unassigned");
+        return statement_start_error(self);
+    }
+
+    if ((PyObject *)Py_TYPE(connection) == connection_type_ref) {
+        self->operation = submit(connection, self->mode, sql, self->args, Py_None);
+        if (self->operation == NULL) return statement_start_error(self);
+        future = SLOT(self->operation, op_off.future);
+        if (future == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "operation has no future");
+            return statement_start_error(self);
+        }
+        self->iterator = await_iterator(future);
+    } else {
+        awaitable = statement_generic_query(self, sql);
+        if (awaitable == NULL) return statement_start_error(self);
+        self->iterator = await_iterator(awaitable);
+        Py_DECREF(awaitable);
+    }
+    if (self->iterator == NULL) return statement_start_error(self);
+    self->state = STATEMENT_FUTURE;
+    return 0;
+}
+
+/* Return 1 when release finished synchronously, 0 when its awaitable is now
+   installed, and -1 on error. */
+static int
+statement_release(StatementAwait *self)
+{
+    PyObject *released = PyObject_CallMethodOneArg(
+        self->pool, str_try_release_shared, self->connection);
+    int truth;
+    if (released == NULL) return -1;
+    truth = PyObject_IsTrue(released);
+    Py_DECREF(released);
+    if (truth < 0) return -1;
+    if (truth) return 1;
+    {
+        PyObject *method = PyObject_GetAttr(self->pool, str_release);
+        PyObject *values[2] = {self->connection, Py_True};
+        PyObject *names = PyTuple_Pack(1, str_shared);
+        PyObject *awaitable;
+        if (method == NULL || names == NULL) {
+            Py_XDECREF(method);
+            Py_XDECREF(names);
+            return -1;
+        }
+        awaitable = PyObject_Vectorcall(method, values, 1, names);
+        Py_DECREF(method);
+        Py_DECREF(names);
+        if (awaitable == NULL) return -1;
+        Py_CLEAR(self->iterator);
+        self->iterator = await_iterator(awaitable);
+        Py_DECREF(awaitable);
+        if (self->iterator == NULL) return -1;
+        self->state = STATEMENT_RELEASE;
+        return 0;
+    }
+}
+
+static PyObject *
+statement_finish(StatementAwait *self)
+{
+    PyObject *result;
+    self->state = STATEMENT_DONE;
+    Py_CLEAR(self->iterator);
+    Py_CLEAR(self->operation);
+    Py_CLEAR(self->connection);
+    Py_CLEAR(self->pool);
+    Py_CLEAR(self->statement);
+    Py_CLEAR(self->mode);
+    Py_CLEAR(self->args);
+    if (self->error != NULL) {
+        PyObject *error = self->error;
+        self->error = NULL;
+        Py_CLEAR(self->result);
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
+    result = self->result != NULL ? self->result : Py_NewRef(Py_None);
+    self->result = NULL;
+    {
+        PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, result);
+        if (stop == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyErr_SetRaisedException(stop);
+    }
+    Py_DECREF(result);
+    return NULL;
+}
+
+static PyObject *
+statement_await_step(StatementAwait *self, PyObject *sent)
+{
+    for (;;) {
+        PyObject *yielded = NULL;
+        PySendResult send_result;
+        int released;
+
+        if (self->state == STATEMENT_INITIAL && statement_await_start(self) < 0) {
+            return NULL;
+        }
+        if (self->state == STATEMENT_DONE) {
+            PyErr_SetString(PyExc_RuntimeError, "statement awaitable already consumed");
+            return NULL;
+        }
+        send_result = PyIter_Send(self->iterator, sent != NULL ? sent : Py_None, &yielded);
+        sent = Py_None;
+        if (send_result == PYGEN_NEXT) return yielded;
+        if (send_result == PYGEN_ERROR) {
+            if (self->state == STATEMENT_PYTHON) return NULL;
+            if (self->state == STATEMENT_RELEASE) {
+                Py_CLEAR(self->error);
+                return NULL;
+            }
+            self->error = PyErr_GetRaisedException();
+            if (self->error != NULL && self->operation != NULL &&
+                PyErr_GivenExceptionMatches(self->error, exc_cancelled_error) &&
+                cancel_operation(self->connection, self->operation) < 0) {
+                Py_CLEAR(self->error);
+                return NULL;
+            }
+        } else if (self->state == STATEMENT_PYTHON) {
+            self->result = yielded;
+            return statement_finish(self);
+        } else if (self->state == STATEMENT_RELEASE) {
+            Py_XDECREF(yielded);
+            return statement_finish(self);
+        } else {
+            self->result = yielded;
+        }
+        released = statement_release(self);
+        if (released < 0) {
+            Py_CLEAR(self->error);
+            return NULL;
+        }
+        if (released) return statement_finish(self);
+    }
+}
+
+static PyObject *
+statement_await_iternext(StatementAwait *self)
+{
+    return statement_await_step(self, Py_None);
+}
+
+static PyObject *
+statement_await_await(StatementAwait *self)
+{
+    return Py_NewRef((PyObject *)self);
+}
+
+static PyObject *
+statement_await_send(StatementAwait *self, PyObject *value)
+{
+    return statement_await_step(self, value);
+}
+
+static PyObject *
+statement_await_throw(StatementAwait *self, PyObject *args)
+{
+    PyObject *method;
+    PyObject *result;
+    int released;
+    if (self->state == STATEMENT_INITIAL && statement_await_start(self) < 0) return NULL;
+    method = PyObject_GetAttr(self->iterator, str_throw);
+    if (method == NULL) return NULL;
+    result = PyObject_Call(method, args, NULL);
+    Py_DECREF(method);
+    if (result != NULL || self->state == STATEMENT_PYTHON ||
+        self->state == STATEMENT_RELEASE) return result;
+    self->error = PyErr_GetRaisedException();
+    if (self->error != NULL && self->operation != NULL &&
+        PyErr_GivenExceptionMatches(self->error, exc_cancelled_error) &&
+        cancel_operation(self->connection, self->operation) < 0) {
+        Py_CLEAR(self->error);
+        return NULL;
+    }
+    released = statement_release(self);
+    if (released < 0) {
+        Py_CLEAR(self->error);
+        return NULL;
+    }
+    if (released) return statement_finish(self);
+    return statement_await_step(self, Py_None);
+}
+
+static PyObject *
+statement_await_close(StatementAwait *self, PyObject *unused)
+{
+    PyObject *method;
+    PyObject *closed;
+    int released;
+    (void)unused;
+    if (self->state == STATEMENT_INITIAL || self->state == STATEMENT_DONE) {
+        self->state = STATEMENT_DONE;
+        Py_RETURN_NONE;
+    }
+    method = PyObject_GetAttr(self->iterator, str_close);
+    if (method != NULL) {
+        closed = PyObject_CallNoArgs(method);
+        Py_DECREF(method);
+        if (closed == NULL) return NULL;
+        Py_DECREF(closed);
+    } else if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        PyErr_Clear();
+    } else {
+        return NULL;
+    }
+    if (self->state != STATEMENT_PYTHON && self->state != STATEMENT_RELEASE) {
+        released = statement_release(self);
+        if (released < 0) return NULL;
+        if (!released) {
+            method = PyObject_GetAttr(self->iterator, str_close);
+            if (method != NULL) {
+                closed = PyObject_CallNoArgs(method);
+                Py_DECREF(method);
+                Py_XDECREF(closed);
+                if (closed == NULL) PyErr_Clear();
+            } else {
+                PyErr_Clear();
+            }
+        }
+    }
+    self->state = STATEMENT_DONE;
+    Py_CLEAR(self->iterator);
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef statement_await_methods[] = {
+    {"send", (PyCFunction)statement_await_send, METH_O, NULL},
+    {"throw", (PyCFunction)statement_await_throw, METH_VARARGS, NULL},
+    {"close", (PyCFunction)statement_await_close, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyType_Slot statement_await_slots[] = {
+    {Py_tp_dealloc, statement_await_dealloc},
+    {Py_tp_traverse, statement_await_traverse},
+    {Py_am_await, statement_await_await},
+    {Py_tp_iter, PyObject_SelfIter},
+    {Py_tp_iternext, statement_await_iternext},
+    {Py_tp_methods, statement_await_methods},
+    {0, NULL}
+};
+
+static PyType_Spec statement_await_spec = {
+    .name = "wreath._native._postgres._StatementAwait",
+    .basicsize = sizeof(StatementAwait),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .slots = statement_await_slots,
+};
+
+static PyObject *
+statement_configure(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    (void)module;
+    if (nargs != 3 || !PyType_Check(args[0]) || !PyType_Check(args[1])) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "_statement_configure expects (Statement, Pool, phase_marker)");
+        return NULL;
+    }
+    if (resolve_one(args[0], "_pool", &statement_pool_offset) < 0 ||
+        resolve_one(args[0], "sql", &statement_sql_offset) < 0) return NULL;
+    Py_XSETREF(statement_type_ref, Py_NewRef(args[0]));
+    Py_XSETREF(pool_type_ref, Py_NewRef(args[1]));
+    Py_XSETREF(phase_marker_ref, Py_NewRef(args[2]));
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+statement_call(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    StatementAwait *awaitable;
+    (void)module;
+    if (nargs != 3 || statement_type_ref == NULL ||
+        !PyObject_TypeCheck(args[0], (PyTypeObject *)statement_type_ref) ||
+        !PyUnicode_CheckExact(args[1]) || !PyTuple_CheckExact(args[2])) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "_statement_call expects a configured Statement, mode, and exact args tuple");
+        return NULL;
+    }
+    awaitable = PyObject_GC_New(StatementAwait, statement_await_type);
+    if (awaitable == NULL) return NULL;
+    Py_INCREF(statement_await_type);
+    awaitable->statement = Py_NewRef(args[0]);
+    awaitable->mode = Py_NewRef(args[1]);
+    awaitable->args = Py_NewRef(args[2]);
+    awaitable->pool = NULL;
+    awaitable->connection = NULL;
+    awaitable->operation = NULL;
+    awaitable->iterator = NULL;
+    awaitable->result = NULL;
+    awaitable->error = NULL;
+    awaitable->state = STATEMENT_INITIAL;
+    PyObject_GC_Track(awaitable);
+    return (PyObject *)awaitable;
+}
+
+/* ------------------------------------------------------------------ *
  * Registration
  * ------------------------------------------------------------------ */
 
@@ -1844,6 +2342,8 @@ static PyMethodDef pipeline_methods[] = {
     {"_publish_completed", connection_publish_completed, METH_NOARGS, NULL},
     {"execute", (PyCFunction)(void (*)(void))connection_execute, METH_FASTCALL, NULL},
     {"fetch", (PyCFunction)(void (*)(void))connection_fetch, METH_FASTCALL, NULL},
+    {"fetch_batch", (PyCFunction)(void (*)(void))connection_fetch_batch,
+     METH_FASTCALL, NULL},
     {"fetchrow", (PyCFunction)(void (*)(void))connection_fetchrow, METH_FASTCALL, NULL},
     {"fetchval", (PyCFunction)(void (*)(void))connection_fetchval, METH_FASTCALL, NULL},
     {"_fetch_into", (PyCFunction)(void (*)(void))connection_fetch_into,
@@ -1955,8 +2455,16 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     INTERN(str_join, "join");
     INTERN(str_publish_completed, "_publish_completed");
     INTERN(str_binary_results, "binary_results");
+    INTERN(str_call, "_call");
+    INTERN(str_try_acquire_shared, "try_acquire_shared");
+    INTERN(str_try_release_shared, "try_release_shared");
+    INTERN(str_release, "release");
+    INTERN(str_throw, "throw");
+    INTERN(str_close, "close");
+    INTERN(str_shared, "shared");
     INTERN(mode_execute, "execute");
     INTERN(mode_fetch, "fetch");
+    INTERN(mode_fetch_batch, "fetch_batch");
     INTERN(mode_fetchrow, "fetchrow");
     INTERN(mode_fetchval, "fetchval");
     INTERN(str_empty, "");
@@ -1971,6 +2479,10 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     if (submit_await_type == NULL) goto error;
     if (PyModule_AddObjectRef(module, "_SubmitAwait",
                               (PyObject *)submit_await_type) < 0) goto error;
+    statement_await_type = (PyTypeObject *)PyType_FromSpec(&statement_await_spec);
+    if (statement_await_type == NULL) goto error;
+    if (PyModule_AddObjectRef(module, "_StatementAwait",
+                              (PyObject *)statement_await_type) < 0) goto error;
 
     /* Graft the pipeline onto the already-created Connection type.
      *
@@ -2029,4 +2541,7 @@ wreath_pg_pipeline_fini(void)
 {
     Py_CLEAR(pure_module);
     Py_CLEAR(exc_cancelled_error);
+    Py_CLEAR(statement_type_ref);
+    Py_CLEAR(pool_type_ref);
+    Py_CLEAR(phase_marker_ref);
 }
