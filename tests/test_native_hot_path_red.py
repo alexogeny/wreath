@@ -57,6 +57,15 @@ def test_http1_reused_immutable_response_headers_skip_revalidation() -> None:
     assert "PyBytes_GET_SIZE(cache_wire) <= 1024" in begin
 
 
+def test_http1_equivalent_dynamic_response_headers_reuse_validated_wire() -> None:
+    """Fresh Response lists with the same byte pairs should hit the cache."""
+    source = (_NATIVE / "server_http1.c").read_text()
+    begin = _function(source, "begin_response_parts", "begin_response")
+
+    assert "response_headers_match_cache(self, headers)" in begin
+    assert "PyList_AsTuple(headers)" in begin
+
+
 def test_decision_router_compile_has_no_pairwise_distinctness_scan() -> None:
     """Route compilation must not compare every candidate with its predecessors."""
     source = (_NATIVE / "dtrouter.c").read_text()
