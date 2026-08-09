@@ -135,7 +135,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
             if "connection" in _e2e_state:
                 return _e2e_state
             from wreath import postgres
-            from wreath.http_client import DestinationPolicy, HTTPClient
+            from wreath.http_client import ClientLimits, DestinationPolicy, HTTPClient
 
             from .e2e_upstream import BenchPostgres, BenchUpstreamHttp
 
@@ -146,6 +146,16 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
             client = HTTPClient(
                 "bench-e2e",
                 base_url=f"http://127.0.0.1:{upstream_port}",
+                # The socket-level run drives up to 64 concurrent requests per
+                # worker. A default 20-connection client turns the remaining 44
+                # into pool-waiter bookkeeping and measures an untuned bound
+                # rather than the DB+HTTP composition this route exists to
+                # exercise. Keep every admitted connection reusable so a trial
+                # also never benchmarks reconnect churn.
+                limits=ClientLimits(
+                    max_connections=64,
+                    max_keepalive_connections=64,
+                ),
                 destination=DestinationPolicy(
                     allow_private=True, allow_loopback=True
                 ),
@@ -166,7 +176,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         state = await _e2e_ensure()
         # Overlap the HTTP fetch with the DB round trip: one task, no gather
         # (gather costs two task wrappers plus its own future per request).
-        fetch = asyncio.ensure_future(state["client"].get("/data"))
+        fetch = asyncio.create_task(state["client"].get("/data"))
         try:
             value = await state["connection"].fetchval("select $1::int4", 42)
         except BaseException:
