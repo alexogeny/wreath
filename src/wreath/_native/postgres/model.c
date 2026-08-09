@@ -1330,7 +1330,9 @@ make_column_descriptor(PyObject *module, PyObject *args)
         Py_DECREF(descriptor);
         return NULL;
     }
-    PyObject_GC_Track(descriptor);
+    if (!PyObject_GC_IsTracked((PyObject *)descriptor)) {
+        PyObject_GC_Track(descriptor);
+    }
     return (PyObject *)descriptor;
 }
 
@@ -1370,7 +1372,9 @@ make_relation_descriptor(PyObject *module, PyObject *args)
         Py_DECREF(descriptor);
         return NULL;
     }
-    PyObject_GC_Track(descriptor);
+    if (!PyObject_GC_IsTracked((PyObject *)descriptor)) {
+        PyObject_GC_Track(descriptor);
+    }
     return (PyObject *)descriptor;
 }
 

@@ -4,6 +4,7 @@
 
 PyTypeObject *WreathPgRecordType = NULL;
 static Py_ssize_t record_allocations = 0;
+static Py_ssize_t record_storage_allocations = 0;
 
 /* Result row with the decoded values stored inline after the header, so a
    row costs a single allocation instead of a Record plus a values tuple. */
@@ -15,6 +16,45 @@ typedef struct {
 } WreathPgRecord;
 
 #define RECORD_BASICSIZE ((Py_ssize_t)offsetof(WreathPgRecord, values))
+
+/* A Fortunes response creates and destroys twelve same-width Records. Their
+ * values are request-owned, but the variable-sized GC shells are not. Keep a
+ * deliberately small mixed-width cache so decode reuses that storage without
+ * retaining any names, indexes, or row values. Free-threaded workers share the
+ * extension in one process, hence TLS only for that ABI; the ordinary build's
+ * GIL makes a static cache cheaper and sufficient. */
+#define RECORD_FREELIST_CAP 64
+#ifdef Py_GIL_DISABLED
+static _Thread_local WreathPgRecord *record_freelist[RECORD_FREELIST_CAP];
+static _Thread_local int record_freelist_len = 0;
+#else
+static WreathPgRecord *record_freelist[RECORD_FREELIST_CAP];
+static int record_freelist_len = 0;
+#endif
+
+static WreathPgRecord *
+record_allocate(PyTypeObject *type, Py_ssize_t count)
+{
+    if (type == WreathPgRecordType) {
+        for (int i = record_freelist_len - 1; i >= 0; i--) {
+            WreathPgRecord *record = record_freelist[i];
+            if (Py_SIZE(record) != count) {
+                continue;
+            }
+            record_freelist[i] = record_freelist[--record_freelist_len];
+            _Py_NewReference((PyObject *)record);
+            if (!PyObject_GC_IsTracked((PyObject *)record)) {
+                PyObject_GC_Track(record);
+            }
+            return record;
+        }
+    }
+    WreathPgRecord *record = (WreathPgRecord *)type->tp_alloc(type, count);
+    if (record != NULL) {
+        record_storage_allocations++;
+    }
+    return record;
+}
 
 static int
 record_traverse(WreathPgRecord *self, visitproc visit, void *arg)
@@ -39,7 +79,19 @@ record_dealloc(WreathPgRecord *self)
 {
     PyObject_GC_UnTrack(self);
     record_clear(self);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    if (Py_TYPE(self) == WreathPgRecordType) {
+        if (record_freelist_len == RECORD_FREELIST_CAP) {
+            /* A large result of one width must not permanently starve every
+             * later projection. Retain the newest shell and evict one empty
+             * predecessor; the cache remains strictly bounded. */
+            WreathPgRecord *victim =
+                record_freelist[--record_freelist_len];
+            PyObject_GC_Del(victim);
+        }
+        record_freelist[record_freelist_len++] = self;
+    } else {
+        Py_TYPE(self)->tp_free((PyObject *)self);
+    }
 }
 
 static PyObject *
@@ -92,7 +144,7 @@ record_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         }
         Py_DECREF(position);
     }
-    self = (WreathPgRecord *)type->tp_alloc(type, count);
+    self = record_allocate(type, count);
     if (self == NULL) {
         Py_DECREF(index);
         return NULL;
@@ -110,7 +162,7 @@ PyObject *
 wreath_pg_record_alloc(PyObject *names, PyObject *index, Py_ssize_t count)
 {
     WreathPgRecord *self;
-    self = (WreathPgRecord *)WreathPgRecordType->tp_alloc(WreathPgRecordType, count);
+    self = record_allocate(WreathPgRecordType, count);
     if (self == NULL) return NULL;
     self->names = Py_NewRef(names);
     self->index = Py_NewRef(index);
@@ -232,8 +284,18 @@ record_allocation_count(PyObject *module, PyObject *unused)
     return PyLong_FromSsize_t(record_allocations);
 }
 
+static PyObject *
+record_storage_allocation_count(PyObject *module, PyObject *unused)
+{
+    (void)module;
+    (void)unused;
+    return PyLong_FromSsize_t(record_storage_allocations);
+}
+
 static PyMethodDef record_methods[] = {
     {"_record_allocation_count", record_allocation_count, METH_NOARGS, NULL},
+    {"_record_storage_allocation_count", record_storage_allocation_count,
+     METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 
@@ -246,4 +308,13 @@ wreath_pg_record_init(PyObject *module)
         PyModule_AddFunctions(module, record_methods) < 0) return -1;
     Py_DECREF(WreathPgRecordType);
     return 0;
+}
+
+void
+wreath_pg_record_fini(void)
+{
+    while (record_freelist_len > 0) {
+        WreathPgRecord *record = record_freelist[--record_freelist_len];
+        PyObject_GC_Del(record);
+    }
 }

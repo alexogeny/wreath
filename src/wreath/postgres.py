@@ -58,6 +58,7 @@ def _select_backend() -> ModuleType:
 
 _backend = _select_backend()
 _implementation: str = _backend._implementation
+_NATIVE_STATEMENT_SUBMIT = _implementation == "native"
 
 Connection = _backend.Connection
 InterfaceError = _backend.InterfaceError
@@ -773,13 +774,17 @@ class Statement:
             connections with `default_transaction_read_only`.
     """
 
-    __slots__ = ("database", "name", "sql", "workload")
+    __slots__ = ("_pool", "database", "name", "sql", "workload")
 
     def __init__(self, database: Database, name: str, sql: str, workload: Workload) -> None:
         self.database = database
         self.name = name
         self.sql = sql
         self.workload = workload
+        # Bound after Database.start() has built the workload pools. Production
+        # statements then reach their fixed pool directly; a Statement created
+        # over a database-shaped double keeps None and the compatibility path.
+        self._pool: Pool | None = None
 
     async def _call(self, method: str, args: tuple[object, ...]) -> Any:
         # Shared, not exclusive: a statement is one autocommit round trip and
@@ -794,6 +799,36 @@ class Statement:
         # `Database.acquire_shared` documents -- a database object that
         # implements neither still gets exclusive leases.
         database = self.database
+        marker = _phase_marker.get(None)
+        pool = self._pool
+        if pool is not None and marker is None:
+            # Startup fixed this statement's workload to this exact pool. The
+            # ordinary request therefore need not rediscover Database methods,
+            # validate the workload, resolve its dict entry and dynamically
+            # discover the Pool fast paths twice around every query. Armed
+            # requests deliberately retain the Database seams below: that is
+            # where pool wait and query phases are recorded.
+            connection = pool.try_acquire_shared()
+            if connection is None:
+                connection = await pool.acquire(shared=True)
+            try:
+                if _NATIVE_STATEMENT_SUBMIT and type(connection) is Connection:
+                    # This coroutine is already running, so native submission
+                    # can happen now without changing Connection.fetch()'s
+                    # lazy call-site contract. Awaiting the Future here removes
+                    # the deferred SubmitAwait object and its first-step
+                    # iterator. Cancellation remains paired to the Operation,
+                    # exactly as it is inside that public awaitable.
+                    operation = connection._submit_now(method, self.sql, args)
+                    try:
+                        return await operation.future
+                    except asyncio.CancelledError:
+                        connection._cancel_operation(operation)
+                        raise
+                return await getattr(connection, method)(self.sql, *args)
+            finally:
+                if not pool.try_release_shared(connection):
+                    await pool.release(connection, shared=True)
         try_acquire_shared = getattr(database, "try_acquire_shared", None)
         connection = (
             try_acquire_shared(self.workload) if try_acquire_shared is not None
@@ -806,7 +841,6 @@ class Statement:
                 else database.acquire(self.workload)
             )
         try:
-            marker = _phase_marker.get(None)
             if marker is None:
                 return await getattr(connection, method)(self.sql, *args)
             # Forensic dependency capture rides inside the phase gate: only a
@@ -840,39 +874,39 @@ class Statement:
                     else database.release(self.workload, connection)
                 )
 
-    async def execute(self, *args: object) -> str:
+    def execute(self, *args: object) -> Awaitable[str]:
         """Run the statement for its effect and return the command tag.
 
         The tag is PostgreSQL's own summary of what happened — `"INSERT 0 1"`,
         `"UPDATE 3"` — so it is where a row count comes from when there are no
         rows to fetch. Rows the statement does produce are discarded.
         """
-        return await self._call("execute", args)
+        return self._call("execute", args)
 
-    async def fetch(self, *args: object) -> list[Any]:
+    def fetch(self, *args: object) -> Awaitable[list[Any]]:
         """Run the statement and return every row, as a list of `Record`.
 
         The whole result is materialized; there is no cursor here. A statement
         that can match an unbounded number of rows should carry its own `LIMIT`.
         """
-        return await self._call("fetch", args)
+        return self._call("fetch", args)
 
-    async def fetchrow(self, *args: object) -> Any:
+    def fetchrow(self, *args: object) -> Awaitable[Any]:
         """Run the statement and return its first row, or `None` for no rows.
 
         `None` means the query matched nothing. It is not an error, and a
         statement whose first column can itself be null is better read with
         this than with `fetchval`, which cannot tell the two apart.
         """
-        return await self._call("fetchrow", args)
+        return self._call("fetchrow", args)
 
-    async def fetchval(self, *args: object) -> Any:
+    def fetchval(self, *args: object) -> Awaitable[Any]:
         """Run the statement and return the first column of the first row.
 
         `None` for no rows *and* for a first column that is null — the two are
         indistinguishable here, which is what `fetchrow` is for.
         """
-        return await self._call("fetchval", args)
+        return self._call("fetchval", args)
 
     async def map(
         self,
@@ -998,6 +1032,7 @@ class Database:
             if workload not in self._configs:
                 self._configs[workload] = PoolConfig()
             statement = Statement(self, name, sql, workload)
+            statement._pool = self._pools.get(workload)
             self._statements[name] = statement
         return statement
 
@@ -1062,6 +1097,8 @@ class Database:
                 await pool.stop(self.shutdown_timeout)
             self._pools.clear()
             raise
+        for statement in self._statements.values():
+            statement._pool = self._pools[statement.workload]
         self.started = True
 
     async def stop(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import importlib
 import struct
 from collections.abc import AsyncIterator
@@ -114,6 +115,27 @@ def test_fetchrow_decodes_directly_without_result_list() -> None:
     assert row["number"] == 9
     assert row["name"] == "wreath"
     assert not isinstance(row, list)
+
+
+@requires_native
+def test_repeated_record_width_reuses_empty_gc_storage() -> None:
+    plan = native._compile_decoder_plan((23, 25), (1, 1), ("number", "label"))
+
+    def decode(value: int) -> Any:
+        tape = native._FieldTape(2)
+        tape.append(_data_row((struct.pack("!i", value), b"value")), 2)
+        return native._decode_field_tape(plan, tape, "fetchrow", 256)
+
+    first = decode(1)
+    assert first["number"] == 1
+    del first
+    gc.collect()
+    warmed = native._record_storage_allocation_count()
+
+    second = decode(2)
+    assert second["number"] == 2
+    assert second["label"] == "value"
+    assert native._record_storage_allocation_count() == warmed
 
 
 @requires_native

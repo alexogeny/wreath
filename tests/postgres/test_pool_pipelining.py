@@ -24,11 +24,12 @@ would turn one caller's `BEGIN` into another caller's `InterfaceError`. Only
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 import pytest
 
-from wreath.postgres import Database, PoolConfig
+from wreath.postgres import Database, PoolConfig, Statement
 
 
 class SlowConnection:
@@ -239,6 +240,9 @@ async def test_an_armed_request_still_records_its_pool_wait() -> None:
     registry = {"peak": 0}
     database = await _database(4, registry)
     statement = database.statement("q", "SELECT 1")
+    assert statement._pool is database._resolve_pool("read"), (
+        "the fixture did not exercise the startup-compiled Statement path"
+    )
     phases: list[int] = []
 
     def marker(phase: int, dep: object, coverage: object, elapsed: int) -> None:
@@ -255,6 +259,42 @@ async def test_an_armed_request_still_records_its_pool_wait() -> None:
         "an armed request recorded no pool-wait phase; the fast path skipped "
         "the seam the recorder attributes from"
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_compiles_a_statement_onto_its_workload_pool() -> None:
+    registry = {"peak": 0}
+
+    async def connect(dsn: str) -> Any:
+        return SlowConnection(registry)
+
+    database = Database(
+        "t", "postgresql://u:p@localhost/db",
+        pools={"read": PoolConfig(min_size=1, max_size=1, pipeline_depth=4)},
+        connector=connect,
+    )
+    statement = database.statement("q", "SELECT 1")
+    assert statement._pool is None
+    await database.start()
+    try:
+        pool = database._resolve_pool("read")
+        assert statement._pool is pool
+        assert await statement.fetch() == [{"sql": "SELECT 1"}]
+    finally:
+        await database.stop()
+
+
+def test_statement_query_methods_return_the_work_coroutine_directly() -> None:
+    """The public method must not wrap `_call` in an empty async frame."""
+    database = Database("t", "postgresql://u:p@localhost/db")
+    statement = database.statement("q", "SELECT 1")
+    for name in ("execute", "fetch", "fetchrow", "fetchval"):
+        awaitable = getattr(statement, name)()
+        try:
+            assert inspect.iscoroutine(awaitable)
+            assert awaitable.cr_code is Statement._call.__code__
+        finally:
+            awaitable.close()
 
 
 @pytest.mark.asyncio

@@ -1732,7 +1732,9 @@ submit_later(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
     awaitable->operation = NULL;
     awaitable->iterator = NULL;
     awaitable->started = 0;
-    PyObject_GC_Track(awaitable);
+    if (!PyObject_GC_IsTracked((PyObject *)awaitable)) {
+        PyObject_GC_Track(awaitable);
+    }
     return (PyObject *)awaitable;
 }
 
@@ -1745,6 +1747,32 @@ connection_submit(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
         return NULL;
     }
     return submit_later(self, args[0], args[1], args[2], dest);
+}
+
+/* Submit from an already-running Statement coroutine.
+ *
+ * The public query methods must stay lazy: merely constructing their awaitable
+ * cannot reorder operations or raise a pipeline refusal at the call site. A
+ * Statement reaches this method only after its own coroutine is being driven,
+ * immediately before it awaits the operation's future. At that point the
+ * deferred SubmitAwait would preserve no additional ordering; it would only
+ * allocate a second GC object, retain four arguments, and rediscover the
+ * future's await iterator on the first step.
+ *
+ * The Operation is returned rather than its Future because Statement owns the
+ * cancellation boundary and needs the operation for _cancel_operation(). */
+static PyObject *
+connection_submit_now(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "_submit_now expects (mode, sql, args)");
+        return NULL;
+    }
+    if (!PyTuple_CheckExact(args[2])) {
+        PyErr_SetString(PyExc_TypeError, "_submit_now args must be an exact tuple");
+        return NULL;
+    }
+    return submit(self, args[0], args[1], args[2], Py_None);
 }
 
 /* The four public entry points. Each is one C call rather than a Python frame
@@ -1808,6 +1836,8 @@ connection_fetch_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 
 static PyMethodDef pipeline_methods[] = {
     {"_submit", (PyCFunction)(void (*)(void))connection_submit, METH_FASTCALL, NULL},
+    {"_submit_now", (PyCFunction)(void (*)(void))connection_submit_now,
+     METH_FASTCALL, NULL},
     {"_flush", connection_flush, METH_NOARGS, NULL},
     {"_closes_prefix", connection_closes_prefix, METH_NOARGS, NULL},
     {"_finish_operation", connection_finish_operation, METH_O, NULL},

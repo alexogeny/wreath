@@ -29,6 +29,7 @@ postgres_module_free(void *module)
     wreath_pg_model_fini();
     wreath_pg_hydrate_fini();
     wreath_pg_codec_fini();
+    wreath_pg_record_fini();
 }
 
 static struct PyModuleDef postgres_module = {
