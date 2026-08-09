@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks import wreath_server
 from wreath._devtools import quiet
 
 # --- the ancestry exemption, which is the property that matters most ---------
@@ -139,6 +140,27 @@ def test_split_cores_never_shares_a_physical_core() -> None:
         assert not (group & server and group & client), (
             f"core {sorted(group)} is split between server and generator"
         )
+
+
+def test_benchmark_workers_use_distinct_physical_cores_before_smt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sorted affinity mask is not a physical-core ordering.
+
+    Ryzen numbers siblings adjacently (0,1), (2,3); selecting the first two
+    logical CPUs therefore puts two workers on one core and leaves the second
+    allocated core idle.
+    """
+    monkeypatch.setattr(
+        wreath_server,
+        "physical_cores",
+        lambda: {0: [0, 1], 2: [2, 3], 4: [4, 5]},
+    )
+
+    available = {0, 1, 2, 3}
+    assert wreath_server._worker_cpu(0, available) == 0
+    assert wreath_server._worker_cpu(1, available) == 2
+    assert wreath_server._worker_cpu(2, available) == 0
 
 
 # --- the journal and restore ------------------------------------------------

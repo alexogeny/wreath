@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+import wreath.http_client as http_client_module
 from wreath import Wreath
 from wreath.http_client import (
     ClientClosed,
@@ -36,6 +37,204 @@ async def _serve(
 
 def _local_policy() -> DestinationPolicy:
     return DestinationPolicy(allow_private=True, allow_loopback=True)
+
+
+@pytest.mark.asyncio
+async def test_reused_connection_skips_condition_when_no_waiter_exists() -> None:
+    """The idle pool transition is atomic until an operation actually awaits."""
+
+    class OpenReader:
+        @staticmethod
+        def at_eof() -> bool:
+            return False
+
+    class OpenWriter:
+        @staticmethod
+        def is_closing() -> bool:
+            return False
+
+        @staticmethod
+        def close() -> None:
+            raise AssertionError("a reusable connection was closed")
+
+    class UnexpectedCondition:
+        async def __aenter__(self) -> None:
+            raise AssertionError("the uncontended pool path entered the condition")
+
+    client = HTTPClient(
+        "fast-pool",
+        base_url="http://127.0.0.1:8000",
+        destination=_local_policy(),
+    )
+    connection = http_client_module._Connection(OpenReader(), OpenWriter())
+    client._started = True
+    client._open = 1
+    client._idle.append(connection)
+    client._condition = cast(Any, UnexpectedCondition())
+
+    assert await client._acquire() is connection
+    assert client.snapshot().active == 1
+    await client._release(connection, True)
+    assert client.snapshot().active == 0
+    assert client.snapshot().idle == 1
+    assert client.snapshot().reused == 1
+
+
+@pytest.mark.asyncio
+async def test_acquire_refuses_a_client_that_was_not_started() -> None:
+    client = HTTPClient(
+        "closed-pool",
+        base_url="http://127.0.0.1:8000",
+        destination=_local_policy(),
+    )
+
+    with pytest.raises(ClientClosed, match="not started"):
+        await client._acquire()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_waiter_forces_idle_acquire_through_condition() -> None:
+    class OpenReader:
+        @staticmethod
+        def at_eof() -> bool:
+            return False
+
+    class OpenWriter:
+        @staticmethod
+        def is_closing() -> bool:
+            return False
+
+    class CountingCondition:
+        entered = 0
+
+        async def __aenter__(self):
+            self.entered += 1
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    client = HTTPClient(
+        "fair-pool",
+        base_url="http://127.0.0.1:8000",
+        destination=_local_policy(),
+    )
+    condition = CountingCondition()
+    connection = http_client_module._Connection(OpenReader(), OpenWriter())
+    client._started = True
+    client._open = 1
+    client._waiters = 1
+    client._idle.append(connection)
+    client._condition = cast(Any, condition)
+
+    assert await client._acquire() is connection
+    assert condition.entered == 1
+
+
+@pytest.mark.parametrize(("closing", "eof"), [(True, False), (False, True)])
+@pytest.mark.asyncio
+async def test_acquire_discards_each_kind_of_dead_idle_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    closing: bool,
+    eof: bool,
+) -> None:
+    class Reader:
+        def __init__(self, at_eof: bool) -> None:
+            self._at_eof = at_eof
+
+        def at_eof(self) -> bool:
+            return self._at_eof
+
+    class Writer:
+        def __init__(self, is_closing: bool) -> None:
+            self._is_closing = is_closing
+            self.closed = 0
+
+        def is_closing(self) -> bool:
+            return self._is_closing
+
+        def close(self) -> None:
+            self.closed += 1
+
+    dead_writer = Writer(closing)
+    dead = http_client_module._Connection(Reader(eof), dead_writer)
+    replacement = http_client_module._Connection(Reader(False), Writer(False))
+
+    async def connect(_client: HTTPClient):
+        return replacement
+
+    monkeypatch.setattr(HTTPClient, "_connect", connect)
+    client = HTTPClient(
+        "dead-idle",
+        base_url="http://127.0.0.1:8000",
+        destination=_local_policy(),
+    )
+    client._started = True
+    client._open = 1
+    client._idle.append(dead)
+
+    assert await client._acquire() is replacement
+    assert dead_writer.closed == 1
+    assert client._open == 1
+
+
+@pytest.mark.parametrize(
+    "blocked_by",
+    ["stopped", "waiter", "closing", "eof", "keepalive-limit"],
+)
+@pytest.mark.asyncio
+async def test_release_fast_path_checks_every_pool_state(blocked_by: str) -> None:
+    class Reader:
+        def at_eof(self) -> bool:
+            return blocked_by == "eof"
+
+    class Writer:
+        closed = 0
+
+        def is_closing(self) -> bool:
+            return blocked_by == "closing"
+
+        def close(self) -> None:
+            self.closed += 1
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class CountingCondition:
+        entered = 0
+
+        async def __aenter__(self):
+            self.entered += 1
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def notify(self, count: int) -> None:
+            return None
+
+        def notify_all(self) -> None:
+            return None
+
+    client = HTTPClient(
+        "release-guard",
+        base_url="http://127.0.0.1:8000",
+        limits=ClientLimits(max_connections=2, max_keepalive_connections=1),
+        destination=_local_policy(),
+    )
+    condition = CountingCondition()
+    connection = http_client_module._Connection(Reader(), Writer())
+    client._started = blocked_by != "stopped"
+    client._waiters = int(blocked_by == "waiter")
+    client._open = 1
+    client._active.add(connection)
+    client._condition = cast(Any, condition)
+    if blocked_by == "keepalive-limit":
+        client._idle.append(http_client_module._Connection(Reader(), Writer()))
+
+    await client._release(connection, True)
+
+    assert condition.entered == 1
 
 
 @pytest.mark.asyncio

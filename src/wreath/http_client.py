@@ -39,6 +39,7 @@ import ipaddress
 import os
 import socket
 import ssl
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -722,7 +723,7 @@ class _StreamContext:
         request = _client_codec.serialize_request(
             self._method,
             client._request_target(self._target),
-            client._authority().encode("ascii"),
+            client._authority_bytes,
             headers=client._propagated(self._headers),
             body=self._body,
         )
@@ -946,6 +947,7 @@ class HTTPClient:
 
     __slots__ = (
         "_active",
+        "_authority_bytes",
         "_base_path",
         #: Set by `_iter_body` when a body reached its declared end. `stream`
         #: reads it to decide whether the connection may be pooled -- a
@@ -998,12 +1000,14 @@ class HTTPClient:
         destination.validate_url(parsed)
         if parsed.query or parsed.fragment:
             raise ValueError("base_url cannot contain a query or fragment")
-        assert parsed.hostname is not None
+        if parsed.hostname is None:
+            raise DestinationRejected("destination host is required")
         self._name = name
         self._scheme = parsed.scheme
         self._host = parsed.hostname.encode("idna").decode("ascii").lower()
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._base_path = parsed.path.rstrip("/")
+        self._authority_bytes = self._authority().encode("ascii")
         self._limits = limits
         self._timeout = timeout
         self._retry = retry
@@ -1146,20 +1150,24 @@ class HTTPClient:
             reused=self._reused,
         )
 
-    async def get(
+    def get(
         self, target: str, *, headers: tuple[tuple[bytes, bytes], ...] = ()
-    ) -> ClientResponse:
-        """`GET` through `request`. Retried under an idempotent-only policy."""
-        return await self.request("GET", target, headers=headers)
+    ) -> Coroutine[Any, Any, ClientResponse]:
+        """`GET` through `request`. Retried under an idempotent-only policy.
 
-    async def post(
+        Returning the request coroutine directly preserves deferred execution
+        while avoiding a forwarding coroutine frame around every response.
+        """
+        return self.request("GET", target, headers=headers)
+
+    def post(
         self,
         target: str,
         *,
         headers: tuple[tuple[bytes, bytes], ...] = (),
         body: bytes | bytearray | memoryview = b"",
         idempotency_key: str | None = None,
-    ) -> ClientResponse:
+    ) -> Coroutine[Any, Any, ClientResponse]:
         """`POST` through `request`.
 
         POST is not idempotent, so an `idempotency_key` is what makes this
@@ -1167,7 +1175,7 @@ class HTTPClient:
         header and is the caller's assertion that the origin collapses
         duplicates. Without one, a POST is attempted exactly once.
         """
-        return await self.request(
+        return self.request(
             "POST", target, headers=headers, body=body, idempotency_key=idempotency_key
         )
 
@@ -1378,15 +1386,33 @@ class HTTPClient:
                 (b"idempotency-key", idempotency_key.encode("ascii")),
             )
         request_headers = self._propagated(request_headers)
-        current_target = self._request_target(target).decode("ascii")
+        target_bytes = self._request_target(target)
         method_upper = method.upper()
         payload = bytes(body)
+        if not self._redirect.enabled:
+            request_bytes = _client_codec.serialize_request(
+                method_upper,
+                target_bytes,
+                self._authority_bytes,
+                headers=request_headers,
+                body=payload,
+            )
+            if len(request_bytes) - len(payload) > self._limits.max_request_header_bytes:
+                raise ClientError("request headers exceed configured limit")
+            if self._retry.attempts == 1 and self._rate_bucket is None:
+                return await self._request_once(method_upper, request_bytes)
+            return await self._send_with_retries(
+                method_upper,
+                request_bytes,
+                idempotency_key=idempotency_key,
+            )
+        current_target = target_bytes.decode("ascii")
         redirects = 0
         while True:
             request_bytes = _client_codec.serialize_request(
                 method_upper,
                 current_target.encode("ascii"),
-                self._authority().encode("ascii"),
+                self._authority_bytes,
                 headers=request_headers,
                 body=payload,
             )
@@ -1465,6 +1491,12 @@ class HTTPClient:
         *,
         idempotency_key: str | None,
     ) -> ClientResponse:
+        # The defaults are deliberately one attempt and no rate limiter. In
+        # that configuration the loop can neither retry nor throttle, and its
+        # exception handlers only re-raise the original exception. Avoid a
+        # coroutine frame and the retry bookkeeping for that exact policy.
+        if self._retry.attempts == 1 and self._rate_bucket is None:
+            return await self._request_once(method, request_bytes)
         retryable = (
             not self._retry.idempotent_only
             or method in _IDEMPOTENT
@@ -1488,7 +1520,8 @@ class HTTPClient:
                     return response
                 retry_response = response
             await asyncio.sleep(self._retry_delay(attempt, retry_response))
-        assert last_error is not None
+        if last_error is None:
+            raise RuntimeError("outbound retry loop exited without a result")
         raise last_error
 
     def _request_target(self, target: str) -> bytes:
@@ -1548,6 +1581,22 @@ class HTTPClient:
             await self._release(connection, reusable)
 
     async def _acquire(self) -> _Connection:
+        # The steady state has a reusable idle connection and no parked caller.
+        # Nothing in this block can suspend, so entering an asyncio.Condition
+        # cannot protect it from an interleaving; it only allocates and drives
+        # the lock context on every outbound request. Preserve waiter fairness:
+        # once a caller is parked, the notified caller owns the next idle slot.
+        if not self._started:
+            raise ClientClosed(f"HTTP client {self._name!r} is not started")
+        if self._waiters == 0:
+            while self._idle:
+                connection = self._idle.pop()
+                if not connection.writer.is_closing() and not connection.reader.at_eof():
+                    self._reused += 1
+                    self._active.add(connection)
+                    return connection
+                connection.writer.close()
+                self._open -= 1
         create = False
         async with self._condition:
             if not self._started:
@@ -1576,7 +1625,8 @@ class HTTPClient:
                     self._waiters -= 1
                 if not self._started:
                     raise ClientClosed(f"HTTP client {self._name!r} is not started")
-        assert create
+        if not create:
+            raise RuntimeError("HTTP connection pool exited without a connection slot")
         try:
             connection = await self._connect()
         except BaseException:  # re-raised; the counter must balance
@@ -1767,6 +1817,22 @@ class HTTPClient:
         raise ConnectError("destination connection failed") from last_error
 
     async def _release(self, connection: _Connection, reusable: bool) -> None:
+        # Pair the uncontended acquire path above. A close sets `_started`
+        # false before it waits for active connections, and a pool waiter makes
+        # `_waiters` non-zero before suspending, so neither can miss the notify
+        # performed by the condition path below. With neither present, this is
+        # one atomic event-loop turn and the condition would guard no await.
+        if (
+            reusable
+            and self._started
+            and self._waiters == 0
+            and not connection.writer.is_closing()
+            and not connection.reader.at_eof()
+            and len(self._idle) < self._limits.max_keepalive_connections
+        ):
+            self._active.discard(connection)
+            self._idle.append(connection)
+            return
         keep = False
         async with self._condition:
             self._active.discard(connection)
@@ -1901,7 +1967,8 @@ class HTTPClient:
                 parsed = _client_codec.parse_response_head(head)
             except ValueError as error:
                 raise ProtocolError(str(error)) from error
-            assert parsed is not None
+            if parsed is None:
+                raise ProtocolError("complete response head was not parsed")
             minor, status, reason, headers, consumed = parsed
             if consumed != len(head):
                 raise ProtocolError("response parser did not consume the complete head")
@@ -1934,17 +2001,7 @@ class HTTPClient:
         transport state, not about framing. Recorded so the next reader does not
         spend a session re-deriving it.
         """
-        connection_tokens = {
-            token.strip().lower()
-            for name, value in headers
-            if name == b"connection"
-            for token in value.split(b",")
-            if token.strip()
-        }
-        reusable = framed and b"close" not in connection_tokens
-        if minor == 0:
-            reusable = reusable and b"keep-alive" in connection_tokens
-        return reusable
+        return _client_codec.response_keeps_alive(minor, headers, framed)
 
     async def _read_response(
         self, reader: asyncio.StreamReader, method: str

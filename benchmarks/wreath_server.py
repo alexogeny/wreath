@@ -16,25 +16,40 @@ import os
 import signal
 from typing import Any
 
+from wreath._devtools.quiet import physical_cores
 from wreath.server import ServerConfig, TLSConfig, serve
+
+
+def _worker_cpu(worker_id: int, available: set[int]) -> int | None:
+    """Choose one available logical CPU from each physical core in turn."""
+    if not available:
+        return None
+    representatives = [
+        next((cpu for cpu in members if cpu in available), None)
+        for members in physical_cores().values()
+    ]
+    candidates = [cpu for cpu in representatives if cpu is not None]
+    if not candidates:
+        candidates = sorted(available)
+    return candidates[worker_id % len(candidates)]
 
 
 def _pin_worker(worker_id: int) -> int | None:
     """Give this worker one logical CPU out of the mask the harness handed us.
 
     Same rule as the shipped supervisor (`wreath._cli._apply_metal_worker_affinity`):
-    take the mask's CPUs in order, one per worker. On an SMT machine the harness
-    hands over whole physical cores, and a sorted mask lists every core's first
-    thread before any core's second one -- so worker N lands on its own physical
-    core for as long as there are cores to go around, which is the allocation a
-    benchmark wants rather than two workers sharing one core's siblings.
+    take one representative logical CPU from each physical core before using an
+    SMT sibling. CPU numbering does not imply topology: on this Ryzen, 0 and 1
+    are siblings, while on other machines the siblings are separated by half
+    the logical-CPU count. Reading sysfs is startup-only and avoids silently
+    pinning a nominal two-core run onto one physical core.
     """
     if not hasattr(os, "sched_setaffinity"):
         return None
-    available = sorted(os.sched_getaffinity(0))
-    if not available:
+    available = set(os.sched_getaffinity(0))
+    cpu = _worker_cpu(worker_id, available)
+    if cpu is None:
         return None
-    cpu = available[worker_id % len(available)]
     os.sched_setaffinity(0, {cpu})
     return cpu
 

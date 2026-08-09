@@ -659,6 +659,247 @@ http_ascii_equals(const uint8_t *data, Py_ssize_t len, const char *literal)
 }
 
 static int
+http_is_ows(uint8_t c)
+{
+    /* bytes.strip()'s ASCII whitespace set, matching the reference codec. */
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+static PyObject *framing_modes[4];
+
+static PyObject *
+http_framing_result(int mode, PyObject *length)
+{
+    static const char *names[4] = {"none", "chunked", "length", "close"};
+    PyObject *result;
+    if (length == NULL) return NULL;
+    if (framing_modes[mode] == NULL) {
+        framing_modes[mode] = PyUnicode_InternFromString(names[mode]);
+        if (framing_modes[mode] == NULL) {
+            Py_DECREF(length);
+            return NULL;
+        }
+    }
+    result = PyTuple_New(2);
+    if (result == NULL) {
+        Py_DECREF(length);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(result, 0, Py_NewRef(framing_modes[mode]));
+    PyTuple_SET_ITEM(result, 1, length);
+    return result;
+}
+
+PyObject *
+wreath_http_response_framing(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *method;
+    PyObject *headers_obj;
+    PyObject *headers = NULL;
+    PyObject *first_length = NULL;
+    PyObject *parsed_length = NULL;
+    long status;
+    Py_ssize_t transfer_count = 0;
+    Py_ssize_t chunked_count = 0;
+    int last_is_chunked = 0;
+    int length_conflict = 0;
+
+    if (!PyArg_ParseTuple(args, "OlO:http_response_framing",
+                          &method, &status, &headers_obj)) return NULL;
+    if (PyUnicode_Check(method)) {
+        int comparison = PyUnicode_CompareWithASCIIString(method, "HEAD");
+        if (comparison == -1 && PyErr_Occurred()) return NULL;
+        if (comparison == 0) return http_framing_result(0, PyLong_FromLong(0));
+    }
+    if (status == 204 || status == 304) {
+        return http_framing_result(0, PyLong_FromLong(0));
+    }
+    headers = PySequence_Fast(headers_obj, "headers must be a sequence of pairs");
+    if (headers == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(headers); index++) {
+        PyObject *pair_obj = PySequence_Fast_GET_ITEM(headers, index);
+        PyObject *pair = PySequence_Fast(pair_obj, "header must be a pair");
+        PyObject *name;
+        PyObject *value;
+        const uint8_t *data;
+        Py_ssize_t len;
+        if (pair == NULL) goto error;
+        if (PySequence_Fast_GET_SIZE(pair) != 2) {
+            Py_DECREF(pair);
+            PyErr_SetString(PyExc_ValueError, "header must be a pair");
+            goto error;
+        }
+        name = PySequence_Fast_GET_ITEM(pair, 0);
+        value = PySequence_Fast_GET_ITEM(pair, 1);
+        if (!PyBytes_Check(name)) {
+            Py_DECREF(pair);
+            continue;
+        }
+        data = (const uint8_t *)PyBytes_AS_STRING(name);
+        len = PyBytes_GET_SIZE(name);
+        if (len == (Py_ssize_t)(sizeof("content-length") - 1) &&
+            memcmp(data, "content-length", sizeof("content-length") - 1) == 0) {
+            if (!PyBytes_Check(value)) {
+                Py_DECREF(pair);
+                PyErr_SetString(PyExc_TypeError, "content-length must be bytes");
+                goto error;
+            }
+            if (first_length == NULL) {
+                first_length = Py_NewRef(value);
+            } else {
+                int equal = PyObject_RichCompareBool(first_length, value, Py_EQ);
+                if (equal < 0) {
+                    Py_DECREF(pair);
+                    goto error;
+                }
+                if (!equal) length_conflict = 1;
+            }
+        } else if (len == (Py_ssize_t)(sizeof("transfer-encoding") - 1) &&
+                   memcmp(data, "transfer-encoding",
+                          sizeof("transfer-encoding") - 1) == 0) {
+            const uint8_t *cursor;
+            const uint8_t *end;
+            if (!PyBytes_Check(value)) {
+                Py_DECREF(pair);
+                PyErr_SetString(PyExc_TypeError, "transfer-encoding must be bytes");
+                goto error;
+            }
+            cursor = (const uint8_t *)PyBytes_AS_STRING(value);
+            end = cursor + PyBytes_GET_SIZE(value);
+            for (;;) {
+                const uint8_t *separator = cursor;
+                const uint8_t *token_end;
+                const uint8_t *start;
+                while (separator < end && *separator != ',') separator++;
+                token_end = separator;
+                start = cursor;
+                while (start < token_end && http_is_ows(*start)) start++;
+                while (token_end > start && http_is_ows(token_end[-1])) token_end--;
+                last_is_chunked = http_ascii_equals(
+                    start, (Py_ssize_t)(token_end - start), "chunked");
+                chunked_count += last_is_chunked;
+                transfer_count++;
+                if (separator == end) break;
+                cursor = separator + 1;
+            }
+        }
+        Py_DECREF(pair);
+    }
+    if (transfer_count && first_length != NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "response has conflicting transfer-encoding and content-length");
+        goto error;
+    }
+    if (transfer_count) {
+        Py_DECREF(headers);
+        Py_XDECREF(first_length);
+        if (!last_is_chunked || chunked_count != 1) {
+            PyErr_SetString(PyExc_ValueError, "unsupported response transfer-encoding");
+            return NULL;
+        }
+        return http_framing_result(1, PyLong_FromLong(-1));
+    }
+    if (first_length != NULL) {
+        const uint8_t *data = (const uint8_t *)PyBytes_AS_STRING(first_length);
+        Py_ssize_t len = PyBytes_GET_SIZE(first_length);
+        if (length_conflict) {
+            PyErr_SetString(PyExc_ValueError,
+                            "response has conflicting content-length values");
+            goto error;
+        }
+        if (len == 0) {
+            PyErr_SetString(PyExc_ValueError, "invalid response content-length");
+            goto error;
+        }
+        for (Py_ssize_t i = 0; i < len; i++) {
+            if (data[i] < '0' || data[i] > '9') {
+                PyErr_SetString(PyExc_ValueError, "invalid response content-length");
+                goto error;
+            }
+        }
+        parsed_length = PyLong_FromString(PyBytes_AS_STRING(first_length), NULL, 10);
+        if (parsed_length == NULL) goto error;
+        Py_DECREF(headers);
+        Py_DECREF(first_length);
+        return http_framing_result(2, parsed_length);
+    }
+    Py_DECREF(headers);
+    return http_framing_result(3, PyLong_FromLong(-1));
+
+error:
+    Py_XDECREF(headers);
+    Py_XDECREF(first_length);
+    Py_XDECREF(parsed_length);
+    return NULL;
+}
+
+PyObject *
+wreath_http_response_keeps_alive(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers_obj;
+    PyObject *headers;
+    int minor;
+    int framed;
+    int saw_close = 0;
+    int saw_keep_alive = 0;
+
+    if (!PyArg_ParseTuple(args, "iOp:http_response_keeps_alive",
+                          &minor, &headers_obj, &framed)) return NULL;
+    if (!framed) Py_RETURN_FALSE;
+    headers = PySequence_Fast(headers_obj, "headers must be a sequence of pairs");
+    if (headers == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(headers); index++) {
+        PyObject *pair_obj = PySequence_Fast_GET_ITEM(headers, index);
+        PyObject *pair = PySequence_Fast(pair_obj, "header must be a pair");
+        PyObject *name;
+        PyObject *value;
+        if (pair == NULL) goto error;
+        if (PySequence_Fast_GET_SIZE(pair) != 2) {
+            Py_DECREF(pair);
+            PyErr_SetString(PyExc_ValueError, "header must be a pair");
+            goto error;
+        }
+        name = PySequence_Fast_GET_ITEM(pair, 0);
+        value = PySequence_Fast_GET_ITEM(pair, 1);
+        if (PyBytes_Check(name) &&
+            PyBytes_GET_SIZE(name) == (Py_ssize_t)(sizeof("connection") - 1) &&
+            memcmp(PyBytes_AS_STRING(name), "connection", sizeof("connection") - 1) == 0) {
+            const uint8_t *cursor;
+            const uint8_t *end;
+            if (!PyBytes_Check(value)) {
+                Py_DECREF(pair);
+                PyErr_SetString(PyExc_TypeError, "connection header must be bytes");
+                goto error;
+            }
+            cursor = (const uint8_t *)PyBytes_AS_STRING(value);
+            end = cursor + PyBytes_GET_SIZE(value);
+            for (;;) {
+                const uint8_t *separator = cursor;
+                const uint8_t *token_end;
+                while (separator < end && *separator != ',') separator++;
+                token_end = separator;
+                while (cursor < token_end && http_is_ows(*cursor)) cursor++;
+                while (token_end > cursor && http_is_ows(token_end[-1])) token_end--;
+                saw_close |= http_ascii_equals(
+                    cursor, (Py_ssize_t)(token_end - cursor), "close");
+                saw_keep_alive |= http_ascii_equals(
+                    cursor, (Py_ssize_t)(token_end - cursor), "keep-alive");
+                if (separator == end) break;
+                cursor = separator + 1;
+            }
+        }
+        Py_DECREF(pair);
+    }
+    Py_DECREF(headers);
+    if (saw_close || (minor == 0 && !saw_keep_alive)) Py_RETURN_FALSE;
+    Py_RETURN_TRUE;
+
+error:
+    Py_DECREF(headers);
+    return NULL;
+}
+
+static int
 http_add_size(Py_ssize_t *total, Py_ssize_t amount)
 {
     if (amount < 0 || *total > PY_SSIZE_T_MAX - amount) {

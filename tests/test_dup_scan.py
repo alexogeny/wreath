@@ -117,6 +117,43 @@ sink_reserve(Sink *sink, size_t extra)
 }
 """
 
+#: The same body twice, once carrying closing braces inside a string, a
+#: character constant and two comments. Those are not braces, and a brace
+#: matcher that thinks they are stops the first body early and then reads the
+#: rest of the file at the wrong depth. Strings collapse to one literal token
+#: and comments are dropped, so the two bodies must hash equal.
+BRACE_DECOY_C_TWINS = r"""
+static int
+guarded(Sink *sink, int flag)
+{
+    /* A brace in a comment is not a brace: } and { again. */
+    const char *hint = "expected } to close the block";
+    char closer = '}';
+    if (flag) {
+        wreath_note(sink, hint, closer);   // and one in a line comment: }
+        wreath_flush(sink);
+        return 1;
+    }
+    wreath_reset(sink);
+    return 0;
+}
+
+static int
+plain(Sink *sink, int flag)
+{
+    /* No decoys at all. */
+    const char *label = "expected the block to close";
+    char marker = 'x';
+    if (flag) {
+        wreath_note(sink, label, marker);
+        wreath_flush(sink);
+        return 1;
+    }
+    wreath_reset(sink);
+    return 0;
+}
+"""
+
 #: Same length, same brace count, different control structure.
 NOT_C_TWINS = r"""
 static int
@@ -230,6 +267,53 @@ def second(other):
 
     assert scanned == 2, "a body whose first statement is `return` must still be scanned"
     assert len(groups) == 1
+
+
+#: Every statement block a definition can be written inside, as (header, depth,
+#: trailer). `_definitions_inside` puts the renamed twins in the block at that
+#: depth, so the scan has to descend the block to find either of them.
+NESTING = {
+    "module": ("", 0, ""),
+    "class": ("class Holder:", 1, ""),
+    "function": ("def outer():", 1, ""),
+    "if": ("if VALUE:", 1, ""),
+    "else": ("if VALUE:\n    pass\nelse:", 1, ""),
+    "for": ("for item in VALUE:", 1, ""),
+    "while": ("while VALUE:", 1, ""),
+    "with": ("with VALUE:", 1, ""),
+    "try": ("try:", 1, "except OSError:\n    pass"),
+    "except": ("try:\n    pass\nexcept OSError:", 1, ""),
+    "except-star": ("try:\n    pass\nexcept* OSError:", 1, ""),
+    "finally": ("try:\n    pass\nfinally:", 1, ""),
+    "match": ("match VALUE:\n    case 1:", 2, ""),
+}
+
+
+def _definitions_inside(block: str) -> str:
+    header, depth, trailer = NESTING[block]
+    pad = "    " * depth
+    body = "\n".join(pad + line if line else line
+                     for line in RENAMED_TWINS.strip().splitlines())
+    return "\n".join(part for part in ("VALUE = 1", header, body, trailer) if part) + "\n"
+
+
+@pytest.mark.parametrize("block", sorted(NESTING))
+def test_a_definition_is_found_inside_every_kind_of_block(tree: Path, block: str) -> None:
+    """Only statements can hold a definition, but *every* statement can.
+
+    The scan reaches definitions by descending the statement blocks rather than
+    every node in the tree, which is an order of magnitude cheaper and exactly
+    as complete — provided no block is left out. A missing one is invisible:
+    the scan reports a clean pass over a file it never fully read, which is the
+    same lie as a file it could not parse, in the same direction. `match` and
+    `except*` are the two that a hand-written list of block names forgets.
+    """
+    _write(tree, "nested.py", _definitions_inside(block))
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert scanned >= 2, f"a definition inside a {block} block was never scanned"
+    assert [site.name for site in groups[0].sites] == ["insert_settled", "replace_settled"]
 
 
 def test_short_bodies_are_trivia(tree: Path) -> None:
@@ -507,6 +591,56 @@ PyDoc_STRVAR(writer_doc, "A writer.");
     groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
 
     assert (groups, scanned) == ([], 0)
+
+
+def test_a_brace_inside_a_string_or_a_comment_is_not_a_brace(tree: Path) -> None:
+    """The invariant the brace matcher exists for, and nothing else asserted it.
+
+    A matcher that counts every `}` closes `guarded` inside its own string
+    literal and then reads the remainder of the file at the wrong depth. The
+    damage is not an exception: it is a body silently truncated to something
+    under `--min-lines`, which drops out of the scan the same way a body with
+    no duplicate does. So the assertion is that both halves are *found* and
+    that they are found to be the same shape, which a truncated first half
+    cannot be.
+    """
+    _write(tree, "decoy.c", BRACE_DECOY_C_TWINS)
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert scanned == 2
+    assert [site.name for site in groups[0].sites] == ["guarded", "plain"]
+
+
+def test_a_c_body_is_weighed_in_code_lines_not_tokens(tree: Path) -> None:
+    """The C ruler is code *lines*, and a one-line body is one line.
+
+    Both halves need asserting, and `test_a_short_c_body_is_trivia` below
+    asserts neither: its bodies are five tokens long, so they stay under the
+    floor whichever ruler is applied. Weighing tokens instead makes a two-line
+    body look like a twenty-line one and fills the report with trivia; losing
+    the floor makes a body written entirely on one line measure zero and
+    vanish from it. Neither shows up as an error -- both just change what the
+    report contains, in opposite directions.
+    """
+    _write(tree, "dense.c", r"""
+static int
+dense(int a, int b)
+{
+    int total = a + b; int scaled = total * 3; int shifted = scaled << 1;
+    /* a comment carries no token, so it is not a line */
+    return shifted + a * b - total / 2;
+}
+
+static int tiny(int a) { return a + 1; }
+""")
+
+    weighed = {body.site.name: body.site.lines
+               for body in dup_scan.collect(tree, ("src/wreath",), 1)}
+
+    assert weighed == {"dense": 2, "tiny": 1}
+    # ... and at the real floor both are trivia, which counting tokens is not.
+    assert dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES) == ([], 0)
 
 
 def test_a_short_c_body_is_trivia(tree: Path) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from wreath._client_codec import response_framing
+from wreath._pure.http_client import response_keeps_alive
 
 
 def test_a_plain_content_length_frames_the_body() -> None:
@@ -31,6 +32,20 @@ def test_chunked_frames_the_body() -> None:
 
 def test_no_framing_header_means_the_body_ends_at_close() -> None:
     assert response_framing("GET", 200, [(b"server", b"nginx")]) == ("close", -1)
+
+
+def test_only_connection_headers_can_control_reuse() -> None:
+    assert response_keeps_alive(
+        1,
+        [(b"x-connection-note", b"close"), (b"connection", b"keep-alive")],
+        True,
+    )
+
+
+def test_reuse_requires_complete_framing_and_http_10_opt_in() -> None:
+    assert not response_keeps_alive(1, [], False)
+    assert not response_keeps_alive(0, [], True)
+    assert response_keeps_alive(0, [(b"connection", b"keep-alive")], True)
 
 
 @pytest.mark.parametrize(

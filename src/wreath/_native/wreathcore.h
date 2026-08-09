@@ -199,6 +199,8 @@ int wreath_http_parse_request_parts(
 );
 PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
+PyObject *wreath_http_response_framing(PyObject *self, PyObject *args);
+PyObject *wreath_http_response_keeps_alive(PyObject *self, PyObject *args);
 PyObject *wreath_http_serialize_request(PyObject *self, PyObject *args);
 int wreath_register_http_client_protocol(PyObject *module);
 

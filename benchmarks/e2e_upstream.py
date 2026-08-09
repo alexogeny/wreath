@@ -43,6 +43,14 @@ _PG_STARTUP_OK = (
     + _message(b"Z", b"I")
 )
 _PG_CANCEL_CODE = 80877102
+_PG_SYNC = _message(b"S")
+_PG_HOT_SQL = "select $1::int4"
+_PG_HOT_RESPONSE = (
+    _message(b"2")
+    + _data_row(struct.pack("!i", 42))
+    + _message(b"C", b"SELECT 1\x00")
+    + _message(b"Z", b"I")
+)
 
 
 class _BenchPostgresProtocol(asyncio.Protocol):
@@ -54,12 +62,29 @@ class _BenchPostgresProtocol(asyncio.Protocol):
         self.started = False
         self.statements: dict[bytes, str] = {}
         self.flight: list[tuple[int, bytes]] = []
+        self.hot = False
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.buffer.clear()
 
     def data_received(self, data: bytes) -> None:
         self.buffer += data
+        if self.hot:
+            # Once the benchmark's one prepared query is warm, every flight is
+            # the same Bind/Execute/Sync and every answer is the same binary
+            # int4 row. Parsing and allocating a tuple for each frontend
+            # message made the in-process test double a visible part of the
+            # server's instruction count. Count complete Sync delimiters in C,
+            # retain a fragmented tail, and emit the canned flight once per
+            # operation. The exact SQL check in `_respond` is what enables this
+            # benchmark-only arm; any other query keeps the general parser.
+            completed = self.buffer.count(_PG_SYNC)
+            if not completed:
+                return
+            consumed = self.buffer.rfind(_PG_SYNC) + len(_PG_SYNC)
+            del self.buffer[:consumed]
+            self.transport.write(_PG_HOT_RESPONSE * completed)  # type: ignore[attr-defined]
+            return
         if not self.started:
             if len(self.buffer) < 4:
                 return
@@ -116,6 +141,8 @@ class _BenchPostgresProtocol(asyncio.Protocol):
 
         cold = parse is not None
         returns_rows = sql.lstrip().lower().startswith("select")
+        if not cold and sql == _PG_HOT_SQL:
+            self.hot = True
         if cold:
             out += _message(b"1")
             description = struct.pack("!H", parameter_count)

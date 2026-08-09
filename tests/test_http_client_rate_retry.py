@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.http_client import (
+    ClientResponse,
     HTTPClient,
     RatePolicy,
     RetryPolicy,
@@ -100,6 +101,33 @@ async def test_throttle_admits_first_request() -> None:
     client = _client(rate=RatePolicy(enabled=True, capacity=5, rate=5))
     await client._throttle()  # first token available, no wait/raise
     assert client._rate_bucket is not None
+
+
+async def test_one_attempt_still_spends_an_enabled_rate_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"throttle": 0, "request": 0}
+
+    async def throttle(_client: HTTPClient) -> None:
+        calls["throttle"] += 1
+
+    async def request_once(
+        _client: HTTPClient, method: str, request: bytes
+    ) -> ClientResponse:
+        calls["request"] += 1
+        return ClientResponse(200, (), b"ok", "1.1", b"OK")
+
+    monkeypatch.setattr(HTTPClient, "_throttle", throttle)
+    monkeypatch.setattr(HTTPClient, "_request_once", request_once)
+    client = _client(rate=RatePolicy(enabled=True, capacity=5, rate=5))
+    client._started = True
+
+    response = await client._request_flow(
+        "GET", "/", headers=(), body=b"", idempotency_key=None
+    )
+
+    assert response.body == b"ok"
+    assert calls == {"throttle": 1, "request": 1}
 
 
 def test_app_http_client_forwards_rate_and_retry() -> None:

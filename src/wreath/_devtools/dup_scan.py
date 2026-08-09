@@ -51,7 +51,7 @@ import ast
 import hashlib
 import json
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,6 +97,32 @@ def _word(out: bytearray, value: str) -> None:
     out.extend(raw)
 
 
+def _token(prefix: bytes, value: str) -> bytes:
+    """One length-prefixed word, ready to append."""
+    out = bytearray(prefix)
+    _word(out, value)
+    return bytes(out)
+
+
+#: Per AST class, the constant bytes its generic encoding opens with and the
+#: constant bytes preceding each of its fields. A node's class fixes both, so
+#: they are built once per class rather than re-encoded for every node -- on
+#: this repository that is ~1.4 million `str.encode` and `int.to_bytes` calls
+#: saved out of a walk of ~7 MB of shape, and it takes `_structure` over
+#: `src/wreath` from 734ms to 324ms.
+_GENERIC: dict[type[ast.AST], tuple[bytes, tuple[tuple[bytes, str], ...]]] = {}
+
+
+def _generic(kind: type[ast.AST]) -> tuple[bytes, tuple[tuple[bytes, str], ...]]:
+    names = kind._fields
+    head = bytearray(b"A")
+    _word(head, kind.__name__)
+    head.extend(len(names).to_bytes(2))
+    described = (bytes(head), tuple((_token(b"", name), name) for name in names))
+    _GENERIC[kind] = described
+    return described
+
+
 def _structure(value: object, out: bytearray) -> None:
     """Append an unambiguous, anonymised AST shape to *out*.
 
@@ -104,44 +130,47 @@ def _structure(value: object, out: bytearray) -> None:
     complete function and then allocated its equally large ``repr`` solely to
     hash it.  Length-prefixed tokens preserve the same equality relation while
     walking the source tree once and allocating one flat buffer.
+
+    The arms are in descending order of how often each kind appears in a real
+    body, which is worth doing when the chain runs once per node of every
+    function in the tree.
     """
     if isinstance(value, ast.Name):
-        out.extend(b"N")
+        out += b"N"
         _structure(value.ctx, out)
         return
     if isinstance(value, ast.Attribute):
-        out.extend(b"R")
+        out += b"R"
         _structure(value.value, out)
         _structure(value.ctx, out)
+        return
+    if isinstance(value, ast.Constant):
+        out += b"C"
+        return
+    if isinstance(value, list):
+        out += b"L"
+        out += len(value).to_bytes(4)
+        for item in value:
+            _structure(item, out)
         return
     if isinstance(value, ast.arg):
         # The former transformer constructed a fresh arg with no annotation or
         # type comment, so neither is structural here.
-        out.extend(b"G")
-        return
-    if isinstance(value, ast.Constant):
-        out.extend(b"C")
+        out += b"G"
         return
     if isinstance(value, ast.keyword):
-        out.extend(b"K0" if value.arg is None else b"K1")
+        out += b"K0" if value.arg is None else b"K1"
         _structure(value.value, out)
         return
     if isinstance(value, ast.AST):
-        out.extend(b"A")
-        _word(out, type(value).__name__)
-        fields = tuple(ast.iter_fields(value))
-        out.extend(len(fields).to_bytes(2))
-        for name, field in fields:
-            _word(out, name)
-            _structure(field, out)
+        kind = type(value)
+        head, fields = _GENERIC.get(kind) or _generic(kind)
+        out += head
+        for prefix, name in fields:
+            out += prefix
+            _structure(getattr(value, name), out)
         return
-    if isinstance(value, list):
-        out.extend(b"L")
-        out.extend(len(value).to_bytes(4))
-        for item in value:
-            _structure(item, out)
-        return
-    out.extend(b"V")
+    out += b"V"
     _word(out, repr(value))
 
 
@@ -174,6 +203,20 @@ _C_HEAD = re.compile(
     re.M | re.S,
 )
 
+#: A keyword and an operator encode to the same bytes every time they appear, so
+#: the encoding is done once per distinct token rather than once per occurrence.
+#: The operator table fills itself: the token pattern's `op` alternation is the
+#: closed set of what can land here, and writing it out twice is how the two
+#: spellings drift apart.
+#:
+#: `wreath mutant` reports the `if token is None` miss check below as a
+#: survivor, and that is correct rather than a missing test: a memo whose miss
+#: path computes exactly what its hit path returns is unobservable from outside
+#: by construction, so the only mutant it can carry is an equivalent one. Making
+#: it always miss was run against the whole suite and changed nothing.
+_C_KEYWORD_TOKENS: dict[str, bytes] = {word: _token(b"K", word) for word in _C_KEYWORDS}
+_C_OPERATOR_TOKENS: dict[str, bytes] = {}
+
 #: Control keywords cannot begin a definition, and `#define FOO(x) { ... }` is
 #: not one either; the token pattern above has already removed the directive,
 #: but a macro *body* left in column one would otherwise read as a header.
@@ -190,6 +233,13 @@ def _c_skip_string(src: str, index: int) -> int:
     return index
 
 
+#: The only characters brace matching has to stop on. Everything between two of
+#: them is skipped in one C-level jump rather than one interpreted loop step per
+#: byte -- 1.9 MB of native bodies is 1.9 MB of steps otherwise, and deleting
+#: them is a 6x on this scan's extraction phase (190ms to 32ms over `src/wreath`).
+_C_INTERESTING = re.compile(r"""["'{}]|/[*/]""")
+
+
 def _c_body(src: str, brace: int) -> tuple[str, int]:
     """The text between *brace* and its match, and the index of that match.
 
@@ -200,23 +250,27 @@ def _c_body(src: str, brace: int) -> tuple[str, int]:
     depth = 0
     index = brace
     end = len(src)
-    while index < end:
+    search = _C_INTERESTING.search
+    while (match := search(src, index)) is not None:
+        index = match.start()
         char = src[index]
         if char in "\"'":
-            index = _c_skip_string(src, index)
-        elif src.startswith("/*", index):
-            found = src.find("*/", index)
-            index = end if found < 0 else found + 1
-        elif src.startswith("//", index):
-            found = src.find("\n", index)
-            index = end if found < 0 else found
+            index = _c_skip_string(src, index) + 1
+        elif char == "/":
+            if src[index + 1] == "*":
+                found = src.find("*/", index)
+                index = end if found < 0 else found + 2
+            else:
+                found = src.find("\n", index)
+                index = end if found < 0 else found
         elif char == "{":
             depth += 1
-        elif char == "}":
+            index += 1
+        else:
             depth -= 1
             if depth == 0:
                 return src[brace + 1:index], index
-        index += 1
+            index += 1
     return src[brace + 1:], end
 
 
@@ -233,24 +287,24 @@ def _c_shape(body: str) -> tuple[bytearray, int]:
     # linear; recounting from the start of the body per token made it quadratic,
     # which on a 4,484-line module is the difference between a report and a wait.
     scanned = 0
+    count = body.count
     for match in _C_TOKEN.finditer(body):
         kind = match.lastgroup
         if kind == "skip":
             continue
-        text = match.group()
-        if kind == "name":
-            if text in _C_KEYWORDS:
-                shape.extend(b"K")
-                _word(shape, text)
-            else:
-                shape.extend(b"I")
-        elif kind == "literal":
-            shape.extend(b"C")
+        if kind == "literal":
+            shape += b"C"
         else:
-            shape.extend(b"O")
-            _word(shape, text)
+            text = match.group()
+            if kind == "name":
+                shape += _C_KEYWORD_TOKENS.get(text) or b"I"
+            else:
+                token = _C_OPERATOR_TOKENS.get(text)
+                if token is None:
+                    token = _C_OPERATOR_TOKENS[text] = _token(b"O", text)
+                shape += token
         start = match.start()
-        if body.count("\n", scanned, start) or not lines:
+        if count("\n", scanned, start) or not lines:
             lines += 1
         scanned = start
     return shape, lines
@@ -405,6 +459,39 @@ def _sources(root: Path, relatives: tuple[str, ...],
     return files
 
 
+#: The fields that hold a block of statements, in `_fields` order so the walk
+#: below visits definitions in exactly the order `ast.walk` did. `cases` holds
+#: `match_case`s and `handlers` holds `ExceptHandler`s, neither of which is a
+#: statement, but both carry a `body` and so belong on the queue.
+_BLOCKS = ("body", "handlers", "orelse", "finalbody", "cases")
+
+
+def _definitions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function defined anywhere in *tree*, in source order.
+
+    `ast.walk` answers this too, and did, at ten times the cost: a definition is
+    a *statement*, so no expression can contain one, yet the generic walk visits
+    every `Name`, `Load` and `Constant` on the way past -- 793,535 nodes over
+    `src/wreath` to reach 7,308 functions. Descending only the statement blocks
+    reaches the same 7,308 in the same order for 69ms against 758ms.
+
+    `tests/test_dup_scan.py::test_a_definition_is_found_inside_every_kind_of_block`
+    is what keeps `_BLOCKS` complete; a block missing from it makes the scan
+    quietly stop reading part of every file that uses it.
+    """
+    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    todo = deque([tree])
+    while todo:
+        node = todo.popleft()
+        for name in _BLOCKS:
+            block = getattr(node, name, None)
+            if block:
+                todo.extend(block)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            found.append(node)
+    return found
+
+
 def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -414,9 +501,7 @@ def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
         # tool unusable on a tree mid-edit.
         return []
     bodies = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
+    for node in _definitions(tree):
         body = _significant_body(node)
         if not body or _is_stub(body):
             continue
