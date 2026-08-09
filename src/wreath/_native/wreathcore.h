@@ -6,6 +6,7 @@
 #include <Python.h>
 #include "activate.h"
 #include "header_block.h"
+#include "record_api.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -176,6 +177,7 @@ PyObject *wreath_template_compile(PyObject *self, PyObject *arg);
 PyObject *wreath_template_render(PyObject *self, PyObject *args);
 PyObject *wreath_template_render_compiled(PyObject *self, PyObject *args);
 PyObject *wreath_template_configure(PyObject *self, PyObject *args);
+PyObject *wreath_template_record_configure(PyObject *self, PyObject *capsule);
 
 /* http.c */
 typedef struct {

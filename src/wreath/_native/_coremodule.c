@@ -176,6 +176,8 @@ static PyMethodDef core_methods[] = {
      "Execute a decoded template program to escaped UTF-8."},
     {"template_configure", wreath_template_configure, METH_VARARGS,
      "template_configure(markup_type, render_error_type) -> None"},
+    {"template_record_configure", wreath_template_record_configure, METH_O,
+     "template_record_configure(record_c_api) -> None"},
     {"http_parse_request", wreath_http_parse_request, METH_O,
      "http_parse_request(data) -> (method, target, minor, headers, consumed) | None"},
     {"http_parse_response", wreath_http_parse_response, METH_O,
