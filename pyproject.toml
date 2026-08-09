@@ -163,6 +163,8 @@ wreath-query-probe = "wreath._devtools.query_probe:main"
 wreath-sanitize = "wreath._devtools.sanitize:main"
 # Checks that the agent-facing maps still describe the repository.
 wreath-map-lint = "wreath._devtools.map_lint:main"
+# Borrowed credit and committed debris; stdlib-only so CI runs it unbuilt.
+wreath-hygiene = "wreath._devtools.hygiene:main"
 # Fails when a compiled extension is older than the sources it is built from.
 # Not in the gate yet: `_http3` is genuinely stale and cannot be rebuilt here.
 wreath-build-lint = "wreath._devtools.build_lint:main"

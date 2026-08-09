@@ -64,6 +64,13 @@ compile_commands.json
 /benchmark-results*/
 /benchmark-diagnosis*/
 /benchmark-smoke*/
+
+# Recorded runs. These are output, not source: a number measured on one machine
+# on one afternoon, which the next run replaces and no code reads. They should
+# never have been committed, and 106 of them already are -- ignoring them here
+# stops the tree growing, and `git rm --cached benchmarks/results` is the
+# separate decision that removes the ones already in history.
+/benchmarks/results/
 *.prof
 *.profraw
 *.profdata
