@@ -91,8 +91,8 @@ jobs:
         run: |
           set -euo pipefail
           # Through the environment and a file, never interpolated into the
-          # script: a PR body is attacker-controlled text, and `${{ }}` inside
-          # `run:` is string substitution before the shell ever sees it.
+          # script: a PR body is attacker-controlled text, and an expression
+          # interpolated into `run:` is substituted before the shell sees it.
           printf '%s\n\n%s\n' "$TITLE" "$BODY" > "$RUNNER_TEMP/pr.md"
           python src/wreath/_devtools/hygiene.py --message-file "$RUNNER_TEMP/pr.md"
 
