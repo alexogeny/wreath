@@ -100,8 +100,8 @@ def test_subclasses_carry_their_media_type() -> None:
 
 
 def test_content_length_beyond_cache() -> None:
-    # The small-value cache covers < 1024; larger bodies format on demand.
-    for size in (0, 1, 1023, 1024, 1025, 70000):
+    # The small-value cache covers < 2048; larger bodies format on demand.
+    for size in (0, 1, 2047, 2048, 2049, 70000):
         response = Response(b"x" * size)
         assert (b"content-length", str(size).encode()) in response.headers
 
@@ -117,6 +117,24 @@ def test_status_without_body_omits_content_length() -> None:
     for status in (204, 304):
         response = Response(b"", status=status)
         assert not any(key == b"content-length" for key, _ in response.headers)
+
+
+def test_html_response_fast_shape_preserves_general_status_semantics() -> None:
+    response = HTMLResponse("ignored", status=204)
+    assert response.body == b""
+    assert response.status == 204
+    assert not any(key == b"content-length" for key, _ in response.headers)
+
+
+def test_html_response_fast_shape_uses_a_subclass_media_type() -> None:
+    class FragmentResponse(HTMLResponse):
+        media_type = b"application/xhtml+xml"
+
+    response = FragmentResponse("<p>ok</p>")
+    assert response.headers == [
+        (b"content-type", b"application/xhtml+xml"),
+        (b"content-length", b"9"),
+    ]
 
 
 def test_caller_headers_are_preserved_and_deduplicated() -> None:

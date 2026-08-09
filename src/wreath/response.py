@@ -41,12 +41,16 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 _CONTENT_TYPE = b"content-type"
 _CONTENT_LENGTH = b"content-length"
 # Small content-length values are overwhelmingly common; formatting them once
-# keeps str+encode out of the per-response path.
-_CONTENT_LENGTHS = tuple(str(n).encode("ascii") for n in range(1024))
+# keeps str+encode out of the per-response path. Two KiB includes ordinary HTML
+# pages such as Fortunes (1,224 bytes) while retaining only ~40 KiB at startup.
+_CONTENT_LENGTH_CACHE_SIZE = 2048
+_CONTENT_LENGTHS = tuple(
+    str(n).encode("ascii") for n in range(_CONTENT_LENGTH_CACHE_SIZE)
+)
 
 
 def _content_length(size: int) -> bytes:
-    if size < 1024:
+    if size < _CONTENT_LENGTH_CACHE_SIZE:
         return _CONTENT_LENGTHS[size]
     return str(size).encode("ascii")
 
@@ -136,7 +140,9 @@ class Response:
                 response_headers.append(
                     (
                         _CONTENT_LENGTH,
-                        _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii"),
+                        _CONTENT_LENGTHS[size]
+                        if size < _CONTENT_LENGTH_CACHE_SIZE
+                        else str(size).encode("ascii"),
                     )
                 )
         else:
@@ -558,11 +564,30 @@ class HTMLResponse(Response):
         *,
         background: Background | None = None,
     ) -> None:
-        super().__init__(
-            body if isinstance(body, bytes) else body.encode("utf-8"),
-            status=status,
-            background=background,
-        )
+        document = body if isinstance(body, bytes) else body.encode("utf-8")
+        if status == 200:
+            # HTMLResponse exposes no headers or media-type override, and 200
+            # can never be bodyless. Entering Response.__init__ made this fixed
+            # shape pay its status-set lookup and both configuration branches
+            # before arriving at these same four assignments. Keep subclasses'
+            # compiled media-type pair just as the general constructor does.
+            type_header = self._media_type_header
+            self.body = document
+            self.status = status
+            self.background = background
+            size = len(document)
+            response_headers = [type_header] if type_header is not None else []
+            response_headers.append(
+                (
+                    _CONTENT_LENGTH,
+                    _CONTENT_LENGTHS[size]
+                    if size < _CONTENT_LENGTH_CACHE_SIZE
+                    else str(size).encode("ascii"),
+                )
+            )
+            self.headers = response_headers
+            return
+        super().__init__(document, status=status, background=background)
 
 
 class RedirectResponse(Response):
