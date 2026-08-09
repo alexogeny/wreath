@@ -72,8 +72,22 @@ typedef struct {
 } WreathReadyHandle;
 
 #define READY_HANDLE_FREELIST_CAP 64
+/* A metal loop owns one OS thread. Under free-threading several loops can live
+ * in one process, so a process-global freelist lets two allocators pop or push
+ * the same Handle concurrently. The entries are empty shells (dealloc clears
+ * every PyObject field), making thread-local ownership sufficient there.
+ *
+ * Keep the ordinary ABI process-local: ELF dynamic TLS lookup measured as the
+ * hottest symbol in the saturated Fortunes profile (3.0% of user cycles), and
+ * the GIL already serializes access in that build. */
+#ifdef Py_GIL_DISABLED
+static _Thread_local WreathReadyHandle *
+    ready_handle_freelist[READY_HANDLE_FREELIST_CAP];
+static _Thread_local int ready_handle_freelist_len = 0;
+#else
 static WreathReadyHandle *ready_handle_freelist[READY_HANDLE_FREELIST_CAP];
 static int ready_handle_freelist_len = 0;
+#endif
 
 static PyTypeObject WreathReadyHandleType;
 
@@ -184,7 +198,11 @@ ready_handle_new(PyObject *callback, PyObject *const *args, Py_ssize_t nargs,
     } else {
         handle->context = Py_NewRef(context);
     }
-    PyObject_GC_Track((PyObject *)handle);
+    /* PyObject_GC_New is untracked on the ordinary 3.14 build but may already
+     * be tracked by 3.14t. Tracking twice is a fatal runtime assertion. */
+    if (!PyObject_GC_IsTracked((PyObject *)handle)) {
+        PyObject_GC_Track((PyObject *)handle);
+    }
     return handle;
 }
 
@@ -3084,4 +3102,3 @@ static WreathTransportCAPI transport_capi = {
     transport_capi_write,
     transport_capi_writelines,
 };
-

@@ -35,7 +35,7 @@ pytestmark = requires_metal
 
 
 def _metal_loop(**kwargs):
-    return reactor.metal_event_loop(diagnostics=True, **kwargs)
+    return reactor.metal_event_loop(diagnostics=True, gc_mode="idle", **kwargs)
 
 
 def _stock_metal_loop():
@@ -49,6 +49,23 @@ def test_a_gc_mode_other_than_stock_or_idle_is_refused(
 
     with pytest.raises(ValueError, match="WREATH_METAL_GC must be 'stock' or 'idle'"):
         reactor.metal_event_loop()
+
+
+@pytest.mark.parametrize(
+    ("configured", "gil_enabled", "expected"),
+    [
+        (None, True, "idle"),
+        (None, False, "stock"),
+        ("idle", False, "idle"),
+        ("stock", True, "stock"),
+    ],
+)
+def test_gc_mode_accounts_for_process_wide_free_threaded_collection(
+    configured: str | None, gil_enabled: bool, expected: str,
+) -> None:
+    assert reactor._metal_gc_mode(
+        configured, gil_enabled=gil_enabled,
+    ) == expected
 
 
 class _Harness:
@@ -117,7 +134,7 @@ class _Harness:
 
 # --- policy installation ---------------------------------------------------
 
-def test_metal_owns_its_collector_by_default() -> None:
+def test_idle_mode_gives_metal_ownership_of_the_collector() -> None:
     stock_threshold = gc.get_threshold()
     loop = _metal_loop()
     try:
@@ -186,7 +203,7 @@ def test_startup_freezes_what_the_server_built() -> None:
 
 
 def test_freezing_is_ablatable_without_touching_the_idle_policy() -> None:
-    loop = reactor.metal_event_loop(diagnostics=True)
+    loop = reactor.metal_event_loop(diagnostics=True, gc_mode="idle")
     loop._collector._freeze_enabled = False
     with _Harness(loop):
         assert gc.get_freeze_count() == 0
@@ -287,7 +304,7 @@ def test_the_collection_floor_bounds_idle_churn() -> None:
     # completion, ready-queue turn -- and each is honestly "work ran". Without a
     # floor a lightly loaded server re-collects a young generation it just
     # emptied, several times per request.
-    loop = reactor.metal_event_loop(diagnostics=True)
+    loop = reactor.metal_event_loop(diagnostics=True, gc_mode="idle")
     loop._collector._min_interval_seconds = 0.050
     with _Harness(loop) as harness:
         loop._collector.attach(loop._poller)  # re-install with the new floor
@@ -318,6 +335,20 @@ class _Echo(asyncio.Protocol):
         self.lost.set()
 
 
+def _echo_accepted_on(port: int) -> _Echo:
+    """Find this server's peer, not deferred garbage from an earlier loop."""
+    matches = []
+    for candidate in gc.get_objects():
+        if not isinstance(candidate, _Echo):
+            continue
+        transport = getattr(candidate, "transport", None)
+        sockname = transport.get_extra_info("sockname") if transport else None
+        if sockname is not None and sockname[1] == port:
+            matches.append(candidate)
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_a_collection_does_not_reap_a_live_connection() -> None:
     """The ownership contract the idle policy depends on, stated directly.
 
@@ -345,9 +376,8 @@ def test_a_collection_does_not_reap_a_live_connection() -> None:
         await writer.drain()
         assert await reader.read(4) == b"pong"
 
-        accepted = [o for o in gc.get_objects() if isinstance(o, _Echo)]
-        assert accepted, "no accepted protocol to watch"
-        witness = weakref.ref(accepted[0])
+        accepted = _echo_accepted_on(port)
+        witness = weakref.ref(accepted)
         del accepted
 
         gc.collect()
@@ -382,9 +412,9 @@ def test_a_closed_connection_is_given_back() -> None:
         await writer.drain()
         assert await reader.read(4) == b"pong"
 
-        accepted = [o for o in gc.get_objects() if isinstance(o, _Echo)]
-        witness = weakref.ref(accepted[0])
-        lost = accepted[0].lost
+        accepted = _echo_accepted_on(port)
+        witness = weakref.ref(accepted)
+        lost = accepted.lost
         del accepted
 
         writer.close()

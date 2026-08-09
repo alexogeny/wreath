@@ -42,6 +42,7 @@ import gc
 import selectors
 import socket
 import ssl
+import sys
 from asyncio import events as _events
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -1065,6 +1066,22 @@ def new_event_loop(backend: str | None = None, *, timers: str = "heap") -> Event
     return EventLoop(selector, backend=backend, timers=timers)
 
 
+def _metal_gc_mode(configured: str | None, *, gil_enabled: bool) -> str:
+    """Resolve Metal's collector ownership once, before the loop is built.
+
+    The idle collector is loop-local but ``gc.collect()`` is process-wide.  A
+    free-threaded server has several independent loops in one process, so none
+    of them can safely infer that a quiet instant belongs to the whole process.
+    Keep the policy available as an explicit diagnostic, but default to
+    CPython's coordinated collector when the GIL is actually disabled.
+    """
+    if configured is not None:
+        if configured not in ("stock", "idle"):
+            raise ValueError("WREATH_METAL_GC must be 'stock' or 'idle'")
+        return configured
+    return "idle" if gil_enabled else "stock"
+
+
 def metal_event_loop(
     *, worker_id: int = 0, reuse_port: bool | None = None,
     diagnostics: bool = False, gc_mode: str | None = None,
@@ -1080,13 +1097,13 @@ def metal_event_loop(
     ReactorPoller reads the wheel's exact next deadline, so there is no recurring
     bridge tick and an idle server sleeps until native work or a real deadline.
 
-    Metal also owns its cycle collector (``gc_mode="idle"``): collection runs in
-    the loop's idle gaps rather than wherever CPython's allocation counter
-    happens to trip, and the server freezes the startup heap once it is up. Both
-    halves are ablatable without touching code -- ``WREATH_METAL_GC=stock``
-    restores CPython's automatic trigger, ``WREATH_METAL_GC_FREEZE=0`` keeps the
-    startup heap traceable -- so the four combinations can be measured against
-    each other.
+    With the GIL enabled, Metal also owns its cycle collector
+    (``gc_mode="idle"``): collection runs in the loop's idle gaps rather than
+    wherever CPython's allocation counter happens to trip. A GIL-disabled
+    runtime defaults to ``stock`` because collection is process-wide while idle
+    detection belongs to one loop. Both choices remain explicitly ablatable via
+    ``WREATH_METAL_GC``. ``WREATH_METAL_GC_FREEZE=0`` independently keeps the
+    startup heap traceable.
     """
     import os
 
@@ -1101,9 +1118,10 @@ def metal_event_loop(
     if reuse_port is None:
         reuse_port = os.environ.get("WREATH_METAL_REUSEPORT", "0") == "1"
     if gc_mode is None:
-        gc_mode = os.environ.get("WREATH_METAL_GC", "idle")
-        if gc_mode not in ("stock", "idle"):
-            raise ValueError("WREATH_METAL_GC must be 'stock' or 'idle'")
+        gc_mode = _metal_gc_mode(
+            os.environ.get("WREATH_METAL_GC"),
+            gil_enabled=sys._is_gil_enabled(),
+        )
     if adaptive_polling is None:
         # The spin is the one metal-only thing on the wait path that can cost a
         # request time without doing any work for it (a miss burns its whole
