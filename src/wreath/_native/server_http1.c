@@ -1122,9 +1122,50 @@ parse_content_length_header(PyObject *value, Py_ssize_t *out)
 
 
 static int
+response_headers_match_cache(WreathHttpProtocol *self, PyObject *headers)
+{
+    PyObject *cached = self->response_header_cache_key;
+    if (cached == NULL || !PyTuple_CheckExact(cached) ||
+        (!PyTuple_CheckExact(headers) && !PyList_CheckExact(headers))) {
+        return 0;
+    }
+    Py_ssize_t count = PyTuple_GET_SIZE(cached);
+    if (PySequence_Size(headers) != count) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyTuple_CheckExact(headers)
+            ? PyTuple_GET_ITEM(headers, i) : PyList_GET_ITEM(headers, i);
+        PyObject *cached_pair = PyTuple_GET_ITEM(cached, i);
+        if (!PyTuple_CheckExact(pair) || PyTuple_GET_SIZE(pair) != 2 ||
+            !PyTuple_CheckExact(cached_pair) || PyTuple_GET_SIZE(cached_pair) != 2) {
+            return 0;
+        }
+        for (Py_ssize_t field = 0; field < 2; field++) {
+            PyObject *value = PyTuple_GET_ITEM(pair, field);
+            PyObject *cached_value = PyTuple_GET_ITEM(cached_pair, field);
+            if (value == cached_value) {
+                continue;
+            }
+            if (!PyBytes_CheckExact(value) || !PyBytes_CheckExact(cached_value)) {
+                return 0;
+            }
+            Py_ssize_t size = PyBytes_GET_SIZE(value);
+            if (size != PyBytes_GET_SIZE(cached_value) ||
+                memcmp(PyBytes_AS_STRING(value), PyBytes_AS_STRING(cached_value),
+                       (size_t)size) != 0) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int
 begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *headers)
 {
     PyObject *items = NULL;
+    PyObject *cache_key = NULL;
     PyObject *cache_wire = NULL;
     long status;
     Py_ssize_t reason_size;
@@ -1172,7 +1213,8 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
         return -1;
     }
 
-    if (headers != NULL && headers == self->response_header_cache_key) {
+    if (headers != NULL && (headers == self->response_header_cache_key ||
+                            response_headers_match_cache(self, headers))) {
         if (response_append(self, PyBytes_AS_STRING(self->response_header_cache_wire),
                             PyBytes_GET_SIZE(self->response_header_cache_wire)) < 0) {
             goto error;
@@ -1187,7 +1229,8 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
          * bounds keep a one-off tuple with oversized fields from becoming
          * connection-lifetime storage; PreparedResponse's usual two fields
          * occupy only a few dozen bytes. */
-        cacheable = PyTuple_CheckExact(headers) && PyTuple_GET_SIZE(headers) <= 16;
+        cacheable = ((PyTuple_CheckExact(headers) || PyList_CheckExact(headers)) &&
+                     PySequence_Size(headers) <= 16);
         header_wire_start = self->response_bytes_len;
         items = PySequence_Fast(headers, "response headers must be a sequence");
         if (items == NULL) {
@@ -1258,7 +1301,11 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
                 wire_start, self->response_bytes_len - header_wire_start);
             if (cache_wire == NULL) goto error;
             if (PyBytes_GET_SIZE(cache_wire) <= 1024) {
-                Py_XSETREF(self->response_header_cache_key, Py_NewRef(headers));
+                cache_key = PyTuple_CheckExact(headers)
+                    ? Py_NewRef(headers) : PyList_AsTuple(headers);
+                if (cache_key == NULL) goto error;
+                Py_XSETREF(self->response_header_cache_key, cache_key);
+                cache_key = NULL;
                 Py_XSETREF(self->response_header_cache_wire, cache_wire);
                 cache_wire = NULL;
                 self->response_header_cache_has_length = self->resp_has_length;
@@ -1311,6 +1358,7 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
 
 error:
     Py_XDECREF(items);
+    Py_XDECREF(cache_key);
     Py_XDECREF(cache_wire);
     clear_response_builder(self);
     return -1;

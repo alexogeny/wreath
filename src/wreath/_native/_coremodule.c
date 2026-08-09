@@ -168,6 +168,12 @@ static PyMethodDef core_methods[] = {
     {"template_render", wreath_template_render, METH_VARARGS,
      "template_render(tape, context, max_output) -> bytes\n"
      "Execute a compiled template tape to escaped UTF-8."},
+    {"template_compile", wreath_template_compile, METH_O,
+     "template_compile(tape) -> program\n"
+     "Decode a template tape once for repeated rendering."},
+    {"template_render_compiled", wreath_template_render_compiled, METH_VARARGS,
+     "template_render_compiled(program, context, max_output) -> bytes\n"
+     "Execute a decoded template program to escaped UTF-8."},
     {"template_configure", wreath_template_configure, METH_VARARGS,
      "template_configure(markup_type, render_error_type) -> None"},
     {"http_parse_request", wreath_http_parse_request, METH_O,

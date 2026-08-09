@@ -172,7 +172,9 @@ PyObject *wreath_xml_parse(PyObject *self, PyObject *args);
 PyObject *wreath_xml_c14n(PyObject *self, PyObject *args);
 
 /* templates.c */
+PyObject *wreath_template_compile(PyObject *self, PyObject *arg);
 PyObject *wreath_template_render(PyObject *self, PyObject *args);
+PyObject *wreath_template_render_compiled(PyObject *self, PyObject *args);
 PyObject *wreath_template_configure(PyObject *self, PyObject *args);
 
 /* http.c */

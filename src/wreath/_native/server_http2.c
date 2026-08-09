@@ -2074,7 +2074,9 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     }
     st->nfr_active = 0;
     st->nfr_bytes_out = 0;
-    PyObject_GC_Track((PyObject *)st);
+    if (!PyObject_GC_IsTracked((PyObject *)st)) {
+        PyObject_GC_Track((PyObject *)st);
+    }
 
     if (self->policy.descriptor != NULL) {
         PyObject *policy_headers = wreath_request_context_headers(scope);

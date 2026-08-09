@@ -985,7 +985,9 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->nfr_active = 0;
     s->nfr_bytes_out = 0;
     wreath_policy_state_init(&s->policy_state);
-    PyObject_GC_Track((PyObject *)s);
+    if (!PyObject_GC_IsTracked((PyObject *)s)) {
+        PyObject_GC_Track((PyObject *)s);
+    }
     if (s->header_list == NULL || s->body_buffer == NULL) {
         Py_DECREF(s);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
