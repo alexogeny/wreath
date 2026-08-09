@@ -139,6 +139,56 @@ def test_fetch_batch_owns_decoded_cells_until_python_observes_a_row() -> None:
     assert native._record_allocation_count() == before + 1
 
 
+@requires_native
+@pytest.mark.parametrize(
+    "oid, format_code, wire, expected",
+    [
+        (21, 1, struct.pack("!h", -(2**15)), -(2**15)),
+        (21, 1, struct.pack("!h", 2**15 - 1), 2**15 - 1),
+        (23, 1, struct.pack("!i", -(2**31)), -(2**31)),
+        (23, 1, struct.pack("!i", 2**31 - 1), 2**31 - 1),
+        (20, 1, struct.pack("!q", -(2**63)), -(2**63)),
+        (20, 1, struct.pack("!q", 2**63 - 1), 2**63 - 1),
+        (20, 0, b"-9223372036854775808", -(2**63)),
+        (20, 0, b"+9223372036854775807", 2**63 - 1),
+    ],
+)
+def test_fetch_batch_native_integer_cells_preserve_extremes(
+    oid: int, format_code: int, wire: bytes, expected: int
+) -> None:
+    tape = native._FieldTape(1)
+    tape.append(_data_row((wire,)), 1)
+    plan = native._compile_decoder_plan((oid,), (format_code,), ("value",))
+
+    rows = native._decode_field_tape(plan, tape, "fetch_batch", 256)
+
+    assert native._batch_storage_counts(rows) == (0, 0, 1, 0, 0)
+    assert rows[0]["value"] == expected
+    assert native._batch_storage_counts(rows) == (1, 1, 0, 0, 0)
+
+
+@requires_native
+@pytest.mark.parametrize(
+    "wire",
+    [
+        b"\x80",
+        b"\xc0\x80",
+        b"\xe2\x28\xa1",
+        b"\xed\xa0\x80",
+        b"\xf4\x90\x80\x80",
+    ],
+)
+def test_fetch_batch_rejects_invalid_utf8_before_exposing_rows(wire: bytes) -> None:
+    tape = native._FieldTape(1)
+    tape.append(_data_row((wire,)), 1)
+    plan = native._compile_decoder_plan((25,), (1,), ("value",))
+
+    with pytest.raises(UnicodeDecodeError):
+        native._decode_field_tape(plan, tape, "fetch_batch", 256)
+
+    assert tape.row_count == 1
+
+
 def test_fetch_batch_final_flush_extends_the_operation_owned_batch() -> None:
     class DecodeHarness(PureConnection):
         _decode_fetch_extend = staticmethod(native._decode_fetch_extend)

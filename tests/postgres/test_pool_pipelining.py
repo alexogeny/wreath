@@ -29,7 +29,13 @@ from typing import Any
 
 import pytest
 
-from wreath.postgres import Database, PoolConfig, Statement, _implementation
+from wreath._flight_markers import phase_marker
+from wreath._native import extension
+from wreath.postgres import Database, Pool, PoolConfig, Statement, _implementation
+
+from .test_connection import FakePostgres
+
+native_postgres = extension("_postgres", ignore_pure=True)
 
 
 class SlowConnection:
@@ -302,6 +308,86 @@ def test_statement_query_methods_return_the_backend_work_awaitable_directly() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    _implementation != "native", reason="native Statement continuation path"
+)
+async def test_native_statement_is_its_own_operation_completion_cell() -> None:
+    """The exact driver path must not quietly allocate an asyncio Future.
+
+    Drive the iterator the same way Task does: its first suspension yields the
+    statement object itself, PostgreSQL completes that object, and the next
+    step returns the query result.  A Future-backed implementation yields a
+    distinct object and fails this structural check even when its bytes agree.
+    """
+    server = FakePostgres(fragment=False)
+    dsn = await server.start_tcp()
+    database = Database(
+        "t", dsn,
+        pools={"read": PoolConfig(
+            min_size=1, max_size=1, pipeline_depth=4
+        )},
+        connector=native_postgres.connect,
+    )
+    await database.start()
+    statement = database.statement("q", "select 1::int4")
+    awaitable = statement.fetch()
+    iterator = awaitable.__await__()
+    completed = asyncio.Event()
+
+    def wake(_completion: object) -> None:
+        completed.set()
+
+    try:
+        yielded = iterator.send(None)
+        assert yielded is awaitable
+        assert yielded._asyncio_future_blocking is True
+        yielded._asyncio_future_blocking = False
+        yielded.add_done_callback(wake)
+        await asyncio.wait_for(completed.wait(), timeout=1.0)
+        with pytest.raises(StopIteration) as stopped:
+            iterator.send(None)
+        assert stopped.value.value[0]["value"] == 1
+    finally:
+        iterator.close()
+        await database.stop()
+        await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    _implementation != "native", reason="native Statement continuation path"
+)
+async def test_native_statement_completion_propagates_task_cancellation() -> None:
+    server = FakePostgres(fragment=False)
+    dsn = await server.start_tcp()
+    database = Database(
+        "t", dsn,
+        pools={"read": PoolConfig(
+            min_size=1, max_size=1, pipeline_depth=4
+        )},
+        connector=native_postgres.connect,
+    )
+    await database.start()
+    statement = database.statement("q", "select 1::int4")
+    server.query_gate = asyncio.Event()
+    server.flight_received.clear()
+    task = asyncio.create_task(statement.fetch())
+    try:
+        await asyncio.wait_for(server.flight_received.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        server.query_gate.set()
+        assert (await asyncio.wait_for(statement.fetch(), timeout=1.0))[0][
+            "value"
+        ] == 1
+    finally:
+        server.query_gate.set()
+        await database.stop()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_a_shared_lease_still_idles_the_connection_for_an_exclusive_caller() -> None:
     """The last borrower out must return the connection to the idle set.
 
@@ -362,6 +448,30 @@ async def test_the_fast_lease_declines_rather_than_deciding_what_it_cannot() -> 
     finally:
         await shared.stop()
         await serial.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_pool_core_mutates_the_python_owned_shared_state() -> None:
+    native_postgres._statement_configure(Statement, Pool, PoolConfig, phase_marker)
+    registry = {"peak": 0}
+    database = await _database(4, registry)
+    try:
+        pool = database._resolve_pool("read")
+
+        first = native_postgres._pool_try_acquire(pool)
+        second = native_postgres._pool_try_acquire(pool)
+
+        assert first is second
+        assert pool._shared[id(first)] == (first, 2)
+        assert native_postgres._pool_try_release(pool, second) is True
+        assert pool._shared[id(first)] == (first, 1)
+        # The test connection is deliberately not the exact native Connection,
+        # so the C core leaves the last-borrower policy to Pool.
+        assert native_postgres._pool_try_release(pool, first) is False
+        assert pool.try_release_shared(first) is True
+        assert pool._available == [first]
+    finally:
+        await database.stop()
 
 
 @pytest.mark.asyncio

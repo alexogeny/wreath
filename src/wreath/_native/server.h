@@ -407,6 +407,7 @@ extern PyTypeObject ImmediateAwaitableType;
 extern PyTypeObject ValueAwaitableType;
 
 int wreath_request_context_ready(PyObject *module);
+void wreath_request_context_fini(void);
 int wreath_request_context_check(PyObject *object);
 PyObject *wreath_request_context_headers(PyObject *object); /* borrowed */
 /* Seed a dict scope's `_wreath_flight` slot with the recorder's request id, for

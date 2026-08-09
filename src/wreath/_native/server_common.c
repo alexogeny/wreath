@@ -765,6 +765,8 @@ wreath_task_exception(PyObject *task)
 void
 server_module_free(void *Py_UNUSED(module))
 {
+    wreath_request_context_fini();
+    wreath_header_block_freelist_fini();
     Py_CLEAR(immediate_none);
     Py_CLEAR(task_add_done_callback);
     Py_CLEAR(task_exception_fn);

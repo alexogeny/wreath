@@ -38,6 +38,7 @@ SOURCES = (
     "sse.c",
     "xml.c",
     "templates.c",
+    "response.c",
     "http.c",
     "header_block.c",
     "router.c",

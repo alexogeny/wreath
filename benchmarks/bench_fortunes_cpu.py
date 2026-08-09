@@ -17,6 +17,7 @@ import argparse
 import json
 import platform
 import statistics
+import struct
 import sys
 import time
 from collections.abc import Callable
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from wreath._devtools import cpu_probe
+from wreath._native import _postgres
 from wreath.postgres import Record, RecordBatch
 from wreath.response import HTMLResponse
 from wreath.templates import Template
@@ -63,7 +65,28 @@ _TEMPLATE = Template.from_string(
     "{% endfor %}</table></body></html>"
 )
 _RENDERED = _TEMPLATE.render_bytes(_RENDER_CONTEXT)
+_WIRE_ROWS = tuple(
+    memoryview(
+        struct.pack("!H", 2)
+        + struct.pack("!I", 4)
+        + struct.pack("!i", identifier)
+        + struct.pack("!I", len(encoded))
+        + encoded
+    )
+    for identifier, message in enumerate(_MESSAGES, 1)
+    for encoded in (message.encode(),)
+)
+_DECODER_PLAN = _postgres._compile_decoder_plan(
+    (23, 25), (1, 1), _COLUMNS
+)
 _SINK: Any = None
+
+
+def _decode_wire(mode: str) -> Any:
+    tape = _postgres._FieldTape(2)
+    for payload in _WIRE_ROWS:
+        tape.append(payload, 2)
+    return _postgres._decode_field_tape(_DECODER_PLAN, tape, mode, 256)
 
 
 def _nothing(iterations: int) -> None:
@@ -175,6 +198,36 @@ def _response_only(iterations: int) -> None:
         _SINK = HTMLResponse(_RENDERED)
 
 
+def _decode_objects(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        _SINK = _decode_wire("fetch")
+
+
+def _decode_tagged(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        _SINK = _decode_wire("fetch_batch")
+
+
+def _wire_object_complete(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = _decode_wire("fetch")
+        rows.append(_EPHEMERAL)
+        rows.sort(key=_BY_MESSAGE)
+        _SINK = HTMLResponse(_TEMPLATE.render_bytes({"rows": rows}))
+
+
+def _wire_tagged_complete(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = _decode_wire("fetch_batch")
+        rows.append(_EPHEMERAL)
+        rows.sort_by("message")
+        _SINK = HTMLResponse(_TEMPLATE.render_bytes({"rows": rows}))
+
+
 ARMS: dict[str, Callable[[int], None]] = {
     "nothing": _nothing,
     "materialize": _materialize,
@@ -192,6 +245,10 @@ ARMS: dict[str, Callable[[int], None]] = {
     "batch-complete": _batch_complete,
     "response-only": _response_only,
     "response-only-aa": _response_only,
+    "decode-objects": _decode_objects,
+    "decode-tagged": _decode_tagged,
+    "wire-object-complete": _wire_object_complete,
+    "wire-tagged-complete": _wire_tagged_complete,
     "complete-aa": _complete,
 }
 

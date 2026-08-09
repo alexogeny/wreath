@@ -195,6 +195,24 @@ def parse_responses(data: bytes | bytearray) -> list[bytes]:
 GET = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
 
 
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_request_shells_reuse_bounded_storage() -> None:
+    """A second same-shaped request reuses both native ingress shells."""
+    await drive(_NativeHttpProtocol, echo_ok, [GET])
+    gc.collect()
+    after_first = _native_server._request_storage_counts()
+
+    await drive(_NativeHttpProtocol, echo_ok, [GET])
+    gc.collect()
+    after_second = _native_server._request_storage_counts()
+
+    assert after_second == after_first, (
+        "the second request allocated a new RequestContext or HeaderBlock "
+        f"shell: {after_first!r} -> {after_second!r}"
+    )
+
+
 def test_native_application_entry_returns_the_compiled_dispatcher_directly() -> None:
     app = Wreath()
 

@@ -105,6 +105,7 @@ PyInit__server(void)
         Py_DECREF(module);
         return NULL;
     }
+    wreath_header_block_freelist_enable();
     request_capsule = PyCapsule_New(
         &request_capi, WREATH_REQUEST_CAPI_NAME, NULL
     );

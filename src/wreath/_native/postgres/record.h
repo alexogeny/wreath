@@ -19,6 +19,12 @@ int wreath_pg_record_batch_prepare(PyObject *batch, PyObject *names,
                                    Py_ssize_t rows, Py_ssize_t *start);
 void wreath_pg_record_batch_set_value(PyObject *batch, Py_ssize_t row,
                                       Py_ssize_t column, PyObject *value);
+int wreath_pg_record_batch_set_int64(PyObject *batch, Py_ssize_t row,
+                                     Py_ssize_t column, int64_t value);
+int wreath_pg_record_batch_set_utf8(PyObject *batch, Py_ssize_t row,
+                                    Py_ssize_t column,
+                                    const unsigned char *data,
+                                    Py_ssize_t length);
 void wreath_pg_record_batch_commit(PyObject *batch, Py_ssize_t size);
 int wreath_pg_record_init(PyObject *module);
 void wreath_pg_record_fini(void);

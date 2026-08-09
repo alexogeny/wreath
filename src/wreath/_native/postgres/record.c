@@ -1,6 +1,9 @@
 #include "record.h"
 
+#include "../record_api.h"
+
 #include <stddef.h>
+#include <stdint.h>
 
 PyTypeObject *WreathPgRecordType = NULL;
 PyTypeObject *WreathPgRecordBatchType = NULL;
@@ -17,11 +20,33 @@ typedef struct {
 } WreathPgRecord;
 
 typedef struct {
+    uint8_t kind;
+    union {
+        PyObject *object;
+        int64_t integer;
+        struct {
+            Py_ssize_t offset;
+            Py_ssize_t length;
+        } utf8;
+    } value;
+} WreathPgBatchCell;
+
+enum {
+    BATCH_CELL_EMPTY = 0,
+    BATCH_CELL_OBJECT = WREATH_RECORD_VALUE_OBJECT,
+    BATCH_CELL_INT64 = WREATH_RECORD_VALUE_INT64,
+    BATCH_CELL_UTF8 = WREATH_RECORD_VALUE_UTF8,
+};
+
+typedef struct {
     PyObject_HEAD
     PyObject **objects;  /* arbitrary rows, or lazily materialized Records */
-    PyObject **cells;    /* batch-owned decoded values, row-major */
+    WreathPgBatchCell *cells; /* batch-owned decoded values, row-major */
     PyObject *names;
     PyObject *index;
+    char *arena;         /* compact ownership for validated wire text */
+    Py_ssize_t arena_size;
+    Py_ssize_t arena_capacity;
     Py_ssize_t size;
     Py_ssize_t capacity;
     Py_ssize_t columns;
@@ -309,20 +334,76 @@ batch_reserve(WreathPgRecordBatch *self, Py_ssize_t needed)
            (size_t)(capacity - self->capacity) * sizeof(PyObject *));
     self->objects = objects;
     if (self->columns > 0) {
-        PyObject **cells = PyMem_Realloc(
+        WreathPgBatchCell *cells = PyMem_Realloc(
             self->cells,
-            (size_t)capacity * (size_t)self->columns * sizeof(PyObject *));
+            (size_t)capacity * (size_t)self->columns *
+                sizeof(WreathPgBatchCell));
         if (cells == NULL) {
             PyErr_NoMemory();
             return -1;
         }
         memset(cells + self->capacity * self->columns, 0,
                (size_t)(capacity - self->capacity) *
-                   (size_t)self->columns * sizeof(PyObject *));
+                   (size_t)self->columns * sizeof(WreathPgBatchCell));
         self->cells = cells;
     }
     self->capacity = capacity;
     return 0;
+}
+
+static int
+batch_arena_reserve(WreathPgRecordBatch *self, Py_ssize_t additional)
+{
+    if (additional < 0 || self->arena_size > PY_SSIZE_T_MAX - additional) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t needed = self->arena_size + additional;
+    if (needed <= self->arena_capacity) return 0;
+    Py_ssize_t capacity = self->arena_capacity > 0 ? self->arena_capacity : 1024;
+    while (capacity < needed) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            capacity = needed;
+            break;
+        }
+        capacity *= 2;
+    }
+    char *arena = PyMem_Realloc(self->arena, (size_t)capacity);
+    if (arena == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    self->arena = arena;
+    self->arena_capacity = capacity;
+    return 0;
+}
+
+static void
+batch_cell_clear(WreathPgBatchCell *cell)
+{
+    if (cell->kind == BATCH_CELL_OBJECT) Py_CLEAR(cell->value.object);
+    memset(cell, 0, sizeof(*cell));
+}
+
+static PyObject *
+batch_cell_materialize(WreathPgRecordBatch *self, WreathPgBatchCell *cell)
+{
+    PyObject *value;
+    if (cell->kind == BATCH_CELL_OBJECT) return cell->value.object;
+    if (cell->kind == BATCH_CELL_INT64) {
+        value = PyLong_FromLongLong(cell->value.integer);
+    } else if (cell->kind == BATCH_CELL_UTF8) {
+        value = PyUnicode_DecodeUTF8(
+            self->arena + cell->value.utf8.offset,
+            cell->value.utf8.length, "strict");
+    } else {
+        PyErr_SetString(PyExc_SystemError, "RecordBatch cell is unset");
+        return NULL;
+    }
+    if (value == NULL) return NULL;
+    cell->kind = BATCH_CELL_OBJECT;
+    cell->value.object = value;
+    return value;
 }
 
 int
@@ -358,9 +439,27 @@ wreath_pg_record_batch_truncate(PyObject *batch, Py_ssize_t size)
         self->size--;
         Py_CLEAR(self->objects[self->size]);
         for (Py_ssize_t column = 0; column < self->columns; column++) {
-            Py_CLEAR(self->cells[self->size * self->columns + column]);
+            batch_cell_clear(
+                &self->cells[self->size * self->columns + column]);
         }
     }
+    /* A failed extension may have copied text after the last committed row.
+     * Recover that tail even when the batch already contained earlier rows.
+     * Materialized text no longer needs its arena span, so only live tagged
+     * cells contribute to the retained high-water mark. */
+    Py_ssize_t arena_size = 0;
+    for (Py_ssize_t row = 0; row < self->size; row++) {
+        for (Py_ssize_t column = 0; column < self->columns; column++) {
+            WreathPgBatchCell *cell =
+                &self->cells[row * self->columns + column];
+            if (cell->kind == BATCH_CELL_UTF8) {
+                Py_ssize_t end =
+                    cell->value.utf8.offset + cell->value.utf8.length;
+                if (end > arena_size) arena_size = end;
+            }
+        }
+    }
+    self->arena_size = arena_size;
 }
 
 int
@@ -392,7 +491,37 @@ wreath_pg_record_batch_set_value(PyObject *batch, Py_ssize_t row,
                                  Py_ssize_t column, PyObject *value)
 {
     WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
-    self->cells[row * self->columns + column] = value;
+    WreathPgBatchCell *cell = &self->cells[row * self->columns + column];
+    cell->kind = BATCH_CELL_OBJECT;
+    cell->value.object = value;
+}
+
+int
+wreath_pg_record_batch_set_int64(PyObject *batch, Py_ssize_t row,
+                                 Py_ssize_t column, int64_t value)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    WreathPgBatchCell *cell = &self->cells[row * self->columns + column];
+    cell->kind = BATCH_CELL_INT64;
+    cell->value.integer = value;
+    return 0;
+}
+
+int
+wreath_pg_record_batch_set_utf8(PyObject *batch, Py_ssize_t row,
+                                Py_ssize_t column, const unsigned char *data,
+                                Py_ssize_t length)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    WreathPgBatchCell *cell = &self->cells[row * self->columns + column];
+    if (batch_arena_reserve(self, length) < 0) return -1;
+    Py_ssize_t offset = self->arena_size;
+    if (length > 0) memcpy(self->arena + offset, data, (size_t)length);
+    self->arena_size += length;
+    cell->kind = BATCH_CELL_UTF8;
+    cell->value.utf8.offset = offset;
+    cell->value.utf8.length = length;
+    return 0;
 }
 
 void
@@ -409,7 +538,9 @@ batch_traverse(WreathPgRecordBatch *self, visitproc visit, void *arg)
     for (Py_ssize_t i = 0; i < self->size; i++) {
         Py_VISIT(self->objects[i]);
         for (Py_ssize_t column = 0; column < self->columns; column++) {
-            Py_VISIT(self->cells[i * self->columns + column]);
+            WreathPgBatchCell *cell =
+                &self->cells[i * self->columns + column];
+            if (cell->kind == BATCH_CELL_OBJECT) Py_VISIT(cell->value.object);
         }
     }
     return 0;
@@ -423,8 +554,12 @@ batch_clear(WreathPgRecordBatch *self)
     Py_CLEAR(self->index);
     PyMem_Free(self->objects);
     PyMem_Free(self->cells);
+    PyMem_Free(self->arena);
     self->objects = NULL;
     self->cells = NULL;
+    self->arena = NULL;
+    self->arena_size = 0;
+    self->arena_capacity = 0;
     self->columns = 0;
     self->capacity = 0;
     return 0;
@@ -452,6 +587,9 @@ batch_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->cells = NULL;
     self->names = NULL;
     self->index = NULL;
+    self->arena = NULL;
+    self->arena_size = 0;
+    self->arena_capacity = 0;
     self->size = 0;
     self->capacity = 0;
     self->columns = 0;
@@ -491,6 +629,9 @@ wreath_pg_record_batch_new(void)
     self->cells = NULL;
     self->names = NULL;
     self->index = NULL;
+    self->arena = NULL;
+    self->arena_size = 0;
+    self->arena_capacity = 0;
     self->size = 0;
     self->capacity = 0;
     self->columns = 0;
@@ -521,10 +662,11 @@ batch_item(WreathPgRecordBatch *self, Py_ssize_t position)
         self->names, self->index, self->columns);
     if (record == NULL) return NULL;
     for (Py_ssize_t column = 0; column < self->columns; column++) {
-        PyObject *value = self->cells[position * self->columns + column];
+        WreathPgBatchCell *cell =
+            &self->cells[position * self->columns + column];
+        PyObject *value = batch_cell_materialize(self, cell);
         if (value == NULL) {
             Py_DECREF(record);
-            PyErr_SetString(PyExc_SystemError, "RecordBatch cell is unset");
             return NULL;
         }
         wreath_pg_record_set_value(record, column, Py_NewRef(value));
@@ -542,43 +684,71 @@ batch_append_method(WreathPgRecordBatch *self, PyObject *value)
 
 typedef struct {
     Py_ssize_t row;
-    PyObject *key;   /* owned */
+    PyObject *key;   /* owned only for object-backed rows */
+    const char *utf8;
+    Py_ssize_t utf8_length;
+    int utf8_key;
 } BatchSortEntry;
 
-static PyObject *
-batch_sort_key(WreathPgRecordBatch *self, Py_ssize_t row, PyObject *column)
+static int
+batch_sort_key(WreathPgRecordBatch *self, Py_ssize_t row, PyObject *column,
+               Py_ssize_t batch_position, BatchSortEntry *entry)
 {
+    entry->row = row;
+    entry->key = NULL;
+    entry->utf8 = NULL;
+    entry->utf8_length = 0;
+    entry->utf8_key = 0;
     PyObject *item = self->objects[row];
     if (item == NULL) {
-        PyObject *position_object = PyDict_GetItemWithError(self->index, column);
-        if (position_object == NULL) {
-            if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, column);
-            return NULL;
+        WreathPgBatchCell *cell =
+            &self->cells[row * self->columns + batch_position];
+        if (cell->kind == BATCH_CELL_UTF8) {
+            entry->utf8 = self->arena + cell->value.utf8.offset;
+            entry->utf8_length = cell->value.utf8.length;
+            entry->utf8_key = 1;
+            return 0;
         }
-        Py_ssize_t position = PyLong_AsSsize_t(position_object);
-        if (position == -1 && PyErr_Occurred()) return NULL;
-        if (position < 0 || position >= self->columns) {
-            PyErr_SetObject(PyExc_KeyError, column);
-            return NULL;
-        }
-        return Py_NewRef(self->cells[row * self->columns + position]);
-    }
-    if (Py_TYPE(item) == WreathPgRecordType) {
+        entry->key = Py_XNewRef(batch_cell_materialize(self, cell));
+    } else if (Py_TYPE(item) == WreathPgRecordType) {
         WreathPgRecord *record = (WreathPgRecord *)item;
         PyObject *position_object = PyDict_GetItemWithError(record->index, column);
         if (position_object == NULL) {
             if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, column);
-            return NULL;
+            return -1;
         }
         Py_ssize_t position = PyLong_AsSsize_t(position_object);
-        if (position == -1 && PyErr_Occurred()) return NULL;
+        if (position == -1 && PyErr_Occurred()) return -1;
         if (position < 0 || position >= Py_SIZE(record)) {
             PyErr_SetObject(PyExc_KeyError, column);
-            return NULL;
+            return -1;
         }
-        return Py_NewRef(record->values[position]);
+        entry->key = Py_NewRef(record->values[position]);
+    } else {
+        entry->key = PyObject_GetItem(item, column);
     }
-    return PyObject_GetItem(item, column);
+    if (entry->key == NULL) return -1;
+    if (PyUnicode_CheckExact(entry->key)) {
+        entry->utf8 = PyUnicode_AsUTF8AndSize(
+            entry->key, &entry->utf8_length);
+        if (entry->utf8 == NULL) {
+            Py_CLEAR(entry->key);
+            return -1;
+        }
+        entry->utf8_key = 1;
+    }
+    return 0;
+}
+
+static int
+batch_sort_utf8_less(const BatchSortEntry *left,
+                     const BatchSortEntry *right)
+{
+    Py_ssize_t common = left->utf8_length < right->utf8_length
+        ? left->utf8_length : right->utf8_length;
+    int compared = common > 0 ? memcmp(left->utf8, right->utf8, (size_t)common) : 0;
+    if (compared != 0) return compared < 0;
+    return left->utf8_length < right->utf8_length;
 }
 
 static PyObject *
@@ -586,20 +756,69 @@ batch_sort_by(WreathPgRecordBatch *self, PyObject *column)
 {
     Py_ssize_t count = self->size;
     if (count < 2) Py_RETURN_NONE;
-    BatchSortEntry *entries = PyMem_Calloc((size_t)count, sizeof(BatchSortEntry));
-    BatchSortEntry *scratch = PyMem_Malloc((size_t)count * sizeof(BatchSortEntry));
-    PyObject **owned_keys = PyMem_Calloc((size_t)count, sizeof(PyObject *));
-    if (entries == NULL || scratch == NULL || owned_keys == NULL) {
-        PyMem_Free(entries);
-        PyMem_Free(scratch);
-        PyMem_Free(owned_keys);
+    Py_ssize_t batch_position = -1;
+    if (self->columns > 0) {
+        PyObject *position_object = PyDict_GetItemWithError(self->index, column);
+        if (position_object == NULL) {
+            if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, column);
+            return NULL;
+        }
+        batch_position = PyLong_AsSsize_t(position_object);
+        if (batch_position == -1 && PyErr_Occurred()) return NULL;
+        if (batch_position < 0 || batch_position >= self->columns) {
+            PyErr_SetObject(PyExc_KeyError, column);
+            return NULL;
+        }
+    }
+    BatchSortEntry stack_entries[64];
+    BatchSortEntry stack_scratch[64];
+    PyObject *stack_objects[64];
+    PyObject *stack_keys[64];
+    WreathPgBatchCell stack_cells[512];
+    int stack = count <= 64 && count * self->columns <= 512;
+    BatchSortEntry *entries = stack ? stack_entries : PyMem_Calloc(
+        (size_t)count, sizeof(BatchSortEntry));
+    BatchSortEntry *scratch = stack ? stack_scratch : PyMem_Malloc(
+        (size_t)count * sizeof(BatchSortEntry));
+    PyObject **sorted_objects = stack ? stack_objects : PyMem_Malloc(
+        (size_t)count * sizeof(PyObject *));
+    PyObject **owned_keys = stack ? stack_keys : PyMem_Calloc(
+        (size_t)count, sizeof(PyObject *));
+    WreathPgBatchCell *sorted_cells = self->columns == 0 ? NULL : stack
+        ? stack_cells : PyMem_Malloc(
+            (size_t)count * (size_t)self->columns * sizeof(WreathPgBatchCell));
+    if (entries == NULL || scratch == NULL || sorted_objects == NULL ||
+        owned_keys == NULL ||
+        (self->columns > 0 && sorted_cells == NULL)) {
+        if (!stack) {
+            PyMem_Free(entries);
+            PyMem_Free(scratch);
+            PyMem_Free(sorted_objects);
+            PyMem_Free(sorted_cells);
+            PyMem_Free(owned_keys);
+        }
         return PyErr_NoMemory();
     }
+    if (stack) {
+        memset(entries, 0, (size_t)count * sizeof(BatchSortEntry));
+        memset(owned_keys, 0, (size_t)count * sizeof(PyObject *));
+    }
+    int all_utf8 = 1;
     for (Py_ssize_t i = 0; i < count; i++) {
-        entries[i].row = i;
-        entries[i].key = batch_sort_key(self, i, column);
-        if (entries[i].key == NULL) goto error;
+        if (batch_sort_key(
+                self, i, column, batch_position, &entries[i]) < 0) goto error;
         owned_keys[i] = entries[i].key;
+        if (!entries[i].utf8_key) all_utf8 = 0;
+    }
+    if (!all_utf8) {
+        for (Py_ssize_t i = 0; i < count; i++) {
+            if (entries[i].key != NULL) continue;
+            WreathPgBatchCell *cell = &self->cells[
+                entries[i].row * self->columns + batch_position];
+            entries[i].key = Py_XNewRef(batch_cell_materialize(self, cell));
+            if (entries[i].key == NULL) goto error;
+            owned_keys[i] = entries[i].key;
+        }
     }
     BatchSortEntry *source = entries;
     BatchSortEntry *dest = scratch;
@@ -612,8 +831,10 @@ batch_sort_by(WreathPgRecordBatch *self, PyObject *column)
             Py_ssize_t end = middle + width < count ? middle + width : count;
             Py_ssize_t output = begin;
             while (left < middle && right < end) {
-                int take_right = PyObject_RichCompareBool(
-                    source[right].key, source[left].key, Py_LT);
+                int take_right = all_utf8
+                    ? batch_sort_utf8_less(&source[right], &source[left])
+                    : PyObject_RichCompareBool(
+                        source[right].key, source[left].key, Py_LT);
                 if (take_right < 0) goto error;
                 dest[output++] = source[take_right ? right++ : left++];
             }
@@ -624,43 +845,40 @@ batch_sort_by(WreathPgRecordBatch *self, PyObject *column)
         source = dest;
         dest = swap;
     }
-    PyObject **sorted_objects = PyMem_Malloc(
-        (size_t)count * sizeof(PyObject *));
-    PyObject **sorted_cells = self->columns > 0 ? PyMem_Malloc(
-        (size_t)count * (size_t)self->columns * sizeof(PyObject *)) : NULL;
-    if (sorted_objects == NULL || (self->columns > 0 && sorted_cells == NULL)) {
-        PyMem_Free(sorted_objects);
-        PyMem_Free(sorted_cells);
-        PyErr_NoMemory();
-        goto error;
-    }
     for (Py_ssize_t i = 0; i < count; i++) {
         Py_ssize_t row = source[i].row;
         sorted_objects[i] = self->objects[row];
         if (self->columns > 0) {
             memcpy(sorted_cells + i * self->columns,
                    self->cells + row * self->columns,
-                   (size_t)self->columns * sizeof(PyObject *));
+                   (size_t)self->columns * sizeof(WreathPgBatchCell));
         }
     }
     memcpy(self->objects, sorted_objects, (size_t)count * sizeof(PyObject *));
     if (self->columns > 0) {
         memcpy(self->cells, sorted_cells,
-               (size_t)count * (size_t)self->columns * sizeof(PyObject *));
+               (size_t)count * (size_t)self->columns *
+                   sizeof(WreathPgBatchCell));
     }
-    PyMem_Free(sorted_objects);
-    PyMem_Free(sorted_cells);
-    for (Py_ssize_t i = 0; i < count; i++) Py_DECREF(owned_keys[i]);
-    PyMem_Free(entries);
-    PyMem_Free(scratch);
-    PyMem_Free(owned_keys);
+    for (Py_ssize_t i = 0; i < count; i++) Py_XDECREF(owned_keys[i]);
+    if (!stack) {
+        PyMem_Free(sorted_objects);
+        PyMem_Free(sorted_cells);
+        PyMem_Free(entries);
+        PyMem_Free(scratch);
+        PyMem_Free(owned_keys);
+    }
     Py_RETURN_NONE;
 
 error:
     for (Py_ssize_t i = 0; i < count; i++) Py_XDECREF(owned_keys[i]);
-    PyMem_Free(entries);
-    PyMem_Free(scratch);
-    PyMem_Free(owned_keys);
+    if (!stack) {
+        PyMem_Free(sorted_objects);
+        PyMem_Free(sorted_cells);
+        PyMem_Free(entries);
+        PyMem_Free(scratch);
+        PyMem_Free(owned_keys);
+    }
     return NULL;
 }
 
@@ -713,15 +931,10 @@ record_capi_batch_get_borrowed(PyObject *batch, Py_ssize_t position)
 }
 
 static int
-record_capi_batch_get_value(PyObject *batch, Py_ssize_t row, PyObject *key,
-                            PyObject **cached_names,
-                            Py_ssize_t *cached_position, PyObject **value)
+batch_resolve_position(WreathPgRecordBatch *self, PyObject *key,
+                       PyObject **cached_names, Py_ssize_t *cached_position,
+                       Py_ssize_t *position_out)
 {
-    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
-    if (self->objects[row] != NULL) {
-        return record_get_borrowed(
-            self->objects[row], key, cached_names, cached_position, value);
-    }
     Py_ssize_t position = *cached_position;
     if (*cached_names != self->names || position < 0 ||
         position >= self->columns) {
@@ -733,7 +946,119 @@ record_capi_batch_get_value(PyObject *batch, Py_ssize_t row, PyObject *key,
         Py_XSETREF(*cached_names, Py_NewRef(self->names));
         *cached_position = position;
     }
-    *value = self->cells[row * self->columns + position];
+    *position_out = position;
+    return 1;
+}
+
+static int
+record_capi_batch_get_value(PyObject *batch, Py_ssize_t row, PyObject *key,
+                            PyObject **cached_names,
+                            Py_ssize_t *cached_position, PyObject **value)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    if (self->objects[row] != NULL) {
+        return record_get_borrowed(
+            self->objects[row], key, cached_names, cached_position, value);
+    }
+    Py_ssize_t position;
+    int resolved = batch_resolve_position(
+        self, key, cached_names, cached_position, &position);
+    if (resolved != 1) return resolved;
+    *value = batch_cell_materialize(
+        self, &self->cells[row * self->columns + position]);
+    return *value != NULL ? 1 : -1;
+}
+
+static int
+record_capi_batch_get_typed(PyObject *batch, Py_ssize_t row, PyObject *key,
+                            PyObject **cached_names,
+                            Py_ssize_t *cached_position,
+                            WreathRecordValue *value)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    memset(value, 0, sizeof(*value));
+    if (self->objects[row] != NULL) {
+        PyObject *object = NULL;
+        int result = record_get_borrowed(
+            self->objects[row], key, cached_names, cached_position, &object);
+        if (result == 1) {
+            value->kind = WREATH_RECORD_VALUE_OBJECT;
+            value->object = object;
+        }
+        return result;
+    }
+    Py_ssize_t position;
+    int resolved = batch_resolve_position(
+        self, key, cached_names, cached_position, &position);
+    if (resolved != 1) return resolved;
+    WreathPgBatchCell *cell = &self->cells[row * self->columns + position];
+    value->kind = cell->kind;
+    if (cell->kind == BATCH_CELL_OBJECT) {
+        value->object = cell->value.object;
+    } else if (cell->kind == BATCH_CELL_INT64) {
+        value->integer = cell->value.integer;
+    } else if (cell->kind == BATCH_CELL_UTF8) {
+        value->data = self->arena + cell->value.utf8.offset;
+        value->length = cell->value.utf8.length;
+    } else {
+        PyErr_SetString(PyExc_SystemError, "RecordBatch cell is unset");
+        return -1;
+    }
+    return 1;
+}
+
+static int
+record_capi_batch_resolve_column(PyObject *batch, PyObject *key,
+                                 Py_ssize_t *position)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    if (self->index == NULL) return 2;
+    PyObject *boxed = PyDict_GetItemWithError(self->index, key);
+    if (boxed == NULL) return PyErr_Occurred() ? -1 : 2;
+    Py_ssize_t resolved = PyLong_AsSsize_t(boxed);
+    if (resolved == -1 && PyErr_Occurred()) return -1;
+    if (resolved < 0 || resolved >= self->columns) return 2;
+    *position = resolved;
+    return 1;
+}
+
+static int
+record_capi_batch_get_typed_at(PyObject *batch, Py_ssize_t row,
+                               Py_ssize_t position,
+                               WreathRecordValue *value)
+{
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    memset(value, 0, sizeof(*value));
+    if (row < 0 || row >= self->size || position < 0 ||
+        position >= self->columns) {
+        PyErr_SetString(PyExc_IndexError, "RecordBatch cell index out of range");
+        return -1;
+    }
+    if (self->objects[row] != NULL) {
+        PyObject *object = self->objects[row];
+        if (Py_TYPE(object) != WreathPgRecordType ||
+            position >= Py_SIZE((WreathPgRecord *)object)) return 0;
+        value->kind = WREATH_RECORD_VALUE_OBJECT;
+        value->object = ((WreathPgRecord *)object)->values[position];
+        if (value->object == NULL) {
+            PyErr_SetString(PyExc_SystemError, "Record value is unset");
+            return -1;
+        }
+        return 1;
+    }
+    WreathPgBatchCell *cell = &self->cells[row * self->columns + position];
+    value->kind = cell->kind;
+    if (cell->kind == BATCH_CELL_OBJECT) {
+        value->object = cell->value.object;
+    } else if (cell->kind == BATCH_CELL_INT64) {
+        value->integer = cell->value.integer;
+    } else if (cell->kind == BATCH_CELL_UTF8) {
+        value->data = self->arena + cell->value.utf8.offset;
+        value->length = cell->value.utf8.length;
+    } else {
+        PyErr_SetString(PyExc_SystemError, "RecordBatch cell is unset");
+        return -1;
+    }
     return 1;
 }
 
@@ -744,6 +1069,9 @@ static WreathRecordCAPI record_capi = {
     .batch_size = record_capi_batch_size,
     .batch_get_borrowed = record_capi_batch_get_borrowed,
     .batch_get_value = record_capi_batch_get_value,
+    .batch_get_typed = record_capi_batch_get_typed,
+    .batch_resolve_column = record_capi_batch_resolve_column,
+    .batch_get_typed_at = record_capi_batch_get_typed_at,
 };
 
 static PyObject *
@@ -794,10 +1122,39 @@ record_storage_allocation_count(PyObject *module, PyObject *unused)
     return PyLong_FromSsize_t(record_storage_allocations);
 }
 
+static PyObject *
+batch_storage_counts(PyObject *module, PyObject *batch)
+{
+    (void)module;
+    if (Py_TYPE(batch) != WreathPgRecordBatchType) {
+        PyErr_SetString(PyExc_TypeError, "expected an exact RecordBatch");
+        return NULL;
+    }
+    WreathPgRecordBatch *self = (WreathPgRecordBatch *)batch;
+    Py_ssize_t rows = 0;
+    Py_ssize_t objects = 0;
+    Py_ssize_t integers = 0;
+    Py_ssize_t text = 0;
+    Py_ssize_t empty = 0;
+    for (Py_ssize_t row = 0; row < self->size; row++) {
+        if (self->objects[row] != NULL) rows++;
+        for (Py_ssize_t column = 0; column < self->columns; column++) {
+            WreathPgBatchCell *cell =
+                &self->cells[row * self->columns + column];
+            if (cell->kind == BATCH_CELL_OBJECT) objects++;
+            else if (cell->kind == BATCH_CELL_INT64) integers++;
+            else if (cell->kind == BATCH_CELL_UTF8) text++;
+            else empty++;
+        }
+    }
+    return Py_BuildValue("(nnnnn)", rows, objects, integers, text, empty);
+}
+
 static PyMethodDef record_methods[] = {
     {"_record_allocation_count", record_allocation_count, METH_NOARGS, NULL},
     {"_record_storage_allocation_count", record_storage_allocation_count,
      METH_NOARGS, NULL},
+    {"_batch_storage_counts", batch_storage_counts, METH_O, NULL},
     {NULL, NULL, 0, NULL}
 };
 
