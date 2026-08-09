@@ -16,6 +16,7 @@
  * wreath.templates itself. */
 static PyObject *T_Markup = NULL;      /* the Markup type object */
 static PyObject *RenderError = NULL;   /* TemplateRenderError */
+static const WreathRecordCAPI *record_capi = NULL;
 
 /* Opcodes -- must match wreath._pure.templates. */
 #define OP_TEXT 0
@@ -38,10 +39,19 @@ typedef struct {
 } outbuf;
 
 typedef struct {
-    PyObject *iterator;   /* owned */
+    PyObject *iterator;   /* owned, or NULL for an exact list/tuple */
+    PyObject *sequence;   /* owned exact list/tuple, or NULL */
     PyObject *current;    /* owned: the loop variable's current value */
     Py_ssize_t body_start;
+    Py_ssize_t position;
+    Py_ssize_t length;
+    int sequence_kind;   /* 1 list, 2 tuple, 3 native RecordBatch */
 } loop_frame;
+
+typedef struct {
+    PyObject *names;  /* owned for this render; NULL until a Record is seen */
+    Py_ssize_t position;
+} lookup_cache;
 
 /* One tape instruction with its operands already out of their Python objects.
  *
@@ -265,24 +275,66 @@ raise_render(int line, PyObject *message)
  * NULL with a Python error set. Mirrors wreath._pure.templates._lookup. */
 static PyObject *
 lookup_path(PyObject *context, PyObject *path, int line,
-            const loop_frame *frames, int binding)
+            const loop_frame *frames, int binding, lookup_cache *cache)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(path);
     Py_ssize_t start = 0;
     PyObject *current = context; /* borrowed until first hop */
+    const loop_frame *bound_frame = NULL;
     if (binding >= 0) {
-        current = frames[binding].current;
+        bound_frame = &frames[binding];
+        if (bound_frame->sequence_kind == 3 && count == 1) {
+            PyObject *row = record_capi->batch_get_borrowed(
+                bound_frame->sequence, bound_frame->position);
+            return row == NULL ? NULL : Py_NewRef(row);
+        }
+        current = bound_frame->current;
         start = 1;  /* the frame already resolved the root loop variable */
     }
     PyObject *owned = NULL;
     for (Py_ssize_t i = start; i < count; i++) {
         PyObject *segment = PyTuple_GET_ITEM(path, i);
         PyObject *found = NULL;
+        int record_missed = 0;
+        if (bound_frame != NULL && bound_frame->sequence_kind == 3 &&
+            i == start) {
+            PyObject *borrowed = NULL;
+            int batch_result = record_capi->batch_get_value(
+                bound_frame->sequence, bound_frame->position, segment,
+                &cache->names, &cache->position, &borrowed);
+            if (batch_result < 0) return NULL;
+            if (batch_result == 1) {
+                found = Py_NewRef(borrowed);
+            } else if (batch_result == 2) {
+                record_missed = 1;
+            } else {
+                current = record_capi->batch_get_borrowed(
+                    bound_frame->sequence, bound_frame->position);
+                if (current == NULL) return NULL;
+            }
+        }
         /* Fast path: most contexts and nested nodes are dicts. A direct hash
          * lookup skips the subscript protocol and, on a miss, avoids raising
          * and clearing a KeyError before the attribute fallback. Semantics
          * stay identical to the generic path (miss falls through to getattr). */
-        if (PyDict_Check(current)) {
+        if (found == NULL && !record_missed && record_capi != NULL &&
+            record_capi->version == WREATH_RECORD_CAPI_VERSION) {
+            PyObject *borrowed = NULL;
+            int record_result = record_capi->get_borrowed(
+                current, segment, &cache->names, &cache->position, &borrowed);
+            if (record_result < 0) {
+                Py_XDECREF(owned);
+                return NULL;
+            }
+            if (record_result == 1) {
+                found = Py_NewRef(borrowed);
+            } else if (record_result == 2) {
+                record_missed = 1;
+            }
+        }
+        if (found != NULL) {
+            /* resolved by the exact native Record bridge */
+        } else if (!record_missed && PyDict_Check(current)) {
             PyObject *borrowed = PyDict_GetItemWithError(current, segment);
             if (borrowed != NULL) {
                 found = Py_NewRef(borrowed);
@@ -290,7 +342,7 @@ lookup_path(PyObject *context, PyObject *path, int line,
                 Py_XDECREF(owned);
                 return NULL;
             }
-        } else {
+        } else if (!record_missed) {
             found = PyObject_GetItem(current, segment);
             if (found == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_KeyError) ||
@@ -372,11 +424,24 @@ emit_value(outbuf *b, PyObject *value)
             return -1;  /* -1 is also a legal value; the sentinel needs both */
         }
         if (!overflowed) {
-            char digits[24];
-            int written = snprintf(digits, sizeof(digits), "%ld", number);
-            if (written > 0 && written < (int)sizeof(digits)) {
-                return outbuf_append(b, digits, written);
+            /* Write backwards from the end.  libc's general printf parser is
+             * considerable machinery for one base-ten signed integer, and
+             * Fortunes exercises this once per row.  Negating LONG_MIN is
+             * undefined, so form the magnitude through the -(n + 1) identity. */
+            char digits[3 * sizeof(long) + 3];
+            char *end = digits + sizeof(digits);
+            char *cursor = end;
+            unsigned long magnitude = number < 0
+                ? (unsigned long)(-(number + 1)) + 1UL
+                : (unsigned long)number;
+            do {
+                *--cursor = (char)('0' + magnitude % 10UL);
+                magnitude /= 10UL;
+            } while (magnitude != 0);
+            if (number < 0) {
+                *--cursor = '-';
             }
+            return outbuf_append(b, cursor, (Py_ssize_t)(end - cursor));
         }
     }
     PyObject *text = PyObject_Str(value);
@@ -412,6 +477,20 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
     Py_ssize_t depth = 0;
     Py_ssize_t ip = 0;
     int failed = 0;
+    lookup_cache stack_caches[TAPE_STACK_SLOTS];
+    lookup_cache *caches = stack_caches;
+    if (n > TAPE_STACK_SLOTS) {
+        caches = PyMem_Calloc((size_t)n, sizeof(lookup_cache));
+        if (caches == NULL) {
+            Py_XDECREF(buf.owner);
+            return PyErr_NoMemory();
+        }
+    } else {
+        memset(caches, 0, (size_t)n * sizeof(lookup_cache));
+    }
+    for (Py_ssize_t cache_index = 0; cache_index < n; cache_index++) {
+        caches[cache_index].position = -1;
+    }
 
     while (ip < n) {
         if (ip > 0 && ip % template_render_chunks == 0 && PyErr_CheckSignals() < 0) {
@@ -429,7 +508,7 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
             ip++;
         } else if (op == OP_VAR) {
             PyObject *value = lookup_path(context, instr->first, instr->line,
-                                          frames, instr->binding);
+                                          frames, instr->binding, &caches[ip]);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -442,7 +521,7 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
             ip++;
         } else if (op == OP_IF) {
             PyObject *value = lookup_path(context, instr->first, instr->line,
-                                          frames, instr->binding);
+                                          frames, instr->binding, &caches[ip]);
             if (value == NULL) {
                 failed = 1;
                 break;
@@ -461,14 +540,47 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
         } else if (op == OP_FOR) {
             int line = instr->line;
             PyObject *iterable = lookup_path(context, instr->path, line,
-                                             frames, instr->binding);
+                                             frames, instr->binding, &caches[ip]);
             if (iterable == NULL) {
                 failed = 1;
                 break;
             }
-            PyObject *iterator = PyObject_GetIter(iterable);
-            Py_DECREF(iterable);
-            if (iterator == NULL) {
+            PyObject *iterator = NULL;
+            PyObject *sequence = NULL;
+            PyObject *item = NULL;
+            Py_ssize_t length = 0;
+            int sequence_kind = 0;
+            if (PyList_CheckExact(iterable)) {
+                sequence = iterable;
+                sequence_kind = 1;
+                length = PyList_GET_SIZE(sequence);
+                if (length > 0) {
+                    item = Py_NewRef(PyList_GET_ITEM(sequence, 0));
+                }
+            } else if (PyTuple_CheckExact(iterable)) {
+                sequence = iterable;
+                sequence_kind = 2;
+                length = PyTuple_GET_SIZE(sequence);
+                if (length > 0) {
+                    item = Py_NewRef(PyTuple_GET_ITEM(sequence, 0));
+                }
+            } else if (record_capi != NULL &&
+                       record_capi->batch_check(iterable)) {
+                sequence = iterable;
+                sequence_kind = 3;
+                length = record_capi->batch_size(sequence);
+                if (length > 0) {
+                    item = Py_NewRef(Py_None);
+                }
+            } else {
+                iterator = PyObject_GetIter(iterable);
+                Py_DECREF(iterable);
+                iterable = NULL;
+                if (iterator != NULL) {
+                    item = PyIter_Next(iterator);
+                }
+            }
+            if (sequence == NULL && iterator == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_TypeError)) {
                     PyErr_Clear();
                     PyObject *joiner = PyUnicode_FromString(".");
@@ -483,9 +595,9 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
                 failed = 1;
                 break;
             }
-            PyObject *item = PyIter_Next(iterator);
             if (item == NULL) {
-                Py_DECREF(iterator);
+                Py_XDECREF(iterator);
+                Py_XDECREF(sequence);
                 if (PyErr_Occurred()) {
                     failed = 1;
                     break;
@@ -495,27 +607,61 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
             }
             if (depth >= MAX_LOOP_DEPTH) {
                 Py_DECREF(item);
-                Py_DECREF(iterator);
+                Py_XDECREF(iterator);
+                Py_XDECREF(sequence);
                 raise_render(0, PyUnicode_FromString(
                                     "template loop nesting too deep"));
                 failed = 1;
                 break;
             }
             frames[depth].iterator = iterator;
+            frames[depth].sequence = sequence;
             frames[depth].current = item;
             frames[depth].body_start = ip + 1;
+            frames[depth].position = 0;
+            frames[depth].length = length;
+            frames[depth].sequence_kind = sequence_kind;
             depth++;
             ip++;
         } else if (op == OP_ENDFOR) {
             loop_frame *frame = &frames[depth - 1];
-            PyObject *item = PyIter_Next(frame->iterator);
+            PyObject *item;
+            if (frame->sequence != NULL) {
+                frame->position++;
+                Py_ssize_t sequence_length;
+                if (frame->sequence_kind == 1) {
+                    sequence_length = PyList_GET_SIZE(frame->sequence);
+                } else if (frame->sequence_kind == 3) {
+                    sequence_length = record_capi->batch_size(frame->sequence);
+                } else {
+                    sequence_length = frame->length;
+                }
+                if (frame->position < sequence_length) {
+                    PyObject *borrowed;
+                    if (frame->sequence_kind == 1) {
+                        borrowed = PyList_GET_ITEM(
+                            frame->sequence, frame->position);
+                    } else if (frame->sequence_kind == 2) {
+                        borrowed = PyTuple_GET_ITEM(
+                            frame->sequence, frame->position);
+                    } else {
+                        borrowed = Py_None;
+                    }
+                    item = Py_NewRef(borrowed);
+                } else {
+                    item = NULL;
+                }
+            } else {
+                item = PyIter_Next(frame->iterator);
+            }
             if (item == NULL) {
                 if (PyErr_Occurred()) {
                     failed = 1;
                     break;
                 }
                 Py_DECREF(frame->current);
-                Py_DECREF(frame->iterator);
+                Py_XDECREF(frame->iterator);
+                Py_XDECREF(frame->sequence);
                 depth--;
                 ip++;
             } else {
@@ -541,7 +687,15 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
     while (depth > 0) {
         depth--;
         Py_DECREF(frames[depth].current);
-        Py_DECREF(frames[depth].iterator);
+        Py_XDECREF(frames[depth].iterator);
+        Py_XDECREF(frames[depth].sequence);
+    }
+
+    for (Py_ssize_t cache_index = 0; cache_index < n; cache_index++) {
+        Py_XDECREF(caches[cache_index].names);
+    }
+    if (caches != stack_caches) {
+        PyMem_Free(caches);
     }
 
     if (failed) {
@@ -707,5 +861,25 @@ wreath_template_configure(PyObject *self, PyObject *args)
     }
     Py_XSETREF(T_Markup, Py_NewRef(markup));
     Py_XSETREF(RenderError, Py_NewRef(render_error));
+    Py_RETURN_NONE;
+}
+
+PyObject *
+wreath_template_record_configure(PyObject *self, PyObject *capsule)
+{
+    (void)self;
+    const WreathRecordCAPI *candidate = PyCapsule_GetPointer(
+        capsule, WREATH_RECORD_CAPI_NAME);
+    if (candidate == NULL) {
+        return NULL;
+    }
+    if (candidate->version != WREATH_RECORD_CAPI_VERSION ||
+        candidate->get_borrowed == NULL || candidate->batch_check == NULL ||
+        candidate->batch_size == NULL || candidate->batch_get_borrowed == NULL ||
+        candidate->batch_get_value == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "incompatible Wreath Record C API");
+        return NULL;
+    }
+    record_capi = candidate;
     Py_RETURN_NONE;
 }

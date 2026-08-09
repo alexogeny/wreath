@@ -51,6 +51,8 @@ PARITY_CASES = [
     ("{% if show %}yes {{ name }}{% else %}no{% endif %}", {"show": True, "name": "x'y"}),
     ("{% if show %}yes{% else %}no {{ name }}{% endif %}", {"show": False, "name": "z&z"}),
     ("{% for x in xs %}{{ x }}{% endfor %}done", {"xs": []}),
+    ("{% for x in xs %}{{ x }}{% endfor %}", {"xs": (1, 2, 3)}),
+    ("{% for x in xs %}{{ x }}{% endfor %}", {"xs": range(1, 4)}),
     (
         "{% for o in items %}[{% for c in o.cs %}{{ c }},{% endfor %}]{% endfor %}",
         {"items": [{"cs": [1, 2]}, {"cs": [3]}]},
