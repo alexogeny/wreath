@@ -906,6 +906,25 @@ direct_data_row(WreathPgBufferedProtocol *self, Py_ssize_t payload_length,
     if (self->cached_discarded) return 1;
     if (!self->cached_usable) return 0;
     if (self->cached_mode == 0) return 1;
+    if (self->cached_mode == 4) {
+        int decoded;
+        if (slab == NULL)
+            slab = locate_contiguous(self, 5, payload_length, &absolute_offset);
+        if (slab != NULL) {
+            decoded = wreath_pg_decode_datarow_batch(
+                self->cached_plan, self->cached_rows,
+                slab->data + absolute_offset, payload_length);
+        } else {
+            PyObject *payload = payload_object(self, 5, payload_length, 0);
+            if (payload == NULL) return -1;
+            decoded = wreath_pg_decode_datarow_batch(
+                self->cached_plan, self->cached_rows,
+                (const unsigned char *)PyBytes_AS_STRING(payload),
+                PyBytes_GET_SIZE(payload));
+            Py_DECREF(payload);
+        }
+        return decoded < 0 ? -1 : 1;
+    }
     tape = (WreathPgFieldTape *)self->cached_tape;
     if ((self->cached_mode == 2 || self->cached_mode == 3) && tape->row_count > 0)
         return 1;
@@ -1379,8 +1398,8 @@ buffered_register_operations(WreathPgBufferedProtocol *self, PyObject *operation
         mode = PyUnicode_AsUTF8(mode_object);
         if (mode == NULL) goto context_error;
         if (strcmp(mode, "execute") == 0) mode_code = 0;
-        else if (strcmp(mode, "fetch") == 0 || strcmp(mode, "fetch_batch") == 0)
-            mode_code = 1;
+        else if (strcmp(mode, "fetch") == 0) mode_code = 1;
+        else if (strcmp(mode, "fetch_batch") == 0) mode_code = 4;
         else if (strcmp(mode, "fetchrow") == 0) mode_code = 2;
         else if (strcmp(mode, "fetchval") == 0) mode_code = 3;
         else {

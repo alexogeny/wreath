@@ -1400,7 +1400,7 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
 
 
 if _NATIVE_STATEMENT_AWAIT:
-    _backend._statement_configure(Statement, Pool, _phase_marker)
+    _backend._statement_configure(Statement, Pool, PoolConfig, _phase_marker)
 
 
 __all__ = [

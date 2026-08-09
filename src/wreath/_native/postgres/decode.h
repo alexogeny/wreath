@@ -39,6 +39,9 @@ extern PyTypeObject *WreathPgDecoderPlanType;
 PyObject *wreath_pg_decoder_plan_new(PyObject *oids, PyObject *formats, PyObject *names);
 int wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
                                Py_ssize_t limit, PyObject *dest);
+int wreath_pg_decode_datarow_batch(PyObject *plan_object, PyObject *batch,
+                                  const unsigned char *data,
+                                  Py_ssize_t length);
 int wreath_pg_decode_init(PyObject *module);
 
 /* Pick the decoder for an OID/format pair. Shared so alternative destinations

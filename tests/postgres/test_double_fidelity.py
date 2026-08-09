@@ -44,7 +44,6 @@ pytestmark = [
         not os.environ.get("WREATH_TEST_POSTGRES_DSN"),
         reason="set WREATH_TEST_POSTGRES_DSN to run live double-fidelity checks",
     ),
-    pytest.mark.asyncio,
 ]
 
 _OK = "ok"

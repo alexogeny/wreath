@@ -20,6 +20,114 @@
 
 PyTypeObject *WreathPgDecoderPlanType = NULL;
 
+/* PostgreSQL promises text in the negotiated server encoding, but the decoder
+ * has always enforced strict UTF-8 at this boundary as well.  Keep that check
+ * without constructing a Unicode object merely to throw it away.  On the
+ * malformed path, ask CPython's decoder to create the exact UnicodeDecodeError
+ * users already receive; only the valid hot path stays allocation-free. */
+static int
+valid_utf8(const unsigned char *data, Py_ssize_t length)
+{
+    Py_ssize_t i = 0;
+    while (i < length) {
+        unsigned int byte = data[i++];
+        if (byte < 0x80) continue;
+        unsigned int codepoint;
+        Py_ssize_t remaining;
+        unsigned int minimum;
+        if (byte >= 0xC2 && byte <= 0xDF) {
+            codepoint = byte & 0x1F;
+            remaining = 1;
+            minimum = 0x80;
+        } else if (byte >= 0xE0 && byte <= 0xEF) {
+            codepoint = byte & 0x0F;
+            remaining = 2;
+            minimum = 0x800;
+        } else if (byte >= 0xF0 && byte <= 0xF4) {
+            codepoint = byte & 0x07;
+            remaining = 3;
+            minimum = 0x10000;
+        } else {
+            return 0;
+        }
+        if (i > length - remaining) return 0;
+        for (Py_ssize_t j = 0; j < remaining; j++) {
+            unsigned int continuation = data[i++];
+            if ((continuation & 0xC0) != 0x80) return 0;
+            codepoint = (codepoint << 6) | (continuation & 0x3F);
+        }
+        if (codepoint < minimum || codepoint > 0x10FFFF ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return 0;
+    }
+    return 1;
+}
+
+static int
+raise_utf8_error(const unsigned char *data, Py_ssize_t length)
+{
+    PyObject *decoded = PyUnicode_DecodeUTF8(
+        (const char *)data, length, "strict");
+    if (decoded != NULL) {
+        Py_DECREF(decoded);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "native UTF-8 validator rejected valid input");
+    }
+    return -1;
+}
+
+/* Return 1 for a natively decoded integer, 0 when the existing Python decoder
+ * must own an unusual representation, and -1 on a wire-format error. */
+static int
+decode_integer_native(const unsigned char *data, Py_ssize_t length,
+                      int format, uint32_t oid, int64_t *value_out)
+{
+    if (format == 1) {
+        uint64_t bits = 0;
+        Py_ssize_t expected = oid == PG_INT2 ? 2 : oid == PG_INT4 ? 4 : 8;
+        if (length != expected) {
+            PyErr_SetString(PyExc_ValueError, "invalid binary integer length");
+            return -1;
+        }
+        for (Py_ssize_t i = 0; i < length; i++) bits = (bits << 8) | data[i];
+        if (oid == PG_INT2) *value_out = (int16_t)bits;
+        else if (oid == PG_INT4) *value_out = (int32_t)bits;
+        else *value_out = (int64_t)bits;
+        return 1;
+    }
+    Py_ssize_t index = 0;
+    int negative = 0;
+    if (length > 0 && (data[0] == '-' || data[0] == '+')) {
+        negative = data[0] == '-';
+        index = 1;
+    }
+    if (index == length) return 0;
+    uint64_t magnitude = 0;
+    uint64_t limit = negative ? (uint64_t)INT64_MAX + 1U : (uint64_t)INT64_MAX;
+    for (; index < length; index++) {
+        unsigned int digit = (unsigned int)data[index] - '0';
+        if (digit > 9 || magnitude > (limit - digit) / 10U) return 0;
+        magnitude = magnitude * 10U + digit;
+    }
+    *value_out = negative
+        ? magnitude == (uint64_t)INT64_MAX + 1U
+            ? INT64_MIN : -(int64_t)magnitude
+        : (int64_t)magnitude;
+    return 1;
+}
+
+static uint16_t
+read_u16(const unsigned char *data)
+{
+    return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+}
+
+static uint32_t
+read_u32(const unsigned char *data)
+{
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) | data[3];
+}
+
 static PyObject *
 decode_bool_binary(const unsigned char *data, Py_ssize_t length, int format, uint32_t oid)
 {
@@ -446,17 +554,51 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
             WreathPgColumnDecoder *decoder = &plan->columns[column];
             for (Py_ssize_t row = 0; row < rows; row++) {
                 WreathPgFieldRef *field = wreath_pg_tape_ref(tape, row, column);
-                PyObject *value;
                 if (field->length == -1) {
-                    value = Py_NewRef(Py_None);
-                } else {
-                    const unsigned char *data =
-                        (const unsigned char *)buffers[
-                            (Py_ssize_t)field->slab_index - tape->owner_head].buf
-                        + field->offset;
-                    value = decoder->decoder(
-                        data, field->length, decoder->format, decoder->oid);
+                    wreath_pg_record_batch_set_value(
+                        dest, start + row, decoder->destination,
+                        Py_NewRef(Py_None));
+                    continue;
                 }
+                const unsigned char *data =
+                    (const unsigned char *)buffers[
+                        (Py_ssize_t)field->slab_index - tape->owner_head].buf
+                    + field->offset;
+                if (decoder->oid == PG_TEXT || decoder->oid == PG_VARCHAR) {
+                    if (!valid_utf8(data, field->length)) {
+                        raise_utf8_error(data, field->length);
+                        wreath_pg_record_batch_commit(dest, start + rows);
+                        wreath_pg_record_batch_truncate(dest, start);
+                        return -1;
+                    }
+                    if (wreath_pg_record_batch_set_utf8(
+                            dest, start + row, decoder->destination,
+                            data, field->length) < 0) {
+                        wreath_pg_record_batch_commit(dest, start + rows);
+                        wreath_pg_record_batch_truncate(dest, start);
+                        return -1;
+                    }
+                    continue;
+                }
+                if (decoder->oid == PG_INT2 || decoder->oid == PG_INT4 ||
+                    decoder->oid == PG_INT8) {
+                    int64_t integer;
+                    int native = decode_integer_native(
+                        data, field->length, decoder->format,
+                        decoder->oid, &integer);
+                    if (native < 0) {
+                        wreath_pg_record_batch_commit(dest, start + rows);
+                        wreath_pg_record_batch_truncate(dest, start);
+                        return -1;
+                    }
+                    if (native == 1) {
+                        wreath_pg_record_batch_set_int64(
+                            dest, start + row, decoder->destination, integer);
+                        continue;
+                    }
+                }
+                PyObject *value = decoder->decoder(
+                    data, field->length, decoder->format, decoder->oid);
                 if (value == NULL) {
                     wreath_pg_record_batch_commit(dest, start + rows);
                     wreath_pg_record_batch_truncate(dest, start);
@@ -535,6 +677,105 @@ done:
     for (Py_ssize_t row = 0; row < rows; row++) Py_XDECREF(records[row]);
     PyMem_Free(records);
     return failed;
+}
+
+/* Decode one complete DataRow directly into its final RecordBatch.  The
+ * ordinary tape remains the compatibility path for lists, scalar modes,
+ * model hydration and non-native destinations.  A native fetch_batch already
+ * owns an exact private batch, however, so retaining a slab, writing an array
+ * of field references, acquiring its buffers and rescanning those references
+ * only to copy the values into that batch is duplicate work.
+ *
+ * The row is committed only after every field and the trailing boundary have
+ * been validated.  A decoder may allocate or run extension-code constructors;
+ * rollback therefore uses the RecordBatch's normal clear path rather than
+ * assuming only tagged cells were written. */
+int
+wreath_pg_decode_datarow_batch(PyObject *plan_object, PyObject *batch,
+                               const unsigned char *data, Py_ssize_t length)
+{
+    WreathPgDecoderPlan *plan = (WreathPgDecoderPlan *)plan_object;
+    Py_ssize_t start;
+    Py_ssize_t offset = 2;
+    int prepared = 0;
+
+    if (Py_TYPE(plan_object) != WreathPgDecoderPlanType ||
+        !wreath_pg_record_batch_check(batch) || data == NULL || length < 2) {
+        PyErr_SetString(PyExc_ValueError, "invalid direct DataRow decode request");
+        return -1;
+    }
+    if ((Py_ssize_t)read_u16(data) != plan->column_count) {
+        PyErr_SetString(PyExc_ValueError, "DataRow column count does not match plan");
+        return -1;
+    }
+    if (wreath_pg_record_batch_prepare(
+            batch, plan->names, plan->name_index, plan->column_count,
+            1, &start) < 0) return -1;
+    prepared = 1;
+
+    for (Py_ssize_t column = 0; column < plan->column_count; column++) {
+        WreathPgColumnDecoder *decoder = &plan->columns[column];
+        int32_t field_length;
+        const unsigned char *field;
+        if (offset > length - 4) {
+            PyErr_SetString(PyExc_ValueError, "truncated DataRow field length");
+            goto error;
+        }
+        field_length = (int32_t)read_u32(data + offset);
+        offset += 4;
+        if (field_length < -1 ||
+            (field_length >= 0 && offset > length - field_length)) {
+            PyErr_SetString(PyExc_ValueError, "invalid DataRow field length");
+            goto error;
+        }
+        if (field_length == -1) {
+            wreath_pg_record_batch_set_value(
+                batch, start, decoder->destination, Py_NewRef(Py_None));
+            continue;
+        }
+        field = data + offset;
+        offset += field_length;
+        if (decoder->oid == PG_TEXT || decoder->oid == PG_VARCHAR) {
+            if (!valid_utf8(field, field_length)) {
+                raise_utf8_error(field, field_length);
+                goto error;
+            }
+            if (wreath_pg_record_batch_set_utf8(
+                    batch, start, decoder->destination,
+                    field, field_length) < 0) goto error;
+            continue;
+        }
+        if (decoder->oid == PG_INT2 || decoder->oid == PG_INT4 ||
+            decoder->oid == PG_INT8) {
+            int64_t integer;
+            int native = decode_integer_native(
+                field, field_length, decoder->format, decoder->oid, &integer);
+            if (native < 0) goto error;
+            if (native == 1) {
+                wreath_pg_record_batch_set_int64(
+                    batch, start, decoder->destination, integer);
+                continue;
+            }
+        }
+        PyObject *value = decoder->decoder(
+            field, field_length, decoder->format, decoder->oid);
+        if (value == NULL) goto error;
+        wreath_pg_record_batch_set_value(
+            batch, start, decoder->destination, value);
+    }
+    if (offset != length) {
+        PyErr_SetString(PyExc_ValueError, "invalid DataRow length");
+        goto error;
+    }
+    wreath_pg_record_batch_commit(batch, start + 1);
+    return 0;
+
+error:
+    if (prepared) {
+        wreath_pg_record_batch_commit(batch, start + 1);
+        wreath_pg_record_batch_truncate(batch, start);
+    }
+    return -1;
 }
 
 int
