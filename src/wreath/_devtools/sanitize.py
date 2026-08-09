@@ -111,6 +111,12 @@ _KNOWN_ARTIFACTS = (
     "test_map_lint",
     "test_request_trace",
     "test_complexity_probe",
+    # This test deliberately caps process RSS. Its three child interpreters
+    # inherit LD_PRELOAD from the sanitizer harness, so ASan's shadow mapping
+    # and quarantine are exactly the memory it observes. The native ring/heap
+    # assertions remain covered by the ordinary suite; an instrumented process
+    # cannot answer the RSS comparison the test was written to make.
+    "test_wreath_execution_tier_process_memory_comparison",
     # Both scan the repository and so find an empty tree in the sanitized copy.
     # Neither is new: `test_dup_scan`'s repo-wide case has always collected zero
     # files from the copy's absent `src/wreath`, and `test_port_golden` reads
@@ -302,8 +308,8 @@ def _report(outcome: Outcome, target: Target) -> None:
     if outcome.artifacts:
         print(f"    {len(outcome.artifacts)} known artifact(s) ignored: "
               f"{', '.join(sorted({a.split('::')[0] for a in outcome.artifacts}))}")
-        print("      (these resolve the repo root into the sanitized copy; not "
-              "a memory finding)")
+        print("      (these inspect repository/runtime properties the isolated "
+              "instrumented process deliberately changes; not a memory finding)")
     for name in outcome.failed:
         print(f"    FAILED {name}")
     if outcome.leak_records:
