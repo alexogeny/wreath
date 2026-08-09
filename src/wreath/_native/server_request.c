@@ -37,6 +37,21 @@ typedef struct {
 } WreathRequestContext;
 
 static PyTypeObject *request_context_type = NULL;
+static Py_ssize_t request_context_allocations = 0;
+
+/* One HTTP request owns one fixed-size context.  Reuse the empty GC shell;
+ * every Python reference and borrowed native pointer is cleared before it
+ * enters this deliberately bounded cache. */
+#define REQUEST_CONTEXT_FREELIST_CAP 64
+#ifdef Py_GIL_DISABLED
+static _Thread_local WreathRequestContext *
+    request_context_freelist[REQUEST_CONTEXT_FREELIST_CAP];
+static _Thread_local int request_context_freelist_len = 0;
+#else
+static WreathRequestContext *
+    request_context_freelist[REQUEST_CONTEXT_FREELIST_CAP];
+static int request_context_freelist_len = 0;
+#endif
 
 static int
 context_traverse(WreathRequestContext *self, visitproc visit, void *arg)
@@ -88,7 +103,12 @@ context_dealloc(WreathRequestContext *self)
 {
     PyObject_GC_UnTrack(self);
     context_clear(self);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    if (Py_TYPE(self) == request_context_type &&
+        request_context_freelist_len < REQUEST_CONTEXT_FREELIST_CAP) {
+        request_context_freelist[request_context_freelist_len++] = self;
+    } else {
+        Py_TYPE(self)->tp_free((PyObject *)self);
+    }
 }
 
 static PyObject *
@@ -491,6 +511,21 @@ static PyType_Spec context_spec = {
     .slots = context_slots,
 };
 
+static PyObject *
+request_storage_counts(PyObject *module, PyObject *unused)
+{
+    (void)module;
+    (void)unused;
+    return Py_BuildValue(
+        "(nn)", request_context_allocations,
+        wreath_header_block_storage_allocations());
+}
+
+static PyMethodDef request_debug_methods[] = {
+    {"_request_storage_counts", request_storage_counts, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
 int
 wreath_request_context_ready(PyObject *module)
 {
@@ -499,8 +534,19 @@ wreath_request_context_ready(PyObject *module)
     if (PyModule_AddObjectRef(
             module, "_RequestContext", (PyObject *)request_context_type) < 0)
         return -1;
+    if (PyModule_AddFunctions(module, request_debug_methods) < 0) return -1;
     Py_DECREF(request_context_type);
     return 0;
+}
+
+void
+wreath_request_context_fini(void)
+{
+    while (request_context_freelist_len > 0) {
+        WreathRequestContext *context =
+            request_context_freelist[--request_context_freelist_len];
+        PyObject_GC_Del(context);
+    }
 }
 
 int
@@ -559,9 +605,17 @@ wreath_request_context_new(
     PyObject *client, PyObject *root_path
 )
 {
-    WreathRequestContext *self = (WreathRequestContext *)request_context_type->tp_alloc(
-        request_context_type, 0
-    );
+    WreathRequestContext *self;
+    if (request_context_freelist_len > 0) {
+        self = request_context_freelist[--request_context_freelist_len];
+        _Py_NewReference((PyObject *)self);
+        PyObject_GC_Track(self);
+    } else {
+        self = (WreathRequestContext *)request_context_type->tp_alloc(
+            request_context_type, 0
+        );
+        if (self != NULL) request_context_allocations++;
+    }
     if (self == NULL) return NULL;
     self->scope_type = Py_NewRef(scope_type);
     self->asgi = Py_NewRef(asgi);
