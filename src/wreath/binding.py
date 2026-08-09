@@ -2478,6 +2478,26 @@ def compile_binder(
         else typing.cast(BindingSpec | None, binding_spec)
     )
     if spec is None and not dependencies:
+        try:
+            requestless = len(inspect.signature(handler).parameters) == 0
+        except (TypeError, ValueError):
+            requestless = False
+        if requestless:
+            if inspect.iscoroutinefunction(handler):
+
+                async def without_request(_request: Request) -> Any:
+                    return await handler()
+
+            else:
+
+                def without_request(_request: Request) -> Any:
+                    return handler()
+
+            without_request.__name__ = getattr(handler, "__name__", "without_request")
+            without_request.__qualname__ = getattr(
+                handler, "__qualname__", "without_request"
+            )
+            return without_request
         return handler
     path_specs = () if spec is None else spec.path_params
     path_opcodes = {str: 0, int: 1, float: 2, bool: 3}
