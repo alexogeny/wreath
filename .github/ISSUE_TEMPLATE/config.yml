@@ -1,0 +1,11 @@
+# Blank issues stay on: a report that fits neither template is still worth
+# having, and a contributor who has to force one into the wrong shape usually
+# just closes the tab instead.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/alexogeny/wreath/security/advisories/new
+    about: Report privately here, never in a public issue.
+  - name: What already ships
+    url: https://alexogeny.github.io/wreath/capabilities/
+    about: wreath is wide on purpose — check before adding a dependency or filing a request.

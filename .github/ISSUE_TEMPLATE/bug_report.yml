@@ -1,0 +1,74 @@
+name: Bug report
+description: Something wreath does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Use whatever tools you like to investigate and write this up** — a
+        model is as welcome here as a debugger. What matters is that you have
+        read what you are filing and can answer questions about it. An issue
+        nobody can follow up on costs more to triage than it saves to file.
+
+        Please leave tool attribution out of the body. It tells a maintainer
+        nothing they can act on, and the repository refuses it in commits for
+        the same reason.
+
+  - type: input
+    id: version
+    attributes:
+      label: wreath version
+      description: "`python -c 'import wreath; print(wreath.__version__)'`, or the commit sha."
+      placeholder: 0.1.0a3
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python and platform
+      description: "`python -VV` and your OS. wreath targets CPython 3.14 only."
+      placeholder: CPython 3.14.6, Linux x86_64
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The behaviour you saw, and the behaviour you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Smallest thing that reproduces it
+      description: |
+        A runnable snippet beats a description of one. `wreath new` gives you a
+        project that already runs if you need somewhere to start.
+
+        If it only reproduces under the native extension, say so — `WREATH_PURE=1`
+        selects the pure-Python twin, and whether the bug survives that is
+        usually the most useful single fact in the report.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Traceback or output
+      description: Complete and unedited. A trimmed traceback usually loses the frame that matters.
+      render: shell
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I have read this report and can answer follow-up questions about it.
+          required: true
+        - label: I checked `wreath capabilities <term>` if this is about something possibly already shipped.

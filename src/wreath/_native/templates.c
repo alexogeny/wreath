@@ -81,6 +81,8 @@ typedef struct {
     PyObject *tape;       /* owned: decoded operands borrow from it */
     decoded *program;    /* owned */
     Py_ssize_t length;
+    Py_ssize_t typed_for; /* simple top-level RecordBatch loop, or -1 */
+    Py_ssize_t typed_end;
     _Atomic Py_ssize_t output_hint;
 } compiled_template;
 
@@ -388,6 +390,41 @@ lookup_path(PyObject *context, PyObject *path, int line,
     return owned != NULL ? owned : Py_NewRef(current);
 }
 
+static int emit_value(outbuf *b, PyObject *value);
+
+static int
+emit_int64(outbuf *b, int64_t number)
+{
+    char digits[3 * sizeof(int64_t) + 3];
+    char *end = digits + sizeof(digits);
+    char *cursor = end;
+    uint64_t magnitude = number < 0
+        ? (uint64_t)(-(number + 1)) + 1U
+        : (uint64_t)number;
+    do {
+        *--cursor = (char)('0' + magnitude % 10U);
+        magnitude /= 10U;
+    } while (magnitude != 0);
+    if (number < 0) *--cursor = '-';
+    return outbuf_append(b, cursor, (Py_ssize_t)(end - cursor));
+}
+
+static int
+emit_record_value(outbuf *b, const WreathRecordValue *value)
+{
+    if (value->kind == WREATH_RECORD_VALUE_INT64) {
+        return emit_int64(b, value->integer);
+    }
+    if (value->kind == WREATH_RECORD_VALUE_UTF8) {
+        return append_escaped(b, value->data, value->length);
+    }
+    if (value->kind == WREATH_RECORD_VALUE_OBJECT && value->object != NULL) {
+        return emit_value(b, value->object);
+    }
+    PyErr_SetString(PyExc_SystemError, "invalid native template value");
+    return -1;
+}
+
 static int
 emit_value(outbuf *b, PyObject *value)
 {
@@ -428,20 +465,7 @@ emit_value(outbuf *b, PyObject *value)
              * considerable machinery for one base-ten signed integer, and
              * Fortunes exercises this once per row.  Negating LONG_MIN is
              * undefined, so form the magnitude through the -(n + 1) identity. */
-            char digits[3 * sizeof(long) + 3];
-            char *end = digits + sizeof(digits);
-            char *cursor = end;
-            unsigned long magnitude = number < 0
-                ? (unsigned long)(-(number + 1)) + 1UL
-                : (unsigned long)number;
-            do {
-                *--cursor = (char)('0' + magnitude % 10UL);
-                magnitude /= 10UL;
-            } while (magnitude != 0);
-            if (number < 0) {
-                *--cursor = '-';
-            }
-            return outbuf_append(b, cursor, (Py_ssize_t)(end - cursor));
+            return emit_int64(b, (int64_t)number);
         }
     }
     PyObject *text = PyObject_Str(value);
@@ -457,6 +481,132 @@ emit_value(outbuf *b, PyObject *value)
     int rc = append_escaped(b, s, n);
     Py_DECREF(text);
     return rc;
+}
+
+/* Recognize the common compiled shape once: literal prefix, one top-level
+ * loop, a body made only of literals and direct ``row.column`` values, then a
+ * literal suffix.  It is deliberately narrow; anything richer remains on the
+ * general VM whose lookup and control-flow semantics are the reference. */
+static void
+find_typed_loop(compiled_template *compiled)
+{
+    const decoded *program = compiled->program;
+    Py_ssize_t n = compiled->length;
+    Py_ssize_t start = 0;
+    compiled->typed_for = -1;
+    compiled->typed_end = -1;
+    while (start < n && program[start].op == OP_TEXT) start++;
+    if (start >= n || program[start].op != OP_FOR ||
+        program[start].binding != -1 ||
+        !PyTuple_CheckExact(program[start].path) ||
+        PyTuple_GET_SIZE(program[start].path) != 1) return;
+    Py_ssize_t end = program[start].target - 1;
+    if (end <= start || end >= n || program[end].op != OP_ENDFOR ||
+        end - start - 1 > TAPE_STACK_SLOTS) return;
+    for (Py_ssize_t ip = start + 1; ip < end; ip++) {
+        if (program[ip].op == OP_TEXT) continue;
+        if (program[ip].op != OP_VAR || program[ip].binding != 0 ||
+            !PyTuple_CheckExact(program[ip].first) ||
+            PyTuple_GET_SIZE(program[ip].first) != 2) return;
+    }
+    for (Py_ssize_t ip = end + 1; ip < n; ip++) {
+        if (program[ip].op != OP_TEXT) return;
+    }
+    compiled->typed_for = start;
+    compiled->typed_end = end;
+}
+
+/* Execute the recognized loop without loop frames, opcode dispatch, name
+ * cache ownership, or one key lookup per cell.  ``matched`` distinguishes a
+ * genuine rendering error from an input that needs the generic VM. */
+static PyObject *
+render_typed_loop(compiled_template *compiled, PyObject *context,
+                  Py_ssize_t max_output, int *matched)
+{
+    const decoded *program = compiled->program;
+    Py_ssize_t start = compiled->typed_for;
+    Py_ssize_t end = compiled->typed_end;
+    Py_ssize_t columns[TAPE_STACK_SLOTS];
+    PyObject *batch;
+    *matched = 0;
+    if (start < 0 || record_capi == NULL ||
+        record_capi->version != WREATH_RECORD_CAPI_VERSION) return NULL;
+    batch = PyDict_GetItemWithError(
+        context, PyTuple_GET_ITEM(program[start].path, 0));
+    if (batch == NULL) return NULL;
+    if (!record_capi->batch_check(batch)) return NULL;
+    for (Py_ssize_t ip = start + 1; ip < end; ip++) {
+        columns[ip - start - 1] = -1;
+        if (program[ip].op != OP_VAR) continue;
+        int resolved = record_capi->batch_resolve_column(
+            batch, PyTuple_GET_ITEM(program[ip].first, 1),
+            &columns[ip - start - 1]);
+        if (resolved < 0) {
+            *matched = 1;
+            return NULL;
+        }
+        if (resolved != 1) return NULL;
+    }
+
+    outbuf buf = {NULL, NULL, 0, 0, max_output, 0};
+    Py_ssize_t initial = atomic_load_explicit(
+        &compiled->output_hint, memory_order_relaxed);
+    if (initial > max_output) initial = max_output;
+    if (initial > 0 && outbuf_reserve(&buf, initial) < 0) {
+        *matched = 1;
+        return NULL;
+    }
+    for (Py_ssize_t ip = 0; ip < start; ip++) {
+        PyObject *fragment = program[ip].first;
+        if (outbuf_append(&buf, PyBytes_AS_STRING(fragment),
+                          PyBytes_GET_SIZE(fragment)) < 0) goto render_error;
+    }
+    Py_ssize_t rows = record_capi->batch_size(batch);
+    Py_ssize_t signal_budget = template_render_chunks;
+    for (Py_ssize_t row = 0; row < rows; row++) {
+        for (Py_ssize_t ip = start + 1; ip < end; ip++) {
+            if (program[ip].op == OP_TEXT) {
+                PyObject *fragment = program[ip].first;
+                if (outbuf_append(&buf, PyBytes_AS_STRING(fragment),
+                                  PyBytes_GET_SIZE(fragment)) < 0)
+                    goto render_error;
+            } else {
+                WreathRecordValue value;
+                int got = record_capi->batch_get_typed_at(
+                    batch, row, columns[ip - start - 1], &value);
+                if (got == 0) {
+                    Py_XDECREF(buf.owner);
+                    return NULL;
+                }
+                if (got < 0 || emit_record_value(&buf, &value) < 0)
+                    goto render_error;
+            }
+            if (--signal_budget == 0) {
+                if (PyErr_CheckSignals() < 0) goto render_error;
+                signal_budget = template_render_chunks;
+            }
+        }
+    }
+    for (Py_ssize_t ip = end + 1; ip < compiled->length; ip++) {
+        PyObject *fragment = program[ip].first;
+        if (outbuf_append(&buf, PyBytes_AS_STRING(fragment),
+                          PyBytes_GET_SIZE(fragment)) < 0) goto render_error;
+    }
+    *matched = 1;
+    atomic_store_explicit(
+        &compiled->output_hint, buf.len, memory_order_relaxed);
+    if (buf.owner == NULL) return PyBytes_FromStringAndSize("", 0);
+    if (buf.len != buf.cap && _PyBytes_Resize(&buf.owner, buf.len) < 0)
+        return NULL;
+    return buf.owner;
+
+render_error:
+    *matched = 1;
+    if (buf.overflow && !PyErr_Occurred()) {
+        raise_render(0, PyUnicode_FromString("template output too large"));
+    }
+    Py_XDECREF(buf.owner);
+    return NULL;
 }
 
 static PyObject *
@@ -507,6 +657,29 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
             }
             ip++;
         } else if (op == OP_VAR) {
+            if (instr->binding >= 0 &&
+                frames[instr->binding].sequence_kind == 3 &&
+                PyTuple_GET_SIZE(instr->first) == 2) {
+                loop_frame *frame = &frames[instr->binding];
+                WreathRecordValue value;
+                int result = record_capi->batch_get_typed(
+                    frame->sequence, frame->position,
+                    PyTuple_GET_ITEM(instr->first, 1),
+                    &caches[ip].names, &caches[ip].position, &value);
+                if (result < 0) {
+                    failed = 1;
+                    break;
+                }
+                if (result == 1) {
+                    if (emit_record_value(&buf, &value) < 0) {
+                        goto overflow_or_error;
+                    }
+                    ip++;
+                    continue;
+                }
+                /* Missing and non-native values take the ordinary lookup so
+                 * its item/attribute fallback and RenderError stay exact. */
+            }
             PyObject *value = lookup_path(context, instr->first, instr->line,
                                           frames, instr->binding, &caches[ip]);
             if (value == NULL) {
@@ -750,6 +923,8 @@ wreath_template_compile(PyObject *self, PyObject *tape)
     compiled->tape = Py_NewRef(tape);
     compiled->program = NULL;
     compiled->length = n;
+    compiled->typed_for = -1;
+    compiled->typed_end = -1;
     atomic_init(&compiled->output_hint, 256);
     if (n > 0) {
         compiled->program = PyMem_Malloc((size_t)n * sizeof(decoded));
@@ -764,6 +939,7 @@ wreath_template_compile(PyObject *self, PyObject *tape)
             PyMem_Free(compiled);
             return NULL;
         }
+        find_typed_loop(compiled);
     }
     PyObject *capsule = PyCapsule_New(compiled, TEMPLATE_CAPSULE_NAME,
                                       compiled_template_destroy);
@@ -799,6 +975,10 @@ wreath_template_render_compiled(PyObject *self, PyObject *args)
     if (compiled == NULL) {
         return NULL;
     }
+    int matched = 0;
+    PyObject *typed = render_typed_loop(
+        compiled, context, max_output, &matched);
+    if (matched || typed != NULL || PyErr_Occurred()) return typed;
     return render_program(compiled->program, compiled->length, context,
                           max_output, &compiled->output_hint);
 }
@@ -876,7 +1056,9 @@ wreath_template_record_configure(PyObject *self, PyObject *capsule)
     if (candidate->version != WREATH_RECORD_CAPI_VERSION ||
         candidate->get_borrowed == NULL || candidate->batch_check == NULL ||
         candidate->batch_size == NULL || candidate->batch_get_borrowed == NULL ||
-        candidate->batch_get_value == NULL) {
+        candidate->batch_get_value == NULL || candidate->batch_get_typed == NULL ||
+        candidate->batch_resolve_column == NULL ||
+        candidate->batch_get_typed_at == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "incompatible Wreath Record C API");
         return NULL;
     }
