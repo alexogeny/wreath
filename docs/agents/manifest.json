@@ -1476,7 +1476,8 @@
       "sources": [
         "src/wreath/_devtools/",
         "tools/",
-        "src/wreath/_devtools/cpu_probe.py"
+        "src/wreath/_devtools/cpu_probe.py",
+        "src/wreath/_devtools/hygiene.py"
       ],
       "tests": [
         "tests/test_native_lint.py",
@@ -1492,7 +1493,8 @@
         "tests/test_complexity_probe.py",
         "tests/test_port_golden.py",
         "tests/test_dup_scan.py",
-        "tests/test_map_lint_capability_index.py"
+        "tests/test_map_lint_capability_index.py",
+        "tests/test_hygiene.py"
       ]
     },
     {

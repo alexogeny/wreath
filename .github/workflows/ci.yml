@@ -1,9 +1,38 @@
 name: ci
 
-# Pull-request and main validation: the fast test suite and a strict docs
-# build. Benchmarks are not run here — they live in benchmarks/, are never
-# collected by pytest (testpaths = ["tests"]), and are regenerated on the
+# Pull-request and main validation: the fast test suite, and a strict docs
+# build on main. Benchmarks are not run here — they live in benchmarks/, are
+# never collected by pytest (testpaths = ["tests"]), and are regenerated on the
 # maintainer's host, not in CI.
+#
+# **One sync, not three.** Measured on run 31304072652 (9 Aug), when this was
+# three parallel jobs: lint 38s (27s of it sync), docs-build 44s (30s sync),
+# test 113s (26s sync, 78s tests) — 113s wall, 195s compute, with the same
+# extension built three times from an identical tree.
+#
+# Ruff and ty together cost 2s. They are free when they are not each paying a
+# 27s sync for the privilege, so they moved in behind the sync the tests were
+# already doing.
+#
+# **This buys compute, not wall clock.** Each job carries ~7s of fixed overhead
+# (set up, checkout, setup-uv, teardown), so folding lint into the test job puts
+# the critical path at roughly 7 + 27 + 2 + 78 = ~115s against today's 113s —
+# call it neutral. What changes is that a pull request now runs one job instead
+# of three: ~115s of compute rather than 195s, a 41% cut, and ~159s on a push to
+# main where the docs job also runs. Those two figures are projections from the
+# per-step timings above; the first run on this workflow is what confirms them.
+#
+# The rejected alternative was a `setup` job publishing the build as an
+# artifact. It loses on both axes: a venv carrying ruff, ty, grpcio and
+# cryptography is too big to upload and download cheaply, and shipping only the
+# wheel still puts `test` behind an upstream job — so wall clock goes *up* to
+# ~116s to save less compute than simply merging the jobs does.
+#
+# The 27s itself is already the fixed version: `setup.py` defaults `build_ext`
+# to one worker per core, which took the extension build from 44s to 27s here.
+# The remainder is dominated by the `-flto` link of `_core`, which parallelism
+# cannot divide — measured locally, `--parallel 16` beat `--parallel 4` by only
+# 1.5s, so there is little left to win without changing how `_core` links.
 
 on:
   pull_request:
@@ -19,21 +48,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
+  # Attribution and debris. A separate job on purpose: `hygiene.py` imports only
+  # the standard library, so this needs no `uv sync` and no compiled extension —
+  # about ten seconds against the 115s of `checks`, running beside it. Behind the
+  # sync it would be a gate nobody wants to wait for.
+  hygiene:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
         with:
-          enable-cache: true
-      - name: Sync (default 'dev' group; builds the native extension)
-        run: uv sync --frozen
-      - name: Ruff
-        run: uv run ruff check .
-      - name: Ty
-        run: uv run ty check
+          # The PR's own commits, which a shallow clone does not have. Without
+          # this the range below resolves to nothing and the check passes by
+          # examining zero commits — the failure mode where a green tick means
+          # "did not look".
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
-  test:
+      - name: Tracked paths
+        run: python src/wreath/_devtools/hygiene.py --paths
+
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Refuse to pass on an empty range rather than reporting clean over
+          # nothing, which is indistinguishable from a pass.
+          count="$(git rev-list --count "$BASE..$HEAD")"
+          echo "checking $count commit(s)"
+          [ "$count" -gt 0 ] || { echo "::error::empty commit range"; exit 1; }
+          python src/wreath/_devtools/hygiene.py --range "$BASE..$HEAD"
+
+      - name: Pull request title and body
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          # Through the environment and a file, never interpolated into the
+          # script: a PR body is attacker-controlled text, and an expression
+          # interpolated into `run:` is substituted before the shell sees it.
+          printf '%s\n\n%s\n' "$TITLE" "$BODY" > "$RUNNER_TEMP/pr.md"
+          python src/wreath/_devtools/hygiene.py --message-file "$RUNNER_TEMP/pr.md"
+
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,12 +105,20 @@ jobs:
           enable-cache: true
       - name: Sync (default 'dev' group; builds the native extension)
         run: uv sync --frozen
+
+      # Cheapest first, so a formatting slip fails at ~30s rather than after the
+      # 78s suite. Every step below is `--no-sync`: the environment is already
+      # exactly what the lockfile describes, and letting `uv run` re-resolve it
+      # per step is the cost this job exists to stop paying.
+      - name: Ruff
+        run: uv run --no-sync ruff check .
+      - name: Ty
+        run: uv run --no-sync ty check
+
       - name: Fast tests
         # Default marks exclude fuzz/performance/network. The suite is ~14,500
-        # tests, not the ~3.5 seconds this step was written for, so it runs
-        # parallel: `wreath test` picks min(8, cpu_count) workers, which is 4 on
-        # a public-repo ubuntu-latest. Serial pytest took 119s here on Aug 2 and
-        # 162s on Aug 6, on one of the runner's four cores.
+        # tests, so it runs parallel: `wreath test` picks min(8, cpu_count)
+        # workers, which is 4 on a public-repo ubuntu-latest.
         #
         # `--mutant off` is load-bearing. The default is a 192-control mutation
         # sample with a 50-second post-suite ceiling plus live mutant children
@@ -57,9 +128,15 @@ jobs:
         # caches `.wreath/test-history.json`, nothing reads it, and without it
         # the history-weighted scheduler stays unregistered and this is xdist
         # `--dist loadgroup` with a timing report on top.
-        run: uv run wreath test --mutant off --no-history
+        run: uv run --no-sync wreath test --mutant off --no-history
 
   docs-build:
+    # Main only. On a pull request this is 4s of work behind a 30s sync, and
+    # the docs are not unguarded by skipping it here: `publish.yml`'s `verify`
+    # job runs `wreath docs check` too, and `release` depends on it — so a
+    # broken docs build still cannot reach PyPI. It costs finding out at merge
+    # rather than at review, which is the trade being made.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
