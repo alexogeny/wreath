@@ -31,6 +31,13 @@ arguments pass through to pytest. See the
 [testing guide](../guides/testing.md#see-the-suite-while-it-runs) for tile
 colours, JSON reports, history, CI behavior, and worker selection.
 
+`wreath new NAME` writes a project that already runs and tests green, and
+`--forge github|gitlab|codeberg|forgejo|gitea` adds the CI file that host reads —
+lint, tests, and preflight. `wreath ci init --forge ...` writes the same files
+into a project that already exists, taking `--forge` more than once for a
+repository mirrored to two hosts. Both refuse to write over what is already
+there. See [Starting a project](../getting-started/new-project.md).
+
 `wreath replay transport MODULE:APP recording.wtr1` feeds a recorded connection
 into the owned HTTP/1 driver; `--inject schedule.wfs1` applies a fault schedule
 first. `wreath replay plan MODULE:APP --path /users --method GET` runs a canonical

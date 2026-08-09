@@ -657,6 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="print versioned JSON instead of tables",
     )
     _add_new_parser(commands)
+    _add_ci_parser(commands)
     _add_capabilities_parser(commands)
     _add_mcp_parser(commands)
     _add_doctor_parser(commands)
@@ -671,6 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_new_parser(commands: Any) -> None:
     """`wreath new NAME` -- a project that runs, tests green, and is wired right."""
+    from ._ci import FORGES as _FORGES
+
     parser = commands.add_parser(
         "new",
         help="write a new wreath project that already runs and tests green",
@@ -700,6 +703,12 @@ def _add_new_parser(commands: Any) -> None:
              "middleware, and tenant-bound sessions (needs --database postgres)",
     )
     parser.add_argument(
+        "--forge", choices=("none", *_FORGES), default="none",
+        help="also write CI for the host this will live on: lint, tests and "
+             "preflight (default: none). `codeberg` and `forgejo` are the same "
+             "file",
+    )
+    parser.add_argument(
         "--json", action="store_true", dest="as_json",
         help="print the written paths as JSON instead of a report",
     )
@@ -717,6 +726,7 @@ def execute_new(namespace: argparse.Namespace) -> int:
         frontend=namespace.frontend,
         database=namespace.database,
         tenancy=namespace.tenancy,
+        forge=namespace.forge,
     )
     try:
         written = create(options)
@@ -733,6 +743,123 @@ def execute_new(namespace: argparse.Namespace) -> int:
         print(f"  {relative}")
     print(f"\nnext:\n  cd {options.target}\n  cp .env.example .env\n  pytest"
           f"\n  wreath dev {options.name}.app:app")
+    return 0
+
+
+def _add_ci_parser(commands: Any) -> None:
+    """`wreath ci init` -- the same CI files, for a project that already exists.
+
+    `wreath new --forge` covers a project being started. This covers the two
+    cases it cannot: a project started before the flag existed, and one that is
+    mirrored to a second host -- `--forge` is repeatable for exactly that.
+    """
+    from ._ci import FORGES as _FORGES
+
+    parser = commands.add_parser(
+        "ci",
+        help="write continuous integration for the forge this project lives on",
+        description=(
+            "Write the lint, test and preflight pipeline for GitHub, GitLab, "
+            "Codeberg/Forgejo or Gitea. Refuses to write over a CI file that is "
+            "already there; there is no --force."
+        ),
+    )
+    actions = parser.add_subparsers(dest="ci_action", required=True)
+    init = actions.add_parser("init", help="write the CI files for one or more forges")
+    init.add_argument(
+        "--forge", action="append", required=True, choices=_FORGES, metavar="FORGE",
+        help=f"which forge to write for, repeatable; one of: {', '.join(_FORGES)}",
+    )
+    init.add_argument(
+        "--directory", default=".", metavar="PATH",
+        help="the project root (default: the working directory)",
+    )
+    init.add_argument(
+        "--name", default=None,
+        help="the importable package name, used to spell the preflight target "
+             "(default: read from pyproject.toml)",
+    )
+    init.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print the written paths as JSON instead of a report",
+    )
+
+
+def _project_name(directory: Path, given: str | None) -> str:
+    """The package name the preflight target is spelled from.
+
+    Read from `pyproject.toml` rather than taken from the directory name. A
+    checkout is routinely called something else -- `shop-api`, or `main` under a
+    CI provider -- and a preflight target built from that names a module that
+    does not import, in a file nobody runs until it is in front of a pull
+    request.
+    """
+    if given is not None:
+        return given
+    manifest = directory / "pyproject.toml"
+    if not manifest.exists():
+        raise CliError(
+            f"no {manifest} to read the project name from; pass --name with the "
+            "importable package name (the one `import <name>` uses)",
+            exit_code=2,
+        )
+    import tomllib
+
+    try:
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CliError(f"could not read {manifest}: {error}", exit_code=2) from error
+    name = data.get("project", {}).get("name")
+    if not isinstance(name, str) or not name:
+        raise CliError(
+            f"{manifest} declares no [project] name; pass --name instead",
+            exit_code=2,
+        )
+    # A distribution name is hyphenated where an import is not, and the
+    # preflight target is an import.
+    return name.replace("-", "_")
+
+
+def execute_ci(namespace: argparse.Namespace) -> int:
+    """Write CI for every named forge, or refuse before writing any of them."""
+    import json as _json
+
+    from ._ci import plan as ci_plan
+    from ._ci import render as ci_render
+
+    if namespace.ci_action != "init":  # pragma: no cover - argparse rejects first
+        raise ValueError(f"unknown ci action {namespace.ci_action!r}")
+    directory = Path(namespace.directory)
+    if not directory.is_dir():
+        raise CliError(f"{directory} is not a directory", exit_code=2)
+    ci = ci_plan(_project_name(directory, namespace.name))
+
+    # Every forge rendered and every collision found before one byte is written,
+    # so `--forge github --forge gitlab` cannot leave one of the two behind.
+    files: dict[str, str] = {}
+    for forge in dict.fromkeys(namespace.forge):
+        files.update(ci_render(ci, forge))
+    clashes = sorted(name for name in files if (directory / name).exists())
+    if clashes:
+        raise CliError(
+            f"{', '.join(clashes)} already exists; wreath ci never writes over a "
+            "pipeline somebody is relying on. Move it aside first.",
+            exit_code=2,
+        )
+    for relative, content in sorted(files.items()):
+        path = directory / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    written = sorted(files)
+    if namespace.as_json:
+        print(_json.dumps({
+            "version": 1, "project": ci.project,
+            "directory": str(directory), "files": written,
+        }))
+        return 0
+    print(f"wrote {len(written)} file(s) to {directory}\n")
+    for relative in written:
+        print(f"  {relative}")
     return 0
 
 
@@ -3143,6 +3270,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_capabilities(namespace)
         if namespace.command == "new":
             return execute_new(namespace)
+        if namespace.command == "ci":
+            try:
+                return execute_ci(namespace)
+            except (OSError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
         if namespace.command == "doctor":
             # `preflight` resolves `--settings`/`--env` through `wreath infra
             # infer`'s own helpers, which report a typo as a ValueError. That is
