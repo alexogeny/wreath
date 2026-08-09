@@ -19,6 +19,7 @@ from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from inspect import isawaitable
 from inspect import iscoroutinefunction as _iscoroutinefunction
+from inspect import signature as _signature
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
 from types import CoroutineType as _COROUTINE
@@ -78,7 +79,9 @@ from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
     _CONTENT_LENGTHS,
+    _HTML_HEADERS,
     FileResponse,
+    HTMLResponse,
     JSONResponse,
     PreparedResponse,
     ProblemResponse,
@@ -608,6 +611,7 @@ class Wreath:
         "_http_policy",
         "_auth_handlers",
         "_handler_requirements",
+        "_requestless_handlers",
         "_hardening",
         "_http_clients",
         "_job_runners",
@@ -755,6 +759,7 @@ class Wreath:
         # (before_hook, is_sync) for middleware explicitly safe on handshakes.
         self._websocket_hooks: tuple[tuple[Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
+        self._requestless_handlers: frozenset[Any] = frozenset()
         # The subset of those whose `needs_backend` is true, so dispatch asks a
         # set rather than a requirement -- see the read site in `__call__`.
         self._auth_handlers: frozenset[Any] = frozenset()
@@ -2608,8 +2613,14 @@ class Wreath:
             declared = overrides.get(handler)
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
-        request = Request(scope, receive, path_params, self._limits, app=self)
-        if _telemetry.PROPAGATING:
+        request = (
+            None
+            if handler in self._requestless_handlers
+            and not _telemetry.PROPAGATING
+            and policy is None
+            else Request(scope, receive, path_params, self._limits, app=self)
+        )
+        if _telemetry.PROPAGATING and request is not None:
             _telemetry.bind_propagation(request)
         json_body: bytes | None = None
         response: Response | StreamingResponse | FileResponse | PreparedResponse
@@ -2643,6 +2654,8 @@ class Wreath:
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            if request is None:
+                request = Request(scope, receive, path_params, self._limits, app=self)
             response = await self._handle_exception(request, error)
         # `active_global` is 0 rather than omitted: this application has no
         # global after hooks to unwind, so `_finish_http` skips its loop and
@@ -2657,6 +2670,8 @@ class Wreath:
                 return
             await self._finish_http_plain(response, send, method, scope, native_response)
         else:
+            if request is None:
+                raise RuntimeError("a policy route reached egress without a Request")
             await self._finish_http(request, response, send, method, scope, native_response, 0)
 
     def _handle_http_plain_sync(
@@ -2690,14 +2705,22 @@ class Wreath:
             declared = overrides.get(handler)
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
-        request = Request(scope, receive, path_params, self._limits, app=self)
-        if _telemetry.PROPAGATING:
+        request = (
+            None
+            if handler in self._requestless_handlers and not _telemetry.PROPAGATING
+            else Request(scope, receive, path_params, self._limits, app=self)
+        )
+        if _telemetry.PROPAGATING and request is not None:
             _telemetry.bind_propagation(request)
         json_body: bytes | None = None
         response: Response | StreamingResponse | FileResponse | PreparedResponse
         try:
             value = handler(request)
             if value.__class__ is _COROUTINE:
+                if request is None:
+                    request = Request(
+                        scope, receive, path_params, self._limits, app=self
+                    )
                 return self._finish_http_plain_await_value(
                     request, value, send, method, scope, native_response
                 )
@@ -2713,6 +2736,8 @@ class Wreath:
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            if request is None:
+                request = Request(scope, receive, path_params, self._limits, app=self)
             return self._finish_http_plain_error(
                 request, error, send, method, scope, native_response
             )
@@ -3705,15 +3730,22 @@ class Wreath:
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
             plain = cast(Response, response)
             protocol = cast(Any, send).__self__
+            headers = (
+                _HTML_HEADERS[len(plain.body)]
+                if plain.__class__ is HTMLResponse
+                and plain._headers is None
+                and len(plain.body) < len(_HTML_HEADERS)
+                else plain.headers
+            )
             if policy is not None and policy.compression is not None:
                 await protocol._wreath_response(
                     plain.status,
-                    plain.headers,
+                    headers,
                     plain.body,
                     request.identity is not None,
                 )
             else:
-                await protocol._wreath_response(plain.status, plain.headers, plain.body)
+                await protocol._wreath_response(plain.status, headers, plain.body)
         elif response.__class__ is PreparedResponse and native_response:
             prepared = response
             protocol = cast(Any, send).__self__
@@ -3786,7 +3818,14 @@ class Wreath:
         if type(response).__call__ is _RESPONSE_CALL and native_response:
             plain = cast(Response, response)
             protocol = cast(Any, send).__self__
-            return protocol._wreath_response(plain.status, plain.headers, plain.body)
+            headers = (
+                _HTML_HEADERS[len(plain.body)]
+                if plain.__class__ is HTMLResponse
+                and plain._headers is None
+                and len(plain.body) < len(_HTML_HEADERS)
+                else plain.headers
+            )
+            return protocol._wreath_response(plain.status, headers, plain.body)
         if response.__class__ is PreparedResponse and native_response:
             prepared = response
             protocol = cast(Any, send).__self__
@@ -4153,6 +4192,7 @@ class Wreath:
         route_programs: dict[Any, tuple[Any, Any]] = {}
         program_cache: dict[frozenset[int], tuple[Any, Any]] = {}
         handler_requirements: dict[Any, AuthRequirement] = {}
+        requestless_handlers: set[Any] = set()
         frozen_responses: dict[Any, PreparedResponse] = {}
         # Compiled handler -> (method, path) so a later telemetry join can map
         # each route to its metadata-image IDs without re-walking the router.
@@ -4168,6 +4208,10 @@ class Wreath:
             self._routes, requirements, binding_specs, strict=True
         ):
             frozen_response = self._frozen_routes.get(definition.endpoint)
+            try:
+                requestless = len(_signature(definition.endpoint).parameters) == 0
+            except (TypeError, ValueError):
+                requestless = False
             # Typed-signature binding compiles once here; request-only
             # handlers come back unchanged.
             endpoint = compile_binder(
@@ -4237,6 +4281,8 @@ class Wreath:
                 else:
                     router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
+                if requestless and not definition.dependencies:
+                    requestless_handlers.add(compiled)
                 if (
                     frozen_response is not None
                     and not chain
@@ -4272,6 +4318,7 @@ class Wreath:
         if self._ws_router is not None:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
+        self._requestless_handlers = frozenset(requestless_handlers)
         self._frozen_responses = frozen_responses
         self._route_programs = route_programs or None
         self._auth_handlers = frozenset(
