@@ -39,6 +39,7 @@ Two more flags:
 wreath new shop --database postgres    # an ORM model, and the migration loop in the README
 wreath new shop --frontend react       # a React app wired to `wreath typegen`
 wreath new shop --database postgres --tenancy   # ... isolated by PostgreSQL role
+wreath new shop --forge codeberg       # ... and CI for the host it will live on
 ```
 
 **It refuses a directory that has anything in it**, and there is no `--force`.
@@ -140,6 +141,55 @@ registry bound with a bare `FromORM` is refused at route-compile time, so the
 declarative spelling is the safe one and there is no way to reach the data
 without a tenant. See [Multi-tenancy](../guides/tenancy.md) for what the
 boundary does and does not stop.
+
+## With continuous integration
+
+```bash
+wreath new shop --forge github        # ... or gitlab, codeberg, forgejo, gitea
+```
+
+Whichever host you name gets the file it actually reads, running the same three
+checks:
+
+| forge | file |
+| --- | --- |
+| `github` | `.github/workflows/ci.yml` |
+| `gitlab` | `.gitlab-ci.yml` |
+| `codeberg`, `forgejo` | `.forgejo/workflows/ci.yml` |
+| `gitea` | `.gitea/workflows/ci.yml` |
+
+The checks are `ruff check .`, `pytest`, and `wreath doctor preflight` — each one
+a command the scaffold's own suite already runs against a generated project, so
+the pipeline is not asking your CI to be the first thing that tries them.
+
+For a project that already exists, or one mirrored to two hosts:
+
+```bash
+wreath ci init --forge github --forge codeberg
+```
+
+It reads the package name from `pyproject.toml` rather than the directory name,
+because a checkout is routinely called something else and a preflight target
+built from that names a module which does not import. Like `wreath new`, it
+**refuses to write over a CI file that is already there**, and there is no
+`--force`.
+
+The checks are declared once and each forge renders them, which is the only
+reason to trust a file the test suite cannot execute: a check added for GitHub
+and forgotten on the other three would be invisible, and
+`tests/test_ci.py` asserts every renderer carries every command instead. What no
+test here can do is *run* a GitLab pipeline, so the first push is the real proof
+— which is also why nothing generated reaches for a clever runner feature. The
+Forgejo and Gitea files name their checkout action by full URL, because a bare
+`uses: actions/checkout@v4` resolves against a different host on each and either
+default is changeable by whoever runs the instance.
+
+Two things the generated pipeline deliberately does not do. It runs no
+front-end job, even with `--frontend react`: `npm run build` needs the
+gitignored `web/src/api/`, so that job is real setup rather than a line, and
+adding `wreath typegen --check` to it is left to you. And it starts no
+PostgreSQL service with `--database postgres`, because the generated suite runs
+`build(database=False)` and needs none.
 
 ## Then what
 
