@@ -28,6 +28,28 @@ static PyTypeObject WreathHeaderBlockType = {
     .tp_flags = Py_TPFLAGS_DEFAULT,
 };
 static int header_block_ready = 0;
+static Py_ssize_t header_block_allocations = 0;
+
+#define HEADER_BLOCK_FREELIST_CAP 64
+#ifdef Py_GIL_DISABLED
+static _Thread_local WreathHeaderBlock *
+    header_block_freelist[HEADER_BLOCK_FREELIST_CAP];
+static _Thread_local int header_block_freelist_len = 0;
+static _Thread_local int header_block_freelist_enabled = 0;
+#else
+static WreathHeaderBlock *header_block_freelist[HEADER_BLOCK_FREELIST_CAP];
+static int header_block_freelist_len = 0;
+static int header_block_freelist_enabled = 0;
+#endif
+
+static void
+header_block_free_storage(WreathHeaderBlock *self)
+{
+    PyMem_Free(self->spans);
+    PyMem_Free(self->names);
+    PyMem_Free(self->values);
+    PyObject_Free(self);
+}
 
 static void
 header_block_dealloc(WreathHeaderBlock *self)
@@ -35,13 +57,43 @@ header_block_dealloc(WreathHeaderBlock *self)
     for (Py_ssize_t i = 0; i < self->count; i++) {
         Py_XDECREF(self->names[i]);
         Py_XDECREF(self->values[i]);
+        self->names[i] = NULL;
+        self->values[i] = NULL;
     }
-    PyMem_Free(self->spans);
-    PyMem_Free(self->names);
-    PyMem_Free(self->values);
     Py_XDECREF(self->raw);
     Py_XDECREF(self->materialized);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    self->raw = NULL;
+    self->materialized = NULL;
+    self->count = 0;
+    if (header_block_freelist_enabled && self->names != NULL &&
+        self->values != NULL && (self->object_mode || self->spans != NULL) &&
+        header_block_freelist_len < HEADER_BLOCK_FREELIST_CAP) {
+        header_block_freelist[header_block_freelist_len++] = self;
+    } else {
+        header_block_free_storage(self);
+    }
+}
+
+void
+wreath_header_block_freelist_enable(void)
+{
+    header_block_freelist_enabled = 1;
+}
+
+void
+wreath_header_block_freelist_fini(void)
+{
+    header_block_freelist_enabled = 0;
+    while (header_block_freelist_len > 0) {
+        header_block_free_storage(
+            header_block_freelist[--header_block_freelist_len]);
+    }
+}
+
+Py_ssize_t
+wreath_header_block_storage_allocations(void)
+{
+    return header_block_allocations;
 }
 
 static int
@@ -59,8 +111,23 @@ new_block(Py_ssize_t capacity, int object_mode)
 {
     if (ensure_type() < 0) return NULL;
     if (capacity < 1) capacity = 1;
-    WreathHeaderBlock *self = PyObject_New(WreathHeaderBlock, &WreathHeaderBlockType);
+    WreathHeaderBlock *self = NULL;
+    if (header_block_freelist_enabled) {
+        for (int i = header_block_freelist_len - 1; i >= 0; i--) {
+            WreathHeaderBlock *candidate = header_block_freelist[i];
+            if (candidate->object_mode != (unsigned char)object_mode ||
+                candidate->capacity < capacity) continue;
+            header_block_freelist[i] =
+                header_block_freelist[--header_block_freelist_len];
+            self = candidate;
+            _Py_NewReference((PyObject *)self);
+            break;
+        }
+    }
+    if (self != NULL) return self;
+    self = PyObject_New(WreathHeaderBlock, &WreathHeaderBlockType);
     if (self == NULL) return NULL;
+    header_block_allocations++;
     self->raw = NULL;
     self->materialized = NULL;
     self->spans = NULL;

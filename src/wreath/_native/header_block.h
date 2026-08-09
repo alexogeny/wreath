@@ -11,6 +11,9 @@
  * mutation semantics remain exact. */
 PyObject *wreath_header_block_new_raw(const uint8_t *data, Py_ssize_t size);
 PyObject *wreath_header_block_new_objects(Py_ssize_t capacity);
+void wreath_header_block_freelist_enable(void);
+void wreath_header_block_freelist_fini(void);
+Py_ssize_t wreath_header_block_storage_allocations(void);
 char *wreath_header_block_raw_data(PyObject *block);
 int wreath_header_block_append_span(
     PyObject *block, Py_ssize_t name_offset, Py_ssize_t name_size,

@@ -178,6 +178,7 @@ PyObject *wreath_template_render(PyObject *self, PyObject *args);
 PyObject *wreath_template_render_compiled(PyObject *self, PyObject *args);
 PyObject *wreath_template_configure(PyObject *self, PyObject *args);
 PyObject *wreath_template_record_configure(PyObject *self, PyObject *capsule);
+PyObject *wreath_html_response_configure(PyObject *self, PyObject *args);
 
 /* http.c */
 typedef struct {

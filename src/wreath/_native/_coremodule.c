@@ -178,6 +178,8 @@ static PyMethodDef core_methods[] = {
      "template_configure(markup_type, render_error_type) -> None"},
     {"template_record_configure", wreath_template_record_configure, METH_O,
      "template_record_configure(record_c_api) -> None"},
+    {"html_response_configure", wreath_html_response_configure, METH_VARARGS,
+     "Install the exact HTMLResponse constructor fast path."},
     {"http_parse_request", wreath_http_parse_request, METH_O,
      "http_parse_request(data) -> (method, target, minor, headers, consumed) | None"},
     {"http_parse_response", wreath_http_parse_response, METH_O,
