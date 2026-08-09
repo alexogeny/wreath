@@ -9,6 +9,10 @@
 static PyMethodDef client_methods[] = {
     {"parse_response_head", wreath_http_parse_response, METH_O,
      "parse_response_head(data) -> (minor, status, reason, headers, consumed) | None"},
+    {"response_framing", wreath_http_response_framing, METH_VARARGS,
+     "response_framing(method, status, headers) -> (mode, length)"},
+    {"response_keeps_alive", wreath_http_response_keeps_alive, METH_VARARGS,
+     "response_keeps_alive(minor, headers, framed) -> bool"},
     {"serialize_request", wreath_http_serialize_request, METH_VARARGS,
      "serialize_request(method, target, host, headers, body) -> bytes"},
     {NULL, NULL, 0, NULL},

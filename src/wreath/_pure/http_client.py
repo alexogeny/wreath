@@ -150,9 +150,28 @@ def response_framing(
     return "close", -1
 
 
+def response_keeps_alive(
+    minor: int,
+    headers: list[tuple[bytes, bytes]],
+    framed: bool,
+) -> bool:
+    """Decide whether a framed HTTP/1.x response connection is reusable."""
+    connection_tokens = {
+        token.strip().lower()
+        for name, value in headers
+        if name == b"connection"
+        for token in value.split(b",")
+    }
+    reusable = framed and b"close" not in connection_tokens
+    if minor == 0:
+        reusable = reusable and b"keep-alive" in connection_tokens
+    return reusable
+
+
 __all__ = [
     "ParsedResponseHead",
     "parse_response_head",
     "response_framing",
+    "response_keeps_alive",
     "serialize_request",
 ]

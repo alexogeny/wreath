@@ -10,7 +10,12 @@ import pytest
 from wreath import _client_codec
 from wreath._client_codec import serialize_request as selected_serialize_request
 from wreath._native import _client, _core
-from wreath._pure.http_client import parse_response_head, serialize_request
+from wreath._pure.http_client import (
+    parse_response_head,
+    response_framing,
+    response_keeps_alive,
+    serialize_request,
+)
 
 
 def test_serialize_fixed_request() -> None:
@@ -226,6 +231,28 @@ def test_native_client_codec_randomized_parity() -> None:
             headers,
             body,
         ) == expected
+        framing_headers = rng.choice(
+            (
+                [],
+                [(b"content-length", str(rng.randrange(10_000)).encode())],
+                [(b"transfer-encoding", b"gzip"), (b"transfer-encoding", b"chunked")],
+            )
+        )
+        assert _client.response_framing(method, status, framing_headers) == (
+            response_framing(method, status, framing_headers)
+        )
+        connection_headers = rng.choice(
+            (
+                [],
+                [(b"connection", b"close")],
+                [(b"connection", b"upgrade, Keep-Alive")],
+            )
+        )
+        minor = rng.randrange(2)
+        framed = bool(rng.randrange(2))
+        assert _client.response_keeps_alive(minor, connection_headers, framed) == (
+            response_keeps_alive(minor, connection_headers, framed)
+        )
 
 
 @pytest.mark.skipif(_client is None, reason="native client extension is not built")
@@ -241,3 +268,17 @@ def test_native_client_codec_malformed_input_parity() -> None:
             parse_response_head(response)
         with pytest.raises(ValueError):
             _client.parse_response_head(response)
+
+    malformed_framing = (
+        [(b"content-length", b"5"), (b"content-length", b"7")],
+        [(b"content-length", b"five")],
+        [(b"transfer-encoding", b"chunked, gzip")],
+        [(b"transfer-encoding", b"chunked, chunked")],
+        [(b"content-length", b"5"), (b"transfer-encoding", b"chunked")],
+    )
+    for headers in malformed_framing:
+        with pytest.raises(ValueError) as pure_error:
+            response_framing("GET", 200, headers)
+        with pytest.raises(ValueError) as native_error:
+            _client.response_framing("GET", 200, headers)
+        assert str(native_error.value) == str(pure_error.value)
