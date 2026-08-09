@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from wreath._devtools import cpu_probe
-from wreath.postgres import Record
+from wreath.postgres import Record, RecordBatch
 from wreath.response import HTMLResponse
 from wreath.templates import Template
 
@@ -128,6 +128,47 @@ def _complete(iterations: int) -> None:
         _SINK = HTMLResponse(_TEMPLATE.render_bytes({"rows": rows}))
 
 
+def _batch_sort(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = RecordBatch(_ROWS)
+        rows.append(_EPHEMERAL)
+        rows.sort_by("message")
+        _SINK = rows
+
+
+def _batch_materialize(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        _SINK = RecordBatch(_ROWS)
+
+
+def _batch_append(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = RecordBatch(_ROWS)
+        rows.append(_EPHEMERAL)
+        _SINK = rows
+
+
+def _batch_render(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = RecordBatch(_ROWS)
+        rows.append(_EPHEMERAL)
+        rows.sort_by("message")
+        _SINK = _TEMPLATE.render_bytes({"rows": rows})
+
+
+def _batch_complete(iterations: int) -> None:
+    global _SINK
+    for _ in range(iterations):
+        rows = RecordBatch(_ROWS)
+        rows.append(_EPHEMERAL)
+        rows.sort_by("message")
+        _SINK = HTMLResponse(_TEMPLATE.render_bytes({"rows": rows}))
+
+
 def _response_only(iterations: int) -> None:
     global _SINK
     for _ in range(iterations):
@@ -144,6 +185,11 @@ ARMS: dict[str, Callable[[int], None]] = {
     "render-only": _render_only,
     "render-only-aa": _render_only,
     "complete": _complete,
+    "batch-sort": _batch_sort,
+    "batch-materialize": _batch_materialize,
+    "batch-append": _batch_append,
+    "batch-render": _batch_render,
+    "batch-complete": _batch_complete,
     "response-only": _response_only,
     "response-only-aa": _response_only,
     "complete-aa": _complete,

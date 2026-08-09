@@ -726,38 +726,16 @@ def _native_request(tick: Any) -> tuple[Any, bytes]:
 
 
 def _native_no_request_route(tick: Any) -> tuple[Any, bytes]:
-    """Architectural ablation: route and activate without a Request carrier.
-
-    This is deliberately not a public framework path yet. It prices the upper
-    bound for a startup-proved zero-argument route: native router lookup and a
-    synchronous handler remain, while Request construction and the dispatcher
-    coroutine are removed. A retained implementation must still preserve the
-    ordinary ASGI path; this arm exists to decide whether that work is worth
-    building before touching the framework.
-    """
+    """Public zero-argument route: routing and activation without a Request."""
     app = Wreath()
-    body = PreparedResponse(_BODY, media_type=b"application/json")
+    body = Response(_BODY)
 
     @app.get("/plain")
-    def plain() -> PreparedResponse:
+    async def plain() -> Response:
         tick()
         return body
 
-    app._compile_routes()
-    match = app._match
-
-    class App:
-        def _wreath_http(self, context: Any, receive: Any, send: Any) -> Any:
-            matched = match(context.method, context.path)
-            if matched is None:
-                raise RuntimeError("benchmark route did not match")
-            handler, _path_params = matched
-            response = handler()
-            return send.__self__._wreath_response(
-                response.status, response.headers, response.body
-            )
-
-    return App(), _request("/plain")
+    return app, _request("/plain")
 
 
 def _sync_handler(tick: Any) -> tuple[Wreath, bytes]:
