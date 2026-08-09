@@ -52,6 +52,16 @@ dev = [
   "grpcio>=1.60",
   "pytest>=8.4",
   "pytest-asyncio>=1.0",
+  # Parsing the CI files `wreath new --forge` writes, in tests/test_ci.py. No
+  # test suite can start a GitLab runner, so parsing them is the only evidence
+  # that a hand-built YAML emitter produced YAML -- and an indentation slip is
+  # exactly what a string assertion cannot see. Declared here rather than left
+  # to arrive as a transitive of the benchmark group (litestar and uvicorn both
+  # pull it), which is the mistake `cryptography` above documents: any
+  # `uv sync` without that group prunes it and the tests go quiet.
+  # Never a runtime dependency -- nothing under `src/wreath` imports yaml, and
+  # `wreath._ci` emits it as text.
+  "pyyaml>=6",
   # Opt-in, never in addopts: the default suite is ~3.5s and worker startup
   # eats the whole gain there. It pays on the full run (-m ''), where the
   # network and performance tests are included. See AGENTS.md.
