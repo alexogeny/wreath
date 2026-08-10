@@ -143,8 +143,8 @@ def default_renderer(*, is_tty: bool) -> Renderer:
 
 #: The hand-off from the projector thread to the writer.
 #:
-#: Was a class here, and a byte-for-byte twin of `_otlp.BoundedExportQueue`
-#: beside it: the same deque, the same lock, the same two counters, the same
+#: Was a class here, and a second copy of it beside `_otlp.BoundedExportQueue`:
+#: the same deque, the same lock, the same two counters, the same
 #: drop-and-count policy, differing only in the type of the thing queued. Both
 #: are now `wreath.queue.Queue`, which is that policy in C -- one call per item
 #: instead of a lock acquire, two increments, a length test and a method call.
