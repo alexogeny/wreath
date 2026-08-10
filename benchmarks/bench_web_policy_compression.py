@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from wreath._pure import compression as pure_compression
+from wreath import _compression as pure_compression
 from wreath._pure import webpolicy as pure_policy
 
 try:

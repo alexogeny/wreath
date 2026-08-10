@@ -5,7 +5,7 @@ from compression import zstd
 
 import pytest
 
-from wreath._pure.compression import (
+from wreath._compression import (
     ZSTD_DEFAULT_LEVEL,
     ZSTD_MAX_LEVEL,
     ZSTD_MIN_LEVEL,

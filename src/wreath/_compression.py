@@ -1,4 +1,14 @@
-"""Pure-Python facade over the stdlib native zlib and zstd implementations."""
+"""Response compression: a thin facade over the stdlib's C `zlib` and `zstd`.
+
+**There is no twin here and there must never be one**, which is why this does
+not live in `wreath._pure`. Every byte of compression below already runs in C --
+`zlib` and `compression.zstd` are CPython extensions -- so a hand-written
+`compression.c` would replace a mature, fuzzed, widely-deployed implementation
+with one of ours and be strictly worse at it. What this module adds is Wreath's
+policy: a mandatory output bound on decompression, a level range asked of
+libzstd rather than restated, and a `finish()` that raises rather than emitting
+a second empty frame.
+"""
 
 from __future__ import annotations
 
