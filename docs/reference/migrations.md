@@ -8,7 +8,9 @@ than silently falling back to a different implementation.
 The direct catalog destination, single-schema `detect` and `check` commands,
 packed image diff, deterministic named `generate` review plan, checksummed
 artifact and chain verification, and strict `show`/`status` commands are available
-now. The single-schema runner applies supported, fully automatic artifacts under
+now. `generate_single_baseline` and the `baseline` command build a verified,
+zero-operation root for a matching existing catalog; `adopt_single_baseline`
+records that root without application DDL. The single-schema runner applies supported, fully automatic artifacts under
 an advisory lock with history and source/target catalog verification, and
 `revert_single_artifact` performs the exact inverse — the reverse plan is derived
 in metal from the same artifact, guarded by a native scan that refuses to

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.orm import (
     CENTRAL_SCHEMA,
@@ -37,19 +38,23 @@ class RecordingConnection:
         return []
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         self.statements.append(sql)
         return "OK"
 
     async def fetch(self, sql: str, *args: object) -> list:
+        check_for(self, sql, args)
         self.statements.append(sql)
         return list(self._result(sql))
 
     async def fetchrow(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         self.statements.append(sql)
         rows = self._result(sql)
         return rows[0] if rows else None
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         row = await self.fetchrow(sql, *args)
         return row[0] if row else None
 

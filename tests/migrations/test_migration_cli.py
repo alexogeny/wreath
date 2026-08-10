@@ -12,6 +12,7 @@ import pytest
 from wreath._cli import build_parser, main
 from wreath._migrations import cli as _migrations_cli
 from wreath.migrations import (
+    MigrationBaseline,
     MigrationDetection,
     MigrationGeneration,
     NativeMigrationDiff,
@@ -81,6 +82,25 @@ def test_migration_generate_parser_is_literal() -> None:
     assert namespace.json is True
 
 
+def test_migration_baseline_parser_requires_review_output_and_identity() -> None:
+    namespace = build_parser().parse_args(
+        [
+            "migrations",
+            "baseline",
+            "example:app",
+            "--output",
+            "migrations/current",
+            "--migration-id",
+            MIGRATION_ID.hex(),
+            "--adopt",
+        ]
+    )
+
+    assert namespace.migration_action == "baseline"
+    assert namespace.output == "migrations/current"
+    assert namespace.adopt is True
+
+
 def test_migration_status_parser_requires_ordered_artifacts() -> None:
     namespace = build_parser().parse_args(
         ["migrations", "status", "example:app", "0001.bin", "0002.bin", "--json"]
@@ -95,8 +115,13 @@ def test_migration_status_parser_requires_ordered_artifacts() -> None:
 def test_migration_apply_parser_requires_explicit_artifact_and_supports_approval() -> None:
     namespace = build_parser().parse_args(
         [
-            "migrations", "apply", "example:app", "migration.bin",
-            "--allow-destructive", "--dsn-env", "DEPLOY_DATABASE_URL",
+            "migrations",
+            "apply",
+            "example:app",
+            "migration.bin",
+            "--allow-destructive",
+            "--dsn-env",
+            "DEPLOY_DATABASE_URL",
         ]
     )
 
@@ -109,8 +134,14 @@ def test_migration_apply_parser_requires_explicit_artifact_and_supports_approval
 def test_migration_down_parser_takes_an_artifact_and_a_force_override() -> None:
     namespace = build_parser().parse_args(
         [
-            "migrations", "down", "example:app", "migrations/0002/migration.bin",
-            "--allow-destructive", "--force", "--dsn-env", "DEPLOY_DATABASE_URL",
+            "migrations",
+            "down",
+            "example:app",
+            "migrations/0002/migration.bin",
+            "--allow-destructive",
+            "--force",
+            "--dsn-env",
+            "DEPLOY_DATABASE_URL",
         ]
     )
 
@@ -124,9 +155,7 @@ def test_migration_down_parser_takes_an_artifact_and_a_force_override() -> None:
 @pytest.mark.asyncio
 async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -> None:
     monkeypatch.delenv("MISSING_MIGRATION_DSN", raising=False)
-    application = SimpleNamespace(
-        _orm_registries={"main": SimpleNamespace(database=object())}
-    )
+    application = SimpleNamespace(_orm_registries={"main": SimpleNamespace(database=object())})
     namespace = argparse.Namespace(
         database="main",
         dsn_env="MISSING_MIGRATION_DSN",
@@ -140,7 +169,8 @@ async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_status_never_falls_back_to_request_pool_credentials(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ) -> None:
     monkeypatch.delenv("MISSING_MIGRATION_DSN", raising=False)
     artifact = tmp_path / "migration.bin"
@@ -161,9 +191,7 @@ async def test_status_never_falls_back_to_request_pool_credentials(
 
 
 def test_migration_show_parser_is_literal() -> None:
-    namespace = build_parser().parse_args(
-        ["migrations", "show", "0001/migration.bin", "--json"]
-    )
+    namespace = build_parser().parse_args(["migrations", "show", "0001/migration.bin", "--json"])
 
     assert namespace.command == "migrations"
     assert namespace.migration_action == "show"
@@ -171,9 +199,7 @@ def test_migration_show_parser_is_literal() -> None:
     assert namespace.json is True
 
 
-def test_migration_show_verifies_and_prints_machine_readable_metadata(
-    tmp_path, capsys
-) -> None:
+def test_migration_show_verifies_and_prints_machine_readable_metadata(tmp_path, capsys) -> None:
     path = tmp_path / "migration.bin"
     path.write_bytes(artifact_bytes())
 
@@ -235,9 +261,7 @@ def test_named_plan_unpacking_is_bounded_and_literal() -> None:
         b"WMP1"
         + (1).to_bytes(4, "little")
         + (1).to_bytes(4, "little")
-        + struct.pack(
-            "<IIHHHHHH", 3, 2, *(len(value) for value in values), 0
-        )
+        + struct.pack("<IIHHHHHH", 3, 2, *(len(value) for value in values), 0)
         + b"".join(values)
     )
 
@@ -311,11 +335,20 @@ async def test_generate_can_write_one_verified_immutable_artifact_directory(
     monkeypatch, tmp_path
 ) -> None:
     class Database:
-        async def start(self) -> None: pass
-        async def stop(self) -> None: pass
-        def pool(self, workload: str) -> object: return object()
-        async def acquire(self, workload: str) -> object: return object()
-        async def release(self, workload: str, connection: object) -> None: pass
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        def pool(self, workload: str) -> object:
+            return object()
+
+        async def acquire(self, workload: str) -> object:
+            return object()
+
+        async def release(self, workload: str, connection: object) -> None:
+            pass
 
     registry = SimpleNamespace(database=Database())
     application = SimpleNamespace(_orm_registries={"main": registry})
@@ -327,9 +360,7 @@ async def test_generate_can_write_one_verified_immutable_artifact_directory(
             b"s" * 32,
             NativeMigrationDiff(0, EMPTY_TAPE),
             NativeMigrationPlan(0, b"WMP1" + (1).to_bytes(4, "little") + bytes(4)),
-            NativeMigrationSql(
-                0, 0, 0, b"WMS1" + (1).to_bytes(4, "little") + bytes(4)
-            ),
+            NativeMigrationSql(0, 0, 0, b"WMS1" + (1).to_bytes(4, "little") + bytes(4)),
         )
 
     monkeypatch.setattr(_migrations_cli, "generate_single_plan", generate)
@@ -356,6 +387,131 @@ async def test_generate_can_write_one_verified_immutable_artifact_directory(
 
 
 @pytest.mark.asyncio
+async def test_baseline_writes_inventory_before_optional_adoption(monkeypatch, tmp_path) -> None:
+    class Database:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        def pool(self, workload: str) -> object:
+            return object()
+
+        async def acquire(self, workload: str) -> object:
+            return object()
+
+        async def release(self, workload: str, connection: object) -> None:
+            pass
+
+    registry = SimpleNamespace(database=Database())
+    application = SimpleNamespace(_orm_registries={"main": registry})
+    descriptor = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
+    artifact = _build_native_artifact(
+        migration_id=MIGRATION_ID,
+        parent_checksum=bytes(32),
+        source_fingerprint=b"f" * 32,
+        target_fingerprint=b"f" * 32,
+        operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
+    )
+
+    async def generate(selected, connection, *, migration_id) -> MigrationBaseline:
+        assert selected is registry
+        assert migration_id == MIGRATION_ID
+        return MigrationBaseline(artifact, b"f" * 32, descriptor, 0)
+
+    monkeypatch.setattr(_migrations_cli, "generate_single_baseline", generate)
+    output = tmp_path / "current"
+    namespace = argparse.Namespace(
+        database="main",
+        output=str(output),
+        migration_id=MIGRATION_ID.hex(),
+        adopt=False,
+        dsn_env="MISSING",
+    )
+
+    payload = await _migrations_cli._baseline(namespace, application)
+
+    assert payload["application_ddl_operations"] == 0
+    assert payload["adopted"] is False
+    assert (output / "migration.sql").read_text() == ""
+    assert json.loads((output / "migration.json").read_text())["objects"] == []
+
+
+@pytest.mark.asyncio
+async def test_baseline_can_adopt_the_previously_reviewed_directory(monkeypatch, tmp_path) -> None:
+    class Database:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        def pool(self, workload: str) -> object:
+            return object()
+
+        async def acquire(self, workload: str) -> object:
+            return object()
+
+        async def release(self, workload: str, connection: object) -> None:
+            pass
+
+    class Connection:
+        async def close(self) -> None:
+            pass
+
+    registry = SimpleNamespace(database=Database())
+    application = SimpleNamespace(_orm_registries={"main": registry})
+    descriptor = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
+    artifact = _build_native_artifact(
+        migration_id=MIGRATION_ID,
+        parent_checksum=bytes(32),
+        source_fingerprint=b"f" * 32,
+        target_fingerprint=b"f" * 32,
+        operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
+    )
+
+    async def generate(selected, connection, *, migration_id) -> MigrationBaseline:
+        return MigrationBaseline(artifact, b"f" * 32, descriptor, 0)
+
+    adopted: list[bytes] = []
+
+    async def adopt(selected, connection, data: bytes) -> object:
+        adopted.append(data)
+        return object()
+
+    async def connect(dsn: str) -> Connection:
+        return Connection()
+
+    monkeypatch.setattr(_migrations_cli, "generate_single_baseline", generate)
+    monkeypatch.setattr(_migrations_cli, "adopt_single_baseline", adopt)
+    monkeypatch.setattr(_migrations_cli, "connect_migration", connect)
+    monkeypatch.setenv("BASELINE_DSN", "postgresql://migration")
+    output = tmp_path / "current"
+    output.mkdir()
+    (output / "migration.bin").write_bytes(artifact.data)
+    (output / "migration.json").write_text("{}\n")
+    (output / "migration.sql").write_text("")
+    namespace = argparse.Namespace(
+        database="main",
+        output=str(output),
+        migration_id=MIGRATION_ID.hex(),
+        adopt=True,
+        dsn_env="BASELINE_DSN",
+    )
+
+    payload = await _migrations_cli._baseline(namespace, application)
+
+    assert adopted == [artifact.data]
+    assert payload["adopted"] is True
+    assert json.loads((output / "migration.json").read_text())["adopted"] is True
+
+
+@pytest.mark.asyncio
 async def test_status_requires_chain_code_and_catalog_to_agree(monkeypatch, tmp_path) -> None:
     artifact = _build_native_artifact(
         migration_id=MIGRATION_ID,
@@ -369,9 +525,7 @@ async def test_status_requires_chain_code_and_catalog_to_agree(monkeypatch, tmp_
     path = tmp_path / "migration.bin"
     path.write_bytes(artifact.data)
 
-    registry = SimpleNamespace(
-        specs=(SimpleNamespace(schema="app"),), database=object()
-    )
+    registry = SimpleNamespace(specs=(SimpleNamespace(schema="app"),), database=object())
     application = SimpleNamespace(_orm_registries={"main": registry})
 
     class Connection:
@@ -391,9 +545,7 @@ async def test_status_requires_chain_code_and_catalog_to_agree(monkeypatch, tmp_
 
     async def detect(selected, connection) -> MigrationDetection:
         assert selected is registry
-        return MigrationDetection(
-            b"t" * 32, b"t" * 32, NativeMigrationDiff(0, EMPTY_TAPE)
-        )
+        return MigrationDetection(b"t" * 32, b"t" * 32, NativeMigrationDiff(0, EMPTY_TAPE))
 
     async def connect(dsn: str) -> Connection:
         assert dsn == "postgresql://migration"
