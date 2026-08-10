@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.orm import Mapped, Model, column
 from wreath.orm.registry import Registry
@@ -56,14 +57,17 @@ class FakeTransaction:
         return False
 
     async def fetch(self, sql: str, *args: object) -> list[tuple]:
+        check_for(self, sql, args)
         self.connection.statements.append((sql, args))
         return self.connection.ledger
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         self.connection.statements.append((sql, args))
         return 1 if self.connection.already else None
 
     async def fetchrow(self, sql: str, *args: object) -> tuple:
+        check_for(self, sql, args)
         self.connection.appended.append((sql, args))
         return (7, 1)
 

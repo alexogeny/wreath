@@ -43,8 +43,8 @@ from ._flight_schema import (
     CaptureSlab,
     MetadataImage,
     SchemaError,
+    decode_metadata_image,
 )
-from ._pure.flight import decode_metadata_image
 
 __all__ = [
     "MAGIC",
