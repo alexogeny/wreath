@@ -46,9 +46,9 @@ from typing import Any
 
 #: A broadcast encodes the whole payload once per room, so this is the one
 #: base64 call in the tree that reliably meets large inputs, where the native
-#: encoder's AVX2 arm is about ten times `base64.b64encode`. The dispatch and
-#: the twin live in `wreath._b64`; this module used to carry its own copy of
-#: both, as did `binding`.
+#: encoder's AVX2 arm is about ten times `base64.b64encode`. The dispatch
+#: lives in `wreath._b64`; this module used to carry its own copy of it, as
+#: did `binding`.
 from ._b64 import b64_encode as _b64encode_str
 from ._busbridge import BusBridge
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
