@@ -1,6 +1,6 @@
 """Declaration errors are refused where they are declared, not where they land.
 
-`docs/decisions/0019-refuse-rather-than-half-wire.md` names the family: a
+the refuse-rather-than-half-wire rule in `AGENTS.md` names the family: a
 declaration whose shape is knowable at registration, accepted there and then
 failing per request as a status that blames the caller. Each case below was
 observed as a runtime failure before it was a refusal, and the comment on each

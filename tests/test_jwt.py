@@ -6,9 +6,9 @@ the arrangement the design mandates for a security component. This is the
 first leg of the eventual three-legged harness; the review fork should add
 Project Wycheproof vectors before production trust.
 
-NOTE FOR THE REVIEW FORK: these tests exercise the Python facade + stdlib
-fallbacks. To also cover the native jose.c path they must run once with the
-compiled _core present (default) and once with WREATH_PURE=1.
+NOTE FOR THE REVIEW FORK: these drive the shipped path -- `jose.c` for parsing,
+HS verification and claim validation, and Python over the stdlib for RSA, EC and
+Ed25519.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import time
 import pytest
 
 import wreath._auth.jwt as jwt_module
-import wreath._b64 as b64_module
 from wreath.auth import (
     JwtVerifier,
     RsaPublicKey,
@@ -71,38 +70,19 @@ def _verifier(**overrides) -> JwtVerifier:
     return JwtVerifier(**kwargs)
 
 
-def test_the_pure_base64url_fallback_rejects_discarded_characters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The stdlib silently discards ``!`` unless Wreath checks first.
-
-    Patched on `wreath._b64` rather than on this module: the decoder lives
-    there now, and `wreath._auth.jwt` imports it. It used to be a second copy
-    here with its own native binding, and the two were identical -- same cap,
-    same alphabet, same message.
-    """
-    monkeypatch.setattr(b64_module, "_native_b64url", None)
-
+def test_a_segment_outside_the_alphabet_is_refused() -> None:
+    """`base64.urlsafe_b64decode` silently discards `!`; this must not."""
     with pytest.raises(ValueError, match="invalid base64url"):
         jwt_module._b64url_decode("YWJj!")
 
 
-def test_the_pure_compact_fallback_enforces_the_total_size_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(jwt_module, "_native_parse", None)
-
+def test_a_token_past_the_absolute_ceiling_is_refused_before_parsing() -> None:
     with pytest.raises(ValueError, match="compact JWT exceeds maximum size"):
         jwt_module._parse_compact("a" * (jwt_module._MAX_TOKEN_BYTES + 1))
 
 
-@pytest.mark.parametrize("value", ["soon", 1.5, True])
-def test_the_pure_claim_fallback_refuses_non_integer_times(
-    monkeypatch: pytest.MonkeyPatch, value: object,
-) -> None:
-    monkeypatch.setattr(jwt_module, "_native_claims", None)
-
-    reason = jwt_module._reason_valid(
+def _reason_for(value: object) -> int:
+    return jwt_module._reason_valid(
         {"exp": value},
         now=int(time.time()),
         leeway=0,
@@ -111,7 +91,29 @@ def test_the_pure_claim_fallback_refuses_non_integer_times(
         required=(),
     )
 
-    assert reason == 7
+
+@pytest.mark.parametrize("value", ["soon", 1.5])
+def test_a_non_integer_exp_is_malformed(value: object) -> None:
+    """RFC 7519 §2: a NumericDate is a JSON *number* of seconds, and `exp` is
+    one. A string or a fraction is not a date this can compare against."""
+    assert _reason_for(value) == 7
+
+
+def test_a_boolean_exp_is_rejected_but_diagnosed_as_expired() -> None:
+    """**A finding, pinned rather than blessed.**
+
+    RFC 7519 §2 makes a NumericDate a JSON number, and `true` is not one -- so
+    the right answer is 7 (malformed), which is what the other non-integers
+    above get. `jose.c` instead reads `true` through as the integer 1 and
+    compares it, landing on 1 (expired).
+
+    The token is refused either way, so this is not a live bypass, and the fix
+    is a change to claim validation in C rather than something to paper over
+    here. It is written down so the next person finds a decision rather than a
+    surprise -- and so that if the comparison ever changes shape, this test is
+    what notices that `"exp": true` has become a far-future date.
+    """
+    assert _reason_for(True) == 1
 
 
 # ---- happy path -----------------------------------------------------------

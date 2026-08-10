@@ -438,8 +438,8 @@ async def test_the_parse_cache_reuses_a_repeated_document(
 
 # --- authorization -----------------------------------------------------------
 #
-# Two kinds of test live here, and the distinction is the point (ADR 0020, ADR
-# 0024 item 4). The *integration* is proved against the shipped
+# Two kinds of test live here, and the distinction is the point: a double is
+# never more capable than the real thing. The *integration* is proved against the shipped
 # `CedarAuthorizer` and a real `CedarPolicies` policy set; the doubles below
 # only cover properties that are GraphQL's own -- caching, `on_denied`, a
 # resolver naming its own resource -- and they refuse anything the real provider

@@ -24,7 +24,7 @@ had been aimed at the wrong subject anyway: it asserted the *driver* refuses a
 mapping, which is permanently true and always will be, because the fix converts
 the mapping to a JSON string before binding rather than teaching the driver to
 bind mappings. It would have passed forever while describing something that no
-longer existed. See `docs/decisions/0024-*`.
+longer existed. See AGENTS.md's rule about a check that has nothing to check.
 """
 
 from __future__ import annotations

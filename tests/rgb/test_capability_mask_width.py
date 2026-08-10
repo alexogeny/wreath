@@ -2,40 +2,19 @@
 
 `Wreath._compile_capabilities` assigns `1 << index` per distinct role and
 permission name, so an application with more than 64 of them produces clauses
-wider than a machine word. This pins that the whole path -- mask building, the
-pure table, and the native table -- stays exact there.
+wider than a machine word. This pins that the whole path -- mask building and
+the route table -- stays exact there.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from wreath._pure.authz import build_capability_mask as pure_build_capability_mask
-from wreath._pure.dtrouter import DecisionRouteTable as PureDecisionRouteTable
+from wreath._native import _core
 from wreath.app import Wreath
 
-try:
-    from wreath._native import _core
-except ImportError:  # pragma: no cover
-    _core = None
-
-_TABLES = [
-    pytest.param(PureDecisionRouteTable, id="pure"),
-    pytest.param(
-        None if _core is None else _core.DecisionRouteTable,
-        id="native",
-        marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
-    ),
-]
-
-_BUILDERS = [
-    pytest.param(pure_build_capability_mask, id="pure"),
-    pytest.param(
-        None if _core is None else _core.build_capability_mask,
-        id="native",
-        marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
-    ),
-]
+_TABLES = [_core.DecisionRouteTable]
+_BUILDERS = [_core.build_capability_mask]
 
 #: Wider than a machine word on purpose: index 0 is `authenticated`, so a role
 #: at index 80 is bit 80.

@@ -37,7 +37,7 @@ class FakeNotification:
 class FakeListenConnection:
     """A connection whose notification stream ends when it is dropped.
 
-    Mirrors `wreath._pure.postgres.Connection.notifications`, whose iterator
+    Mirrors `wreath._pgdriver.Connection.notifications`, whose iterator
     returns (rather than raising) once the connection closes -- the detail that
     made this failure invisible.
     """

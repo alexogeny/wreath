@@ -75,13 +75,9 @@ async def database() -> Any:
         await db.stop()
 
 
-@pytest.fixture(params=[False, True], ids=["native", "pure"])
-def protocol(request: Any, monkeypatch: Any) -> type:
-    """Drive the native HTTP/1 protocol and the pure reference in turn."""
-    if request.param:
-        monkeypatch.setenv("WREATH_PURE", "1")
-    else:
-        monkeypatch.delenv("WREATH_PURE", raising=False)
+@pytest.fixture
+def protocol() -> type:
+    """The HTTP/1 protocol class, resolved the way `Server` resolves it."""
     return _select_protocol()
 
 

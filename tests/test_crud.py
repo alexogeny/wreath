@@ -133,7 +133,7 @@ async def test_readonly_and_operations_subset() -> None:
 # clauses from `writable_fields` / `output_fields` and the whole suite stayed
 # green. Each control was correct; none of them was watched. The test above is
 # where they looked like they lived -- it is named for `readonly=` and asserts
-# only the `operations=` subset, which is ADR 0024's shape exactly.
+# only the `operations=` subset, which is exactly the shape of a check with nothing to check.
 
 
 def _owned_model():

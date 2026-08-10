@@ -14,7 +14,7 @@ works.
 
 So the fiction is frozen here instead of borrowed from shipping code. A check
 built to catch a known bug has to keep catching it after the bug is gone; see
-`docs/decisions/0024-name-the-failure-a-check-that-silently-has-nothing-to-check.md`.
+`AGENTS.md's rule about a check that has nothing to check`.
 
 Nothing imports this outside `tests/test_docs_codeblocks.py`.
 """

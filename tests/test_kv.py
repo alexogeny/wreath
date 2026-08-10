@@ -1,30 +1,36 @@
-"""`wreath.kv` behaviour, on whichever arm the facade selected and on the pure one.
+"""`wreath.kv` behaviour.
 
-Both arms are driven directly rather than through the facade alone, because the
-facade selects exactly one of them per process and a suite that only tested the
-selection would leave the other completely unexercised on every machine.
+`KV` is an LRU table with an optional per-entry deadline. That is a specified
+policy, not an implementation detail -- `set` evicts the least recently used
+entry at the ceiling, `items` reports most recently used first, and an entry is
+gone once `now` reaches its deadline -- so the randomised sweep at the bottom
+drives it against that specification written out in `_ModelKV`.
 
-The randomised cross-check at the bottom is the one that has already earned its
-place: it found the native table failing to add its rebuild's expired count to
-`expirations`, while every operation result and every other counter matched.
-That is the shape of divergence nothing else catches -- the table behaves
-correctly and only the number an operator reads is wrong.
+The counters are checked by conservation rather than by the model, because
+expiry is lazy: an entry whose deadline passed is reclaimed on the next read or
+rebuild that reaches it, so `expirations` at any instant depends on what has
+been touched, not only on what has died. What cannot vary is the total. Every
+key that entered has been evicted, expired, removed, or is still resident, and
+the one defect this file has already caught -- the native rebuild reclaiming
+expired entries without adding them to `expirations` -- is exactly a break in
+that sum.
 """
 
 from __future__ import annotations
 
 import random
+from collections import OrderedDict
 
 import pytest
 
-from wreath._pure.kv import KV as PureKV
 from wreath.kv import KV, Stats, stats
 
-ARMS = [PureKV]
-if KV is not PureKV:
-    ARMS.append(KV)
+ARMS = [KV]
+ARM_IDS = ["kv"]
 
-ARM_IDS = ["pure", "native"][: len(ARMS)]
+#: A sentinel no stored value can equal, so "absent" is distinguishable from a
+#: stored `None` or a stored `"-"`.
+_ABSENT = object()
 
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)
@@ -315,12 +321,11 @@ def test_now_is_accepted_positionally_on_both_arms(arm) -> None:
     `wreath.cache.BoundedCache` and `wreath.store.MemoryStore` call these four
     methods with `now` as a positional argument, deliberately: a keyword forces
     the C method to build an argument tuple and a keyword dict per call, which
-    together cost more than the lookup they carry. The pure twin kept `now`
-    keyword-only for a while, so every one of those calls raised `TypeError`
-    under `WREATH_PURE=1` while the native-arm suite stayed entirely green.
+    together cost more than the lookup they carry.
 
-    The parity suite could not catch it -- it calls both arms the same way -- so
-    the calling *convention* needs a test of its own.
+    A behaviour test cannot catch a broken *convention*, because it calls the
+    method whichever way it likes and gets the right answer either way. This one
+    calls it the way the callers do.
     """
     table = arm(max_entries=8, ttl=10.0)
     assert table.claim("key", "held", None, 0.0) is True
@@ -529,20 +534,100 @@ def test_a_cycle_through_the_table_is_collectable(arm) -> None:
     assert reference() is None, "the cycle collector must be able to see through it"
 
 
-# --- the two arms, on identical operation sequences -------------------------
+# --- the specification, and a randomised sweep against it -------------------
 
 
-def _script(seed: int) -> list[tuple[str, object, object]]:
+class _ModelKV:
+    """`KV`'s policy written out: an ordered dict, MRU first, deadline per entry.
+
+    Deliberately the slow obvious thing -- no rebuild, no slot table, no lazy
+    reclaim. It is not a transcription of the table under test; it is the four
+    rules the docstrings state, in the form that makes them easy to read:
+    a hit moves to the front, an insert at the ceiling drops the back, a
+    deadline at or before `now` means gone, and `keep_deadline` leaves an
+    existing window alone.
+    """
+
+    def __init__(self, max_entries: int, ttl: float | None = None) -> None:
+        self.max_entries, self.ttl = max_entries, ttl
+        self.data: OrderedDict[str, tuple[object, float | None]] = OrderedDict()
+
+    def _live(self, key: str, now: float) -> tuple[object, float | None] | None:
+        entry = self.data.get(key)
+        if entry is None:
+            return None
+        if entry[1] is not None and now >= entry[1]:
+            del self.data[key]
+            return None
+        return entry
+
+    def _deadline(self, now: float) -> float | None:
+        return None if self.ttl is None else now + self.ttl
+
+    def get(self, key: str, default: object = None, now: float = 0.0) -> object:
+        entry = self._live(key, now)
+        if entry is None:
+            return default
+        self.data.move_to_end(key, last=False)
+        return entry[0]
+
+    def set(self, key: str, value: object, now: float = 0.0, keep: bool = False) -> None:
+        entry = self._live(key, now)
+        deadline = entry[1] if (keep and entry is not None) else self._deadline(now)
+        self.data[key] = (value, deadline)
+        self.data.move_to_end(key, last=False)
+        while len(self.data) > self.max_entries:
+            self.data.popitem(last=True)
+
+    def claim(self, key: str, value: object, now: float = 0.0) -> bool:
+        if self._live(key, now) is not None:
+            return False
+        self.set(key, value, now)
+        return True
+
+    def pop(self, key: str, default: object = None, now: float = 0.0) -> object:
+        entry = self._live(key, now)
+        if entry is None:
+            return default
+        del self.data[key]
+        return entry[0]
+
+    def touch(self, key: str, now: float = 0.0) -> bool:
+        entry = self._live(key, now)
+        if entry is None:
+            return False
+        self.data[key] = (entry[0], self._deadline(now))
+        self.data.move_to_end(key, last=False)
+        return True
+
+    def items(self, now: float = 0.0) -> list[tuple[str, object]]:
+        for key in list(self.data):
+            self._live(key, now)
+        return [(key, value) for key, (value, _) in self.data.items()]
+
+    def purge(self, now: float = 0.0) -> int:
+        before = len(self.data)
+        for key in list(self.data):
+            self._live(key, now)
+        return before - len(self.data)
+
+
+#: Every operation that takes an explicit `now`. `delete` is excluded on
+#: purpose: it has no `now` parameter, so it judges expiry against the real
+#: monotonic clock rather than the script's, and no model driven by script time
+#: could agree with it. It gets its own test above.
+_OPERATIONS = ("get", "set", "set_keep", "claim", "pop", "touch", "items", "purge")
+
+
+def _script(seed: int) -> list[tuple[str, str, tuple[float, int]]]:
     """A deterministic sequence of operations, weighted toward the edges."""
     random.seed(seed)
-    steps: list[tuple[str, object, object]] = []
+    steps: list[tuple[str, str, tuple[float, int]]] = []
     now = 0.0
     for index in range(600):
         now += random.choice([0.0, 0.0, 0.0, 1.0, 7.0])
         key = f"k{random.randrange(20)}"
-        steps.append((random.choice(
-            ["get", "set", "set_keep", "claim", "delete", "pop", "touch", "items", "purge"]
-        ), key, (now, index)))
+        steps.append((random.choice(_OPERATIONS), key, (now, index)))
     return steps
 
 
@@ -557,8 +642,6 @@ def _run(table, steps) -> list[object]:
             results.append(table.set(key, index, now=now, keep_deadline=True))
         elif operation == "claim":
             results.append(table.claim(key, index, now=now))
-        elif operation == "delete":
-            results.append(table.delete(key))
         elif operation == "pop":
             results.append(table.pop(key, "-", now=now))
         elif operation == "touch":
@@ -566,20 +649,136 @@ def _run(table, steps) -> list[object]:
         elif operation == "items":
             results.append(table.items(now=now))
         else:
-            results.append(table.purge(now=now))
+            # The count is how many dead entries this call happened to reclaim,
+            # which depends on how much lazy expiry already ran -- not something
+            # the policy specifies. `test_purge_reclaims_every_dead_entry` pins
+            # it where the answer is determined. What is compared is that purge
+            # changes nothing observable, so `items` still agrees afterwards.
+            table.purge(now=now)
+            results.append(("purged", table.items(now=now)))
     return results
 
 
-@pytest.mark.skipif(KV is PureKV, reason="only one arm is built here")
+def _run_model(model: _ModelKV, steps) -> list[object]:
+    results: list[object] = []
+    for operation, key, (now, index) in steps:
+        if operation == "get":
+            results.append(model.get(key, "-", now))
+        elif operation == "set":
+            results.append(model.set(key, index, now))
+        elif operation == "set_keep":
+            results.append(model.set(key, index, now, keep=True))
+        elif operation == "claim":
+            results.append(model.claim(key, index, now))
+        elif operation == "pop":
+            results.append(model.pop(key, "-", now))
+        elif operation == "touch":
+            results.append(model.touch(key, now))
+        elif operation == "items":
+            results.append(model.items(now))
+        else:
+            model.purge(now)
+            results.append(("purged", model.items(now)))
+    return results
+
+
 @pytest.mark.parametrize("seed", range(12))
 @pytest.mark.parametrize("max_entries", [1, 2, 8, 64])
 @pytest.mark.parametrize("ttl", [None, 5.0])
-def test_both_arms_agree_step_for_step(seed: int, max_entries: int, ttl: float | None) -> None:
+def test_the_table_matches_its_specification_step_for_step(
+    seed: int, max_entries: int, ttl: float | None
+) -> None:
     steps = _script(seed)
-    native = KV(max_entries=max_entries, ttl=ttl)
-    pure = PureKV(max_entries=max_entries, ttl=ttl)
-    assert _run(native, steps) == _run(pure, steps)
-    # Counters too, and this is not decoration: the native table used to drop
-    # the expired entries its rebuild reclaimed without counting them, which
-    # every assertion above passed straight through.
-    assert stats(native) == stats(pure)
+    table = KV(max_entries=max_entries, ttl=ttl)
+    model = _ModelKV(max_entries=max_entries, ttl=ttl)
+    assert _run(table, steps) == _run_model(model, steps)
+    # `items` compares above, so recency order is already pinned; this is the
+    # resident set at the end, which a table that leaked a dead entry would fail
+    # even with every operation result correct.
+    assert table.items(now=steps[-1][2][0]) == model.items(steps[-1][2][0])
+
+
+@pytest.mark.parametrize("seed", range(12))
+@pytest.mark.parametrize("max_entries", [1, 2, 8, 64])
+@pytest.mark.parametrize("ttl", [None, 5.0])
+def test_every_key_that_entered_is_accounted_for(
+    seed: int, max_entries: int, ttl: float | None
+) -> None:
+    """Admissions == evictions + expirations + removals + residents.
+
+    The counters are what an operator reads, and they are the half a
+    result-for-result comparison passes straight through: the native rebuild
+    once reclaimed expired entries without adding them to `expirations`, and
+    every operation still answered correctly. Conservation is what that breaks.
+    """
+    steps = _script(seed)
+    table = KV(max_entries=max_entries, ttl=ttl)
+
+    admissions = removals = 0
+    for operation, key, (now, index) in steps:
+        if operation == "get":
+            table.get(key, "-", now=now)
+        elif operation in ("set", "set_keep"):
+            # An overwrite is not an admission: the key was already resident.
+            resident = table.get(key, _ABSENT, now=now) is not _ABSENT
+            table.set(key, index, now=now, keep_deadline=operation == "set_keep")
+            admissions += not resident
+        elif operation == "claim":
+            admissions += table.claim(key, index, now=now)
+        elif operation == "pop":
+            removals += table.pop(key, _ABSENT, now=now) is not _ABSENT
+        elif operation == "touch":
+            table.touch(key, now=now)
+        elif operation == "items":
+            table.items(now=now)
+        else:
+            table.purge(now=now)
+
+    # Anything still holding a passed deadline has not been reclaimed yet, so
+    # bring the lazy half up to date before reading the counters.
+    final = steps[-1][2][0]
+    table.purge(now=final)
+    counters = stats(table)
+    # `items(now=)` rather than `counters.size`: `len(table)` takes no `now`, so
+    # it judges every deadline against the real monotonic clock and reads zero
+    # for a table driven on a script clock.
+    resident = len(table.items(now=final))
+    assert admissions == (
+        counters.evictions + counters.expirations + removals + resident
+    ), (counters, resident, admissions, removals)
+
+
+def test_purge_reclaims_every_dead_entry_and_leaves_the_live_ones() -> None:
+    """The one arrangement where the count is determined: nothing read since.
+
+    Four entries expire and four do not, and no operation between the writes
+    and the purge touches any of them -- so no lazy reclaim has happened and
+    `purge` must report exactly the four that died.
+    """
+    table = KV(max_entries=16, ttl=5.0)
+    for index in range(4):
+        table.set(f"dead{index}", index, now=0.0)
+    for index in range(4):
+        table.set(f"live{index}", index, now=8.0)
+
+    assert table.purge(now=9.0) == 4
+    assert table.purge(now=9.0) == 0, "a second purge finds nothing left to reclaim"
+    assert sorted(key for key, _ in table.items(now=9.0)) == [f"live{i}" for i in range(4)]
+
+
+def test_a_rebuild_counts_every_expired_entry_it_reclaims() -> None:
+    """The defect this file caught, as a test that names it.
+
+    Expiry is lazy, so the entries below are still occupying slots when the
+    insert at the end forces a rebuild. All eight died; `expirations` must say
+    eight, whether they were reclaimed one at a time on read or all at once.
+    """
+    table = KV(max_entries=8, ttl=5.0)
+    for index in range(8):
+        table.set(f"k{index}", index, now=0.0)
+    assert stats(table).expirations == 0
+
+    table.set("trigger", "t", now=10.0)  # every prior deadline passed at 5.0
+    table.purge(now=10.0)
+    assert stats(table).expirations == 8
+    assert table.items(now=10.0) == [("trigger", "t")]

@@ -2,7 +2,7 @@
 
 Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database. These
 exercise the real claim/complete/retry/fencing SQL against Postgres; the fake-DB
-unit tests cover the pure paths.
+unit tests cover the Python paths.
 """
 
 from __future__ import annotations
