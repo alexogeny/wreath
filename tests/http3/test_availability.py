@@ -1,4 +1,4 @@
-"""HTTP/3 build isolation and availability (ADR 0011).
+"""HTTP/3 build isolation and availability (HTTP/3 is opt-in at build time).
 
 These run in the default (no-QUIC) build and prove that:
   * Wreath imports cleanly without any HTTP/3 / QUIC libraries;
@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import importlib.util
-import os
 import tempfile
 
 import pytest
@@ -81,10 +80,6 @@ def test_http3_available_matches_extension_usability() -> None:
     assert _http3_available() is _http3_loadable()
 
 
-@pytest.mark.skipif(
-    bool(os.environ.get("WREATH_PURE")),
-    reason="WREATH_PURE=1 does not load the _core C API the native server needs",
-)
 def test_native_server_import_does_not_pull_in_http3() -> None:
     # The HTTP/1.1+HTTP/2 extension must import independently of QUIC libraries.
     server_ext = importlib.import_module("wreath._native._server")

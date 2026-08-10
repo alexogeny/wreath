@@ -9,9 +9,9 @@ Related material:
 - `docs/agents/manifest.json`
 - `docs/decisions/0008-native-http-server-boundary.md`
 - `docs/plans/native-http-server.md`
-- `docs/plans/future/03-supervised-services.md`
-- `docs/plans/future/04-managed-outbound-clients.md`
-- `docs/plans/future/05-operational-observability.md`
+- `wreath.services`
+- `wreath.http_client`
+- `wreath.telemetry` / `wreath.logging`
 - `docs/internals/performance.md`
 - `benchmarks/README.md`
 

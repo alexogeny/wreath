@@ -20,10 +20,7 @@ from typing import NamedTuple
 
 from ._native import _core
 
-if _core is not None:
-    _parse = _core.http_parse_request
-else:
-    from ._pure.http import http_parse_request as _parse
+_parse = _core.http_parse_request
 
 
 class RequestHead(NamedTuple):

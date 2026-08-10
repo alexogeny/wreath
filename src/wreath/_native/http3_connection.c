@@ -2,7 +2,7 @@
  *
  * asyncio.DatagramProtocol is used only to receive/send UDP datagrams; packet
  * parsing, ACK/loss state, stream dispatch and TLS stay native (ngtcp2). See
- * ADR 0011. nghttp3/QPACK and the ASGI bridge live in http3_asgi.c.
+ * built. nghttp3/QPACK and the ASGI bridge live in http3_asgi.c.
  */
 #include "http3.h"
 

@@ -27,9 +27,8 @@ Responses are read fully into memory under `ClientLimits.max_response_bytes`;
 there is no streaming response API. That is a deliberate limitation of this
 client, which exists to call other services, not to download files.
 
-The public policy and pool remain in Python. Byte codecs start with the pure
-reference implementation and are the parity contract for the optional native
-client protocol.
+The public policy and pool are Python; the byte codecs are C, served by the
+dedicated `_client` extension when the build has it and by `_core` otherwise.
 """
 
 from __future__ import annotations  # noqa: I001 -- Ruff misorders the local codec facade
@@ -52,15 +51,7 @@ from ._native import _client as _native_client
 from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
 
-# Reuse the native token-bucket that backs the inbound rate-limiter (no new C):
-# the outbound client throttle shares the exact same primitive.
 from ._native import _core as _native_core
-
-if _native_core is not None and hasattr(_native_core, "TokenBucket"):
-    _TokenBucket: Any = _native_core.TokenBucket
-else:  # pragma: no cover - exercised under WREATH_PURE=1
-    from ._pure.ratelimit import TokenBucket as _TokenBucket
-
 from ._flight_markers import (
     CAP_OUTBOUND_REQUEST as _CAP_OUTBOUND_REQUEST,
 )
@@ -79,6 +70,10 @@ from ._flight_markers import (
 from ._flight_markers import (
     phase_marker as _phase_marker,
 )
+
+# Reuse the native token-bucket that backs the inbound rate-limiter (no new C):
+# the outbound client throttle shares the exact same primitive.
+_TokenBucket: Any = _native_core.TokenBucket
 
 # Accelerated transport-facing stream; optional like every native piece. Resolved
 # through the `_native` loader rather than imported straight from the compiled
