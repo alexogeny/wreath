@@ -90,12 +90,47 @@ def test_it_emits_a_project_whose_layout_matches_the_documented_one(
         "README.md",
         "pyproject.toml",
         "shop/__init__.py",
+        "shop/adapters.py",
         "shop/app.py",
         "shop/config.py",
+        "shop/contracts.py",
+        "shop/ports.py",
+        "shop/py.typed",
         "shop/routers/__init__.py",
         "shop/routers/items.py",
         "tests/test_items.py",
     }
+
+
+def test_the_modular_monolith_profile_is_sliced_by_bounded_context(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "backoffice"
+    assert _new(target, "--profile", "modular-monolith") == 0
+    expected = {
+        "AGENTS.md",
+        "backoffice/adapters/__init__.py",
+        "backoffice/adapters/memory.py",
+        "backoffice/domains/__init__.py",
+        "backoffice/domains/items/__init__.py",
+        "backoffice/domains/items/contracts.py",
+        "backoffice/domains/items/ports.py",
+        "backoffice/domains/items/router.py",
+    }
+    written = {
+        path.relative_to(target).as_posix()
+        for path in target.rglob("*")
+        if path.is_file()
+    }
+    assert expected <= written
+    assert "backoffice/routers/items.py" not in written
+
+
+def test_the_modular_monolith_profile_passes_its_own_tests(tmp_path: Path) -> None:
+    target = tmp_path / "modular"
+    assert _new(target, "--profile", "modular-monolith") == 0
+    result = _run_generated_suite(target)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_generated_application_answers_a_request(
@@ -159,6 +194,26 @@ def test_the_generated_project_passes_its_own_tests(tmp_path: Path) -> None:
     target = tmp_path / "green"
     assert _new(target) == 0
     result = _run_generated_suite(target)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "options",
+    [(), ("--profile", "modular-monolith"), ("--database", "postgres")],
+)
+def test_the_generated_project_typechecks(
+    tmp_path: Path, options: tuple[str, ...],
+) -> None:
+    target = tmp_path / ("typed" + str(len(options)))
+    assert _new(target, *options) == 0
+    result = subprocess.run(
+        ["ty", "check"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
