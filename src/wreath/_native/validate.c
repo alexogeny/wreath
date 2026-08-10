@@ -3,7 +3,7 @@
  * Python compiles each annotation into a normalized "plan" once (see
  * wreath.binding._compile_plan); this executes that plan against a decoded-JSON
  * value in a single call per body, accumulating the same {loc, msg, type}
- * errors as the pure wreath.binding._validate and constructing dataclass
+ * errors as wreath.binding._validate and constructing dataclass
  * instances on success. C never inspects annotations -- it only reads the
  * plan tuples and the dataclass class objects the plan carries.
  *
@@ -84,7 +84,7 @@ loc_pop(PyObject *loc)
 
 /* Returns a new reference to the validated value, or NULL only on a hard
  * C-API failure (exception set). Validation failures are accumulated into
- * errors and still return a (new-reference) value, mirroring the pure code. */
+ * errors and still return a (new-reference) value, mirroring the Python code. */
 static PyObject *
 validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
               long *steps)
@@ -356,7 +356,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             }
         }
         /* Unexpected fields: any value key not named by a field. Iterated in
-         * value's insertion order to match the pure implementation. */
+         * value's insertion order to match `wreath.binding._validate`. */
         if (PyDict_GET_SIZE(value) > PyDict_GET_SIZE(kwargs)) {
             /* Build the field-name set once (O(F)) so each value key is an O(1)
              * membership test. The old per-key linear rescan of every field
