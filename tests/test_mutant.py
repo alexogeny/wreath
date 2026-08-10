@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from wreath._mutant import operators
+from wreath._mutant import runner as mutant_runner
 from wreath._mutant.patch import (
     CodePatch,
     PatchError,
@@ -1523,6 +1524,84 @@ def test_sample_is_stable_bounded_and_drawn_across_the_corpus(
     assert max(lines) > 30
     plan = build_plan([package], tmp_path, selected_ids=frozenset(first))
     assert {mutation.identifier for mutation in plan.mutations} == set(first)
+
+
+def test_live_mutant_completed_at_baseline_seal_keeps_its_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class InertPatch:
+        def apply(self) -> None:
+            pass
+
+        def undo(self) -> None:
+            pass
+
+    source = tmp_path / "policy.py"
+    source.write_text("value = True\n", encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    target = tmp_path / "mutant.json"
+    mutation = mutant_runner.Mutation(
+        "predicate@policy.py:1",
+        "predicate",
+        "the policy refuses a request",
+        mutant_runner.Site("policy.py", 1, "policy"),
+        "policy",
+        patch=InertPatch(),
+    )
+    plan = mutant_runner.Plan(
+        mutations=[mutation],
+        watch={mutation.identifier: (1,)},
+    )
+    events = iter(
+        ([{"nodeid": "tests/test_policy.py::test_refuses", "hits": [[str(source), 1]]}], [])
+    )
+    monkeypatch.setattr(
+        mutant_runner,
+        "_live_trace_events",
+        lambda _directory, _positions: next(events),
+    )
+    running = mutant_runner.RunningMutant(123, target, 0.0, 60.0)
+    monkeypatch.setattr(mutant_runner, "start_mutant", lambda *_args, **_kwargs: running)
+    polls = 0
+
+    def poll(_running: mutant_runner.RunningMutant):
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            baseline.write_text("{}", encoding="utf-8")
+            return None
+        return (
+            mutant_runner.Outcome.KILLED,
+            ("tests/test_policy.py::test_refuses",),
+            0.01,
+            "",
+        )
+
+    monkeypatch.setattr(mutant_runner, "poll_mutant", poll)
+    monkeypatch.setattr(mutant_runner.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(mutant_runner.os, "waitpid", lambda pid, _flags: (pid, 0))
+
+    verdicts, probes, completed, cancelled, first_started = (
+        mutant_runner._run_live_mutants(
+            plan,
+            tmp_path,
+            tmp_path,
+            baseline,
+            extra=(),
+            workdir=tmp_path,
+            timeout=60.0,
+            maxfail=1,
+            jobs=1,
+            origin=0.0,
+            emit=lambda *_args, **_kwargs: None,
+        )
+    )
+
+    assert verdicts[0].outcome == mutant_runner.Outcome.KILLED
+    assert probes == 1
+    assert completed == 1
+    assert cancelled == 0
+    assert first_started is not None
 
 
 def test_sample_and_limit_are_refused_as_competing_bounds(
