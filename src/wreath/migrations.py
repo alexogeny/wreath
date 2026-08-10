@@ -752,18 +752,13 @@ class MigrationBaseline:
 
 
 def _metal() -> Any:
-    # `ignore_pure`: migrations have no pure twin -- the planner, the diff and
-    # the SQL emitter live only in C -- so `WREATH_PURE=1` must not turn every
-    # migration command into the "not built" error. The mode selects between two
-    # implementations of the same thing; here there is only one.
-    module = _extension("_postgres", ignore_pure=True)
+    # The planner, the diff and the SQL emitter are C. `_postgres` is optional --
+    # a build for an application that talks to no database does not need it --
+    # so its absence is refused here by name rather than surfacing somewhere
+    # inside a migration.
+    module = _extension("_postgres")
     if module is None:
         raise RuntimeError("wreath.migrations requires the Wreath-metal PostgreSQL extension")
-    if not hasattr(module, "_migration_resolve_managed"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension does not provide migrations; "
-            "rebuild Wreath's native extensions"
-        )
     return module
 
 
@@ -983,11 +978,6 @@ def _compile_registry_image(registry: Any) -> bytes:
     """Compile immutable ORM intent into one native desired image."""
     descriptor = _registry_descriptor(registry)
     module = _metal()
-    if not hasattr(module, "_migration_compile_desired"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks desired images; "
-            "rebuild Wreath's native extensions"
-        )
     return module._migration_compile_desired(descriptor)
 
 
@@ -998,11 +988,6 @@ async def _decode_catalog_snapshot(
 ) -> NativeCatalogSnapshot:
     """Decode catalog rows directly without allocating Python records."""
     module = _metal()
-    if not hasattr(module, "_migration_catalog_builder"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks catalog images; "
-            "rebuild Wreath's native extensions"
-        )
     builder = module._migration_catalog_builder()
     await connection._fetch_into(sql, args, builder)
     descriptor = builder.descriptor()
@@ -1028,32 +1013,17 @@ async def _read_single_catalog(connection: Any, schema: str) -> bytes:
 
 def _fingerprint_image(image: bytes) -> bytes:
     module = _metal()
-    if not hasattr(module, "_migration_image_fingerprint"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks image fingerprints; "
-            "rebuild Wreath's native extensions"
-        )
     return module._migration_image_fingerprint(image)
 
 
 def _plan_descriptors(desired: bytes, actual: bytes) -> NativeMigrationPlan:
     module = _metal()
-    if not hasattr(module, "_migration_plan_descriptors"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks named plans; "
-            "rebuild Wreath's native extensions"
-        )
     tape = module._migration_plan_descriptors(desired, actual)
     return NativeMigrationPlan(int.from_bytes(tape[8:12], "little"), tape)
 
 
 def _render_sql_plan(plan: NativeMigrationPlan) -> NativeMigrationSql:
     module = _metal()
-    if not hasattr(module, "_migration_render_sql"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks SQL tapes; "
-            "rebuild Wreath's native extensions"
-        )
     tape = module._migration_render_sql(plan.tape)
     if len(tape) < 12 or tape[:4] != b"WMS1" or int.from_bytes(tape[4:8], "little") != 1:
         raise RuntimeError("Wreath-metal returned an invalid SQL tape")
@@ -1079,11 +1049,6 @@ def _render_sql_plan(plan: NativeMigrationPlan) -> NativeMigrationSql:
 def _diff_packed_images(desired: object, actual: object) -> NativeMigrationDiff:
     """Diff two canonical native schema images without materializing operations."""
     module = _metal()
-    if not hasattr(module, "_migration_diff_images"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks migration images; "
-            "rebuild Wreath's native extensions"
-        )
     tape = module._migration_diff_images(desired, actual)
     operation_count = int.from_bytes(tape[8:12], "little")
     return NativeMigrationDiff(operation_count, tape)
@@ -1271,12 +1236,7 @@ async def generate_single_baseline(
 
 async def connect_migration(dsn: str) -> Any:
     """Open a dedicated Wreath-metal migration connection."""
-    module = _metal()
-    if not hasattr(module, "connect"):
-        raise RuntimeError(
-            "Wreath-metal PostgreSQL connection support is unavailable; rebuild native extensions"
-        )
-    return await module.connect(dsn)
+    return await _metal().connect(dsn)
 
 
 def _qualified_history_table() -> str:
@@ -2071,11 +2031,6 @@ def _build_native_artifact(
 ) -> NativeMigrationArtifact:
     """Build and immediately verify one deterministic artifact in metal."""
     module = _metal()
-    if not hasattr(module, "_migration_build_artifact"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks migration artifacts; "
-            "rebuild Wreath's native extensions"
-        )
     data = module._migration_build_artifact(
         migration_id,
         parent_checksum,
@@ -2100,11 +2055,6 @@ def _verify_native_chain(
             raise ValueError("migration artifact exceeds WMC1 length limit")
         payload += struct.pack("<I", len(artifact)) + artifact
     module = _metal()
-    if not hasattr(module, "_migration_verify_chain"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks chain verification; "
-            "rebuild Wreath's native extensions"
-        )
     checksum, target, count = module._migration_verify_chain(
         bytes(payload), expected_parent, expected_source
     )
@@ -2114,11 +2064,6 @@ def _verify_native_chain(
 def _load_native_artifact(data: bytes) -> NativeMigrationArtifact:
     """Verify checksum, format, lengths, and operation tape before publication."""
     module = _metal()
-    if not hasattr(module, "_migration_verify_artifact"):
-        raise RuntimeError(
-            "the installed Wreath-metal PostgreSQL extension lacks migration artifacts; "
-            "rebuild Wreath's native extensions"
-        )
     migration_id, parent, source, target, tape, plan, sql = module._migration_verify_artifact(data)
     return NativeMigrationArtifact(
         data=data,
