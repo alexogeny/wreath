@@ -11,9 +11,8 @@ running, because a `POST` unwound mid-flight rolls its transaction back cleanly
 and still leaves whatever it did *outside* the transaction half-done. A route
 overrides either default with `cancel_on_disconnect=`.
 
-Both servers are driven: the native protocol when it is built, and the pure
-reference under `WREATH_PURE`. `tests/test_disconnect_cancels_query.py` carries
-the same disconnect through to a live PostgreSQL backend.
+`tests/test_disconnect_cancels_query.py` carries the same disconnect through to
+a live PostgreSQL backend.
 """
 
 from __future__ import annotations
@@ -30,19 +29,9 @@ from wreath.server import ServerConfig, _select_protocol, serve
 #: How long a cancellation is given to arrive before the test calls it absent.
 _PATIENCE = 5.0
 
-@pytest.fixture(params=[False, True], ids=["native", "pure"])
-def protocol(request: Any, monkeypatch: Any) -> type:
-    """Select the HTTP/1 implementation this test drives.
-
-    `Server` resolves its protocol class on the first connection, so setting the
-    variable before `serve()` is enough. With no native extension built both
-    parameters resolve to the pure protocol, which duplicates the run rather
-    than skipping it -- the honest outcome, since there is only one server there.
-    """
-    if request.param:
-        monkeypatch.setenv("WREATH_PURE", "1")
-    else:
-        monkeypatch.delenv("WREATH_PURE", raising=False)
+@pytest.fixture
+def protocol() -> type:
+    """The HTTP/1 protocol class, resolved the way `Server` resolves it."""
     return _select_protocol()
 
 

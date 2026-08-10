@@ -365,7 +365,7 @@ Two boundaries are deliberate:
   there and an interrupt would be a second one.
 
 **What carries this and what does not.** The trigger lives in the HTTP/1.1
-protocol — the native one and the pure reference alike — because that is where a
+protocol — the native one and the Python reference alike — because that is where a
 lost connection is observed. HTTP/2 and HTTP/3 multiplex, so a reset stream is
 not a lost connection and cancelling the wrong task because a sibling stream
 reset would be worse than not cancelling at all; they are not covered yet, and a

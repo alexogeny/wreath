@@ -40,7 +40,7 @@ uint64_t wreath_flight_now_ns(void);
 /* A worker-local connection id, assigned once per accepted connection. */
 uint64_t wreath_flight_next_connection_id(void);
 
-/* Connection states, mirroring wreath._pure.server. */
+/* Connection states. */
 enum {
     ST_READING_HEAD = 0,
     ST_READING_FIXED_BODY,
@@ -180,7 +180,7 @@ typedef struct {
     int disconnected;
     /* Whether losing the peer cancels the application task as well as queueing
      * `http.disconnect`. Set per request from the method (RFC 9110's safe
-     * methods, matching `_SAFE_METHODS` in the pure twin) and overridden by the
+     * methods) and overridden by the
      * application through `_wreath_cancel_on_disconnect` for a route that
      * declared one. Cleared for a WebSocket session, which observes its own
      * disconnect message instead. */

@@ -864,17 +864,17 @@ init_cached_constants(void)
     }
     core_capi = (const WreathCoreCAPI *)PyCapsule_Import(WREATH_CORE_CAPI_NAME, 0);
     if (core_capi == NULL) {
-        /* PyCapsule_Import walks `wreath._native._core._C_API` as attributes, and
-         * wreath._native.__init__ sets `_core` to None on purpose under WREATH_PURE=1
-         * -- so this arrives as AttributeError on None, not ImportError. Every
-         * caller guards on ImportError to fall back to the pure server, so
-         * report the condition that actually holds: this extension needs the
-         * _core C API and it is not loaded. The original error stays as the
-         * cause so a genuinely missing or broken _core is still diagnosable. */
+        /* PyCapsule_Import walks `wreath._native._core._C_API` as attributes, so
+         * a missing or half-initialised _core arrives here as AttributeError
+         * rather than ImportError. Callers guard on ImportError, so report the
+         * condition that actually holds and report it as the right type. The
+         * original error stays as the cause, so a genuinely broken _core is
+         * still diagnosable. */
         PyObject *cause = PyErr_GetRaisedException();
         PyErr_SetString(PyExc_ImportError,
-                        "wreath._native._server requires the wreath._native._core C "
-                        "API, which is not loaded (WREATH_PURE=1 disables it)");
+                        "wreath._native._server requires the wreath._native._core "
+                        "C API, which is not loaded: rebuild the extensions with "
+                        "`python setup.py build_ext --inplace`");
         PyObject *raised = PyErr_GetRaisedException();
         if (raised != NULL) {
             PyException_SetCause(raised, cause);  /* steals the cause */
@@ -938,7 +938,7 @@ init_cached_constants(void)
         || s_add_done_callback == NULL || s_exception == NULL) return -1;
 
     /* One shared extensions mapping for every scope; consumers treat scope
-     * contents as read-only, matching the pure twin's module-level constant. */
+     * contents as read-only. */
     extensions_dict = Py_BuildValue("{s:{}}", "wreath.response");
     if (extensions_dict == NULL) {
         return -1;

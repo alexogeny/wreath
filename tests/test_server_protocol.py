@@ -1,9 +1,8 @@
 """Fake-transport protocol tests for the Wreath HTTP server.
 
-Every behavioral test is parameterized over the pure and native protocol
-implementations. Native cases are skipped when the extension is not built. We
-only ever compare bytes on the wire, ASGI scopes/messages, and closure
-behavior -- never internal object layout.
+Every behavioral test runs against the HTTP protocol implementation, skipped
+when the extension is not built. We only ever compare bytes on the wire, ASGI
+scopes/messages, and closure behavior -- never internal object layout.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from _server_ingest import feed
 
 import wreath.app as app_module
 from wreath import Response, Wreath
-from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath.auth import BearerTokenBackend, Identity, authenticated
 from wreath.cache_control import CacheControl
 from wreath.policy import CachePolicy, CompressionPolicy, HttpPolicy
@@ -35,14 +33,13 @@ try:
 except ImportError:
     _NativeHttpProtocol = None
 
-IMPLS = [pytest.param(PureHttpProtocol, id="pure")]
-IMPLS.append(
+IMPLS = [
     pytest.param(
         _NativeHttpProtocol,
-        id="native",
+        id="http1",
         marks=pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built"),
     )
-)
+]
 
 impl = pytest.mark.parametrize("protocol_cls", IMPLS)
 
@@ -664,13 +661,19 @@ MALFORMED = [
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 @pytest.mark.parametrize("payload", MALFORMED)
 @pytest.mark.asyncio
-async def test_malformed_input_status_matches_pure_at_every_split(payload: bytes) -> None:
-    """Resumable scanning must not change what malformed input produces."""
+async def test_malformed_input_status_is_the_same_at_every_split(payload: bytes) -> None:
+    """Resumable scanning must not change what malformed input produces.
+
+    The oracle is the payload delivered whole: a parser that resumes correctly
+    cannot care where the TCP boundary landed, so all `len(payload) - 1` split
+    points must produce the response the single `data_received` produced.
+    """
+    whole = await drive(_NativeHttpProtocol, echo_ok, [payload])
+    expected = parse_responses(whole.buffer)
     for split in range(1, len(payload)):
         chunks = [payload[:split], payload[split:]]
-        native = await drive(_NativeHttpProtocol, echo_ok, chunks)
-        pure = await drive(PureHttpProtocol, echo_ok, chunks)
-        assert parse_responses(native.buffer) == parse_responses(pure.buffer), split
+        split_at = await drive(_NativeHttpProtocol, echo_ok, chunks)
+        assert parse_responses(split_at.buffer) == expected, split
 
 
 @impl
@@ -1403,8 +1406,6 @@ def _make_native(app: Any, config: ServerConfig | None = None) -> tuple[Any, Fak
 @native_only
 def test_native_is_buffered_protocol() -> None:
     assert issubclass(_NativeHttpProtocol, asyncio.BufferedProtocol)
-    # The pure fallback intentionally stays a plain streaming Protocol.
-    assert not issubclass(PureHttpProtocol, asyncio.BufferedProtocol)
 
 
 @native_only
@@ -1580,110 +1581,6 @@ async def test_native_data_received_compat_path_still_parses() -> None:
     await _settle()
 
 
-# --- adversarial: receive-queue drain must not be quadratic (#6) -------------
-
-
-class _ShiftCountingQueue:
-    """Records how many references a front removal shifts.
-
-    ``pop(0)`` shifts every trailing element (list semantics); ``popleft`` shifts
-    none (deque semantics). Total shift work over a full drain is the quadratic
-    signal this bounds.
-    """
-
-    def __init__(self) -> None:
-        self._items: list[Any] = []
-        self.shift_work = 0
-
-    def append(self, item: Any) -> None:
-        self._items.append(item)
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    def __bool__(self) -> bool:
-        return bool(self._items)
-
-    def __iter__(self) -> Any:
-        return iter(self._items)
-
-    def clear(self) -> None:
-        self._items.clear()
-
-    def popleft(self) -> Any:
-        return self._items.pop(0)
-
-    def pop(self, index: int = -1) -> Any:
-        if index == 0:
-            self.shift_work += max(0, len(self._items) - 1)
-            return self._items.pop(0)
-        return self._items.pop(index)
-
-
-@pytest.mark.asyncio
-async def test_receive_queue_drain_has_linear_reference_movement() -> None:
-    async def _noop_app(scope: dict, receive: Any, send: Any) -> None:
-        return None
-
-    config = ServerConfig(read_high_water_messages=256)
-    loop = asyncio.get_running_loop()
-    protocol = PureHttpProtocol(_noop_app, config, loop, set())
-    protocol.connection_made(FakeTransport())
-
-    n = config.read_high_water_messages
-    queue = _ShiftCountingQueue()
-    protocol._receive_queue = queue  # type: ignore[assignment]
-    for index in range(n):
-        queue.append({"type": "http.request", "body": b"x", "more_body": index < n - 1})
-    protocol._queued_bytes = n
-
-    delivered = [await protocol._receive() for _ in range(n)]
-    assert len(delivered) == n
-    assert all(m["type"] == "http.request" for m in delivered)
-    # Front-draining N messages must not shift O(N^2) references.
-    assert queue.shift_work <= 2 * n, queue.shift_work
-
-
-# --- adversarial: incomplete-head parsing must be linear (#3) -----------------
-
-
-@pytest.mark.asyncio
-async def test_incomplete_head_scans_each_byte_a_bounded_number_of_times() -> None:
-    """A head arriving one byte per data_received must not rescan quadratically."""
-
-    class _CountingHeadProtocol(PureHttpProtocol):
-        def __init__(self, *args: Any) -> None:
-            super().__init__(*args)
-            self.examined = 0
-
-        def _pending(self) -> Any:
-            view = super()._pending()
-            self.examined += len(view)
-            return view
-
-    async def app(scope: dict, receive: Any, send: Any) -> None:
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await send({"type": "http.response.body", "body": b"ok"})
-
-    head = (
-        b"GET / HTTP/1.1\r\nHost: x\r\n"
-        + b"".join(b"X-Pad-%d: %s\r\n" % (i, b"y" * 24) for i in range(48))
-        + b"\r\n"
-    )
-    n = len(head)
-    loop = asyncio.get_running_loop()
-    transport = FakeTransport()
-    protocol = _CountingHeadProtocol(app, ServerConfig(), loop, set())
-    protocol.connection_made(transport)
-    for byte in head:
-        protocol.data_received(bytes([byte]))
-    await _settle()
-
-    assert b"HTTP/1.1 200" in bytes(transport.buffer)
-    # Delimiter search work must be linear in the head length, not N^2/2.
-    assert protocol.examined <= 4 * n, (protocol.examined, n)
-
-
 # --- integer rendering in the response head ---------------------------------
 #
 # The status code, the content-length, and every chunk size line are written by
@@ -1693,10 +1590,7 @@ async def test_incomplete_head_scans_each_byte_a_bounded_number_of_times() -> No
 # having if it is right at the edges, so these drive the values a `%zd`/`%zx`
 # format string would have covered for free: zero, one digit, every digit-count
 # boundary, and both sides of each hex nibble boundary.
-#
-# Parameterized over both implementations on purpose: the pure protocol still
-# formats through Python, so it is the oracle for what the native writer must
-# reproduce byte for byte.
+
 
 
 @impl

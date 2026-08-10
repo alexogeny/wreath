@@ -1,4 +1,4 @@
-"""Deterministic fragmentation fuzzing for pure/native HTTP protocols."""
+"""Deterministic fragmentation fuzzing for the HTTP/1 protocol."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 from _server_ingest import feed
 
-from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath.server import ServerConfig
 
 try:
@@ -118,7 +117,18 @@ def corpus() -> list[bytes]:
 
 @pytest.mark.skipif(_server is None, reason="native server extension unavailable")
 @pytest.mark.asyncio
-async def test_native_fragmentation_fuzz_matches_pure_status_classes() -> None:
+async def test_the_answer_does_not_depend_on_where_the_reads_split() -> None:
+    """The whole payload delivered at once is the oracle for every fragmentation.
+
+    A resumable parser cannot care where a TCP boundary landed, so for each
+    input the single-`data_received` outcome is the answer every split must
+    reproduce -- and the same holds with the peer disconnecting afterwards,
+    which is a separate resumption path.
+
+    This is stronger than it looks: the splits include *every* byte position for
+    inputs short enough to enumerate, so a parser that mis-resumes at one offset
+    in one state is caught by exactly one of them.
+    """
     config = ServerConfig(
         max_request_line=96,
         max_header_count=12,
@@ -128,17 +138,25 @@ async def test_native_fragmentation_fuzz_matches_pure_status_classes() -> None:
     )
     rng = random.Random(0xC0FFEE)
     for value in corpus():
-        split_sets: list[list[bytes]] = [[value]]
+        split_sets: list[list[bytes]] = []
         if len(value) <= 96:
             split_sets.extend([[value[:index], value[index:]] for index in range(1, len(value))])
         if value:
             indexes = sorted({0, len(value), *(rng.randrange(len(value) + 1) for _ in range(5))})
             split_sets.append([value[a:b] for a, b in zip(indexes, indexes[1:], strict=False)])
-        for pieces in split_sets:
-            disconnect = bool(rng.getrandbits(1))
-            pure = await drive(PureHttpProtocol, pieces, disconnect=disconnect, config=config)
-            native = await drive(_server.HttpProtocol, pieces, disconnect=disconnect, config=config)
-            assert native == pure, value.hex()
+        for disconnect in (False, True):
+            whole = await drive(
+                _server.HttpProtocol, [value], disconnect=disconnect, config=config
+            )
+            for pieces in split_sets:
+                split = await drive(
+                    _server.HttpProtocol, pieces, disconnect=disconnect, config=config
+                )
+                assert split == whole, (
+                    value.hex(),
+                    [piece.hex() for piece in pieces],
+                    disconnect,
+                )
 
 
 @pytest.mark.skipif(_server is None, reason="native server extension unavailable")
