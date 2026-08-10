@@ -217,7 +217,7 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
     raise ValueError(
         f"no OpenAPI schema for TypeKind {ref.kind!r}. A kind added to "
         "`wreath.typegen.model.TypeKind` must be rendered here and in "
-        "`wreath._pure.typegen.ts_type`; returning a default instead would emit a "
+        "`wreath.typegen.typescript_renderer.ts_type`; returning a default instead would emit a "
         "silently wrong document and a silently wrong client, and report success."
     )
 
