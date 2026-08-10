@@ -619,8 +619,7 @@ class HTMLResponse(Response):
         super().__init__(document, status=status, background=background)
 
 
-if _core is not None and hasattr(_core, "html_response_configure"):
-    _core.html_response_configure(HTMLResponse, Response)
+_core.html_response_configure(HTMLResponse, Response)
 
 
 class RedirectResponse(Response):
@@ -833,11 +832,10 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
 
     Accepts a `ServerSentEvent`, a `str`/`bytes` (treated as `data`), or a
     mapping with `data`/`event`/`id`/`retry`/`comment` keys; anything else is a
-    `TypeError`. Shape dispatch and coercion stay here, in Python, and only the
-    framing itself goes through `_frame_fields` -- `_core.sse_frame` when the
-    accelerator is loaded, `_sse_frame_fields` under `WREATH_PURE=1` or a
-    source checkout with no build. The two agree byte for byte, which
-    `tests/test_sse_frame_parity.py` asserts.
+    `TypeError`. Shape dispatch and coercion stay here, in Python; only the
+    framing itself goes through `_core.sse_frame`, and
+    `tests/test_sse_frame_parity.py` holds it to the `text/event-stream`
+    grammar.
     """
     if isinstance(event, ServerSentEvent):
         comment, name, ident, retry, data = (
@@ -874,11 +872,11 @@ def _sse_frame_fields(
     retry: int | None,
     data: str | None,
 ) -> bytes:
-    """Frame already-resolved SSE fields. The parity contract for `sse.c`.
+    """Frame already-resolved SSE fields.
 
-    Split from `_encode_sse` so the native twin has a narrow, exactly
-    mirrorable boundary: shape dispatch and coercion stay in Python, and only
-    the framing -- the part that walks the payload -- crosses.
+    Split from `_encode_sse` so `sse.c` has a narrow boundary: shape dispatch
+    and coercion stay in Python, and only the framing -- the part that walks the
+    payload -- crosses.
     """
     lines: list[str] = []
     if comment is not None:
