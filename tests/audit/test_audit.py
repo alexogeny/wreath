@@ -1,5 +1,5 @@
 """wreath audit (Tier 1): self-audit of the API-docs surface, a11y rule firing,
-and middleware-introspection performance checks. Pure Python — holds under WREATH_PURE=1.
+and middleware-introspection performance checks. No C of its own.
 """
 from __future__ import annotations
 

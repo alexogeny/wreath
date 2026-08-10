@@ -1,7 +1,7 @@
 """`wreath audit` — accessibility (WCAG 2.1 A/AA) and performance auditing for the
 HTML and responses Wreath generates.
 
-Pure-Python, zero-dependency, offline (a dev/CI tool, never on a request path), so the
+Zero-dependency and offline (a dev/CI tool, never on a request path), so the
 HTML is parsed with the standard-library `html.parser`. It covers a curated a11y
 ruleset (incl. WCAG 1.4.3 contrast over the design tokens) plus middleware/size/render
 performance checks over the API-docs surface and static HTML trees, `--fix` remediation
