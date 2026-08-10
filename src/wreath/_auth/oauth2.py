@@ -261,7 +261,7 @@ def register_oauth2_login(
         # path would point at *this* application. Its origin is pinned against
         # the issuer in `OidcProvider.discover`, which is why there is no second
         # check here -- one that could never fire would be a check with nothing
-        # to check (docs/decisions/0024).
+        # to check (a check that has nothing to check).
         return RedirectResponse(f"{provider.authorization_endpoint}?{params}", status=302)
 
     @app.get(callback_path)

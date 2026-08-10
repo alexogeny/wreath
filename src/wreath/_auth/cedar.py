@@ -25,7 +25,6 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol, cast
 
 from .._native import _core
-from .._pure.authz import normalize_authorization_decision as _pure_normalize_decision
 from .._reqcache import resolve_once
 from ..request import Request
 from .cedar_engine import CedarEntity, EntityUid
@@ -418,7 +417,7 @@ class CedarEngine(Protocol):
     Cedar evaluator can be substituted without touching the adapter, the
     decorators, or anything that reads a decision. `CedarPolicies` — the
     built-in engine, parsed in Python and evaluated in C — satisfies it, and is
-    what `CedarAuthorizer(engine=...)` is normally handed (ADR 0017).
+    what `CedarAuthorizer(engine=...)` is normally handed (Wreath implements Cedar itself).
 
     Three attributes are *optional* and are read off the authorizer, which
     delegates each straight through to its engine: `fingerprint`, `source`,
@@ -855,7 +854,7 @@ class CedarAuthorizer:
             )
         )
         normalize = (
-            _pure_normalize_decision if _core is None else _core.normalize_authorization_decision
+            _core.normalize_authorization_decision
         )
         return cast(AuthorizationDecision, normalize(result, AuthorizationDecision))
 

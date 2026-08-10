@@ -9,9 +9,8 @@ erroring policy is skipped and reported, never silently satisfied).
 The split follows Wreath's usual shape. Parsing and compilation happen here,
 in Python, exactly once — at application startup, where a syntax error is an
 application bug and not a request-time surprise. The compiled program is a
-flat tuple tape; the per-request evaluator that walks it is native C
-(`wreath._native._core.cedar_is_authorized`) with a pure-Python twin of
-identical observable behavior in `wreath._pure.cedar`.
+flat tuple tape, and the per-request evaluator that walks it is C
+(`wreath._native._core.cedar_is_authorized`).
 
 Scope is deliberate and loud. The Cedar core — everything above — is
 implemented faithfully. Extension types (`ip`, `decimal`, `datetime`)
@@ -43,7 +42,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .._native import _core
-from .._pure import cedar as _pure_cedar
 from .models import AuthorizationDecision
 
 __all__ = [
@@ -56,7 +54,7 @@ __all__ = [
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 
-# Expression opcodes; wreath/_native/cedar.c and wreath/_pure/cedar.py agree.
+# Expression opcodes; `wreath/_native/cedar.c` switches on these.
 _OP_CONST = 0
 _OP_VAR = 1
 _OP_AND = 2
@@ -1009,7 +1007,7 @@ class CedarPolicies:
     def referenced_regions(self) -> frozenset[str] | None:
         """Every geofence region name this policy set tests, or None for "all".
 
-        The geospatial twin of `referenced_flags`, and the same two jobs: the
+        The geospatial counterpart of `referenced_flags`, and the same two jobs: the
         vocabulary a `CedarAuthorizer` validates its region set against at
         startup, and the names it resolves per request.
 
@@ -1091,9 +1089,8 @@ class CedarPolicies:
         because it is what reaches the client as the 403's `detail`; the policy
         ids stay in `diagnostics`, which is not sent.
 
-        Evaluation runs in C when the native extension is present and in the
-        pure-Python twin otherwise, with identical observable behaviour. This
-        does no parsing — that happened once, in `__init__`.
+        Evaluation runs in C. This does no parsing — that happened once, in
+        `__init__`.
         """
         request_entities = _as_entities(entities)
         if request_entities:
@@ -1102,11 +1099,7 @@ class CedarPolicies:
             )
         else:
             store = self._store
-        evaluate = _pure_cedar.cedar_is_authorized
-        native = getattr(_core, "cedar_is_authorized", None)
-        if native is not None:
-            evaluate = native
-        allowed, reason, diagnostics = evaluate(
+        allowed, reason, diagnostics = _core.cedar_is_authorized(
             self._policies,
             _as_uid_tuple(principal, "principal"),
             _as_uid_tuple(action, "action"),

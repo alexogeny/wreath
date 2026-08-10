@@ -190,7 +190,7 @@ policy that errors is skipped and reported in the decision's diagnostics —
 never silently satisfied. The engine covers the Cedar core. Cedar extension
 constructor syntax (`ip`, `decimal`, `datetime`) and schema validation are not
 implemented and fail loudly at parse time; Wreath time policy uses the core i64
-model described below, so both native and pure evaluators execute it. A
+model described below, so the compiled tape carries it. A
 different evaluator can be swapped in through the same `CedarEngine` protocol
 the built-in engine satisfies.
 
@@ -216,8 +216,8 @@ identity = Identity(
 `context.now` is Unix seconds, resolved once per request and only when the
 compiled policy reads it. Parsing, timezone conversion, and storage still use
 [`wreath.temporal`](../reference/temporal.md); the policy boundary deliberately
-uses an i64 so the same comparison executes in the native and pure Cedar
-evaluators:
+uses an i64 so the comparison is integer arithmetic on both sides of the C
+boundary:
 
 ```cedar
 permit(principal is Account, action == Action::"Capture::upload", resource)
