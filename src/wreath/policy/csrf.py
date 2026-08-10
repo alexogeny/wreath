@@ -47,20 +47,9 @@ from ..response import ProblemResponse
 # only ~2.5us. The rest was glue -- an f-string, `.encode()`, and two
 # b64encode/rstrip/decode round trips -- and that is what moved into C. The
 # digest still comes from `hmac.digest`; see security.c.
-if _core is None:
-    from .._pure.security import (
-        csrf_new_token as _csrf_new_token,
-    )
-    from .._pure.security import (
-        csrf_sign as _csrf_sign,
-    )
-    from .._pure.security import (
-        csrf_validate as _csrf_validate,
-    )
-else:
-    _csrf_sign: Any = _core.csrf_sign
-    _csrf_new_token: Any = _core.csrf_new_token
-    _csrf_validate: Any = _core.csrf_validate
+_csrf_sign: Any = _core.csrf_sign
+_csrf_new_token: Any = _core.csrf_new_token
+_csrf_validate: Any = _core.csrf_validate
 
 _TOKEN_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
