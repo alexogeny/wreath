@@ -1,13 +1,12 @@
-"""Pure-Python core for the durable-jobs and messaging coordinator.
+"""The durable-jobs and messaging coordinator core.
 
-Everything here is deterministic, allocation-light, and free of I/O so it can be
-unit-tested without a database and, later, replaced by a native `_queue`
-accelerator behind a byte-identical twin (see `docs/plans` / design 01).
+Everything here is deterministic, allocation-light, and free of I/O, so it can be
+unit-tested without a database.
 
 TODO(native-queue): the state-machine validator, backoff arithmetic, and dedup
 hashing are the concerns design 01 earmarks for `_native/_queue/` (envelope /
-jobstate / backoff / dedup). They live in pure Python for this cut; a native
-fast-path plus pure twin can drop in without changing the coordinator API.
+jobstate / backoff / dedup). They are Python for this cut and can move without
+changing the coordinator API.
 """
 
 from __future__ import annotations
