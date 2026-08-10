@@ -1,11 +1,10 @@
-"""Pure AWS Signature Version 4 signing (zero-dependency, stdlib `hmac`/`hashlib`).
+"""AWS Signature Version 4 signing (zero-dependency, stdlib `hmac`/`hashlib`).
 
-This is the shipped implementation AND the parity contract for an optional native
-`sigv4_signing_key` helper (design 09 §5/§10). It is used by the Phase-2 S3
-storage backend, and is implemented + vector-tested now as the correctness anchor.
+Used by the Phase-2 S3 storage backend and vector-tested against the published
+AWS suite -- those vectors are the correctness anchor.
 
-TODO(native): the 4-HMAC signing-key chain (`signing_key`) is the only piece worth
-a `security.c` accelerator; any such twin MUST be byte-identical to this.
+TODO(native): the 4-HMAC signing-key chain (`signing_key`) is the only piece
+worth a `security.c` accelerator (design 09 §5/§10).
 """
 from __future__ import annotations
 
