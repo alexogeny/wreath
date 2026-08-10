@@ -120,7 +120,7 @@ wreath_pg_connection_init(PyObject *module)
     str_reader_attr = PyUnicode_InternFromString("_reader");
     str_read_message = PyUnicode_InternFromString("read_message");
     if (str_reader_attr == NULL || str_read_message == NULL) return -1;
-    pure_module = PyImport_ImportModule("wreath._pure.postgres");
+    pure_module = PyImport_ImportModule("wreath._pgdriver");
     if (pure_module == NULL) return -1;
     connect_buffered = PyObject_GetAttrString(pure_module, "_connect_buffered");
     buffered_protocol_type = PyObject_GetAttrString(module, "BufferedProtocol");

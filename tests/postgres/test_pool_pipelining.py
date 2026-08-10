@@ -35,7 +35,7 @@ from wreath.postgres import Database, Pool, PoolConfig, Statement, _implementati
 
 from .test_connection import FakePostgres
 
-native_postgres = extension("_postgres", ignore_pure=True)
+native_postgres = extension("_postgres")
 
 
 class SlowConnection:
@@ -291,7 +291,7 @@ async def test_startup_compiles_a_statement_onto_its_workload_pool() -> None:
 
 
 def test_statement_query_methods_return_the_backend_work_awaitable_directly() -> None:
-    """Native statements remove `_call`; the pure facade retains its reference."""
+    """Native statements remove `_call`; the Python facade retains its reference."""
     database = Database("t", "postgresql://u:p@localhost/db")
     statement = database.statement("q", "SELECT 1")
     for name in ("execute", "fetch", "fetch_batch", "fetchrow", "fetchval"):

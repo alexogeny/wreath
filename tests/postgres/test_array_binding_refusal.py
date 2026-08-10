@@ -11,11 +11,10 @@ pending:
 
 * inference is genuinely ambiguous -- `[1, 2]` is equally `int4[]`, `int8[]` or
   `numeric[]`, and `[]` names no element type at all;
-* the native codec has an array encoder and the pure twin does not (see
-  `tests/orm/test_array_codec_roundtrip.py`, "the pure-Python array twin is
-  deferred"). Inferring an array OID would make the native build succeed where
-  the pure build raised `no binary encoder for PostgreSQL OID 1007` -- a *new*
-  divergence, where today both fail identically.
+* `codec.c` has an array encoder and `_pgdriver` does not. Inferring an array
+  OID would make a build with `_postgres` succeed where one without it raised
+  `no binary encoder for PostgreSQL OID 1007` -- a *new* divergence, where today
+  both fail identically.
 
 So the fix was to the message, not the behaviour. A `TypeError` that neither
 works nor explains is the worst of both.
@@ -27,7 +26,7 @@ import os
 
 import pytest
 
-from wreath._pure.postgres import _infer_oid
+from wreath._pgdriver import _infer_oid
 from wreath.postgres import Database, PoolConfig
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")

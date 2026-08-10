@@ -14,7 +14,7 @@
 
 #include <string.h>
 
-/* `wreath._pure.postgres.InterfaceError`, so a refusal here is the same
+/* `wreath._pgdriver.InterfaceError`, so a refusal here is the same
  * exception a caller catches on a pure build. The pure engine is the reference
  * and a native build that raised something else would make `except
  * InterfaceError` around a query work on one build and not the other. */
@@ -1650,7 +1650,7 @@ wreath_pg_protocol_init(PyObject *module)
     Py_DECREF(base);
     if (bases == NULL) return -1;
     {
-        PyObject *pure = PyImport_ImportModule("wreath._pure.postgres");
+        PyObject *pure = PyImport_ImportModule("wreath._pgdriver");
         if (pure == NULL) return -1;
         exc_interface = PyObject_GetAttrString(pure, "InterfaceError");
         Py_DECREF(pure);

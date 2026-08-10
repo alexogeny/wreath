@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from wreath._pure.postgres import _is_transaction_sql as reference
+from wreath._pgdriver import _is_transaction_sql as reference
 
 native = pytest.importorskip("wreath._native._postgres")
 
@@ -50,7 +50,7 @@ CORPUS = [
 @pytest.mark.parametrize("sql", CORPUS, ids=lambda s: repr(s))
 def test_the_native_transaction_test_agrees_with_python(sql: str) -> None:
     assert native._is_transaction_sql(sql) == reference(sql), (
-        f"native and pure disagree on {sql!r}"
+        f"`codec.c` and `_pgdriver` disagree on {sql!r}"
     )
 
 

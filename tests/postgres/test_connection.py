@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import pytest
 
-from wreath._pure import postgres as pure_postgres
+from wreath import _pgdriver as pure_postgres
 
 native_postgres: Any = None
 try:
@@ -413,11 +413,10 @@ def test_a_declared_sqlstate_survives_construction(postgres: Any) -> None:
 
 
 def test_the_error_classes_are_one_set_across_both_backends() -> None:
-    """The native backend re-exports the pure classes rather than redefining them.
+    """The native backend re-exports these classes rather than redefining them.
 
-    Which is why the fix above needs no C twin: there is no second constructor
-    to keep in step. If that ever changes, this fails and the parity contract
-    applies to the new one.
+    Which is why the fix above needs no C counterpart: there is no second
+    constructor to keep in step. If that ever changes, this fails.
     """
     if native_postgres is None:
         pytest.skip("the native PostgreSQL extension is not built")

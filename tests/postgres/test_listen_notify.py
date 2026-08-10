@@ -1,6 +1,6 @@
 """LISTEN/NOTIFY seam on the shared pure Connection.
 
-These exercise the pure notification ring, parsing, channel validation, and the
+These exercise the notification ring, parsing, channel validation, and the
 notifications() iterator in isolation (no live PostgreSQL): a stub Connection is
 built with __new__ and only the ring-related slots populated. Real-DB delivery
 (idle wakeups, interleaved-during-operation capture, native-backend parity) is
@@ -15,7 +15,7 @@ from collections import deque
 
 import pytest
 
-from wreath._pure.postgres import (
+from wreath._pgdriver import (
     Connection,
     Notification,
     _parse_notification,

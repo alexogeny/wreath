@@ -52,7 +52,7 @@ def _select_backend() -> ModuleType:
     if backend is not None:
         return cast(ModuleType, backend)
 
-    from ._pure import postgres
+    from . import _pgdriver as postgres
 
     return postgres
 
@@ -64,12 +64,7 @@ _NATIVE_STATEMENT_AWAIT = _NATIVE_STATEMENT_SUBMIT and hasattr(
     _backend, "_statement_call"
 )
 
-if (
-    _NATIVE_STATEMENT_SUBMIT
-    and _core is not None
-    and hasattr(_backend, "_RECORD_C_API")
-    and hasattr(_core, "template_record_configure")
-):
+if _NATIVE_STATEMENT_SUBMIT:
     _core.template_record_configure(_backend._RECORD_C_API)
 
 Connection = _backend.Connection
@@ -82,6 +77,38 @@ Record = _backend.Record
 RecordBatch = _backend.RecordBatch
 connect = _backend.connect
 _DEFAULT_CONNECTOR = connect
+
+
+def _driver_infer_oid() -> Callable[[object], int]:
+    """The parameter-OID inference the driver actually performs.
+
+    There is no C `_infer_oid`. `_native/postgres/pipeline.c` reads this very
+    function out of `wreath._pgdriver` at module init and calls it per parameter
+    of a cold operation, so the Python one *is* what the driver runs. The
+    `getattr` comes first anyway: the day a C `_infer_oid` lands, every derived
+    caller picks it up without an edit.
+    """
+    inference = getattr(_backend, "_infer_oid", None)
+    if inference is not None:
+        return cast(Callable[[object], int], inference)
+
+    from ._pgdriver import _infer_oid
+
+    return _infer_oid
+
+
+#: What the shipped driver does, resolved once against whichever backend loaded.
+#: Doubles and probes derive their behaviour from these rather than restating a
+#: table, so a codec landing changes them with nobody editing them.
+#:
+#: **Ask here, never `wreath._pgdriver`.** That module is the driver's Python
+#: base class, and the extension table `register_extension_codec` writes into
+#: belongs to the backend that owns it -- so a `vector` column decoded through
+#: the base class comes back as raw bytes in the same process that registered
+#: it.
+_decode_value: Callable[[int, int, bytes | None], Any] = _backend._decode_value
+_is_transaction_sql: Callable[[str], bool] = _backend._is_transaction_sql
+_infer_oid = _driver_infer_oid()
 
 Connector = Callable[[str], Awaitable[Any]]
 

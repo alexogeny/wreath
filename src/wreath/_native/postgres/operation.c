@@ -16,7 +16,7 @@ static PyType_Spec operation_spec = {
 int
 wreath_pg_operation_init(PyObject *module)
 {
-    PyObject *pure = PyImport_ImportModule("wreath._pure.postgres");
+    PyObject *pure = PyImport_ImportModule("wreath._pgdriver");
     PyObject *base;
     PyObject *bases;
     int result;

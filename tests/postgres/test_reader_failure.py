@@ -24,8 +24,8 @@ from typing import Any
 
 import pytest
 
-from wreath._pure.postgres import Connection as PureConnection
-from wreath._pure.postgres import connect as pure_connect
+from wreath._pgdriver import Connection as PureConnection
+from wreath._pgdriver import connect as pure_connect
 from wreath.postgres import connect
 
 from .test_connection import POSTGRES_BACKENDS, FakePostgres
@@ -94,7 +94,7 @@ async def test_a_reader_defect_fails_every_caller_wherever_it_is_raised(
     and `_finish_operation` cases never returned, so a bare `pytest.raises`
     would have hung the run instead of failing one test.
 
-    Patched on **the backend's own `Connection`**, not always the pure one.
+    Patched on **the backend's own `Connection`**, not always the Python one.
 
     That distinction used to make no difference, because the native class
     overrode only `_receive_message` and inherited every hook below from the
@@ -148,7 +148,7 @@ async def test_a_decode_failure_in_the_reader_reaches_the_caller(
     `asyncio.wait_for` is the assertion: before the fix this call never returned,
     so a plain `pytest.raises` would have hung the run rather than failed it.
 
-    Driven through the pure `Connection` because `_read_pipeline` -- where the
+    Driven through `_pgdriver`'s `Connection` because `_read_pipeline` -- where the
     fix lives -- is pure Python that the native class inherits, and a C type's
     attributes cannot be patched. The reader is the same code either way.
 

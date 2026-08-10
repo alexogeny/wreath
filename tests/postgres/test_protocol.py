@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from wreath._pure import postgres as pure_postgres
+from wreath import _pgdriver as pure_postgres
 
 native_postgres: Any = None
 try:
@@ -169,7 +169,7 @@ def test_both_engines_refuse_an_argument_count_the_plan_does_not_declare(
     raising `ValueError` for the same mistake means `except InterfaceError`
     around a query works on one build and not the other.
     """
-    from wreath._pure.postgres import InterfaceError
+    from wreath._pgdriver import InterfaceError
 
     plan = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
     with pytest.raises(InterfaceError, match="argument count"):

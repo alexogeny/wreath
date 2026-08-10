@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from wreath._pure.postgres import Connection as PureConnection
+from wreath._pgdriver import Connection as PureConnection
 
 from .test_connection import POSTGRES_BACKENDS, FakePostgres
 

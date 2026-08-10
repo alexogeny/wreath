@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from wreath._pure import postgres
+from wreath import _pgdriver as postgres
 
 
 class _Writer:

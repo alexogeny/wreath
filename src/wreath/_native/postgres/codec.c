@@ -102,8 +102,8 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_JSONB_ARRAY 3807
 
 /* The element OID for an array OID, or 0 when the OID is not a supported array.
- * TODO(pure-twin): the pure backend (_pure/postgres.py) has no array codec yet,
- * so Array(...) columns require the native build until that twin is added. */
+ * TODO: `wreath._pgdriver` has no array codec, so `Array(...)` columns need a
+ * build with `_postgres`. */
 static uint32_t
 array_element_oid(uint32_t oid)
 {
@@ -159,7 +159,7 @@ array_element_oid(uint32_t oid)
 /* The largest finite IEEE-754 binary16. A halfvec element beyond it rounds to an
  * infinity, which pgvector refuses on the way in -- so the encode would succeed
  * and the INSERT would fail with a message naming neither the element nor the
- * column. Checked here, matching _pure/postgres.py::_MAX_HALF. */
+ * column. Checked here, matching `_pgdriver._MAX_HALF`. */
 #define WREATH_PG_MAX_HALF 65504.0
 
 typedef struct {
@@ -239,7 +239,7 @@ codec_register_extension_type(PyObject *module, PyObject *args)
  * PyFloat_Pack4/Unpack4.
  *
  * This is measured, not assumed, and the measurement is the whole reason the
- * code looks like this. The pure twin's `struct.unpack_from("!1536f", ...)` is
+ * code looks like this. `_pgdriver`'s `struct.unpack_from("!1536f", ...)` is
  * one call into `_struct`'s specialised float handler; a C loop calling
  * PyFloat_Unpack4 per element is *slower* than that, because the per-call
  * format dispatch costs more than the arithmetic. Reading the four bytes into a
@@ -295,18 +295,18 @@ write_be_float4(char *out, double number)
  *
  * Two cautions for whoever re-measures. **The decode number here is the
  * conservative one**: it times `wreath_pg_decode_value`, which takes an already
- * boxed bytes object, because that is the only entry point the pure twin has.
+ * boxed bytes object, because that is the only entry point `_pgdriver` has.
  * The real read path installs `wreath_pg_decode_extension` as a column decoder
  * (see `wreath_pg_select_decoder`) and reads the wire buffer directly, skipping
  * a 6 KB copy per row that this measurement charges to both arms. And **decode
- * is the narrower margin for a reason**: the pure twin's decoder is a single
+ * is the narrower margin for a reason**: `_pgdriver`'s decoder is a single
  * `struct.unpack_from("!1536f")`, one call into `_struct`'s specialised float
  * handler rather than 1536 interpreter round trips, so it is a much better
  * opponent than the usual per-element Python loop.
  *
  * That is also why the float conversion above is spelled by hand. The first
  * version of this code called PyFloat_Pack4/Unpack4 per element and was *slower
- * than the pure twin at both ends*; it measured as no better than a tie, and it
+ * than `_pgdriver` at both ends*; it measured as no better than a tie, and it
  * was only after the hand-rolled conversion that this file earned its place.
  * Anyone tempted to simplify it back should re-measure first -- and rebuild
  * before believing the result, because an ablation against a stale `.so` is how
@@ -833,7 +833,7 @@ decode_sparsevec(const unsigned char *raw, Py_ssize_t length)
 }
 
 /* pgvector's text `sparsevec`: `{1:1.5,3:3.5}/5`. Each value is rendered by
- * `repr()` rather than by a C format, because the pure twin renders it that way
+ * `repr()` rather than by a C format, because `_pgdriver` renders it that way
  * and the two must agree byte for byte -- `%g` and `repr` disagree about how
  * many digits a float4 deserves. */
 static PyObject *
@@ -970,7 +970,7 @@ done:
  * people say aloud. The value arriving here is the `(x,y)` text literal that
  * `Point.to_wire` produced, because one `to_wire` has to serve both the text
  * and the binary parameter paths; this parses it rather than the column type
- * carrying two representations. Kept byte-for-byte equal to the pure twin's
+ * carrying two representations. Kept byte-for-byte equal to `_pgdriver`'s
  * `_encode_point` by tests/orm/test_geospatial_codec_parity.py. */
 static PyObject *
 encode_point(PyObject *value)
@@ -1034,7 +1034,7 @@ encode_point(PyObject *value)
  * path and the un-hexed bytes on the binary one, so one `to_wire` serves both
  * and this only has to reverse the hex -- deliberately without a second opinion
  * about what the geometry may be, which is the server's to hold. Kept
- * byte-for-byte equal to the pure twin's `_encode_geography` by
+ * byte-for-byte equal to `_pgdriver`'s `_encode_geography` by
  * tests/orm/test_geospatial_codec_parity.py. */
 static int
 hex_nibble(unsigned char digit)

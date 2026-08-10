@@ -287,8 +287,12 @@ def test_the_refusal_message_is_the_drivers_own(value: object) -> None:
 
     Delegation is what closes it, so this asserts equality rather than a
     substring: any future divergence is a divergence, however small.
+
+    Asked of `wreath.postgres` rather than of `_pgdriver`: the oracle has to
+    be the backend that loaded, or this compares the double against a twin of
+    the thing it is supposed to be modelling.
     """
-    from wreath._pure.postgres import _infer_oid
+    from wreath.postgres import _infer_oid
 
     with pytest.raises(TypeError) as from_driver:
         _infer_oid(value)
