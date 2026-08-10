@@ -13,10 +13,10 @@ import json
 import re
 from typing import Any
 
-from ..._pure.typegen import GENERATOR_HEADER, TYPEGEN_CONTRACT, ts_type
 from ..inspect import _pascal
 from ..model import ApiModel, Operation, TypeRef
 from ..render import select_renderers
+from ..typescript_renderer import GENERATOR_HEADER, TYPEGEN_CONTRACT, ts_type
 
 MANIFEST_NAME = "wreath-typegen.json"
 

@@ -1,10 +1,17 @@
-"""Reference TypeScript renderer for typegen.
+"""The TypeScript renderer for typegen.
 
 This module renders already-normalized, prevalidated tuples -- never the
 semantic dataclasses and never live Python objects. That keeps the boundary to
 an optional native renderer explicit and makes parity fixtures compact. Output
 assembly is linear: a list builder with one final join, no output-proportional
 string concatenation.
+
+**This is not a twin, which is why it does not live in `wreath._pure`.** It is
+the only renderer, and the "benchmark decision" `render.py` defers to has now
+been made: rendering a client is a cold path reached from `wreath typegen`, run
+by a developer occasionally rather than by a request, and the assembly above is
+already linear with a single join. `select_renderers` keeps its seam because it
+costs nothing, but a missing `_core.typegen_render_*` is not a gap.
 
 Normalized tuple contract (version `TYPEGEN_CONTRACT`):
 

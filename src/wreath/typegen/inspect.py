@@ -87,7 +87,7 @@ def _pascal(text: str) -> str:
     Separators are word breaks, so a name made entirely of them has no words to
     capitalize. Returning `""` there would emit a nameless
     `export interface  {`, so the original is kept instead -- which is also
-    what `wreath._pure.typegen._pascal` does, and the two must agree: the
+    what `wreath.typegen.typescript_renderer._pascal` does, and the two must agree: the
     planner declares the parameter interface and the renderer references it, each
     deriving the name from the operation id independently.
     """
