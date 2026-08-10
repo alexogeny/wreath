@@ -1,61 +1,36 @@
-"""`_parse_compact`'s DoS guards and structural checks, in whichever mode is running.
+"""`_parse_compact`'s DoS guards and structural checks.
 
 **Why this file exists.** A mutation sweep over `src/wreath/_auth/jwt.py` reported the
 size caps and structural checks on a compact JWT as `unreached` -- no test executed
 them. A compact JWT is attacker-controlled input, so that is the worst place for it.
 
-**Why they were unreached, and the trap in fixing it.** `_parse_compact` uses native
-`jose_parse` when `_core` is built and only falls through to a Python branch when it
-is not. The suite runs with `_core` built, so the Python branch never executes -- and
-that branch exists precisely to hold the same caps when `_core` is absent:
+The guards are `jose.c`'s now, and these drive them through `_parse_compact` in
+process rather than through a subprocess: `wreath mutant` applies a mutation in a
+forked child's memory, and `subprocess.run(sys.executable, ...)` starts a fresh
+interpreter that reads pristine source from disk -- so a subprocess test passes
+whether or not the mutant is present, and the mutant survives. Measured: a subprocess
+version of this file left lines 311-321 `unreached`, exactly as before it was written.
 
-    Enforce the same hard size caps as native jose_parse so the DoS guard
-    (a giant segment fed to the JSON parser) holds under WREATH_PURE=1 and
-    whenever _core is unavailable, not only on the native path.
+**Asserting the message, not just `ValueError`, is what makes these bite.** The caps
+are ordered and overlapping: a token past the 1 MiB total cap necessarily has a
+segment past the per-segment cap, so deleting the total-cap `raise` merely falls
+through to the next guard and still raises `ValueError`. Only the wording says which
+one fired. A message-agnostic version was tried and left seven mutants alive.
 
-The obvious fix is to select the pure branch by running a subprocess with
-`WREATH_PURE=1`, following `test_http_client_protocol.py`. **That works as a test and
-is useless as coverage.** `wreath mutant` applies a mutation in a forked child's
-memory; `subprocess.run(sys.executable, ...)` starts a fresh interpreter that reads
-pristine source from disk, so the mutation never reaches the code under test, the
-assertions pass either way, and the mutant survives. Measured: a subprocess version of
-this file left lines 311-321 `unreached`, exactly as before it was written.
-
-So these tests are **in-process and mode-agnostic**. Each malformed token must be
-refused whichever implementation is active, which is a twin-parity claim worth making
-on its own. Run the suite normally and they cover native `jose_parse`; run it with
-`WREATH_PURE=1` and the same tests cover the Python branch *and* become visible to
-mutation testing. Anything only reachable under `WREATH_PURE=1` is unmutatable while
-the extension is built, so the sweep has to be run in both modes -- the same argument
-AGENTS.md makes for free-threading and the JIT being separately tested modes.
-
-**The two twins answer identically, and that is now a checked property.** They did not
-when this file was written: `MALFORMED` carried two columns, one wording per
-implementation, and a comment recording that the difference was real. Exercising both
-paths turned up three divergences behind that -- a size cap that differed by two
-characters, a `binascii.Error` escaping the pure branch with a stdlib message, and an
-empty token diagnosed two different ways -- so the twins were aligned on the clearer
-wording of the two and the table collapsed to one expected message per token. Every
-case below is therefore also a twin-parity assertion.
-
-Pinning the *message* rather than just `ValueError` is what makes these bite: the caps
-are ordered and overlapping, so deleting one `raise` often just falls through to the
-next and still raises `ValueError`. A message-agnostic first draft left seven mutants
-alive for exactly that reason.
+The alphabet and length checks below cover the same ground from the other side: a
+segment whose characters are legal but whose *length* is not (one more than a multiple
+of four), a `binascii.Error` escaping with a stdlib message rather than wreath's, and
+an oversized segment that must be refused before it reaches the JSON parser.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import os
 import re
-import subprocess
-import sys
 
 import pytest
 
-from wreath._auth import jwt as jwt_module
 from wreath._auth.jwt import _parse_compact
 
 # Mirrors of the module's own caps. Duplicated deliberately: importing them would make
@@ -75,35 +50,11 @@ def _segment(payload: object) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def test_which_implementation_this_run_is_exercising() -> None:
-    """Not an assertion so much as a label, and it earns its place.
-
-    Every test below is written to hold in both modes. If that ever stops being true
-    the failure is much easier to read knowing which branch ran, and this is the one
-    place that says so.
-    """
-    assert jwt_module._native_parse is None or callable(jwt_module._native_parse)
-
-
-#: Which twin this interpreter loaded. Selected at import time from the environment,
-#: so it is a property of the run rather than something a test can choose.
-MODE = "pure" if jwt_module._native_parse is None else "native"
-
-#: Every malformed token, with the refusal *each* implementation answers it with.
+#: Every malformed token, with the guard that must refuse it and the words it uses.
 #:
-#: **Asserting the message, not just `ValueError`, is what makes these tests bite.**
-#: A message-agnostic version was tried and left seven mutants alive, because the caps
-#: are ordered and overlapping: a token past the 1 MiB total cap necessarily has a
-#: segment past the per-segment cap, so deleting the total-cap `raise` merely falls
-#: through to the next one and still raises `ValueError`. Only the wording
-#: distinguishes which guard fired.
-#:
-#: One expected message per token, asserted in whichever mode is running, so each row
-#: is also a claim that the twins agree. They did not until exercising both paths
-#: forced the question: native separated "exactly two dots" (wrong count) from "has an
-#: empty segment" (right count, empty part) where the pure branch answered both with
-#: one message, and the pure branch had the clearer wording for a bad segment. Both
-#: were aligned on the better of the two rather than on whichever was already there.
+#: "Exactly two dots" (wrong separator count) is deliberately a different message
+#: from "has an empty segment" (right count, empty part): they are different
+#: diagnoses, and answering both with one told the caller less.
 MALFORMED = [
     # Past the whole-token ceiling, before any splitting happens.
     ("a." + "b" * MAX_TOKEN_BYTES + ".c", "token over the total cap",
@@ -153,16 +104,12 @@ MALFORMED = [
 def test_a_malformed_compact_token_is_refused_by_the_right_guard(
     token: str, why: str, message: str
 ) -> None:
-    """One expected message, whichever twin is running.
-
-    That the message no longer depends on `MODE` is the assertion: a caller cannot
-    tell from a refusal which build parsed the token.
-    """
+    """One guard per token, named by the words it refuses with."""
     with pytest.raises(ValueError, match=re.escape(message)):
         _parse_compact(token)
 
 
-def test_the_per_segment_cap_is_reported_by_both_twins_in_the_same_words() -> None:
+def test_the_per_segment_cap_is_reported_in_its_own_words() -> None:
     """The DoS guard the source comment singles out, pinned separately.
 
     A giant segment reaching the JSON parser is the attack the cap exists for, so it
@@ -176,7 +123,7 @@ def test_a_header_or_payload_that_is_not_a_json_object_is_refused() -> None:
     """`[1]` is valid JSON and is not a JWT header.
 
     Both positions, because either alone leaves the other arm of the `or` unexercised.
-    This check is after the native/pure fork, so it runs in both modes identically.
+    This check is after the segment decode, so the guard is the same either way.
     """
     for header, claims in (([1], {}), ({}, [1]), ("str", {}), (1, {})):
         token = f"{_segment(header)}.{_segment(claims)}.AAAA"
@@ -235,15 +182,15 @@ def test_the_per_segment_cap_holds_at_exactly_the_boundary() -> None:
         _parse_compact("a" * (MAX_SEGMENT_B64_ACCEPTED + 1) + ".b.c")
 
 
-def test_the_two_twins_answer_a_bad_base64_length_the_same_way() -> None:
+def test_a_bad_base64_length_is_refused_in_wreath_s_words() -> None:
     """A segment whose characters are legal but whose length is not.
 
-    The charset check cannot catch this -- every character is in the alphabet -- so
-    the pure branch reached `base64.urlsafe_b64decode` and let `binascii.Error`
-    escape carrying CPython's wording ("Invalid base64-encoded string: number of data
-    characters ..."), where native answered with wreath's. Both are `ValueError`
-    subclasses, so every caller caught it and nothing failed loudly; what differed was
-    the message, and only in the fallback build.
+    The charset check cannot catch this -- every character is in the alphabet -- so an
+    implementation that fell through to `base64.urlsafe_b64decode` would let
+    `binascii.Error` escape carrying CPython's wording ("Invalid base64-encoded
+    string: number of data characters ..."). It is a `ValueError` subclass, so every
+    caller catches it and nothing fails loudly; what leaks is an implementation
+    detail.
 
     **One residue is invalid, not all of them.** An unpadded base64 segment may be
     0, 2 or 3 characters more than a multiple of four; only 1-more-than is impossible,
@@ -273,31 +220,6 @@ def test_a_valid_base64_length_gets_past_the_decoder() -> None:
         assert "unpadded base64url" not in str(raised.value), segment
 
 
-def test_wreath_pure_selects_the_python_branch() -> None:
-    """That the other mode exists and is reachable -- the reason this file is
-    mode-agnostic rather than pinned to one implementation.
-
-    This one *is* a subprocess, because import-time selection from the environment
-    cannot be observed any other way. It is deliberately the only one: it asserts which
-    branch a pure interpreter picks and nothing about behaviour, so it does not need to
-    kill a mutant to be worth having. Run the mutation sweep with `WREATH_PURE=1` to
-    measure the branch this proves is there.
-    """
-    environment = os.environ.copy()
-    environment["WREATH_PURE"] = "1"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from wreath._auth import jwt;"
-            " print('pure' if jwt._native_parse is None else 'native')",
-        ],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert completed.stdout.strip() == "pure"
 
 
 # --- _b64url_decode: strict in both twins ---------------------------------------
