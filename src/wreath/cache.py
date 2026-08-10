@@ -30,16 +30,14 @@ from ._orm_events import (
     unsubscribe_writes,
 )
 
-# One implementation, not a selection. The `hasattr(_core, "SnapshotCache")`
-# guard that used to stand here never fired -- no C `SnapshotCache` was ever
-# written -- and a port was measured and declined rather than left pending. The
-# numbers, and the `kv.c` arm that decided it, are in `_snapshot`'s docstring.
+# A port to C was measured and declined; the numbers are in `_snapshot`'s
+# docstring.
 from ._snapshot import SnapshotCache as SnapshotCache
 
 # A small bounded LRU/TTL store for hot request-path caching (response cache,
 # idempotency replay), now a shell over `wreath.kv.KV`.
 #
-# This comment used to say a native twin was not worth building. That reasoning
+# This comment used to say a C implementation was not worth building. That reasoning
 # was sound for what it measured and wrong about what to measure: the ~0.11us it
 # priced is indeed three orders of magnitude below what a *response* cache
 # saves, but `BoundedCache` had by then become the engine under the session
