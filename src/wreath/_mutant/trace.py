@@ -95,7 +95,7 @@ class OutcomeRecorder:
 
     A mutant is only KILLED when a test that *passed at baseline* fails with the
     control removed. Without this, every already-broken test in the tree would
-    read as a mutation being caught, which is the same failure ADR 0024 names:
+    read as a mutation being caught, which is the same failure AGENTS.md names:
     a check reporting safety it is not providing.
     """
 

@@ -657,7 +657,7 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                 # `if` line carrying no bytecode at all -- the first thing that
                 # executes is the first operand, one line down -- so watching
                 # `node.lineno` alone reported an exercised guard as UNREACHED.
-                # That is ADR 0024's failure mode with the tool as its subject,
+                # That is the has-nothing-to-check failure mode with the tool as its subject,
                 # the same one the `def`-line rule exists for; `users.py`'s
                 # step-up check was covered by five tests and read as unwatched.
                 guard_watch = (node.test.lineno,)

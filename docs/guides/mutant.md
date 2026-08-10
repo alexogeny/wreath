@@ -151,7 +151,7 @@ dependency parameter, so it never reaches the check on the route's
 another. Two tests elsewhere do cover the real one, so the control was safe; but
 the test that most looked like its regression test was not one.
 
-This is ADR 0024's shape — *a check that silently has nothing to check* — and it
+This is the shape of a check with nothing to check — *a check that silently has nothing to check* — and it
 is exactly what a mutation report is for. Nobody reading that test would have
 seen it. The tool sees it because it does not read names.
 
@@ -214,7 +214,7 @@ anger, and a refusal that has never fired is a refusal nobody has watched work.
 every test that exercises a policy hands it a hand-rolled fake, mutating the
 shipped implementation changes nothing any of them assert, and the mutant
 survives. That reads as "your tests would not notice", which is exactly right —
-ADR 0020 calls the same thing *a double is never more capable than the real
+AGENTS.md calls the same thing *a double is never more capable than the real
 thing*, and it was found here once by hand after thirteen tests passed over a
 read that had never worked. When a survivor sits in code you are sure is
 covered, look at what the covering tests are actually holding.
@@ -311,5 +311,5 @@ sized for that; 20 s is not.
   every flag.
 - [Find the controls your tests do not watch](../cookbook/recipes/find-unwatched-controls.md)
   — the smallest useful run, on your own application.
-- [ADR 0024](https://github.com/alexogeny/wreath/blob/main/docs/decisions/0024-a-check-that-has-nothing-to-check.md)
-  — the idea this tool automates, and the nine times it was found by hand first.
+- [`AGENTS.md`](https://github.com/alexogeny/wreath/blob/main/AGENTS.md) — "a
+  check that silently has nothing to check", the idea this tool automates.
