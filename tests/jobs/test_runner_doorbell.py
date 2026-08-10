@@ -23,6 +23,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from _pgfidelity import check_for
+
 from wreath.jobs import JobRunner, _doorbell_delay
 
 
@@ -51,15 +53,19 @@ class FakeListenConnection:
         self.listening.append(channel)
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        check_for(self, sql, args)
         return []
 
     async def fetchrow(self, sql: str, *args: Any) -> None:
+        check_for(self, sql, args)
         return None
 
     async def fetchval(self, sql: str, *args: Any) -> None:
+        check_for(self, sql, args)
         return None
 
     def deliver(self) -> None:
