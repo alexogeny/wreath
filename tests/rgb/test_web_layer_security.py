@@ -4,6 +4,7 @@ R-54, R-55, R-57, R-58)."""
 from __future__ import annotations
 
 import pytest
+from wreath._native._core import TrustedNetworks
 
 from wreath import Wreath
 from wreath.policy.cors import CorsPolicy
@@ -195,20 +196,17 @@ class TestForwardedForFallback:
     can trigger that at will."""
 
     def test_a_malformed_hop_does_not_collapse_the_chain(self):
-        from wreath._pure.proxy import TrustedNetworks
 
         networks = TrustedNetworks(["10.0.0.0/8"])
         # The rightmost hops are the trusted proxy; the client prepended junk.
         assert networks.forwarded_client(b"garbage, 203.0.113.9, 10.0.0.5") == "203.0.113.9"
 
     def test_a_wholly_untrusted_chain_still_resolves_the_nearest_hop(self):
-        from wreath._pure.proxy import TrustedNetworks
 
         networks = TrustedNetworks(["10.0.0.0/8"])
         assert networks.forwarded_client(b"203.0.113.9, 198.51.100.7") == "198.51.100.7"
 
     def test_a_chain_of_only_garbage_is_still_refused(self):
-        from wreath._pure.proxy import TrustedNetworks
 
         networks = TrustedNetworks(["10.0.0.0/8"])
         assert networks.forwarded_client(b"garbage") is None

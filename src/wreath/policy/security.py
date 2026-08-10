@@ -69,10 +69,7 @@ def _normalize_host(value: str, *, pattern: bool = False) -> str | None:
     return host
 
 
-if _core is None or not hasattr(_core, "host_allowed"):
-    from .._pure.security import host_allowed as _host_allowed
-else:
-    _host_allowed = _core.host_allowed
+_host_allowed = _core.host_allowed
 
 
 class TrustedHostPolicy:

@@ -1,4 +1,4 @@
-"""PoC: bypass ``max_body_bytes`` on the pure HTTP/1 server with slow chunks.
+"""PoC: bypass ``max_body_bytes`` on the HTTP/1 server with slow chunks.
 
 Run from the repository root::
 
@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from wreath._pure.server import HttpProtocol
+from wreath._native._server import HttpProtocol
+
 from wreath.server import ServerConfig
 
 

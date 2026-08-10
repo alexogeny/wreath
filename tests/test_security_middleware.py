@@ -6,7 +6,6 @@ import pytest
 
 from wreath import Wreath
 from wreath._native import _core
-from wreath._pure.security import host_allowed as pure_host_allowed
 from wreath.policy import HttpPolicy, SecurityHeadersPolicy, TrustedHostPolicy
 from wreath.testing import TestClient
 
@@ -19,18 +18,13 @@ def test_native_trusted_host_matcher_matches_pure_reference() -> None:
         ("internal.test", False),
         ("evil.example", False),
     ):
-        assert pure_host_allowed(host, patterns) is expected
-        if _core is not None:
-            assert _core.host_allowed(host, patterns) is expected
+        assert _core.host_allowed(host, patterns) is expected
 
 
 def test_trusted_host_matchers_share_their_runtime_type_boundary() -> None:
     invalid: Any = None
     with pytest.raises(TypeError):
-        pure_host_allowed(invalid, ("example.com",))
-    if _core is not None:
-        with pytest.raises(TypeError):
-            _core.host_allowed(invalid, ("example.com",))
+        _core.host_allowed(invalid, ("example.com",))
 
 
 @pytest.mark.asyncio
