@@ -30,11 +30,15 @@ from .analyzer import (
     TreeContext,
     _base_kind,
     _config_extra,
+    _eager_paths,
     _Imports,
     _is_false,
     _is_true,
     _iter_py,
+    _order_argument_is_mechanical,
+    _pagination_values,
     _plain_graphql_dataclass,
+    _projection_names,
     _relative_to,
     _resolved_column_path,
     _returns_in,
@@ -52,8 +56,8 @@ from .analyzer import (
     pydantic_field_rule,
     pydantic_projection_rule,
     query_rule,
+    redundant_literal_validator,
     settings_class_rule,
-    settings_required,
     split_lookup,
     status_code_rule,
     status_int,
@@ -83,6 +87,8 @@ _FASTAPI_TO_WREATH = {
     "File": "File",
     "WebSocket": "WebSocket",
     "WebSocketDisconnect": "WebSocketDisconnect",
+    "BackgroundTasks": "BackgroundTasks",
+    "Response": "Response",
     # NOTE: FastAPI's UploadFile has no wreath public equivalent — intentionally NOT
     # mapped, so it is left in place + flagged rather than emitted as a broken import.
 }
@@ -140,6 +146,7 @@ _WREATH_MODULE = {
     "Cookie": "wreath.binding",
     "Form": "wreath.binding",
     "File": "wreath.binding",
+    "Field": "wreath.binding",
     "HttpPolicy": "wreath.policy",
     "CorsPolicy": "wreath.policy",
     "TrustedHostPolicy": "wreath.policy",
@@ -184,6 +191,17 @@ _WREATH_MODULE = {
     "Session": "wreath.orm",
     "FromORM": "wreath.orm",
     "model_dataclass": "wreath.orm",
+    "Environment": "wreath.config",
+    "Env": "wreath.config",
+    "read_osenv": "wreath.config",
+    "HTTPClient": "wreath.http_client",
+    "ClientTimeout": "wreath.http_client",
+    "ClientResponse": "wreath.http_client",
+    "ClientError": "wreath.http_client",
+    "RetryPolicy": "wreath.http_client",
+    "dumps": "wreath.json",
+    "loads": "wreath.json",
+    "BackgroundTasks": "wreath.background",
     "Numeric": "wreath.orm.types",
     "Bytea": "wreath.orm.types",
     "Uuid": "wreath.orm.types",
@@ -220,8 +238,8 @@ def _grouped_imports(names):
 # decides `exc.http_literal` from exactly the table the emitter rewrites with, so
 # a status with no class cannot be reported as translated and then annotated.
 
-# Query/Path/... kwargs that map to a wreath marker (renamed where noted). Everything
-# else (gt/lt/min_length/regex/description/...) is dropped from the marker and reported.
+# Query/Path/... kwargs that map to a Wreath parameter marker. Dataclass field
+# metadata is handled separately by ``_rewrite_field_metadata``.
 _KW_RENAME = {"ge": "minimum", "le": "maximum"}
 _KW_KEEP = frozenset({"alias"})
 _MARKERS = frozenset({"Query", "Path", "Header", "Cookie", "Form", "File"})
@@ -255,6 +273,7 @@ _ORMAR_TYPE = {
     "Float": "Float64",
     "Date": "Date",
     "JSON": "Jsonb",
+    "JSONB": "Jsonb",
     # Both of these have shipped in `wreath.orm.types` the whole time and were
     # simply missing from this table, so a money column and a blob column each
     # came out as "map by hand" over a type that already existed.
@@ -388,12 +407,18 @@ _RENAMED_ORIGINS: dict[str, str] = {
         for old, new in _RESPONSE_RENAME.items()
     },
     **{f"{module}.TestClient": "TestClient" for module in _TESTCLIENT_MODULES},
+    "fastapi.Response": "Response",
+    "httpx.Response": "ClientResponse",
+    "httpx.HTTPError": "ClientError",
+    "httpx.TimeoutException": "ClientError",
+    "httpx.NetworkError": "ClientError",
+    "httpx.ReadError": "ClientError",
 }
 
 
 #: Query verdicts whose target is fully determined, and which the emitter
 #: therefore writes out rather than describing. Everything else — a write, a
-#: projection, a relation traversal, `get()`'s changed miss behaviour — keeps
+#: dynamic projection or relation traversal — keeps
 #: its note, because a person still has to decide something.
 _QUERY_TRANSLATED = frozenset(
     {
@@ -407,6 +432,9 @@ _QUERY_TRANSLATED = frozenset(
         "orm.query.exists",
         "orm.query.order_exact",
         "orm.query.eager_exact",
+        "orm.query.select_all_exact",
+        "orm.query.get_or_create_exact",
+        "orm.query.values_exact",
     }
 )
 
@@ -422,6 +450,16 @@ _QUERY_RUNNER = {
 }
 
 
+def _snake(name: str) -> str:
+    """A stable local-name spelling for one statically known model name."""
+    pieces: list[str] = []
+    for character in name:
+        if character.isupper() and pieces:
+            pieces.append("_")
+        pieces.append(character.lower() if character.isalnum() else "_")
+    return "".join(pieces).strip("_") or "row"
+
+
 class _QueryPlan:
     """The wreath query one `Model.objects.…` chain becomes, assembled verb by verb."""
 
@@ -435,11 +473,71 @@ class _QueryPlan:
         self.runner: str | None = None
         self.write_values: list[str] = []
         self.primary_key: str | None = None
+        self.create_pairs: list[tuple[str, str]] = []
+        self.existing_name: str | None = None
+        self.projection_pairs: list[tuple[str, str]] = []
+        self.row_name: str | None = None
 
     def step(self, emitter: _Emitter, verb: str, call: ast.Call | None) -> bool:
         """Fold one verb into the plan; `False` if it is not one we can write."""
         if self.runner is not None:
             return False  # nothing chains after the run
+        if verb == "get_or_create":
+            if call is None or call.args or not call.keywords:
+                return False
+            pairs = [
+                (keyword.arg, emitter._seg(keyword.value))
+                for keyword in call.keywords
+                if keyword.arg is not None
+            ]
+            names = {name for name, _value in pairs}
+            if (
+                len(pairs) != len(call.keywords)
+                or not names
+                or names & {"_defaults", "defaults"}
+                or any("__" in name for name in names)
+            ):
+                return False
+            self.create_pairs = pairs
+            self.wheres = [
+                f"{self.model}.{name} == {value}" for name, value in pairs
+            ]
+            self.write_values = [f"{name}={value}" for name, value in pairs]
+            self.runner = "get_or_create"
+            return True
+        if verb == "select_all":
+            return call is not None and not call.args and not call.keywords
+        if verb == "values":
+            names = _projection_names(call)
+            if names is not None:
+                pairs = [emitter._projection_pair(self.model, name) for name in names]
+                if any(pair is None for pair in pairs):
+                    return False
+                self.projection_pairs = [pair for pair in pairs if pair is not None]
+            elif call is None or call.args or call.keywords or not self.projection_pairs:
+                return False
+            self.runner = "values"
+            return True
+        if verb == "values_list":
+            names = _projection_names(call)
+            if names is not None:
+                pairs = [emitter._projection_pair(self.model, name) for name in names]
+                if any(pair is None for pair in pairs):
+                    return False
+                self.projection_pairs = [pair for pair in pairs if pair is not None]
+            elif call is None or call.args or call.keywords or not self.projection_pairs:
+                return False
+            self.runner = "values_list"
+            return True
+        if verb == "fields":
+            names = _projection_names(call)
+            if names is None:
+                return False
+            pairs = [emitter._projection_pair(self.model, name) for name in names]
+            if any(pair is None for pair in pairs):
+                return False
+            self.projection_pairs = [pair for pair in pairs if pair is not None]
+            return True
         if verb in ("filter", "all", "get_or_none", "get", "count", "exists"):
             if verb == "get" and call is not None and len(call.keywords) == 1:
                 keyword = call.keywords[0]
@@ -469,23 +567,47 @@ class _QueryPlan:
             return True
         if verb == "order_by":
             for argument in call.args if call else ():
-                name = argument.value if isinstance(argument, ast.Constant) else None
-                if not isinstance(name, str) or not name.strip("-"):
+                if not _order_argument_is_mechanical(argument, self.model):
                     return False
-                column = f"{self.model}.{name.lstrip('-')}"
-                self.orders.append(f"{column}.desc()" if name.startswith("-") else column)
+                if isinstance(argument, ast.Constant):
+                    name = argument.value
+                    if not isinstance(name, str):
+                        return False
+                    column = f"{self.model}.{name.lstrip('-')}"
+                    self.orders.append(
+                        f"{column}.desc()" if name.startswith("-") else column
+                    )
+                else:
+                    self.orders.append(emitter._seg(argument))
             return bool(self.orders)
+        if verb == "first":
+            if call is None or call.args or call.keywords or not self.orders:
+                return False
+            self.limit = "1"
+            self.runner = "fetch_one"
+            return True
         if verb in ("select_related", "prefetch_related"):
-            for argument in call.args if call else ():
-                name = argument.value if isinstance(argument, ast.Constant) else None
-                if not isinstance(name, str) or "__" in name:
+            paths = _eager_paths(call)
+            if paths is None:
+                return False
+            for path in paths:
+                expression = emitter._include_expression(self.model, path)
+                if expression is None:
                     return False
-                self.includes.append(name)
+                self.includes.append(expression)
             return bool(self.includes)
         if verb in ("limit", "offset"):
             if call is None or len(call.args) != 1 or call.keywords:
                 return False
             setattr(self, verb, emitter._seg(call.args[0]))
+            return True
+        if verb == "paginate":
+            values = _pagination_values(call)
+            if values is None:
+                return False
+            page, page_size = (emitter._seg(value) for value in values)
+            self.limit = page_size
+            self.offset = f"({page} - 1) * {page_size}"
             return True
         if verb == "delete":
             if call is None or call.args or call.keywords:
@@ -506,16 +628,28 @@ class _QueryPlan:
         return False
 
     def render(self, session: str | None) -> str:
+        if self.runner == "get_or_create" and self.existing_name is not None:
+            query = f"{self.model}.select().where({', '.join(self.wheres)})"
+            values = ", ".join(self.write_values)
+            existing = self.existing_name
+            return (
+                f"(({existing}, False) if "
+                f"({existing} := await {session}.fetch_one({query})) is not None "
+                f"else (await {session}.create({self.model}, {values}), True))"
+            )
         if self.runner == "create":
             suffix = f", {', '.join(self.write_values)}" if self.write_values else ""
             return f"await {session}.create({self.model}{suffix})"
         if self.runner == "require" and self.primary_key is not None:
             return f"await {session}.require({self.model}, {self.primary_key})"
-        query = f"{self.model}.select()"
+        selected = ", ".join(
+            f"{self.model}.{attribute}" for _key, attribute in self.projection_pairs
+        )
+        query = f"{self.model}.select({selected})" if selected else f"{self.model}.select()"
         if self.wheres:
             query += f".where({', '.join(self.wheres)})"
         for relation in self.includes:
-            query += f".include({self.model}.{relation}.selectin())"
+            query += f".include({relation})"
         if self.orders:
             query += f".order_by({', '.join(self.orders)})"
         if self.limit is not None:
@@ -524,6 +658,20 @@ class _QueryPlan:
             query += f".offset({self.offset})"
         if self.runner is None:
             return query
+        if self.runner == "values" and self.row_name is not None:
+            pairs = ", ".join(
+                f"{key!r}: {self.row_name}.{attribute}"
+                for key, attribute in self.projection_pairs
+            )
+            return f"[{{{pairs}}} for {self.row_name} in await {session}.fetch({query})]"
+        if self.runner == "values_list" and self.row_name is not None:
+            values = ", ".join(
+                f"{self.row_name}.{attribute}"
+                for _key, attribute in self.projection_pairs
+            )
+            if len(self.projection_pairs) == 1:
+                values += ","
+            return f"[({values}) for {self.row_name} in await {session}.fetch({query})]"
         if self.runner == "exists":
             # Wreath has no `exists()`; the count is the same round trip.
             return f"await {session}.count({query}) > 0"
@@ -645,9 +793,35 @@ class _Emitter(ast.NodeVisitor):
         self.imports = imports
         self.opinionated = opinionated
         self.session_functions: frozenset[str] = frozenset()
+        self.session_definition_sites: frozenset[tuple[str, int]] = frozenset()
+        self.session_call_sites: frozenset[tuple[str, int, int]] = frozenset()
+        self.session_sites_resolved = False
+        self._source_path = ""
         self.pk_types = pk_types or {}  # ORM model name -> PK PgType (FK inference)
         self.orm_columns: dict[str, set[str]] = {}
         self.orm_relations: dict[str, dict[str, str]] = {}
+        self.orm_tables: dict[str, str] = {}
+        self.orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] = {}
+        self.orm_mixins: frozenset[str] = frozenset()
+        self.pydantic_models: frozenset[str] = frozenset()
+        self.settings_models: frozenset[str] = frozenset()
+        self._settings_custom_init: frozenset[str] = frozenset()
+        self._settings_bindings: dict[str, tuple[str | None, str | None]] = {}
+        self._http_clients: dict[int, tuple[str, ast.expr | None]] = {}
+        self._http_client_calls: dict[int, int] = {}
+        self._http_requests: dict[int, int] = {}
+        self._http_dynamic_clients: dict[int, ast.expr] = {}
+        self._http_url_parts: dict[int, str] = {}
+        self._http_request_timeouts: dict[int, ast.expr] = {}
+        self._http_retries: dict[int, ast.expr] = {}
+        self._http_transport_assignments: set[int] = set()
+        self._http_timeout_constants: set[str] = set()
+        self._http_responses: set[tuple[int | None, str]] = set()
+        self.needs_urlencode = False
+        self._global_test_clients: dict[str, ast.Call] = {}
+        self._fixture_test_clients: set[str] = set()
+        self.needs_fixture = False
+        self._pydantic_partial_family: frozenset[str] = frozenset()
         self.needs: set[str] = set()  # extra `from wreath import` names
         self._from_fastapi_wreath: set[str] = set()  # names already on the rewritten fastapi import
         self.needs_annotated = False  # `from typing import Annotated`
@@ -689,15 +863,385 @@ class _Emitter(ast.NodeVisitor):
         # since the `FastAPI(lifespan=...)` call sits below the `def` it names.
         self._lifespan_names: frozenset[str] = frozenset()
         self._test_clients: frozenset[str] = frozenset()
+        self._removed_pydantic_imports: set[str] = set()
+        self._removed_middleware_imports: set[str] = set()
+        self._used_names: set[str] = set()
 
     def visit_Module(self, node: ast.Module) -> None:
         self._parents = parent_map(node)
+        self._used_names = {
+            candidate.id for candidate in ast.walk(node) if isinstance(candidate, ast.Name)
+        }
+        class_bases = {
+            candidate.name: {
+                self._seg(base.func.value)
+                if (
+                    isinstance(base, ast.Call)
+                    and isinstance(base.func, ast.Attribute)
+                    and base.func.attr == "model_as_partial"
+                )
+                else self._seg(base).split("[", 1)[0]
+                for base in candidate.bases
+            }
+            for candidate in node.body
+            if isinstance(candidate, ast.ClassDef)
+        }
+        partial = {
+            name
+            for name, bases in class_bases.items()
+            if any(
+                isinstance(base, ast.Call)
+                and isinstance(base.func, ast.Attribute)
+                and base.func.attr == "model_as_partial"
+                for candidate in node.body
+                if isinstance(candidate, ast.ClassDef) and candidate.name == name
+                for base in candidate.bases
+            )
+        }
+        for candidate in node.body:
+            if not isinstance(candidate, ast.ClassDef):
+                continue
+            for base in candidate.bases:
+                if (
+                    isinstance(base, ast.Call)
+                    and isinstance(base.func, ast.Attribute)
+                    and base.func.attr == "model_as_partial"
+                ):
+                    partial.add(self._seg(base.func.value))
+        changed = True
+        while changed:
+            changed = False
+            for name, bases in class_bases.items():
+                if name in partial or not (bases & partial):
+                    continue
+                partial.add(name)
+                changed = True
+            for name in tuple(partial):
+                for base in class_bases.get(name, ()):
+                    if base in class_bases and base not in partial:
+                        partial.add(base)
+                        changed = True
+        self._pydantic_partial_family = frozenset(partial)
+        def owner_id(candidate: ast.AST) -> int | None:
+            owner = self._parents.get(id(candidate))
+            while owner is not None:
+                if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return id(owner)
+                owner = self._parents.get(id(owner))
+            return None
+
+        def owner_chain(candidate: ast.AST) -> tuple[int, ...]:
+            owners: list[int] = []
+            owner = self._parents.get(id(candidate))
+            while owner is not None:
+                if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    owners.append(id(owner))
+                owner = self._parents.get(id(owner))
+            return tuple(owners)
+
+        transport_definitions: dict[
+            str, list[tuple[ast.Assign, ast.Call, int | None]]
+        ] = {}
+        for candidate in ast.walk(node):
+            if (
+                isinstance(candidate, ast.Assign)
+                and len(candidate.targets) == 1
+                and isinstance(candidate.targets[0], ast.Name)
+                and isinstance(candidate.value, ast.Call)
+                and self.imports.origin(candidate.value.func) == "httpx.AsyncHTTPTransport"
+            ):
+                transport_definitions.setdefault(candidate.targets[0].id, []).append(
+                    (candidate, candidate.value, owner_id(candidate))
+                )
+            if not isinstance(candidate, (ast.Assign, ast.AnnAssign)):
+                continue
+            target = (
+                candidate.target
+                if isinstance(candidate, ast.AnnAssign)
+                else candidate.targets[0] if len(candidate.targets) == 1 else None
+            )
+            value = candidate.value
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Call)
+                and self._http_timeout_total(value) is not None
+            ):
+                self._http_timeout_constants.add(target.id)
         self._lifespan_names = lifespan_names(node)
+        self._settings_custom_init = frozenset(
+            cls.name
+            for cls in node.body
+            if isinstance(cls, ast.ClassDef)
+            and cls.name in self.settings_models
+            and any(
+                isinstance(statement, ast.FunctionDef)
+                and statement.name == "__init__"
+                and bool(
+                    statement.args.posonlyargs
+                    or statement.args.kwonlyargs
+                    or len(statement.args.args) > 1
+                    or statement.args.vararg
+                    or statement.args.kwarg
+                )
+                for statement in cls.body
+            )
+        )
+        for cls in node.body:
+            if not isinstance(cls, ast.ClassDef) or cls.name not in self.settings_models:
+                continue
+            env_file = prefix = None
+            for statement in cls.body:
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = (
+                    statement.targets
+                    if isinstance(statement, ast.Assign)
+                    else [statement.target]
+                )
+                if not any(
+                    isinstance(target, ast.Name) and target.id == "model_config"
+                    for target in targets
+                ) or not isinstance(statement.value, ast.Call):
+                    continue
+                for keyword in statement.value.keywords:
+                    if keyword.arg == "env_file":
+                        env_file = self._seg(keyword.value)
+                    elif keyword.arg == "env_prefix":
+                        prefix = self._seg(keyword.value)
+            self._settings_bindings[cls.name] = (env_file, prefix)
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, (ast.With, ast.AsyncWith)):
+                continue
+            for item in candidate.items:
+                call = item.context_expr
+                if not (
+                    isinstance(call, ast.Call)
+                    and self.imports.origin(call.func) == "httpx.AsyncClient"
+                    and isinstance(item.optional_vars, ast.Name)
+                    and not call.args
+                ):
+                    continue
+                key = id(item)
+                options = {keyword.arg for keyword in call.keywords}
+                if None in options or not options <= {
+                    "base_url",
+                    "headers",
+                    "timeout",
+                    "transport",
+                }:
+                    continue
+                transport = next(
+                    (keyword.value for keyword in call.keywords if keyword.arg == "transport"),
+                    None,
+                )
+                if transport is not None:
+                    transport_assignment = None
+                    if isinstance(transport, ast.Name):
+                        scopes = owner_chain(call)
+                        candidates = [
+                            (assignment, definition)
+                            for assignment, definition, scope in transport_definitions.get(
+                                transport.id, ()
+                            )
+                            if assignment.lineno < call.lineno
+                            and (scope in scopes or (scope is None and not scopes))
+                        ]
+                        if candidates:
+                            transport_assignment, transport = max(
+                                candidates, key=lambda item: item[0].lineno
+                            )
+                    if not (
+                        isinstance(transport, ast.Call)
+                        and self.imports.origin(transport.func)
+                        == "httpx.AsyncHTTPTransport"
+                        and not transport.args
+                        and all(keyword.arg == "retries" for keyword in transport.keywords)
+                    ):
+                        continue
+                    retries = next(
+                        (
+                            keyword.value
+                            for keyword in transport.keywords
+                            if keyword.arg == "retries"
+                        ),
+                        None,
+                    )
+                    if retries is not None:
+                        self._http_retries[key] = retries
+                        if transport_assignment is not None:
+                            self._http_transport_assignments.add(id(transport_assignment))
+                requests = [
+                    request
+                    for request in ast.walk(candidate)
+                    if isinstance(request, ast.Call)
+                    and isinstance(request.func, ast.Attribute)
+                    and isinstance(request.func.value, ast.Name)
+                    and request.func.value.id == item.optional_vars.id
+                    and request.func.attr in _TEST_REQUEST_METHODS
+                    and all(
+                        keyword.arg
+                        in {"headers", "json", "content", "data", "params", "timeout"}
+                        for keyword in request.keywords
+                    )
+                ]
+                if len(requests) == 1:
+                    request_timeout = next(
+                        (
+                            keyword.value
+                            for keyword in requests[0].keywords
+                            if keyword.arg == "timeout"
+                        ),
+                        None,
+                    )
+                    if request_timeout is not None:
+                        self._http_request_timeouts[key] = request_timeout
+                if "base_url" not in options:
+                    if len(requests) != 1:
+                        continue
+                    request = requests[0]
+                    # Re-narrowed: the comprehension above only keeps calls whose
+                    # `func` is an Attribute, but `requests` is a list of `ast.Call`
+                    # and that guarantee does not survive the binding.
+                    method = (
+                        request.func.attr
+                        if isinstance(request.func, ast.Attribute)
+                        else ""
+                    )
+                    target_index = 1 if method == "request" else 0
+                    if len(request.args) <= target_index:
+                        continue
+                    self._http_dynamic_clients[key] = request.args[target_index]
+                headers = next(
+                    (keyword.value for keyword in call.keywords if keyword.arg == "headers"),
+                    None,
+                )
+                self._http_clients[key] = (item.optional_vars.id, headers)
+                self._http_client_calls[id(call)] = key
+                self._http_requests.update((id(request), key) for request in requests)
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = candidate.value
+            if not (
+                isinstance(value, ast.Await)
+                and isinstance(value.value, ast.Call)
+                and id(value.value) in self._http_requests
+            ):
+                continue
+            targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+            self._http_responses.update(
+                (owner_id(candidate), target.id)
+                for target in targets
+                if isinstance(target, ast.Name)
+            )
+        for statement in node.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Call)
+                and self._is_test_client_call(statement.value)
+            ):
+                self._global_test_clients[statement.targets[0].id] = statement.value
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            fixture = any(
+                self.imports.origin(
+                    decorator.func if isinstance(decorator, ast.Call) else decorator
+                ).endswith("pytest.fixture")
+                or (
+                    isinstance(decorator, ast.Attribute)
+                    and decorator.attr == "fixture"
+                )
+                for decorator in statement.decorator_list
+            )
+            if fixture and any(
+                isinstance(inner, (ast.Return, ast.Yield))
+                and isinstance(inner.value, ast.Call)
+                and self._is_test_client_call(inner.value)
+                for inner in ast.walk(statement)
+            ):
+                self._fixture_test_clients.add(statement.name)
         self.generic_visit(node)
 
     # -- helpers -----------------------------------------------------------------
     def _seg(self, node: ast.AST) -> str:
         return ast.get_source_segment(self.src, node) or ""
+
+    def _enclosing_callable_id(self, node: ast.AST) -> int | None:
+        owner = self._parents.get(id(node))
+        while owner is not None:
+            if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return id(owner)
+            owner = self._parents.get(id(owner))
+        return None
+
+    def _fresh_name(self, preferred: str) -> str:
+        """Reserve a local temporary without shadowing a source identifier."""
+        name = preferred
+        suffix = 2
+        while name in self._used_names:
+            name = f"{preferred}_{suffix}"
+            suffix += 1
+        self._used_names.add(name)
+        return name
+
+    def _session_definition_selected(self, node) -> bool:
+        if self.session_sites_resolved:
+            return (self._source_path, node.lineno) in self.session_definition_sites
+        return node.name in self.session_functions
+
+    def _session_call_selected(self, node: ast.Call, called: str | None) -> bool:
+        if self.session_sites_resolved:
+            return (
+                self._source_path,
+                node.lineno,
+                node.col_offset,
+            ) in self.session_call_sites
+        return called in self.session_functions
+
+    def _asgi_test_client_app(self, call: ast.Call) -> ast.expr | None:
+        if self.imports.origin(call.func) != "httpx.AsyncClient":
+            return None
+        options = {keyword.arg for keyword in call.keywords}
+        if None in options or not options <= {"transport", "base_url", "headers"}:
+            return None
+        transport = next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "transport"),
+            None,
+        )
+        if not (
+            isinstance(transport, ast.Call)
+            and self.imports.origin(transport.func) == "httpx.ASGITransport"
+        ):
+            return None
+        app = next(
+            (keyword.value for keyword in transport.keywords if keyword.arg == "app"),
+            transport.args[0] if transport.args else None,
+        )
+        return app if isinstance(app, ast.expr) else None
+
+    def _is_test_client_call(self, call: ast.Call) -> bool:
+        return (
+            self.imports.origin(call.func)
+            in {f"{module}.TestClient" for module in _TESTCLIENT_MODULES}
+            or self._asgi_test_client_app(call) is not None
+        )
+
+    def _test_client_text(self, call: ast.Call) -> str:
+        app = self._asgi_test_client_app(call)
+        if app is None:
+            return self._seg(call)
+        self.needs.add("TestClient")
+        headers = next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "headers"),
+            None,
+        )
+        suffix = "" if headers is None else f", headers={self._seg(headers)}"
+        self._resolve(call.lineno, "ext.httpx")
+        self._resolve(call.lineno, "test.client")
+        self._rewritten.update(id(item) for item in ast.walk(call))
+        return f"TestClient({self._seg(app)}{suffix})"
 
     def _annotate(self, line: int, rule_id: str, extra: str = "") -> None:
         """Write the rule's own wording, with a detail in brackets after it."""
@@ -741,6 +1285,14 @@ class _Emitter(ast.NodeVisitor):
     # -- imports -----------------------------------------------------------------
     def rewrite_imports(self, tree: ast.Module) -> None:
         last_import_line = 0
+        live_httpx = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and self.imports.origin(node).startswith("httpx")
+            and id(node) not in self._rewritten
+            and not self._inside_replaced(node)
+        }
         # Only the imports at the *top* of the file decide where new ones go. One
         # module that imports something halfway down the file, and following the
         # last import anywhere put `from wreath.orm import Session` below the
@@ -767,17 +1319,36 @@ class _Emitter(ast.NodeVisitor):
                 self._rewrite_from_pydantic(node)
             elif (
                 isinstance(node, ast.ImportFrom)
+                and node.module == "pydantic_settings"
+                and node.level == 0
+            ):
+                gone = {
+                    alias.name
+                    for alias in node.names
+                    if alias.name in {"BaseSettings", "SettingsConfigDict"}
+                    and (alias.asname or alias.name) not in self._retain
+                }
+                self.buf.replace(node, self._keep_leftover(node, gone, node.module))
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "pydantic_partial"
+                and node.level == 0
+            ):
+                gone = {
+                    alias.name
+                    for alias in node.names
+                    if alias.name == "PartialModelMixin"
+                    and (alias.asname or alias.name) not in self._retain
+                }
+                self.buf.replace(node, self._keep_leftover(node, gone, node.module))
+            elif (
+                isinstance(node, ast.ImportFrom)
                 and (module := node.module) is not None
                 and module.startswith(("fastapi.middleware", "starlette.middleware"))
                 and any(a.name in {"CORSMiddleware", "TrustedHostMiddleware"} for a in node.names)
             ):
                 imported = {a.name for a in node.names}
                 drop = imported & {"CORSMiddleware", "TrustedHostMiddleware"}
-                self.needs.add("HttpPolicy")
-                if "CORSMiddleware" in drop:
-                    self.needs.add("CorsPolicy")
-                if "TrustedHostMiddleware" in drop:
-                    self.needs.add("TrustedHostPolicy")
                 self.buf.replace(
                     node,
                     self._keep_leftover(node, drop=drop, module=module),
@@ -786,8 +1357,45 @@ class _Emitter(ast.NodeVisitor):
                 self._swap_import(node, _RESPONSE_RENAME)
             elif isinstance(node, ast.ImportFrom) and node.module in _TESTCLIENT_MODULES:
                 self._swap_import(node, {"TestClient": "TestClient"})
+            elif isinstance(node, ast.ImportFrom) and node.module == "httpx":
+                keep = [
+                    alias
+                    for alias in node.names
+                    if (alias.asname or alias.name) in live_httpx
+                ]
+                self.buf.replace(
+                    node,
+                    "from httpx import " + ", ".join(self._alias_str(alias) for alias in keep)
+                    if keep
+                    else "",
+                )
+            elif isinstance(node, ast.Import) and any(
+                alias.name == "httpx" for alias in node.names
+            ):
+                keep = [
+                    alias
+                    for alias in node.names
+                    if alias.name != "httpx" or (alias.asname or alias.name) in live_httpx
+                ]
+                self.buf.replace(
+                    node,
+                    "import " + ", ".join(self._alias_str(alias) for alias in keep)
+                    if keep
+                    else "",
+                )
             elif isinstance(node, ast.ImportFrom) and node.module == "cachetools":
                 self._drop_replaced(node, set(_CACHE_RENAME))
+            elif isinstance(node, ast.ImportFrom) and self._removed_middleware_imports:
+                gone = {
+                    alias.name
+                    for alias in node.names
+                    if alias.name in self._removed_middleware_imports
+                    and (alias.asname or alias.name) not in self._retain
+                }
+                if gone:
+                    self.buf.replace(
+                        node, self._keep_leftover(node, gone, node.module or "")
+                    )
             elif (
                 isinstance(node, ast.Import)
                 and all((a.asname or a.name) not in self._retain for a in node.names)
@@ -870,7 +1478,7 @@ class _Emitter(ast.NodeVisitor):
         # class with a second base, or `Field` on a field whose marker needed a
         # human, is still written in the file — deleting its import turns a
         # reviewable port into a module that will not import at all.
-        dropped = {"BaseModel", "Field"} - self._retain
+        dropped = ({"BaseModel", "Field"} - self._retain) | self._removed_pydantic_imports
         keep = [a for a in node.names if a.name not in dropped]
         if any(a.name in dropped for a in node.names):
             self.needs_dataclass = True
@@ -905,6 +1513,12 @@ class _Emitter(ast.NodeVisitor):
             lines.append("import uuid")
         if self.needs_temporal and "temporal" not in self.imports.names:
             lines.append("from wreath import temporal")
+        if self.needs_urlencode and "urlencode" not in self.imports.names:
+            lines.append("from urllib.parse import urlencode")
+        if self.needs_fixture and "fixture" not in self.imports.names:
+            lines.append("from pytest import fixture")
+        if self._http_dynamic_clients and "urlsplit" not in self.imports.names:
+            lines.append("from urllib.parse import urlsplit, urlunsplit")
         wanted = [
             name
             for name, needed in (("dataclass", self.needs_dataclass), ("field", self.needs_field))
@@ -912,10 +1526,11 @@ class _Emitter(ast.NodeVisitor):
         ]
         if wanted:
             lines.append("from dataclasses import " + ", ".join(wanted))
-        if lines and getattr(self, "_last_import_line", 0):
-            self.buf.insert_before_line(self._last_import_line + 1, "\n".join(lines))
-        elif lines:
-            self.buf.insert_before_line(1, "\n".join(lines) + "\n")
+        additions = "\n".join(lines)
+        if additions and getattr(self, "_last_import_line", 0):
+            self.buf.insert_before_line(self._last_import_line + 1, additions)
+        elif additions:
+            self.buf.insert_before_line(1, additions + "\n")
 
     def annotate_findings(self, findings) -> None:
         """Write a note above every construct the report says needs a person.
@@ -943,6 +1558,10 @@ class _Emitter(ast.NodeVisitor):
 
     # -- classes (Pydantic DTOs / ORM / custom middleware) -----------------------
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node.name in self._pydantic_partial_family:
+            self._annotate(node.lineno, "pydantic.partial")
+            self.generic_visit(node)
+            return
         for dec in node.decorator_list:
             decorated = dec.func if isinstance(dec, ast.Call) else dec
             origin = self.imports.origin(decorated)
@@ -969,21 +1588,18 @@ class _Emitter(ast.NodeVisitor):
             indent = self.buf.line_indent(node.lineno)
             self.buf.insert_before_line(node.lineno, f"{indent}@dataclass(kw_only=True)")
         kind = _base_kind(self.imports, node)
+        if kind is None and node.name in self.pydantic_models:
+            kind = "pydantic"
+        elif kind is None and node.name in self.settings_models:
+            kind = "settings"
         if kind == "pydantic":
             self._rewrite_pydantic_class(node)
         elif kind == "settings":
-            # Same verdict function the report uses. The emitter has no tree
-            # index, so a sub-group field reads as `complex` rather than
-            # `nested` — which lands on the same class verdict, since neither is
-            # the `scalar` shape the translated verdict requires.
-            rule_id = settings_class_rule(self.imports, node)
-            self._annotate(
-                node.lineno,
-                rule_id,
-                settings_required(node) if rule_id == "settings.class_env" else "",
-            )
+            self._rewrite_settings_class(node)
         elif kind == "ormar":
             self._rewrite_ormar_class(node)
+        elif node.name in self.orm_mixins:
+            self._rewrite_ormar_mixin(node)
         elif kind == "sqlmodel":
             self._note(
                 node.lineno,
@@ -992,11 +1608,150 @@ class _Emitter(ast.NodeVisitor):
                 "automatically. The shape is the same: Mapped[...] annotations "
                 "with column(...) for each field",
             )
-        elif any(self.imports.origin(b).endswith("BaseHTTPMiddleware") for b in node.bases):
-            self._annotate(
-                node.lineno, "mw.custom", "subclass — rework onto wreath's fused middleware base"
-            )
         self.generic_visit(node)
+
+    def _rewrite_settings_class(self, node: ast.ClassDef) -> None:
+        """Move BaseSettings onto Environment-bound dataclasses."""
+        self.needs_dataclass = True
+        indent = self.buf.line_indent(node.lineno)
+        self.buf.insert_before_line(node.lineno, f"{indent}@dataclass(kw_only=True)")
+        origins = [self.imports.origin(base) for base in node.bases]
+        settings_origins = {"pydantic_settings.BaseSettings", "pydantic.BaseSettings"}
+        kept = [
+            self._seg(base)
+            for base, origin in zip(node.bases, origins, strict=True)
+            if origin not in settings_origins
+        ]
+        if node.bases:
+            if kept:
+                self.buf.replace_span(node.bases[0], node.bases[-1], ", ".join(kept))
+            else:
+                self._strip_all_bases(node)
+            for base, origin in zip(node.bases, origins, strict=True):
+                if origin in settings_origins:
+                    self._rewritten.add(id(base))
+        rule_id = settings_class_rule(self.imports, node)
+        self._resolve(node.lineno, rule_id)
+        self._rewrite_settings_custom_init(node)
+        for statement in node.body:
+            if isinstance(statement, ast.ClassDef) and statement.name == "Config":
+                self._replace_all_of(statement, "# wreath-port: BaseSettings Config removed")
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                target = (
+                    statement.target
+                    if isinstance(statement, ast.AnnAssign)
+                    else statement.targets[0] if len(statement.targets) == 1 else None
+                )
+                if isinstance(target, ast.Name) and target.id == "model_config":
+                    self._replace_all_of(statement, "# wreath-port: legacy settings config removed")
+                    continue
+            if not (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            ):
+                continue
+            value = statement.value
+            if (
+                isinstance(value, ast.Call)
+                and self.imports.origin(value.func).split(".")[-1] == "Field"
+            ):
+                alias = next(
+                    (kw.value for kw in value.keywords if kw.arg in ("alias", "env")),
+                    None,
+                )
+                if alias is not None:
+                    self.needs.update({"Env"})
+                    self.needs_annotated = True
+                    annotation = self._seg(statement.annotation)
+                    self.buf.replace(
+                        statement.annotation,
+                        f"Annotated[{annotation}, Env({self._seg(alias)})]",
+                    )
+                self._rewrite_field_marker(statement, value)
+            elif (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id in self.settings_models
+                and not value.args
+                and not value.keywords
+            ):
+                self.needs_field = True
+                self._replace_all_of(value, f"field(default_factory={value.func.id})")
+            else:
+                factory = _mutable_factory(value) if value is not None else None
+                if factory and value is not None:
+                    self.needs_field = True
+                    self._replace_all_of(value, f"field(default_factory={factory})")
+            self._resolve(statement.lineno, "settings.field_complex")
+            self._resolve(statement.lineno, "settings.nested")
+
+    def _rewrite_settings_custom_init(self, node: ast.ClassDef) -> None:
+        init = next(
+            (
+                statement
+                for statement in node.body
+                if isinstance(statement, ast.FunctionDef) and statement.name == "__init__"
+            ),
+            None,
+        )
+        if init is None:
+            return
+        parameterized = bool(
+            init.args.posonlyargs
+            or init.args.kwonlyargs
+            or len(init.args.args) > 1
+            or init.args.vararg
+            or init.args.kwarg
+        )
+        # The call is carried out of the comprehension beside its statement: a
+        # list of `ast.Expr` would widen `.value` back to `ast.expr` and lose the
+        # `isinstance` the filter already established.
+        super_calls = [
+            (statement, statement.value)
+            for statement in init.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr == "__init__"
+            and isinstance(statement.value.func.value, ast.Call)
+            and isinstance(statement.value.func.value.func, ast.Name)
+            and statement.value.func.value.func.id == "super"
+        ]
+        if len(super_calls) != 1:
+            return
+        statement, call = super_calls[0]
+        if not parameterized and not call.args and not call.keywords:
+            header_end = self.buf.b.find(
+                b":", self.buf.start_of(init), self.buf.start_of(init.body[0])
+            )
+            name_at = self.buf.b.find(b"__init__", self.buf.start_of(init), header_end)
+            if name_at >= 0:
+                self.buf._edits.append((name_at, name_at + len("__init__"), b"__post_init__"))
+                self._replace_all_of(statement, "")
+            return
+        if call.args or any(keyword.arg is None for keyword in call.keywords):
+            return
+        supplied = {keyword.arg: self._seg(keyword.value) for keyword in call.keywords}
+        assignments: list[str] = []
+        for field_statement in node.body:
+            if not (
+                isinstance(field_statement, ast.AnnAssign)
+                and isinstance(field_statement.target, ast.Name)
+            ):
+                continue
+            name = field_statement.target.id
+            value = supplied.get(name)
+            if value is None and field_statement.value is not None:
+                value = self._seg(field_statement.value)
+            if value is not None:
+                assignments.append(f"self.{name} = {value}")
+        if assignments:
+            indent = self.buf.line_indent(statement.lineno)
+            self._replace_all_of(
+                statement,
+                ("\n" + indent).join(assignments),
+            )
 
     def _rewrite_pydantic_class(self, node: ast.ClassDef) -> None:
         self.needs_dataclass = True
@@ -1009,20 +1764,98 @@ class _Emitter(ast.NodeVisitor):
         offenders = dataclass_needs_kw_only(self.imports, node)
         header = "@dataclass(kw_only=True)" if offenders else "@dataclass"
         self.buf.insert_before_line(node.lineno, f"{indent}{header}")
-        # Strip the BaseModel base. Only the clean sole-base case is auto-rewritten.
+        # Strip Pydantic's runtime bases while preserving ordinary mixins and
+        # generic bases. PartialModelMixin itself disappears; a
+        # ``model_as_partial()`` base becomes a local stdlib-dataclass helper.
         base_origins = [self.imports.origin(b) for b in node.bases]
-        if base_origins == ["pydantic.BaseModel"]:
-            self._strip_all_bases(node)  # `class X(BaseModel):` -> `class X:`
-        elif "pydantic.BaseModel" in base_origins:
-            self._note(
-                node.lineno,
-                "pydantic.model",
-                "this class has another base as well as BaseModel, so BaseModel "
-                "was left in place. Remove it once you have checked the other "
-                "base does not rely on pydantic",
-            )
+        kept: list[str] = []
+        for base, origin in zip(node.bases, base_origins, strict=True):
+            if origin in {"pydantic.BaseModel", "pydantic_partial.PartialModelMixin"}:
+                self._rewritten.update(id(item) for item in ast.walk(base))
+                continue
+            if (
+                isinstance(base, ast.Call)
+                and isinstance(base.func, ast.Attribute)
+                and base.func.attr == "model_as_partial"
+                and not base.args
+                and not base.keywords
+            ):
+                kept.append(self._seg(base))
+                continue
+            kept.append(self._seg(base))
+        if node.bases:
+            if kept:
+                self.buf.replace_span(node.bases[0], node.bases[-1], ", ".join(kept))
+            else:
+                self._strip_all_bases(node)
+        self._resolve(node.lineno, "pydantic.model")
         for stmt in node.body:
             self._rewrite_pydantic_field(stmt)
+        self._rewrite_pydantic_validators(node)
+
+    def _rewrite_pydantic_validators(self, node: ast.ClassDef) -> None:
+        """Run ordinary field validators from a dataclass ``__post_init__``."""
+        calls: list[str] = []
+        for statement in node.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if redundant_literal_validator(statement, self._parents, self.imports):
+                continue
+            marker = next(
+                (
+                    decorator
+                    for decorator in statement.decorator_list
+                    if isinstance(decorator, ast.Call)
+                    and self.imports.origin(decorator.func).split(".")[-1]
+                    in {"validator", "field_validator"}
+                ),
+                None,
+            )
+            if marker is None or isinstance(statement, ast.AsyncFunctionDef):
+                continue
+            fields = [
+                argument.value
+                for argument in marker.args
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+            ]
+            if not fields or len(fields) != len(marker.args):
+                continue
+            self._delete_decorator(marker)
+            for decorator in statement.decorator_list:
+                decorated = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if (
+                    isinstance(decorated, ast.Name) and decorated.id == "classmethod"
+                ) or self.imports.origin(decorated) == "builtins.classmethod":
+                    self._delete_decorator(decorator)
+            self._removed_pydantic_imports.update({"validator", "field_validator"})
+            self._resolve(marker.lineno, "pydantic.validator")
+            calls.extend(
+                f"self.{field} = self.{statement.name}(self.{field})" for field in fields
+            )
+        if not calls:
+            return
+        existing = next(
+            (
+                statement
+                for statement in node.body
+                if isinstance(statement, ast.FunctionDef)
+                and statement.name == "__post_init__"
+            ),
+            None,
+        )
+        if existing is not None:
+            first = existing.body[0]
+            indent = self.buf.line_indent(first.lineno)
+            self.buf.insert_before_line(
+                first.lineno, "\n".join(f"{indent}{call}" for call in calls)
+            )
+            return
+        indent = self.buf.line_indent(node.lineno) + "    "
+        end = self.buf.end_of(node.body[-1])
+        body = "\n".join(f"{indent}    {call}" for call in calls)
+        self.buf._edits.append(
+            (end, end, f"\n\n{indent}def __post_init__(self) -> None:\n{body}".encode())
+        )
 
     def _strip_all_bases(self, node: ast.ClassDef) -> None:
         """Remove the whole `(...)` base list — correct only when it is the sole base."""
@@ -1039,8 +1872,34 @@ class _Emitter(ast.NodeVisitor):
 
     def _rewrite_pydantic_field(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.ClassDef) and stmt.name == "Config":
-            # pydantic v1 nested config class — flag for manual removal, don't delete.
-            self._annotate(stmt.lineno, "pydantic.config_class")
+            declarative = all(
+                isinstance(child, ast.Assign)
+                or (
+                    isinstance(child, ast.Expr)
+                    and isinstance(child.value, ast.Constant)
+                    and isinstance(child.value.value, str)
+                )
+                for child in stmt.body
+            )
+            settings = {
+                child.targets[0].id
+                for child in stmt.body
+                if isinstance(child, ast.Assign)
+                and len(child.targets) == 1
+                and isinstance(child.targets[0], ast.Name)
+            }
+            if declarative and settings and settings <= {
+                "arbitrary_types_allowed",
+                "from_attributes",
+                "orm_mode",
+                "protected_namespaces",
+                "use_enum_values",
+                "validate_default",
+            }:
+                self._replace_all_of(stmt, "# wreath-port: redundant model config removed")
+                self._resolve(stmt.lineno, "pydantic.config_class")
+            else:
+                self._annotate(stmt.lineno, "pydantic.config_class")
             return
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             name = stmt.target.id
@@ -1061,12 +1920,19 @@ class _Emitter(ast.NodeVisitor):
                     )
                 elif extra == "ignore":
                     self._annotate(stmt.lineno, "pydantic.config_ignore")
+                elif self._drop_redundant_model_config(stmt, stmt.value):
+                    pass
                 return
             rule_id = pydantic_field_rule(self.imports, stmt)
+            if (
+                rule_id == "pydantic.field_metadata_exact"
+                and isinstance(stmt.value, ast.Call)
+            ):
+                self._rewrite_field_metadata(stmt, stmt.value)
+                return
             if rule_id != "pydantic.field":
-                # A constraint or an `alias=` stays exactly as written, so the
-                # reviewer can see what they are deciding about — and so the
-                # `Field` import stays with it.
+                # Metadata without an exact Wreath equivalent stays written so
+                # the reviewer can see the contract they are deciding about.
                 self._annotate(stmt.lineno, rule_id)
                 return
             default = stmt.value
@@ -1098,15 +1964,56 @@ class _Emitter(ast.NodeVisitor):
                 )
             elif extra == "ignore":
                 self._annotate(stmt.lineno, "pydantic.config_ignore")
+            else:
+                self._drop_redundant_model_config(stmt, stmt.value)
+
+    def _drop_redundant_model_config(
+        self, stmt: ast.stmt, value: ast.expr | None
+    ) -> bool:
+        # `None` because an `AnnAssign` may carry no value at all (`x: int`);
+        # it takes the same answer as any other non-call.
+        if not isinstance(value, ast.Call):
+            return False
+        safe = {
+            "arbitrary_types_allowed",
+            "from_attributes",
+            "protected_namespaces",
+            "use_enum_values",
+            "validate_default",
+        }
+        names = {keyword.arg for keyword in value.keywords}
+        if None in names or not names or not names <= safe:
+            return False
+        self._removed_pydantic_imports.add("ConfigDict")
+        self._replace_all_of(stmt, "# wreath-port: redundant model config removed")
+        return True
+
+    def _rewrite_field_metadata(self, stmt: ast.AnnAssign, call: ast.Call) -> None:
+        """Move an exact Pydantic ``Field`` contract into ``Annotated``."""
+        metadata: list[str] = []
+        for keyword in call.keywords:
+            if keyword.arg in {
+                "alias", "description", "gt", "ge", "lt", "le",
+                "min_length", "max_length", "pattern", "regex",
+            }:
+                name = "pattern" if keyword.arg == "regex" else keyword.arg
+                metadata.append(f"{name}={self._seg(keyword.value)}")
+        self.needs.add("Field")
+        self.needs_annotated = True
+        annotation = self._seg(stmt.annotation)
+        self.buf.replace(
+            stmt.annotation,
+            f"Annotated[{annotation}, Field({', '.join(metadata)})]",
+        )
+        self._rewrite_field_marker(stmt, call)
 
     def _rewrite_field_marker(self, stmt: ast.AnnAssign, call: ast.Call) -> None:
         """`x: int = Field(default=3, description="…")` -> `x: int = 3`.
 
         Reached only for the shape `pydantic_field_rule` calls determined: the
-        marker holds a default and, at most, wording for a schema. A dataclass
-        has one slot per field, so the default is written into it and the
-        wording is dropped — wreath's generated OpenAPI describes operations,
-        not individual properties, so there is nowhere for it to go.
+        marker holds a default and, at most, metadata already moved into
+        ``Annotated``. A dataclass has one slot per field, so the default is
+        written into it.
 
         `Field(...)` with no default at all is how pydantic spells *required*,
         and a dataclass spells that by having no `=` — so the whole assignment
@@ -1146,17 +2053,50 @@ class _Emitter(ast.NodeVisitor):
                 isinstance(t, ast.Name) and t.id == "ormar_config" for t in stmt.targets
             ):
                 config_stmt, table = stmt, _copy_tablename(stmt.value)
-        mixins = []
-        for base in node.bases:
-            if self.imports.origin(base) == "ormar.Model":
-                self.buf.replace(base, "Model")
-            else:
-                mixins.append(base)
-        if table is not None and node.bases:
-            last = node.bases[-1]
-            e = self.buf.end_of(last)
-            self.buf._edits.append((e, e, f', table="{table}"'.encode()))
-        else:
+        meta = next(
+            (
+                statement
+                for statement in node.body
+                if isinstance(statement, ast.ClassDef) and statement.name == "Meta"
+            ),
+            None,
+        )
+        if table is None and meta is not None:
+            table = next(
+                (
+                    statement.value.value
+                    for statement in meta.body
+                    if isinstance(statement, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "tablename"
+                        for target in statement.targets
+                    )
+                    and isinstance(statement.value, ast.Constant)
+                    and isinstance(statement.value.value, str)
+                ),
+                None,
+            )
+        inherited_mixins = [
+            base
+            for base in node.bases
+            if self.imports.origin(base).split(".")[-1] in self.orm_mixins
+        ]
+        bases = [
+            self._seg(base)
+            for base in node.bases
+            if self.imports.origin(base) != "ormar.Model"
+        ]
+        if not inherited_mixins:
+            bases.insert(0, "Model")
+        if node.bases:
+            header = ", ".join(bases)
+            if table is not None:
+                header += f', table="{table}"'
+            self.buf.replace_span(node.bases[0], node.bases[-1], header)
+            for base in node.bases:
+                if self.imports.origin(base) == "ormar.Model":
+                    self._rewritten.add(id(base))
+        if table is None:
             self._note(
                 node.lineno,
                 "orm.model",
@@ -1165,13 +2105,73 @@ class _Emitter(ast.NodeVisitor):
             )
         if config_stmt is not None:
             self._rewrite_ormar_config(node, config_stmt)
-        if mixins:
-            self._note(
-                node.lineno,
-                "orm.model",
-                "this model inherits columns from a mixin. Move the mixin's "
-                "columns over too, or the ported model will be missing them",
-            )
+        if meta is not None:
+            self._rewrite_legacy_ormar_meta(meta)
+        self._rewrite_ormar_fields(node, config_stmt)
+
+    def _rewrite_legacy_ormar_meta(self, meta: ast.ClassDef) -> None:
+        """Move legacy ``Meta`` indexes and unique constraints into the model."""
+        declarations: list[str] = []
+        for statement in meta.body:
+            if not (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                continue
+            name = statement.targets[0].id
+            if name == "indexes" and isinstance(statement.value, (ast.List, ast.Tuple)):
+                for value in statement.value.elts:
+                    columns = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+                    if not all(
+                        isinstance(column, ast.Constant) and isinstance(column.value, str)
+                        for column in columns
+                    ):
+                        continue
+                    self.needs.add("index")
+                    args = ", ".join(self._seg(column) for column in columns)
+                    declarations.append(f"_index_{len(declarations)} = index({args})")
+            elif name == "constraints" and isinstance(
+                statement.value, (ast.List, ast.Tuple)
+            ):
+                for value in statement.value.elts:
+                    if not isinstance(value, ast.Call):
+                        continue
+                    kind = self.imports.origin(value.func).split(".")[-1]
+                    if kind not in ("UniqueColumns", "IndexColumns") or not all(
+                        isinstance(column, ast.Constant) and isinstance(column.value, str)
+                        for column in value.args
+                    ):
+                        continue
+                    target = "unique" if kind == "UniqueColumns" else "index"
+                    self.needs.add(target)
+                    args = ", ".join(self._seg(column) for column in value.args)
+                    declarations.append(
+                        f"_{target}_{len(declarations)} = {target}({args})"
+                    )
+        indent = self.buf.line_indent(meta.lineno)
+        replacement = (
+            f"\n{indent}".join(declarations)
+            if declarations
+            else "# wreath-port: legacy Ormar Meta moved to the class header"
+        )
+        self._replace_all_of(meta, replacement)
+
+    def _rewrite_ormar_mixin(self, node: ast.ClassDef) -> None:
+        """Turn a plain Ormar column mixin into a table-less Wreath model."""
+        self.needs.add("Model")
+        if node.bases:
+            end = self.buf.end_of(node.bases[-1])
+            self.buf._edits.append((end, end, b", Model"))
+        else:
+            name_end = self.buf.start_of(node) + len(f"class {node.name}".encode())
+            self.buf._edits.append((name_end, name_end, b"(Model)"))
+        self._rewrite_ormar_fields(node, None)
+
+    def _rewrite_ormar_fields(
+        self, node: ast.ClassDef, config_stmt: ast.Assign | None
+    ) -> None:
+        """Rewrite the column declarations shared by tables and mixins."""
         # Paired rather than filtered: `AnnAssign.value` is Optional, and a list
         # of statements throws away the narrowing every reader below relies on.
         columns: list[tuple[ast.AnnAssign, ast.Call]] = [
@@ -1204,6 +2204,18 @@ class _Emitter(ast.NodeVisitor):
             )
         for stmt, call in columns:
             self._rewrite_ormar_column(stmt, call)
+        plain_columns: list[tuple[ast.Assign, ast.Call]] = [
+            (stmt, stmt.value)
+            for stmt in node.body
+            if stmt is not config_stmt
+            and isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Call)
+            and self.imports.origin(stmt.value.func).startswith("ormar.")
+        ]
+        for stmt, call in plain_columns:
+            self._rewrite_unannotated_ormar_column(stmt, call)
 
     def _rewrite_ormar_config(self, node: ast.ClassDef, config_stmt: ast.Assign) -> None:
         """Delete `ormar_config = …`, but not the constraints hanging off it.
@@ -1232,7 +2244,7 @@ class _Emitter(ast.NodeVisitor):
             lines.append(f"_{call}_{len(lines)} = {call}({names})")
         # `replace` starts at the statement's own column, so the first line keeps
         # the indentation already in the source and the rest supply their own.
-        self.buf.replace(config_stmt, f"\n{indent}".join(lines))
+        self._replace_all_of(config_stmt, f"\n{indent}".join(lines))
         if unread:
             self._note(
                 config_stmt.lineno,
@@ -1262,7 +2274,26 @@ class _Emitter(ast.NodeVisitor):
         kwargs = self._ormar_kwargs(stmt, call)
         self.buf.replace(stmt.annotation, f"Mapped[{ann_src}]")
         args = "" if not kwargs else ", " + ", ".join(kwargs)
-        self.buf.replace(call, f"column({pgtype}{args})")
+        self._replace_all_of(call, f"column({pgtype}{args})")
+
+    def _rewrite_unannotated_ormar_column(
+        self, stmt: ast.Assign, call: ast.Call
+    ) -> None:
+        """Move an old-style mixin column whose Python type was implicit."""
+        tail = self.imports.origin(call.func).split(".")[-1]
+        pgtype = self._ormar_pgtype(tail, call)
+        if pgtype is None:
+            self._note(
+                stmt.lineno,
+                "orm.column",
+                f"wreath has no column type matching ormar.{tail}; pick the "
+                "closest one in wreath.orm.types and check the values still fit",
+            )
+            return
+        self.needs.add("column")
+        kwargs = self._ormar_kwargs(stmt, call)
+        args = "" if not kwargs else ", " + ", ".join(kwargs)
+        self._replace_all_of(call, f"column({pgtype}{args})")
 
     def _rewrite_ormar_fk(self, stmt: ast.AnnAssign, call: ast.Call, ann_src: str) -> None:
         if not isinstance(stmt.target, ast.Name) or not call.args:
@@ -1285,13 +2316,17 @@ class _Emitter(ast.NodeVisitor):
             self.needs.update({"Mapped", "column", "relationship", pg})
             index = ", index=True" if idx else ""
             col = f"{name}_id: Mapped[{pyann}] = column({pg}, references={target}.id{index})"
-            self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
+            self._replace_all_of(
+                stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")'
+            )
         else:  # needs-review: referenced PK not resolvable in this module -> Uuid default + flag
             self.needs.update({"Mapped", "column", "relationship", "Uuid"})
             index = ", index=True" if idx else ""
             self.needs_uuid = True
             col = f"{name}_id: Mapped[uuid.UUID] = column(Uuid, references={target}.id{index})"
-            self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
+            self._replace_all_of(
+                stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")'
+            )
             self._annotate(stmt.lineno, "orm.fk")
 
     def _ormar_pgtype(self, tail: str, call: ast.Call) -> str | None:
@@ -1316,7 +2351,7 @@ class _Emitter(ast.NodeVisitor):
             self.needs.add(name)
         return name
 
-    def _ormar_kwargs(self, stmt: ast.AnnAssign, call: ast.Call) -> list[str]:
+    def _ormar_kwargs(self, stmt: ast.AnnAssign | ast.Assign, call: ast.Call) -> list[str]:
         """The `column(...)` arguments one ormar column's keywords become.
 
         Anything with a wreath home is carried; anything that only described the
@@ -1404,7 +2439,52 @@ class _Emitter(ast.NodeVisitor):
 
     # -- functions (routes) ------------------------------------------------------
     def visit_FunctionDef(self, node) -> None:
+        if redundant_literal_validator(node, self._parents, self.imports):
+            start = self.buf.start_of_line(node.decorator_list[0].lineno)
+            end = self.buf.end_of(node)
+            self.buf._edits.append((start, end, b""))
+            self._replaced.append((start, end))
+            self._removed_pydantic_imports.add("field_validator")
+            return
         outer_test_clients = self._test_clients
+        fixture_clients = {
+            argument.arg
+            for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+            if argument.arg in self._fixture_test_clients
+        }
+        referenced_globals = {
+            name
+            for name in self._global_test_clients
+            if any(isinstance(inner, ast.Name) and inner.id == name for inner in ast.walk(node))
+        }
+        if node.name.startswith("test_"):
+            for name in sorted(referenced_globals):
+                self._add_test_fixture_param(node, name)
+            fixture_clients |= referenced_globals
+        if fixture_clients and isinstance(node, ast.FunctionDef):
+            self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"async "))
+        self._rewrite_test_client_fixture(node)
+        for inner in ast.walk(node):
+            if not isinstance(inner, (ast.With, ast.AsyncWith)):
+                continue
+            for item in inner.items:
+                if not (
+                    isinstance(item.context_expr, ast.Call)
+                    and self._is_test_client_call(item.context_expr)
+                ):
+                    continue
+                if isinstance(inner, ast.With):
+                    self.buf._edits.append(
+                        (self.buf.start_of(inner), self.buf.start_of(inner), b"async ")
+                    )
+                    if isinstance(node, ast.FunctionDef) and not fixture_clients:
+                        self.buf._edits.append(
+                            (self.buf.start_of(node), self.buf.start_of(node), b"async ")
+                        )
+                if isinstance(item.optional_vars, ast.Name):
+                    fixture_clients.add(item.optional_vars.id)
+                self._resolve(item.context_expr.lineno, "test.client")
+        self._test_clients |= fixture_clients
         rewritten_test_clients = self._rewrite_test_client_function(node)
         if rewritten_test_clients:
             self._test_clients |= rewritten_test_clients
@@ -1422,6 +2502,8 @@ class _Emitter(ast.NodeVisitor):
             # task all need a human, and all of them are recognized once by the
             # analyzer — `annotate_findings` writes their notes.
         if route_dec is not None:
+            self._rewrite_route_background_tasks(node)
+            self._rewrite_route_created_tasks(node)
             session = self._route_session_name(node)
             self._ensure_request_param(
                 node,
@@ -1450,26 +2532,306 @@ class _Emitter(ast.NodeVisitor):
         # someone else depends on without being asked.
         outer_session, outer_wanted = self._session, self._session_wanted
         self._session, self._session_wanted = None, False
-        if (
+        existing_session = next(
+            (
+                argument.arg
+                for argument in (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                if argument.annotation is not None
+                and self._is_orm_session(argument.annotation)
+            ),
+            None,
+        )
+        if existing_session is not None:
+            self._session = existing_session
+        elif (
             self.opinionated
             and isinstance(node, ast.AsyncFunctionDef)
-            and node.name in self.session_functions
+            and self._session_definition_selected(node)
             and self._can_take_session(node)
         ):
             self._session = _SESSION_PARAM
             self._add_session_param(node)
-            self._note(
-                node.lineno,
-                "orm.query.session_added",
-                f"this function now takes a `{_SESSION_PARAM}`, because it runs "
-                "queries or calls something that does. Calls to it inside this tree "
-                "were updated to pass one. Check anything outside it",
-            )
+            # Opinionated mode owns both ends of this signature change: the
+            # tree call graph selected the function and every selected call is
+            # updated below. A successful rewrite is not review work.
+            self._resolve(node.lineno, "orm.query.session_added")
         self.generic_visit(node)
         if self._session_wanted:
             self._annotate(node.lineno, "orm.query.needs_session")
         self._session, self._session_wanted = outer_session, outer_wanted
         self._test_clients = outer_test_clients
+
+    def _rewrite_route_background_tasks(self, node) -> None:
+        parameter = next(
+            (
+                argument
+                for argument in (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                if argument.annotation is not None
+                and self.imports.origin(argument.annotation) == "fastapi.BackgroundTasks"
+            ),
+            None,
+        )
+        if parameter is None:
+            return
+        returns: list[ast.Return] = []
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, ast.Return) or candidate.value is None:
+                continue
+            owner = self._parents.get(id(candidate))
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = self._parents.get(id(owner))
+            if owner is node:
+                returns.append(candidate)
+        if not returns or any(
+            not isinstance(statement.value, ast.Call)
+            or not (
+                (
+                    statement.value.func.attr
+                    if isinstance(statement.value.func, ast.Attribute)
+                    else getattr(statement.value.func, "id", "")
+                ).endswith("Response")
+            )
+            for statement in returns
+        ):
+            return
+        self._remove_function_parameter(node, parameter)
+        body_index = (
+            1
+            if node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+            and len(node.body) > 1
+            else 0
+        )
+        first = node.body[body_index]
+        indent = self.buf.line_indent(first.lineno)
+        self.buf.insert_before_line(
+            first.lineno, f"{indent}{parameter.arg} = BackgroundTasks()"
+        )
+        for statement in returns:
+            value = statement.value
+            if value is None:  # filtered when `returns` was built; re-narrowed here
+                continue
+            close = self.buf.end_of(value) - 1
+            separator = "" if _ends_argument_list(self.buf.b, close) else ", "
+            self.buf._edits.append(
+                (close, close, f"{separator}background={parameter.arg}".encode())
+            )
+        self.needs.update({"BackgroundTasks"})
+
+    def _rewrite_route_created_tasks(self, node) -> None:
+        if any(
+            argument.annotation is not None
+            and self.imports.origin(argument.annotation) == "fastapi.BackgroundTasks"
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        ):
+            return
+        calls: list[tuple[ast.Call, ast.Call]] = []
+        for candidate in ast.walk(node):
+            if not (
+                isinstance(candidate, ast.Call)
+                and self.imports.origin(candidate.func) == "asyncio.create_task"
+                and candidate.args
+                and isinstance(candidate.args[0], ast.Call)
+                and isinstance(self._parents.get(id(candidate)), ast.Expr)
+                and all(keyword.arg == "name" for keyword in candidate.keywords)
+            ):
+                continue
+            owner = self._parents.get(id(candidate))
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = self._parents.get(id(owner))
+            if owner is node:
+                calls.append((candidate, candidate.args[0]))
+        if not calls:
+            return
+        name = "_wreath_background"
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+            and len(node.body) > 1
+        ):
+            first = node.body[1]
+        indent = self.buf.line_indent(first.lineno)
+        self.buf.insert_before_line(first.lineno, f"{indent}{name} = BackgroundTasks()")
+        for task, coroutine in calls:
+            arguments = [self._seg(argument) for argument in coroutine.args]
+            arguments.extend(
+                f"{keyword.arg}={self._seg(keyword.value)}"
+                for keyword in coroutine.keywords
+            )
+            suffix = "" if not arguments else ", " + ", ".join(arguments)
+            self._replace_all_of(
+                task,
+                f"{name}.add_task({self._seg(coroutine.func)}{suffix})",
+            )
+            self._resolve(task.lineno, "bg.asyncio_loop")
+        returns: list[ast.Return] = []
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, ast.Return):
+                continue
+            owner = self._parents.get(id(candidate))
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = self._parents.get(id(owner))
+            if owner is node:
+                returns.append(candidate)
+        if not returns:
+            return
+        for statement in returns:
+            value = statement.value
+            if value is None:
+                self._replace_all_of(
+                    statement, f"return Response(status=204, background={name})"
+                )
+                self.needs.add("Response")
+                continue
+            response_name = (
+                value.func.attr
+                if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                else getattr(value.func, "id", "") if isinstance(value, ast.Call) else ""
+            )
+            if response_name.endswith("Response"):
+                close = self.buf.end_of(value) - 1
+                separator = "" if _ends_argument_list(self.buf.b, close) else ", "
+                self.buf._edits.append(
+                    (close, close, f"{separator}background={name}".encode())
+                )
+            else:
+                self._replace_all_of(
+                    value, f"JSONResponse({self._seg(value)}, background={name})"
+                )
+                self.needs.add("JSONResponse")
+        self.needs.add("BackgroundTasks")
+
+    def _remove_function_parameter(self, node, parameter: ast.arg) -> None:
+        arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+        index = arguments.index(parameter)
+        if index + 1 < len(arguments):
+            start = self.buf.start_of(parameter)
+            end = self.buf.start_of(arguments[index + 1])
+        elif index:
+            start = self.buf.end_of(arguments[index - 1])
+            end = self.buf.end_of(parameter)
+        else:
+            start = self.buf.start_of(parameter)
+            end = self.buf.end_of(parameter)
+        self.buf._edits.append((start, end, b""))
+        self._rewritten.update(id(item) for item in ast.walk(parameter))
+
+    def _add_test_fixture_param(self, node, name: str) -> None:
+        existing = {
+            argument.arg
+            for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+        }
+        if name in existing:
+            return
+        body_start = self.buf.start_of(node.body[0])
+        close = self.buf.b.rfind(b")", self.buf.start_of(node), body_start)
+        if close < 0:
+            return
+        has_args = bool(node.args.posonlyargs or node.args.args or node.args.kwonlyargs)
+        if not has_args and node.args.vararg is None and node.args.kwarg is None:
+            text = name
+        elif node.args.vararg is not None or node.args.kwonlyargs:
+            text = f", {name}"
+        elif node.args.kwarg is not None:
+            text = f"*, {name}, "
+            close = self.buf.start_of(node.args.kwarg) - 2
+        else:
+            text = f", *, {name}"
+        self.buf._edits.append((close, close, text.encode()))
+
+    def _rewrite_test_client_fixture(self, node) -> None:
+        if node.name not in self._fixture_test_clients:
+            return
+        changed = False
+        for inner in ast.walk(node):
+            if not (
+                isinstance(inner, (ast.Return, ast.Yield))
+                and isinstance(inner.value, ast.Call)
+                and self._is_test_client_call(inner.value)
+            ):
+                continue
+            statement = self._parents.get(id(inner)) if isinstance(inner, ast.Yield) else inner
+            if not isinstance(statement, (ast.Expr, ast.Return)):
+                continue
+            indent = self.buf.line_indent(statement.lineno)
+            call = self._test_client_text(inner.value)
+            self._replace_all_of(
+                statement,
+                f"async with {call} as {node.name}:\n{indent}    yield {node.name}",
+            )
+            self._resolve(inner.value.lineno, "test.client")
+            changed = True
+        if changed and isinstance(node, ast.FunctionDef):
+            self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"async "))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if id(node) in self._http_transport_assignments:
+            self._replace_all_of(node, "")
+            return
+        if (
+            len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self._global_test_clients
+            and node.value is self._global_test_clients[node.targets[0].id]
+        ):
+            name = node.targets[0].id
+            call = self._test_client_text(node.value)
+            self.needs_fixture = True
+            self._replace_all_of(
+                node,
+                f"@fixture\nasync def {name}():\n"
+                f"    async with {call} as {name}:\n"
+                f"        yield {name}",
+            )
+            self._resolve(node.lineno, "test.client")
+            return
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        value = node.value
+        if (
+            self.opinionated
+            and isinstance(node.target, ast.Name)
+            and isinstance(value, ast.Call)
+            and (total := self._http_timeout_total(value)) is not None
+        ):
+            timeout_annotations = [
+                candidate
+                for candidate in ast.walk(node.annotation)
+                if isinstance(candidate, (ast.Name, ast.Attribute))
+                and self.imports.origin(candidate) == "httpx.Timeout"
+            ]
+            if timeout_annotations:
+                self.needs.add("ClientTimeout")
+                for annotation in timeout_annotations:
+                    self._rewritten.update(id(item) for item in ast.walk(annotation))
+                    self.buf.replace(annotation, "ClientTimeout")
+                self._replace_all_of(value, f"ClientTimeout(total={total})")
+                self._resolve(node.lineno, "ext.httpx")
+                return
+        self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -1490,8 +2852,7 @@ class _Emitter(ast.NodeVisitor):
                 and len(statement.targets) == 1
                 and isinstance(statement.targets[0], ast.Name)
                 and isinstance(statement.value, ast.Call)
-                and self.imports.origin(statement.value.func)
-                in {f"{module}.TestClient" for module in _TESTCLIENT_MODULES}
+                and self._is_test_client_call(statement.value)
             ):
                 assignments.append((statement, statement.targets[0], statement.value))
         if len(assignments) != 1:
@@ -1499,7 +2860,10 @@ class _Emitter(ast.NodeVisitor):
         statement, target, call = assignments[0]
         if isinstance(node, ast.FunctionDef):
             self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"async "))
-        self.buf.replace(statement, f"async with {self._seg(call)} as {target.id}:")
+        self._replace_all_of(
+            statement,
+            f"async with {self._test_client_text(call)} as {target.id}:",
+        )
         if node.end_lineno is None or statement.end_lineno is None:
             return frozenset()
         for line in range(statement.end_lineno + 1, node.end_lineno + 1):
@@ -1528,7 +2892,7 @@ class _Emitter(ast.NodeVisitor):
             return None  # the name is taken by something else
         if not (self._name_is_free("Session") and self._name_is_free("FromORM")):
             return None  # so is the type's name
-        if node.name in self.session_functions or self._runs_a_query(node):
+        if self._session_definition_selected(node) or self._runs_a_query(node):
             return _SESSION_PARAM
         if self.opinionated and self._calls_a_session_function(node):
             return _SESSION_PARAM
@@ -1539,6 +2903,13 @@ class _Emitter(ast.NodeVisitor):
         for inner in ast.walk(node):
             if not isinstance(inner, ast.Call):
                 continue
+            if self._session_call_selected(
+                inner,
+                inner.func.attr
+                if isinstance(inner.func, ast.Attribute)
+                else getattr(inner.func, "id", None),
+            ):
+                return True
             name = (
                 inner.func.attr
                 if isinstance(inner.func, ast.Attribute)
@@ -1637,6 +3008,8 @@ class _Emitter(ast.NodeVisitor):
                 model=self._seg(inner.value.value),
                 relations=self.orm_relations,
                 columns=self.orm_columns,
+                tables=self.orm_tables,
+                unique_constraints=self.orm_unique_constraints,
                 plain_mappings=plain_filter_mappings(
                     call if isinstance(call, ast.Call) else None, self._parents
                 ),
@@ -1779,10 +3152,12 @@ class _Emitter(ast.NodeVisitor):
         return False
 
     def _delete_decorator(self, dec) -> None:
-        """Remove a whole `@decorator` line (assumes it sits on its own line)."""
+        """Remove a complete decorator, including a multiline argument list."""
         self._rewritten.update(id(item) for item in ast.walk(dec))
         start = self.buf._starts[dec.lineno - 1]
-        nxt = self.buf.b.find(b"\n", start)
+        end_line = dec.end_lineno or dec.lineno
+        line_start = self.buf._starts[end_line - 1]
+        nxt = self.buf.b.find(b"\n", line_start)
         end = (nxt + 1) if nxt != -1 else len(self.buf.b)
         self.buf._edits.append((start, end, b""))
 
@@ -1923,22 +3298,102 @@ class _Emitter(ast.NodeVisitor):
         # that constructs the application.
         called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
         if (
+            self.opinionated
+            and isinstance(node, ast.Call)
+            and self._asgi_test_client_app(node) is not None
+            and not self._inside_replaced(node)
+        ):
+            self._replace_all_of(node, self._test_client_text(node))
+        elif self.opinionated and origin == "httpx.AsyncClient":
+            self._rewrite_httpx_client(node)
+        elif self.opinionated and origin == "httpx.Timeout":
+            total = self._http_timeout_total(node)
+            if total is not None and not self._inside_replaced(node):
+                self.needs.add("ClientTimeout")
+                self._replace_all_of(node, f"ClientTimeout(total={total})")
+                self._resolve(node.lineno, "ext.httpx")
+        elif (
+            self.opinionated
+            and isinstance(func, ast.Attribute)
+            and id(node) in self._http_requests
+            and func.attr in _TEST_REQUEST_METHODS
+        ):
+            self._rewrite_httpx_request(node, self._http_requests[id(node)], func.attr)
+        elif (
+            self.opinionated
+            and isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and (
+                self._enclosing_callable_id(node),
+                func.value.id,
+            ) in self._http_responses
+            and func.attr == "json"
+            and not node.args
+            and not node.keywords
+        ):
+            self.needs.add("loads")
+            self._replace_all_of(node, f"loads({func.value.id}.body)")
+        if (
+            self.opinionated
+            and isinstance(func, ast.Name)
+            and called in self.settings_models
+            and called not in self._settings_custom_init
+            and not node.args
+            and not node.keywords
+            and not self._inside_replaced(node)
+        ):
+            env_file, prefix = self._settings_bindings.get(called, (None, None))
+            self.needs.add("Environment")
+            if env_file is None:
+                self.needs.add("read_osenv")
+                environment = "Environment(read_osenv())"
+            else:
+                environment = f"Environment.load({env_file})"
+            options = "" if prefix is None else f", prefix={prefix}"
+            self._replace_all_of(
+                node,
+                f"{environment}.bind({called}{options})",
+            )
+        orm_query_call = (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "objects"
+        )
+        if (
             isinstance(func, ast.Attribute)
             and isinstance(func.value, ast.Name)
             and func.value.id in self._test_clients
             and func.attr in _TEST_REQUEST_METHODS
             and not isinstance(self._parents.get(id(node)), ast.Await)
         ):
-            self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"await "))
+            parent = self._parents.get(id(node))
+            if isinstance(parent, (ast.Attribute, ast.Subscript)):
+                # Attribute and subscription bind before ``await``. Merely
+                # prefixing ``client.get(...).status`` produced an await of the
+                # response attribute on the still-unawaited coroutine.
+                self.buf._edits.append(
+                    (self.buf.start_of(node), self.buf.start_of(node), b"(await ")
+                )
+                self.buf._edits.append((self.buf.end_of(node), self.buf.end_of(node), b")"))
+            else:
+                self.buf._edits.append(
+                    (self.buf.start_of(node), self.buf.start_of(node), b"await ")
+                )
         if (
             self.opinionated
-            and called in self.session_functions
+            and self._session_call_selected(node, called)
             and self._session is not None
+            and not orm_query_call
             and not any(kw.arg == _SESSION_PARAM for kw in node.keywords)
         ):
             # The callee gained a session parameter, so this call has to pass
             # one. Doing the signature and leaving the call is the half-port
             # that fails on its first request; `--opinionated` means both ends.
+            # A ``Model.objects.create(...)`` call is not a call to a local
+            # function named ``create``. The query rewriter below owns its
+            # complete span and turns it into ``session.create(Model, ...)``;
+            # inserting a keyword here overlaps that replacement and used to
+            # leave the old manager call behind in the emitted tree.
             self._pass_session(node)
         if tail == "HTTPException":
             self._rewrite_http_exception(node)
@@ -1948,7 +3403,10 @@ class _Emitter(ast.NodeVisitor):
             # and the value it wrapped stays.
             self._rewritten.add(id(func))
             self._replace_all_of(node, self._seg(node.args[0]))
-        elif origin in _RENAMED_ORIGINS and origin.rsplit(".", 1)[0] in _RESPONSE_MODULES:
+        elif (
+            origin in _RENAMED_ORIGINS
+            and _RENAMED_ORIGINS[origin] in _RESPONSE_BODY_ARG
+        ):
             self._rewrite_response_call(node, _RENAMED_ORIGINS[origin])
         elif origin.startswith("arrow.") and tail in _ARROW_RENAME:
             # `arrow.utcnow()` is `temporal.now()`. An `Instant` is a datetime
@@ -1976,6 +3434,148 @@ class _Emitter(ast.NodeVisitor):
         # ended up reporting *every* boto3 call as "keep the library" while the
         # report had already learned to route S3 at `wreath.objects`.
         self.generic_visit(node)
+
+    def _rewrite_httpx_client(self, node: ast.Call) -> None:
+        key = self._http_client_calls.get(id(node))
+        if key is None:
+            return
+        parent = self._parents.get(id(node))
+        if not isinstance(parent, ast.withitem):
+            return
+        name, _default_headers = self._http_clients[key]
+        by_name = {keyword.arg: keyword.value for keyword in node.keywords}
+        base_url = by_name.get("base_url")
+        if base_url is None:
+            dynamic = self._http_dynamic_clients.get(key)
+            if dynamic is None:
+                return
+            statement = self._parents.get(id(parent))
+            if not isinstance(statement, (ast.With, ast.AsyncWith)):
+                return
+            parts = self._fresh_name(f"_{name}_url")
+            self._http_url_parts[key] = parts
+            indent = self.buf.line_indent(statement.lineno)
+            self.buf.insert_before_line(
+                statement.lineno,
+                f"{indent}{parts} = urlsplit(str({self._seg(dynamic)}))",
+            )
+            options = [
+                "base_url=urlunsplit("
+                f"({parts}.scheme, {parts}.netloc, '', '', ''))"
+            ]
+        else:
+            options = [f"base_url={self._seg(base_url)}"]
+        timeout = self._http_request_timeouts.get(key, by_name.get("timeout"))
+        if timeout is not None:
+            if isinstance(timeout, ast.Name) and timeout.id in self._http_timeout_constants:
+                options.append(f"timeout={timeout.id}")
+            else:
+                total = self._http_timeout_value(timeout)
+                if total is None:
+                    return
+                self.needs.add("ClientTimeout")
+                options.append(f"timeout=ClientTimeout(total={total})")
+        retries = self._http_retries.get(key)
+        if retries is not None:
+            self.needs.add("RetryPolicy")
+            options.append(
+                "retry=RetryPolicy("
+                f"attempts=1 + ({self._seg(retries)}), "
+                "idempotent_only=False, statuses=frozenset())"
+            )
+        self.needs.add("HTTPClient")
+        self._resolve(node.lineno, "ext.httpx")
+        self._replace_all_of(
+            node,
+            f"HTTPClient({name.replace('_', '-')!r}, {', '.join(options)})",
+        )
+
+    def _http_timeout_value(self, timeout: ast.expr) -> str | None:
+        if not (
+            isinstance(timeout, ast.Call)
+            and self.imports.origin(timeout.func) == "httpx.Timeout"
+        ):
+            return self._seg(timeout)
+        if timeout.args:
+            return self._seg(timeout.args[0])
+        value = next(
+            (keyword.value for keyword in timeout.keywords if keyword.arg == "timeout"),
+            None,
+        )
+        return self._seg(value) if value is not None else None
+
+    def _http_timeout_total(self, call: ast.Call) -> str | None:
+        """The single total deadline of an exact ``httpx.Timeout`` call."""
+        if self.imports.origin(call.func) != "httpx.Timeout":
+            return None
+        if len(call.args) == 1 and not call.keywords:
+            return self._seg(call.args[0])
+        if call.args or len(call.keywords) != 1 or call.keywords[0].arg != "timeout":
+            return None
+        return self._seg(call.keywords[0].value)
+
+    def _http_headers(self, value: ast.expr) -> str:
+        source = self._seg(value)
+        return (
+            "tuple((str(_name).lower().encode('ascii'), "
+            "str(_value).encode('latin-1')) "
+            f"for _name, _value in ({source}).items())"
+        )
+
+    def _rewrite_httpx_request(self, node: ast.Call, key: int, method: str) -> None:
+        client, default_headers = self._http_clients[key]
+        if not node.args:
+            return
+        allowed = {"headers", "json", "content", "data", "params", "timeout"}
+        if any(keyword.arg not in allowed for keyword in node.keywords):
+            return
+        target_index = 1 if method == "request" else 0
+        if len(node.args) <= target_index:
+            return
+        args = [self._seg(argument) for argument in node.args[: target_index + 1]]
+        if key in self._http_dynamic_clients:
+            parts = self._http_url_parts.get(key)
+            if parts is None:
+                return
+            args[target_index] = (
+                "urlunsplit(('', '', "
+                f"{parts}.path or '/', {parts}.query, ''))"
+            )
+        by_name = {keyword.arg: keyword.value for keyword in node.keywords}
+        params = by_name.get("params")
+        if params is not None:
+            self.needs_urlencode = True
+            args[target_index] = f"f'{{{args[target_index]}}}?{{urlencode({self._seg(params)})}}'"
+        headers: list[str] = []
+        if default_headers is not None:
+            headers.append(f"*{self._http_headers(default_headers)}")
+        request_headers = by_name.get("headers")
+        if request_headers is not None:
+            headers.append(f"*{self._http_headers(request_headers)}")
+        body = None
+        if (value := by_name.get("json")) is not None:
+            self.needs.add("dumps")
+            body = f"dumps({self._seg(value)})"
+            headers.insert(0, "(b'content-type', b'application/json')")
+        elif (value := by_name.get("data")) is not None:
+            self.needs_urlencode = True
+            body = f"urlencode({self._seg(value)}).encode('ascii')"
+            headers.insert(0, "(b'content-type', b'application/x-www-form-urlencoded')")
+        elif (value := by_name.get("content")) is not None:
+            body = self._seg(value)
+        keywords = []
+        if headers:
+            keywords.append(f"headers=({', '.join(headers)},)")
+        if body is not None:
+            keywords.append(f"body={body}")
+        suffix = "" if not keywords else ", " + ", ".join(keywords)
+        if method in {"get", "post", "request"}:
+            call = f"{client}.{method}({', '.join(args)}{suffix})"
+        else:
+            target = args[target_index]
+            call_args = [repr(method.upper()), target]
+            call = f"{client}.request({', '.join(call_args)}{suffix})"
+        self._replace_all_of(node, call)
 
     def _rewrite_model_dataclass(self, node: ast.Call, func: ast.Attribute) -> None:
         """Replace a statically named ormar projection with Wreath's dataclass."""
@@ -2018,7 +3618,7 @@ class _Emitter(ast.NodeVisitor):
             return
         wreath_name = _RENAMED_ORIGINS.get(origin)
         if wreath_name is not None:
-            self._rewritten.add(id(node))
+            self._rewritten.update(id(item) for item in ast.walk(node))
             self.needs.add(wreath_name)
             if wreath_name != origin.split(".")[-1]:
                 self.buf.replace(node, wreath_name)
@@ -2058,12 +3658,32 @@ class _Emitter(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         value = node.value
         self._track_reference(node, self.imports.origin(node))
+        if (
+            self.opinionated
+            and isinstance(value, ast.Name)
+            and (self._enclosing_callable_id(node), value.id) in self._http_responses
+        ):
+            if node.attr == "status_code":
+                end = self.buf.end_of(node)
+                self.buf._edits.append((end - len("status_code"), end, b"status"))
+            elif node.attr == "content":
+                end = self.buf.end_of(node)
+                self.buf._edits.append((end - len("content"), end, b"body"))
+            elif node.attr == "text":
+                self._replace_all_of(node, f"{value.id}.body.decode('utf-8')")
         if node.attr == "status_code" and self._test_clients:
             end = self.buf.end_of(node)
             self.buf._edits.append((end - len("status_code"), end, b"status"))
         # Mirrors the analyzer: the verb after `.objects` names the rewrite, and
         # the `.objects` underneath it is claimed so one chain gets one note.
-        if isinstance(value, ast.Attribute) and value.attr == "objects":
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "objects"
+            and node.attr == "__class__"
+        ):
+            self._claimed_objects.add(id(value))
+            self._annotate(value.lineno, "orm.manager_patch")
+        elif isinstance(value, ast.Attribute) and value.attr == "objects":
             self._claimed_objects.add(id(value))
             call = self._parents.get(id(node))
             rule_id = query_rule(
@@ -2073,6 +3693,8 @@ class _Emitter(ast.NodeVisitor):
                 model=self._seg(value.value),
                 relations=self.orm_relations,
                 columns=self.orm_columns,
+                tables=self.orm_tables,
+                unique_constraints=self.orm_unique_constraints,
                 plain_mappings=plain_filter_mappings(
                     call if isinstance(call, ast.Call) else None, self._parents
                 ),
@@ -2080,7 +3702,7 @@ class _Emitter(ast.NodeVisitor):
             if not self._rewrite_query(node, rule_id):
                 self._annotate(value.lineno, rule_id)
         elif node.attr == "objects" and id(node) not in self._claimed_objects:
-            self._annotate(node.lineno, "orm.query")
+            self._annotate(node.lineno, "orm.manager_value")
         self.generic_visit(node)
 
     # -- queries -----------------------------------------------------------------
@@ -2132,6 +3754,10 @@ class _Emitter(ast.NodeVisitor):
         if plan.runner is not None and self._session is None:
             self._session_wanted = True
             return False
+        if plan.runner == "get_or_create":
+            plan.existing_name = self._fresh_name(f"_existing_{_snake(plan.model)}")
+        elif plan.runner in ("values", "values_list"):
+            plan.row_name = self._fresh_name("_row")
         target: _Positioned = last if isinstance(last, (ast.expr, ast.stmt)) else head
         awaited = self._parents.get(id(target))
         text = plan.render(self._session)
@@ -2167,6 +3793,30 @@ class _Emitter(ast.NodeVisitor):
             return f"{model}.{column}.{method}({shape % value})"
         operator = LOOKUP_OPERATOR.get(suffix)
         return None if operator is None else f"{model}.{column} {operator} {value}"
+
+    def _include_expression(self, model: str, path: str) -> str | None:
+        """One resolved ``a__b`` relation trail as nested selectin options."""
+        current = model
+        parts: list[tuple[str, str]] = []
+        for relation in path.split("__"):
+            target = self.orm_relations.get(current, {}).get(relation)
+            if target is None:
+                return None
+            parts.append((current, relation))
+            current = target
+        nested = ""
+        for owner, relation in reversed(parts):
+            suffix = f"({nested})" if nested else "()"
+            nested = f"{owner}.{relation}.selectin{suffix}"
+        return nested
+
+    def _projection_pair(self, model: str, name: str) -> tuple[str, str] | None:
+        """The legacy dictionary key and Wreath column selected for it."""
+        if name in self.orm_relations.get(model, {}):
+            return name, f"{name}_id"
+        if name in self.orm_columns.get(model, set()):
+            return name, name
+        return None
 
     def _rewrite_http_exception(self, node: ast.Call) -> None:
         """`HTTPException(status_code=404, detail=x)` -> `NotFound(x)`.
@@ -2264,10 +3914,26 @@ class _Emitter(ast.NodeVisitor):
             "CORSMiddleware": ("cors", "CorsPolicy"),
             "TrustedHostMiddleware": ("trusted_host", "TrustedHostPolicy"),
         }.get(tail)
+        if tail == "RateLimitingMiddleware" and self._rewrite_rate_limit_middleware(node):
+            return
         if policy is None:
             self._annotate(node.lineno, "mw.custom")
             return
         field, class_name = policy
+        if class_name == "TrustedHostPolicy":
+            allowed = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "allowed_hosts"),
+                None,
+            )
+            if (
+                isinstance(allowed, (ast.List, ast.Tuple))
+                and len(allowed.elts) == 1
+                and isinstance(allowed.elts[0], ast.Constant)
+                and allowed.elts[0].value == "*"
+            ):
+                self._replace_all_of(node, "")
+                return
+        self.needs.update({"HttpPolicy", class_name})
         arguments = [self._seg(argument) for argument in node.args[1:]]
         arguments.extend(f"{kw.arg}={self._seg(kw.value)}" for kw in node.keywords)
         receiver = self._seg(function.value)
@@ -2276,6 +3942,65 @@ class _Emitter(ast.NodeVisitor):
             node,
             f"{receiver}.configure_http_policy(HttpPolicy({field}={configured}))",
         )
+
+    def _rewrite_rate_limit_middleware(self, node: ast.Call) -> bool:
+        provider = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "provider"),
+            None,
+        )
+        if not (
+            isinstance(provider, ast.Call)
+            and (
+                provider.func.attr
+                if isinstance(provider.func, ast.Attribute)
+                else getattr(provider.func, "id", "")
+            )
+            == "InMemoryLimitProvider"
+        ):
+            return False
+        options = {keyword.arg: keyword.value for keyword in provider.keywords}
+        if "limit" not in options or "timespan" not in options:
+            return False
+        arguments = [
+            f"limit={self._seg(options['limit'])}",
+            f"window={self._seg(options['timespan'])}",
+        ]
+        included = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "included_routes"),
+            None,
+        )
+        if included is not None:
+            routes = self._seg(included)
+            arguments.append(
+                "exempt=lambda request: not any("
+                f"request.path.startswith(prefix) for prefix in {routes})"
+            )
+        receiver = self._seg(node.func.value) if isinstance(node.func, ast.Attribute) else "app"
+        self.needs.update({"HttpPolicy", "RateLimitPolicy"})
+        self._removed_middleware_imports.update(
+            {"RateLimitingMiddleware", "InMemoryLimitProvider"}
+        )
+        self._replace_all_of(
+            node,
+            f"{receiver}.configure_http_policy(HttpPolicy("
+            f"rate_limit=RateLimitPolicy({', '.join(arguments)})))",
+        )
+        blocked = options.get("block_duration")
+        if not (
+            blocked is None
+            or isinstance(blocked, ast.Constant)
+            and blocked.value is None
+        ):
+            self._note(
+                node.lineno,
+                "mw.custom",
+                "the fixed-window limiter became Wreath's token bucket with the same "
+                "limit and window. Its block_duration has no equivalent: refusals now "
+                "carry Retry-After for the bucket's actual refill time",
+            )
+        else:
+            self._resolve(node.lineno, "mw.custom")
+        return True
 
 
 # --------------------------------------------------------------------------- module predicates
@@ -2408,12 +4133,27 @@ def emit_module(source, context: TreeContext | None = None, *, opinionated: bool
     text = _read_source(source)
     tree = ast.parse(text)
     imports = _Imports().visit(tree)
-    context = context or TreeContext()
+    if context is None:
+        context = (
+            TreeContext.of([source], opinionated=opinionated)
+            if isinstance(source, Path)
+            else TreeContext()
+        )
     resolved = {**context.pk_types, **module_pk_types(tree, imports)}
     emitter = _Emitter(text, imports, resolved, opinionated=opinionated)
     emitter.orm_columns = context.orm_columns
     emitter.orm_relations = context.orm_relations
+    emitter.orm_tables = context.orm_tables
+    emitter.orm_unique_constraints = context.orm_unique_constraints
+    emitter.orm_mixins = frozenset(context.index.get("orm_mixin", ()))
+    emitter.pydantic_models = frozenset(context.index.get("pydantic", ()))
+    emitter.settings_models = frozenset(context.index.get("settings", ()))
     emitter.session_functions = context.session_functions
+    emitter.session_definition_sites = context.session_definition_sites
+    emitter.session_call_sites = context.session_call_sites
+    emitter.session_sites_resolved = context.session_sites_resolved
+    if isinstance(source, Path):
+        emitter._source_path = str(source.resolve())
     emitter.collect_dep_targets(tree)
     emitter.visit(tree)
     path = source if isinstance(source, Path) else Path("<module>")
@@ -2507,10 +4247,10 @@ def port_tree(
                 if rec_src == cur_src:
                     result.skipped.append(dest)  # unchanged source — idempotent no-op
                     continue
-                emitted = emit_module(source, context, opinionated=opinionated)
+                emitted = emit_module(src_path, context, opinionated=opinionated)
                 regenerating = True
             else:
-                emitted = emit_module(source, context, opinionated=opinionated)
+                emitted = emit_module(src_path, context, opinionated=opinionated)
                 regenerating = False
         except _SKIPPABLE as exc:
             # An unreadable source, a non-UTF-8 one, or one that is not valid

@@ -53,24 +53,24 @@ def _defined_names(source: str) -> set[str]:
 
 
 def test_a_field_marker_that_stays_keeps_its_import() -> None:
-    """`Field(ge=...)` needs a person, so `Field` has to still be importable."""
+    """A supported constraint keeps the first-party ``Field`` import usable."""
     emitted = _emit(
         "from pydantic import BaseModel, Field\n\n\n"
         "class Llama(BaseModel):\n"
         "    age: int = Field(default=1, ge=0)\n"
     )
     assert "Field" in _defined_names(emitted)
-    assert "Field(default=1, ge=0)" in emitted
+    assert "age: Annotated[int, Field(ge=0)] = 1" in emitted
 
 
-def test_a_field_marker_that_goes_takes_its_import_with_it() -> None:
+def test_description_metadata_moves_to_the_first_party_field() -> None:
     emitted = _emit(
         "from pydantic import BaseModel, Field\n\n\n"
         "class Llama(BaseModel):\n"
         '    name: str = Field(default="anon", description="the llama")\n'
     )
-    assert "Field" not in _defined_names(emitted)
-    assert 'name: str = "anon"' in emitted
+    assert "Field" in _defined_names(emitted)
+    assert 'name: Annotated[str, Field(description="the llama")] = "anon"' in emitted
 
 
 def test_an_ordinary_callable_default_is_not_a_field_marker() -> None:
@@ -85,6 +85,30 @@ def test_an_ordinary_callable_default_is_not_a_field_marker() -> None:
     assert "age: int = initial_age()" in emitted
 
 
+def test_an_unannotated_model_mixin_uses_tableless_wreath_columns(tmp_path) -> None:
+    source = tmp_path / "trail.py"
+    source.write_text(
+        "import ormar\n\n\n"
+        "class TrailTimes:\n"
+        "    opened_at = ormar.DateTime(timezone=True, nullable=True)\n\n\n"
+        "    surveyed_on = ormar.Date()\n"
+        "    quiet_at = ormar.Time(nullable=True)\n\n\n"
+        "class Llama(ormar.Model, TrailTimes):\n"
+        "    ormar_config = db.copy(tablename='llama')\n"
+        "    id: int = ormar.Integer(primary_key=True)\n",
+        encoding="utf-8",
+    )
+
+    emitted = port.emit_module(source)
+
+    assert "class TrailTimes(Model):" in emitted
+    assert "opened_at = column(TimestampTz, nullable=True)" in emitted
+    assert "surveyed_on = column(Date)" in emitted
+    assert "quiet_at = ormar.Time(nullable=True)" in emitted
+    assert "wreath has no column type matching ormar.Time" in emitted
+    assert 'class Llama(TrailTimes, table="llama"):' in emitted
+
+
 def test_a_non_cors_fastapi_middleware_import_does_not_invent_cors() -> None:
     emitted = _emit(
         "from fastapi.middleware.gzip import GZipMiddleware\n\n\n"
@@ -96,21 +120,35 @@ def test_a_non_cors_fastapi_middleware_import_does_not_invent_cors() -> None:
 
 
 @pytest.mark.parametrize(
-    "marker,expected",
+    "marker,expected,has_field",
     [
-        ('Field(default_factory=list, description="tags")', "field(default_factory=list)"),
-        ('Field(..., description="required")', "name: str\n"),
-        ('Field(description="also required")', "name: str\n"),
-        ("Field(default=[])", "field(default_factory=list)"),
+        (
+            'Field(default_factory=list, description="tags")',
+            'name: Annotated[str, Field(description="tags")] = field(default_factory=list)',
+            True,
+        ),
+        (
+            'Field(..., description="required")',
+            'name: Annotated[str, Field(description="required")]\n',
+            True,
+        ),
+        (
+            'Field(description="also required")',
+            'name: Annotated[str, Field(description="also required")]\n',
+            True,
+        ),
+        ("Field(default=[])", "field(default_factory=list)", False),
     ],
 )
-def test_every_plain_field_shape_becomes_a_dataclass_default(marker, expected) -> None:
+def test_every_plain_field_shape_becomes_a_dataclass_default(
+    marker, expected, has_field
+) -> None:
     emitted = _emit(
         "from pydantic import BaseModel, Field\n\n\n"
         f"class Llama(BaseModel):\n    name: str = {marker}\n"
     )
     assert expected in emitted
-    assert "Field" not in _defined_names(emitted)
+    assert ("Field" in _defined_names(emitted)) is has_field
 
 
 def test_an_except_clause_keeps_httpexception_importable() -> None:
@@ -249,15 +287,17 @@ def test_a_legal_order_is_left_as_a_plain_dataclass() -> None:
     assert namespace["Llama"]("Bo").age == 1
 
 
-def test_a_constraint_left_in_place_counts_as_a_default() -> None:
-    """`= Field(..., ge=0)` stays written, so it occupies the defaulted position."""
+def test_a_required_constraint_does_not_force_keyword_only_fields() -> None:
+    """Required Wreath metadata is an annotation, not a dataclass default."""
     emitted = _emit(
         "from pydantic import BaseModel, Field\n\n\n"
         "class Llama(BaseModel):\n"
         "    age: int = Field(..., ge=0)\n"
         "    name: str\n"
     )
-    assert "@dataclass(kw_only=True)" in emitted
+    assert "@dataclass\n" in emitted
+    assert "kw_only" not in emitted
+    assert "age: Annotated[int, Field(ge=0)]\n" in emitted
 
 
 def test_a_required_query_parameter_keeps_being_required() -> None:
