@@ -928,9 +928,9 @@ async def test_every_scalar_converter_still_accepts_what_it_should(
 #
 # A mutation sweep of `binding.py` reported these guards as `survived`: tests
 # reached every one of them, and not one test could tell whether the guard was
-# there. They are all in `_validate`, the pure reference implementation that
-# `WREATH_PURE=1` runs and that the native validator is required to match, so a
-# hole here is a hole in the definition of what a valid body is.
+# there. They are all in `_validate`, which is what runs for the shapes the flat
+# plan cannot express -- so a hole here is a hole in the definition of what a
+# valid body is.
 
 
 def test_any_and_an_unannotated_parameter_both_accept_anything() -> None:

@@ -146,7 +146,7 @@ def _field_annotation(annotation: Any) -> tuple[Any, Field | None]:
 
 # Body-validation plan opcodes. These mirror the enum in
 # src/wreath/_native/validate.c; the native validator executes a plan compiled
-# here once per body type, and the pure `validate` remains the reference.
+# here once per body type, and the Python `validate` remains the reference.
 _OP_ANY = 0
 _OP_NULL = 1
 _OP_INT = 2
@@ -162,7 +162,7 @@ _OP_UNSUPPORTED = 10
 
 class _PlanUnsupported(Exception):
     """A body plan could not be compiled (e.g. a recursive dataclass); the
-    caller falls back to the pure validator, which recurses lazily."""
+    caller falls back to the Python validator, which recurses lazily."""
 
 
 def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
@@ -174,10 +174,9 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
     """
     annotation, field = _field_annotation(annotation)
     if field is not None:
-        # Advanced annotations are uncommon and remain on the pure reference
-        # path until the native plan has opcodes for every constraint. Falling
-        # back is safe; compiling a partial plan would let native and pure
-        # validation disagree.
+        # Advanced annotations are uncommon and stay on the Python path until
+        # the plan has opcodes for every constraint. Falling back is safe;
+        # compiling a partial plan would let the two disagree.
         raise _PlanUnsupported
     if annotation in (Any, object) or annotation is inspect.Parameter.empty:
         return (_OP_ANY,)
@@ -303,10 +302,10 @@ _VALIDATE_MAX_STEPS = 2_000_000
 def validate(annotation: Any, value: Any, loc: tuple[Any, ...] = ()) -> Any:
     """Validate a decoded-JSON `value` against `annotation`.
 
-    The reference implementation of body validation, in pure Python. The native
-    validator executes a compiled plan with identical semantics and identical
-    error ordering; this is what runs under `WREATH_PURE=1` and for the shapes
-    the flat plan cannot express.
+    Body validation for the shapes the flat plan cannot express -- recursive
+    dataclasses, mostly. Everything else compiles to a plan and is checked in C
+    by `_core.run_validation`, with identical semantics and identical error
+    ordering.
 
     Understood annotations are the scalars `str`, `int`, `float` and `bool`,
     `Any`, `None`, `list[T]`, `tuple[T, ...]` (from list input), `dict[str, T]`,
@@ -1977,10 +1976,9 @@ class _FormModelValidationTape:
     native multipart parser (`request.form()`) and the native validation tape;
     no new native code. File parts are bound by separate `File()` params.
 
-    That reuse is also why this tier needs no pure twin of its own: both pieces
-    it stands on already select native-or-pure themselves (`_body_validator` and
-    `request.form()`), and what is left here is pure-Python glue that behaves
-    identically under `WREATH_PURE=1`.
+    That reuse is also why there is nothing to accelerate here: both pieces it
+    stands on are already C (`_body_validator` and `request.form()`), and what
+    is left is glue.
     """
 
     __slots__ = ("_name", "_fields", "_validator")
@@ -2079,7 +2077,7 @@ def _body_validator(annotation: Any) -> _BodyValidator:
     if _core is not None:
         # Compile the annotation into a flat plan once; the native validator
         # then checks a whole body in one call. Plans that cannot be flattened
-        # (recursive dataclasses) fall through to the pure validator.
+        # (recursive dataclasses) fall through to the Python validator.
         try:
             plan = _compile_plan(annotation, frozenset())
         except _PlanUnsupported:
@@ -2194,7 +2192,7 @@ def _resolve_hints(obj: Any, label: str, *, extras: bool = True) -> dict[str, An
     imported under `if TYPE_CHECKING:`, is not in that namespace -- and the bare
     `NameError` names neither the callable nor the parameter, so a startup
     failure arrives with nothing to act on. Refused here with all three facts,
-    per `docs/decisions/0019-refuse-rather-than-half-wire.md`.
+    per the refuse-rather-than-half-wire rule in `AGENTS.md`.
     """
     try:
         return typing.get_type_hints(obj, include_extras=extras)
@@ -2638,7 +2636,7 @@ def compile_binder(
             # every bound handler purely to reach one member.
             query = parse_qs(request.query_string)
             # First occurrence wins, which `dict` gives from the pairs reversed:
-            # the earliest pair is assigned last. Both twins return a list, so
+            # the earliest pair is assigned last. `parse_qs` returns a list, so
             # `reversed` is a view rather than a copy and the whole fold is one
             # C loop -- it was a Python loop of `setdefault` calls, one per pair,
             # over pairs a C parser had just produced.
