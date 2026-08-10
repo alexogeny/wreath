@@ -1,11 +1,10 @@
-"""Content negotiation + the pure MessagePack encoder (spec byte-vectors)."""
+"""Content negotiation + the MessagePack encoder (spec byte-vectors)."""
 from __future__ import annotations
 
 from typing import cast
 
 import pytest
 
-from wreath._pure.msgpack import packb
 from wreath.negotiation import (
     JSON,
     MSGPACK,
@@ -13,6 +12,7 @@ from wreath.negotiation import (
     parse_accept,
     serialize,
 )
+from wreath.negotiation import _msgpack as packb
 from wreath.request import Request
 
 

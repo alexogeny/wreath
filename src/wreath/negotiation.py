@@ -18,9 +18,8 @@ yields `406 Not Acceptable` listing what is available. A negotiated response
 carries `Vary: Accept` so a shared cache keys on the negotiated type; the 406
 does not, because it varies with nothing a cache should reuse.
 
-The msgpack encoder is the same pure/native pair as JSON: the C implementation
-is used when built, the pure one is the reference, and `WREATH_PURE=1` selects
-the reference. `tests/test_msgpack_parity.py` holds them byte-for-byte equal.
+The msgpack encoder is C, held to the published msgpack specification vectors
+by `tests/test_msgpack_parity.py`.
 """
 
 from __future__ import annotations
@@ -36,13 +35,7 @@ from .protobuf import is_message as _is_message
 from .request import Request
 from .response import ProblemResponse, Response
 
-# The pure encoder stays the reference implementation and the parity contract
-# (tests/test_msgpack_parity.py asserts the two are byte-for-byte), so
-# WREATH_PURE=1 selects it exactly as it does for JSON.
-if _core is not None and hasattr(_core, "msgpack_dumps"):
-    _msgpack = _core.msgpack_dumps
-else:
-    from ._pure.msgpack import packb as _msgpack
+_msgpack = _core.msgpack_dumps
 
 __all__ = [
     "JSON",
