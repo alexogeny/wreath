@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass
+from time import monotonic_ns
+from typing import Any, Literal
 
 from ._correlation import Pending
+from ._flight_markers import COV_PYTHON as _COV_PYTHON
+from ._flight_markers import PH_WS_FANOUT as _PH_WS_FANOUT
+from ._flight_markers import phase_marker as _phase_marker
 from ._headers import find_header
 from ._json import dumps as _json_dumps
 from ._json import loads as _json_loads
@@ -39,6 +44,7 @@ def _json_text(payload: Any) -> str | bytes:
 def _json_value(frame: str | bytes) -> Any:
     """The default incoming codec, the inverse of `_json_text`."""
     return _json_loads(frame)
+
 
 Message = dict[str, Any]
 
@@ -253,6 +259,16 @@ class WebSocket:
             raise RuntimeError("expected a binary message, received text")
         return payload
 
+    async def receive_json(self) -> Any:
+        """Decode the next text or binary frame as JSON."""
+        message = await self.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1006))
+        frame = message.get("text")
+        if frame is None:
+            frame = message["bytes"]
+        return _json_loads(frame)
+
     async def send(self, data: str | bytes) -> None:
         """Send one message, framed by type: `str` as text, anything else as binary.
 
@@ -276,6 +292,13 @@ class WebSocket:
     async def send_bytes(self, data: bytes) -> None:
         """Send a binary frame. Explicit about the frame type, unlike `send`."""
         await self._send({"type": "websocket.send", "bytes": data})
+
+    async def send_json(self, data: Any) -> None:
+        """Encode `data` with Wreath's JSON codec and send one text frame."""
+        payload = _json_dumps(data)
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        await self.send_text(payload)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """Close the connection with a Close frame carrying `code`.
@@ -364,8 +387,18 @@ class Calls:
     not cost a caller its timeout.
     """
 
-    __slots__ = ("_decode", "_encode", "_label", "_lock", "_on_request", "_pending",
-                 "_reply_to", "_task", "_timeout", "_ws")
+    __slots__ = (
+        "_decode",
+        "_encode",
+        "_label",
+        "_lock",
+        "_on_request",
+        "_pending",
+        "_reply_to",
+        "_task",
+        "_timeout",
+        "_ws",
+    )
 
     def __init__(
         self,
@@ -487,4 +520,390 @@ class CallsClosed(Exception):
     """The socket went away while a call was outstanding."""
 
 
-__all__ = ["Calls", "CallsClosed", "WebSocket", "WebSocketDisconnect"]
+class ConnectionBackpressure(Exception):
+    """A managed connection could not accept another outbound frame."""
+
+
+class Heartbeat:
+    """Protocol-supplied heartbeat frame and acknowledgement contract.
+
+    Wreath does not guess an application subprotocol. The caller supplies the
+    frame and the predicate that recognizes its answer; the service supplies
+    bounded scheduling, timeout, and closure.
+    """
+
+    __slots__ = ("acknowledge", "consume", "frame", "interval", "timeout")
+
+    def __init__(
+        self,
+        *,
+        frame: str | bytes,
+        acknowledge: Callable[[str | bytes], bool],
+        interval: Any = 30.0,
+        timeout: Any = 10.0,
+        consume: bool = True,
+    ) -> None:
+        resolved_interval = Duration.of(interval).total_seconds()
+        resolved_timeout = Duration.of(timeout).total_seconds()
+        if resolved_interval <= 0 or resolved_timeout <= 0:
+            raise ValueError("heartbeat interval and timeout must be positive")
+        self.frame = frame
+        self.acknowledge = acknowledge
+        self.interval = resolved_interval
+        self.timeout = resolved_timeout
+        self.consume = consume
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionSnapshot:
+    """Point-in-time operational counters for one connection service."""
+
+    active: int
+    queued: int
+    accepted: int
+    closed: int
+    capacity_refusals: int
+    queue_refusals: int
+    protocol_refusals: int
+    heartbeat_timeouts: int
+    drain_timeouts: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Close:
+    code: int
+    reason: str
+
+
+_Frame = str | bytes
+_Outbound = _Frame | _Close
+
+
+class _ManagedConnection:
+    __slots__ = (
+        "done",
+        "closed",
+        "heartbeat_ack",
+        "key",
+        "queue",
+        "service",
+        "stopping",
+        "websocket",
+        "write_lock",
+    )
+
+    def __init__(
+        self,
+        service: WebSocketService,
+        key: Hashable,
+        websocket: WebSocket,
+    ) -> None:
+        self.service = service
+        self.key = key
+        self.websocket = websocket
+        self.queue: asyncio.Queue[_Outbound] = asyncio.Queue(maxsize=service.queue_capacity)
+        self.write_lock = asyncio.Lock()
+        self.done = asyncio.Event()
+        self.closed = False
+        self.stopping = asyncio.Event()
+        self.heartbeat_ack = asyncio.Event()
+
+    async def close(self, code: int, reason: str) -> None:
+        async with self.write_lock:
+            if self.closed:
+                return
+            self.closed = True
+            await self.websocket.close(code, reason)
+
+    async def write(self, frame: _Frame) -> None:
+        marker = _phase_marker.get(None)
+        started = monotonic_ns() if marker is not None else 0
+        async with self.write_lock:
+            if self.closed:
+                return
+            await self.websocket.send(frame)
+        if marker is not None:
+            marker(
+                _PH_WS_FANOUT,
+                self.queue.qsize(),
+                _COV_PYTHON,
+                monotonic_ns() - started,
+            )
+
+
+class WebSocketService:
+    """Bounded lifecycle and outbound flow control for long-lived sockets.
+
+    The service is protocol-neutral. Applications supply a message handler and
+    optional connection key; Wreath supplies capacity admission, one bounded
+    outbound queue per connection, serialized writes, shutdown draining, and
+    counters. Register it with `app.service(name, service)` and delegate a
+    route to `serve`.
+
+    `overflow` is explicit because all three useful policies have different
+    operational meanings:
+
+    * `"reject"` refuses the producer immediately;
+    * `"backpressure"` waits for queue space, bounded by `enqueue_timeout`;
+    * `"disconnect"` closes a peer that cannot keep up, then refuses the send.
+
+    No mode grows memory with traffic. The default is rejection, which keeps a
+    slow peer from delaying an unrelated producer.
+    """
+
+    __slots__ = (
+        "_accepted",
+        "_accepting",
+        "_capacity_refusals",
+        "_closed",
+        "_connections",
+        "_drain_timeouts",
+        "_enqueue_timeout",
+        "_heartbeat",
+        "_heartbeat_timeouts",
+        "_overflow",
+        "_protocol_refusals",
+        "_queue_refusals",
+        "max_connections",
+        "queue_capacity",
+    )
+
+    def __init__(
+        self,
+        *,
+        max_connections: int = 1024,
+        queue_capacity: int = 64,
+        overflow: Literal["reject", "backpressure", "disconnect"] = "reject",
+        enqueue_timeout: Any = 5.0,
+        heartbeat: Heartbeat | None = None,
+    ) -> None:
+        if max_connections < 1:
+            raise ValueError("max_connections must be at least one")
+        if queue_capacity < 1:
+            raise ValueError("queue_capacity must be at least one")
+        if overflow not in {"reject", "backpressure", "disconnect"}:
+            raise ValueError("overflow must be 'reject', 'backpressure', or 'disconnect'")
+        timeout = Duration.of(enqueue_timeout).total_seconds()
+        if timeout <= 0:
+            raise ValueError("enqueue_timeout must be positive")
+        self.max_connections = max_connections
+        self.queue_capacity = queue_capacity
+        self._overflow = overflow
+        self._enqueue_timeout = timeout
+        self._heartbeat = heartbeat
+        self._connections: dict[Hashable, _ManagedConnection] = {}
+        self._accepting = False
+        self._accepted = 0
+        self._closed = 0
+        self._capacity_refusals = 0
+        self._queue_refusals = 0
+        self._protocol_refusals = 0
+        self._heartbeat_timeouts = 0
+        self._drain_timeouts = 0
+
+    async def start(self, supervisor: Any) -> None:
+        """Open admission when the application lifespan starts."""
+        if self._connections:
+            raise RuntimeError("cannot restart a WebSocketService with active connections")
+        self._accepting = True
+
+    async def drain(self, deadline: float) -> None:
+        """Stop admission, close every peer, and wait until the deadline."""
+        self._accepting = False
+        connections = tuple(self._connections.values())
+        if not connections:
+            return
+        await asyncio.gather(
+            *(connection.close(1001, "service shutting down") for connection in connections)
+        )
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            self._drain_timeouts += len(connections)
+            return
+        try:
+            async with asyncio.timeout(remaining):
+                await asyncio.gather(*(connection.done.wait() for connection in connections))
+        except TimeoutError:
+            self._drain_timeouts += sum(not connection.done.is_set() for connection in connections)
+
+    @property
+    def snapshot(self) -> ConnectionSnapshot:
+        """Current gauges and cumulative refusal/closure counters."""
+        return ConnectionSnapshot(
+            active=len(self._connections),
+            queued=sum(connection.queue.qsize() for connection in self._connections.values()),
+            accepted=self._accepted,
+            closed=self._closed,
+            capacity_refusals=self._capacity_refusals,
+            queue_refusals=self._queue_refusals,
+            protocol_refusals=self._protocol_refusals,
+            heartbeat_timeouts=self._heartbeat_timeouts,
+            drain_timeouts=self._drain_timeouts,
+        )
+
+    async def serve(
+        self,
+        websocket: WebSocket,
+        handler: Callable[[_Frame], Awaitable[_Frame | None]],
+        *,
+        key: Hashable | None = None,
+        subprotocol: str | None = None,
+    ) -> None:
+        """Own one connection until the peer leaves or the handler fails.
+
+        The handler is called sequentially, so inbound work has natural
+        backpressure. A returned frame enters the same bounded outbound queue as
+        `send`; returning `None` sends nothing. Handler failures propagate
+        to Wreath's ordinary route error boundary after the connection is
+        removed, rather than being swallowed by the service.
+        """
+        connection_key: Hashable = id(websocket) if key is None else key
+        if (
+            not self._accepting
+            or len(self._connections) >= self.max_connections
+            or connection_key in self._connections
+        ):
+            self._capacity_refusals += 1
+            await websocket.close(1013, "connection capacity unavailable")
+            return
+        if subprotocol is not None and subprotocol not in websocket.subprotocols:
+            self._protocol_refusals += 1
+            await websocket.close(1002, "subprotocol was not offered")
+            return
+        connection = _ManagedConnection(self, connection_key, websocket)
+        self._connections[connection_key] = connection
+        self._accepted += 1
+        try:
+            await websocket.accept(subprotocol=subprotocol)
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(
+                    self._send_loop(connection),
+                    name=f"wreath.websocket.send:{connection_key}",
+                )
+                tasks.create_task(
+                    self._receive_loop(connection, handler),
+                    name=f"wreath.websocket.receive:{connection_key}",
+                )
+                if self._heartbeat is not None:
+                    tasks.create_task(
+                        self._heartbeat_loop(connection, self._heartbeat),
+                        name=f"wreath.websocket.heartbeat:{connection_key}",
+                    )
+        finally:
+            current = self._connections.get(connection_key)
+            if current is connection:
+                del self._connections[connection_key]
+            self._closed += 1
+            connection.done.set()
+
+    async def send(self, key: Hashable, frame: _Frame) -> None:
+        """Enqueue one frame under the configured overflow policy."""
+        connection = self._connections.get(key)
+        if connection is None:
+            raise KeyError(f"no active WebSocket connection {key!r}")
+        if self._overflow == "backpressure":
+            try:
+                async with asyncio.timeout(self._enqueue_timeout):
+                    await connection.queue.put(frame)
+            except TimeoutError as error:
+                self._queue_refusals += 1
+                raise ConnectionBackpressure(
+                    f"connection {key!r} did not free outbound capacity"
+                ) from error
+            return
+        try:
+            connection.queue.put_nowait(frame)
+        except asyncio.QueueFull as error:
+            self._queue_refusals += 1
+            if self._overflow == "disconnect":
+                await connection.close(1013, "outbound queue capacity exceeded")
+            raise ConnectionBackpressure(f"connection {key!r} outbound queue is full") from error
+
+    async def broadcast(self, frame: _Frame) -> int:
+        """Enqueue one frame for each current connection; return acceptances."""
+        delivered = 0
+        for key in tuple(self._connections):
+            try:
+                await self.send(key, frame)
+            except ConnectionBackpressure:
+                continue
+            delivered += 1
+        return delivered
+
+    async def _send_loop(self, connection: _ManagedConnection) -> None:
+        try:
+            while True:
+                outbound = await connection.queue.get()
+                try:
+                    if isinstance(outbound, _Close):
+                        await connection.close(outbound.code, outbound.reason)
+                        return
+                    await connection.write(outbound)
+                finally:
+                    connection.queue.task_done()
+        finally:
+            connection.stopping.set()
+
+    async def _receive_loop(
+        self,
+        connection: _ManagedConnection,
+        handler: Callable[[_Frame], Awaitable[_Frame | None]],
+    ) -> None:
+        try:
+            async for frame in connection.websocket:
+                heartbeat = self._heartbeat
+                if heartbeat is not None and heartbeat.acknowledge(frame):
+                    connection.heartbeat_ack.set()
+                    if heartbeat.consume:
+                        continue
+                reply = await handler(frame)
+                if reply is not None:
+                    await self.send(connection.key, reply)
+        finally:
+            connection.stopping.set()
+            await connection.queue.put(_Close(1000, ""))
+
+    async def _heartbeat_loop(
+        self,
+        connection: _ManagedConnection,
+        heartbeat: Heartbeat,
+    ) -> None:
+        while not connection.stopping.is_set():
+            try:
+                async with asyncio.timeout(heartbeat.interval):
+                    await connection.stopping.wait()
+                return
+            except TimeoutError:
+                pass
+            connection.heartbeat_ack.clear()
+            await self.send(connection.key, heartbeat.frame)
+            try:
+                async with asyncio.timeout(heartbeat.timeout):
+                    heartbeat_wait = asyncio.create_task(connection.heartbeat_ack.wait())
+                    stopping_wait = asyncio.create_task(connection.stopping.wait())
+                    done, pending = await asyncio.wait(
+                        (heartbeat_wait, stopping_wait),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    if stopping_wait in done:
+                        return
+            except TimeoutError:
+                self._heartbeat_timeouts += 1
+                connection.stopping.set()
+                await connection.close(1011, "heartbeat timed out")
+                return
+
+
+__all__ = [
+    "Calls",
+    "CallsClosed",
+    "ConnectionBackpressure",
+    "ConnectionSnapshot",
+    "Heartbeat",
+    "WebSocket",
+    "WebSocketDisconnect",
+    "WebSocketService",
+]

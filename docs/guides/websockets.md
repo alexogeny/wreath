@@ -27,6 +27,72 @@ bounds how many messages and fragments one connection may accumulate — see
 handler in a test with `WebSocketTestSession` from
 [`wreath.testing`](../reference/testing.md), no server required.
 
+`send_json(value)` and `receive_json()` use Wreath's JSON codec when the
+application protocol is JSON. Routers carry WebSocket routes too, including
+their inherited permissions:
+
+```python
+from wreath import Router
+from wreath.websocket import WebSocket
+
+streams = Router(prefix="/streams", permissions=("stream:read",))
+
+@streams.websocket("/{name}")
+async def stream(connection: WebSocket) -> None:
+    await connection.accept()
+    request = await connection.receive_json()
+    await connection.send_json({"accepted": request["name"]})
+```
+
+## Bounded connection ownership
+
+For a large, long-lived connection population, register a `WebSocketService`.
+It reserves capacity before accepting, gives every peer a bounded outbound
+queue, serializes writes, drains at application shutdown, and exposes counters
+through `snapshot`:
+
+```python
+from wreath.websocket import Heartbeat, WebSocket, WebSocketService
+
+connections = app.service(
+    "streams",
+    WebSocketService(
+        max_connections=10_000,
+        queue_capacity=64,
+        overflow="reject",
+        heartbeat=Heartbeat(
+            frame='{"type":"ping"}',
+            acknowledge=lambda frame: frame == '{"type":"pong"}',
+        ),
+    ),
+)
+
+@app.websocket("/streams/{name}")
+async def stream(connection: WebSocket) -> None:
+    async def handle(frame: str | bytes) -> str | bytes | None:
+        return frame
+
+    await connections.serve(
+        connection,
+        handle,
+        key=connection.path_params["name"],
+    )
+```
+
+The overflow choice is an operational contract: `reject` raises
+`ConnectionBackpressure` immediately, `backpressure` waits only up to
+`enqueue_timeout`, and `disconnect` closes a peer whose queue is full. All three
+remain memory-bounded. Inbound messages are handled sequentially, providing
+natural backpressure rather than spawning an unbounded task per frame.
+
+`Heartbeat` is protocol-supplied: Wreath schedules and bounds it but does not
+guess a ping message or acknowledgement shape. Acknowledgements are consumed by
+default, a missed deadline closes once with code 1011, and
+`snapshot.heartbeat_timeouts` records the outcome.
+
+Outbound wire time is recorded using the existing Flight Recorder WebSocket
+fan-out phase. There is no second telemetry or comparison pipeline to deploy.
+
 ## User story: a live feed the client subscribes to
 
 > *As an API author, my dashboard opens a socket and I want to push it live
