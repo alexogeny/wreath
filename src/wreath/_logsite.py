@@ -187,7 +187,7 @@ def specs_for(site: LogSite, fields: tuple[LogField, ...]) -> bytes:
     the same line with a string reach the same interned site, whose declared
     fields are whichever call arrived first. Packing the second call against the
     first call's types would turn its value into a counted mismatch and lose it,
-    which the pure packer never did -- so the native emitter must not either.
+    which the Python packer never did -- so the native emitter must not either.
 
     Rebuilding the blob unconditionally costs ~360ns; comparing first costs
     ~170ns and skips the rebuild in every case that is not this pathology. A
@@ -410,9 +410,9 @@ def pack_value(
     """Convert one Python value into a packed argument.
 
     This is half of the Python packing; the other half is `LogCell.encode`.
-    Together they are the pure twin `wreath_nfr_log` is checked against byte for
-    byte, and the path that still runs when there is no ring, when a record is
-    buffered, or when the caller is not the loop. **Which is which, and why, is
+    Together they are what runs when there is no ring, when a record is
+    buffered, or when the caller is not the loop -- `wreath_nfr_log` packs
+    every other record straight into a cell. **Which is which, and why, is
     written once at the head of the log-record section in `_flight_schema.py`.**
 
     Returns the argument and whether the value failed its declared type. A
