@@ -1,7 +1,7 @@
 """A tool's `inputSchema` and the same handler's OpenAPI schema must agree.
 
-This is the parity contract that justifies reusing the binding layer instead of
-writing a second one. The two renderings differ in exactly one respect -- where
+Their agreeing is what justifies reusing the binding layer instead of writing a
+second one. The two renderings differ in exactly one respect -- where
 a dataclass definition lives, `#/$defs/...` for a standalone JSON Schema against
 `#/components/schemas/...` for an OpenAPI document -- and every assertion here
 pins that difference so a future change to either renderer breaks loudly.
