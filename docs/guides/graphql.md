@@ -148,6 +148,33 @@ The resolver receives a small `info`: `request`, `session`, `arguments` (with
 variables already substituted), `path`, and `parent_type`. Nothing from the
 executor's internals, so the execution strategy stays free to change.
 
+### Custom result types are native dataclasses
+
+A result assembled from SQL or another service does not need an ORM table and
+does not need a second schema-model library. Register an ordinary dataclass and
+return it from a root or field resolver:
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class SearchSummary:
+    label: str
+    matches: int
+    note: str | None = None
+
+api = GraphQL(registry, models=[User], dataclasses=[SearchSummary])
+
+@api.query("summary", returns="SearchSummary")
+async def summary(info):
+    return SearchSummary(label="recent", matches=12)
+```
+
+The dataclass annotations define the GraphQL fields, scalar types, lists and
+nullability. Nested dataclass types must also appear in `dataclasses=[...]`, so
+the public schema remains an explicit allowlist. Pydantic and Strawberry are
+not runtime dependencies or compatibility surfaces.
+
 ## Exposure is opt-in
 
 ```python

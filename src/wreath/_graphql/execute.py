@@ -261,8 +261,12 @@ class _Run:
                     )
                 continue
 
+            attribute: str | None = None
             if schema_field.column is not None:
                 attribute = schema_field.column.python_name
+            else:
+                attribute = schema_field.attribute
+            if attribute is not None:
                 for index, instance in enumerate(instances):
                     results[index][field.key] = getattr(instance, attribute, None)
                 if marker is not None:
