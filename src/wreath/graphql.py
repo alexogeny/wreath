@@ -94,6 +94,7 @@ class GraphQL:
         registry: Any,
         *,
         models: list[Any] | None = None,
+        dataclasses: Iterable[type] = (),
         expose: Iterable[str] = (),
         limits: Limits | None = None,
         authorizer: Any = None,
@@ -127,7 +128,9 @@ class GraphQL:
             raise ValueError("authorization action is required")
         self._action = action
         self._registry = registry
-        self._schema = build_schema(registry, models, expose=expose)
+        self._schema = build_schema(
+            registry, models, expose=expose, dataclasses=dataclasses
+        )
         self._limits = limits or Limits()
         self._authorizer = authorizer
         self._introspection = introspection

@@ -19,12 +19,12 @@ import typing
 
 import pytest
 
-from wreath._pure.typegen import ts_type
 from wreath.authorization import EntityUid
 from wreath.crud import Access
 from wreath.objects import LocalObjectStore, MemoryObjectStore
 from wreath.openapi import _openapi_schema
 from wreath.typegen.model import TypeKind, TypeRef
+from wreath.typegen.typescript_renderer import ts_type
 
 # -- Access.cedar: a bare type name was a 500 on a route declaring 403 ---------
 
@@ -157,7 +157,7 @@ def test_an_unhandled_type_kind_is_refused_by_both_emitters() -> None:
 
 def test_each_refusal_names_its_counterpart() -> None:
     """The two must be extended together; each message says so."""
-    with pytest.raises(ValueError, match=r"wreath\._pure\.typegen\.ts_type"):
+    with pytest.raises(ValueError, match=r"wreath\.typegen\.typescript_renderer\.ts_type"):
         _openapi_schema(TypeRef(kind="nope"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match=r"wreath\.openapi\._openapi_schema"):
         ts_type(("nope", None, (), ()))

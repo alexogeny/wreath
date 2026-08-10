@@ -14,6 +14,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.orm.errors import SessionError
 from wreath.orm.session import Session, TenantContext
@@ -27,10 +28,12 @@ class FakeConnection:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         # pg_try_advisory_lock(...) -> bool; the namespace arg is truthy, so the
         # default lease is "acquired". Blocking locks/unlocks return void (None).

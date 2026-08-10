@@ -6,35 +6,15 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from _doubles import RecordingConnection
 
 from wreath.jobs import JobRunner
 from wreath.messaging import MessageBus
 
 
-class _FakeConnection:
-    def __init__(self):
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, sql, *args):
-        self.calls.append((sql, args))
-        return "OK"
-
-    async def fetch(self, sql, *args):
-        self.calls.append((sql, args))
-        return []
-
-    async def fetchrow(self, sql, *args):
-        self.calls.append((sql, args))
-        return None
-
-    async def fetchval(self, sql, *args):
-        self.calls.append((sql, args))
-        return 1
-
-
 class _FakeDatabase:
     def __init__(self):
-        self.connection = _FakeConnection()
+        self.connection = RecordingConnection()
 
     async def acquire(self, workload):
         return self.connection

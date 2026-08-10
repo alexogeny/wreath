@@ -18,6 +18,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.messaging import Message, MessageBus, NoSubscriberGroup
 
@@ -36,12 +37,14 @@ class FakeConnection:
         self.fetches = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         if self.execute_error is not None:
             raise self.execute_error
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, str]]:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         self.fetches += 1
         if self.fetch_error is not None:
@@ -56,6 +59,7 @@ class FakeConnection:
         absent, which the driver reads as `None` -- so that is the shape of the
         negative answer, not `False`.
         """
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return True
 

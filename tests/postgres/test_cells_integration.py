@@ -103,9 +103,14 @@ async def session(database):
         "weight_kg double precision, seen_at timestamptz NOT NULL)",
     )
     registry = Registry(database, [Observation], validate_schema="off")
+    session = Session(registry, "write")
     try:
-        yield Session(registry, "write")
+        yield session
     finally:
+        # Before the DDL, and before `database` stops: an unreturned lease costs
+        # the pool its full 10s `shutdown_timeout`, and a `DROP SCHEMA` issued
+        # while this session still holds an open transaction blocks on its locks.
+        await session.close()
         await _execute(database, f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 

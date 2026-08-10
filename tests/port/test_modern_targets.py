@@ -195,6 +195,8 @@ def test_an_httpx_client_points_at_the_managed_pool(tmp_path) -> None:
     )
     message = _message(tmp_path, source, "ext.httpx")
     assert "http_client" in message
+    assert "ServiceClient" in message
+    assert "compatibility layer" in message
 
 
 def test_httpx_is_reported_once_per_module(tmp_path) -> None:
@@ -450,6 +452,10 @@ def test_a_dependency_override_points_at_acting_as(tmp_path) -> None:
     source = "app.dependency_overrides[authenticate] = lambda: rider\n"
     message = _message(tmp_path, source, "test.dependency_override")
     assert "acting_as" in message
+    assert "ServiceClient" in message
+    assert "same Session" in message
+    assert "Delete fake repositories" in message
+    assert "app.state" not in message
 
 
 # --- libraries to keep -----------------------------------------------------------

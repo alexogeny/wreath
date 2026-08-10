@@ -84,6 +84,10 @@ def test_the_preflight_target_names_the_project_being_generated() -> None:
     assert not any("myapp.app:app" in command for command in plan("shop").commands())
 
 
+def test_the_plan_typechecks_the_generated_package() -> None:
+    assert "uv run ty check" in plan("shop").commands()
+
+
 def test_the_env_file_is_copied_before_anything_imports_the_application() -> None:
     """The generated `config.py` reads `.env` at import, and with `--database
     postgres` the DSN has no default -- so a job that imports before copying
@@ -179,8 +183,9 @@ def test_the_gitlab_pipeline_shares_one_install_across_its_jobs(tmp_path: Path) 
         assert "uv sync" not in document[name]["script"]
 
 
+@pytest.mark.parametrize("profile", ["service", "modular-monolith"])
 def test_the_generated_project_lints_clean_under_its_own_ruff_config(
-    tmp_path: Path,
+    tmp_path: Path, profile: str,
 ) -> None:
     """The pipeline runs `ruff check .`, so a project delivered failing it hands
     somebody a red build they did not write.
@@ -192,8 +197,8 @@ def test_the_generated_project_lints_clean_under_its_own_ruff_config(
     import subprocess
     import sys
 
-    target = tmp_path / "shop"
-    assert _new(target, "--forge", "github") == 0
+    target = tmp_path / profile.replace("-", "_")
+    assert _new(target, "--forge", "github", "--profile", profile) == 0
     result = subprocess.run(
         [sys.executable, "-m", "ruff", "check", "."],
         cwd=target, capture_output=True, text=True, check=False,

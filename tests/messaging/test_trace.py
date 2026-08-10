@@ -25,6 +25,7 @@ import os
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import _pytest_plugin, telemetry
 from wreath.messaging import MessageBus
@@ -42,18 +43,22 @@ class FakeConn:
         self.row = row
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> Any:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return []
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self.row
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return True if self.trace_column else None
 

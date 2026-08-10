@@ -240,6 +240,42 @@ wreath migrations status app:app migrations/0001/migration.bin \
 
 `status` exits 1 if the chain, ORM target, and catalog do not all agree.
 
+## Adopt an existing schema without replaying its history
+
+An established application may have hundreds of old migration files whose end
+state already exists in PostgreSQL. Do not translate or replay them merely to
+give Wreath a root. Declare that end state in Wreath ORM models, then generate a
+zero-operation baseline:
+
+```bash
+wreath migrations baseline app:app --database main \
+  --output migrations/current \
+  --migration-id 00112233445566778899aabbccddeeff
+```
+
+This succeeds only when the compiled ORM image and live catalog match exactly.
+The output is a normal checksummed root `migration.bin`, a deterministic
+`migration.json` containing the catalog inventory, and an empty
+`migration.sql`. Source and target fingerprints are identical and all operation
+tapes are empty. Drift is refused; it is never folded into the baseline.
+
+Review and retain that directory. To record it as the Wreath history root, use a
+dedicated migration credential and opt in explicitly:
+
+```bash
+export WREATH_MIGRATION_DSN='postgresql://migration-role@db/service'
+wreath migrations baseline app:app --database main \
+  --output migrations/current \
+  --migration-id 00112233445566778899aabbccddeeff \
+  --adopt
+```
+
+Adoption re-reads the ORM and catalog under the schema migration lock, refuses
+pre-existing Wreath history, and inserts one history row. It runs no application
+DDL. The only objects it may create are Wreath's own migration-history schema
+and table. Subsequent generated migrations use the baseline artifact checksum
+as their parent.
+
 ## Apply one authoritative artifact
 
 Application requires a dedicated migration DSN. Wreath never falls back to the

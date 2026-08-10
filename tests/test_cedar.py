@@ -54,6 +54,7 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
         resource=lambda resource, request: f"Document::{resource}",
         entities=lambda request: (),
         context=lambda request: {"method": request.method},
+        clock=lambda: 150,
     )
     app = Wreath()
     app.configure_auth(BearerTokenBackend(verify), authorizer)
@@ -97,6 +98,7 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
         # access. Empty leaves the forbid standing and inert.
         "quota": frozenset(),
         "delegated": False,
+        "now": 150,
     }
 
 

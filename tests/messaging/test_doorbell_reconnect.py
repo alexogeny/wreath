@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 import wreath._doorbell as doorbell_module
 from wreath.messaging import Message, MessageBus, _doorbell_delay
@@ -58,14 +59,17 @@ class FakeListenConnection:
         self.listening.append(wire)
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, str]]:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return []
 
     async def fetchrow(self, sql: str, *args: Any) -> None:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return None
 
@@ -77,6 +81,7 @@ class FakeListenConnection:
         absent, which the driver reads as `None` -- so that is the shape of the
         negative answer, not `False`.
         """
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return True
 

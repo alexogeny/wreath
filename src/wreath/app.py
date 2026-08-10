@@ -30,11 +30,13 @@ from . import telemetry as _telemetry
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider, BearerTokenBackend
 from ._auth.models import Identity
 from ._auth.requirements import (
+    AuthorizationVocabulary,
     AuthRequirement,
     SetRequirement,
     merge_requirements,
     requirement_for,
     second_factor_age,
+    set_requirement,
 )
 from ._codecs import parse_qs as _parse_qs
 from ._flight_markers import capture_marker as _capture_marker
@@ -103,9 +105,7 @@ _build_capability_mask = (
     _pure_build_capability_mask if _core is None else _core.build_capability_mask
 )
 _build_compiled_capability_mask = (
-    _pure_build_compiled_capability_mask
-    if _core is None
-    else _core.build_compiled_capability_mask
+    _pure_build_compiled_capability_mask if _core is None else _core.build_compiled_capability_mask
 )
 
 # Baseline Response.__call__ used to detect subclasses that override sending;
@@ -567,6 +567,10 @@ class Wreath:
         limits: Body, form and cookie ceilings applied to every request built here.
         background_timeout: Seconds a response's background tasks may run before
             they are cancelled, or `None` for no limit. Default 30.
+        require_access_declarations: Refuse route compilation unless every HTTP
+            and WebSocket endpoint explicitly declares `public`, optional
+            identity, authentication, or authorization. Default False for
+            incremental adoption.
     """
 
     __slots__ = (
@@ -577,6 +581,7 @@ class Wreath:
         "_bearer_verifier_is_async",
         "_app_scope",
         "_authorizer",
+        "_authorization_vocabulary",
         "_cancel_on_disconnect",
         "_capabilities",
         "_capability_descriptor",
@@ -626,6 +631,7 @@ class Wreath:
         "_orm_registries",
         "_supervisor",
         "_preflight_fallback",
+        "_require_access_declarations",
         "_probe",
         "_resolve",
         "_resolve_identity",
@@ -634,6 +640,7 @@ class Wreath:
         "_routing",
         "_entity_registries",
         "_series_stores",
+        "_services",
         "_shutdown_handlers",
         "_startup_handlers",
         "_stage_hooks",
@@ -660,6 +667,7 @@ class Wreath:
         http_policy: Any = None,
         signatures: Any = None,
         hardening: str = "warn",
+        require_access_declarations: bool = False,
     ) -> None:
         #: What a `wreath.hardening` finding does at startup: `warn` logs them
         #: and starts, `block` raises and does not, `off` scans nothing.
@@ -707,6 +715,8 @@ class Wreath:
         self._bearer_verifier: Any = None
         self._bearer_verifier_is_async = False
         self._authorizer: AuthorizationProvider | None = None
+        self._authorization_vocabulary: AuthorizationVocabulary | None = None
+        self._require_access_declarations = require_access_declarations
         # Values from `Depends(..., scope="app")`. Owned by this application
         # and torn down by its lifespan shutdown -- never a module global, so
         # two apps in one process do not share dependency instances.
@@ -829,6 +839,7 @@ class Wreath:
         #: get an owner that `schema_components` can ask.
         self._series_stores: dict[str, Any] = {}
         self._entity_registries: dict[str, Any] = {}
+        self._services: dict[str, Any] = {}
         self._object_stores: dict[str, Any] = {}
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
@@ -890,6 +901,7 @@ class Wreath:
             *self._webhook_hubs.values(),
             *self._series_stores.values(),
             *self._entity_registries.values(),
+            *self._services.values(),
             # The middleware registries hold `(priority, order, middleware)`.
             # Walking the tuples asked a tuple for `component()`, so every
             # middleware-owned table was silently never collected.
@@ -1189,6 +1201,28 @@ class Wreath:
         self.state.__setattr__(f"postgres_{name}", database)
         self._dirty = True
         return database
+
+    def service(self, name: str, service: Any) -> Any:
+        """Register a generic process-lifetime service with the supervisor.
+
+        A service supplies `async start(supervisor)` and
+        `async drain(deadline)`. It starts after databases and clients, before
+        user startup handlers, and drains before those dependencies close. This
+        is the public lifecycle seam for bounded protocol managers and other
+        infrastructure that does not need a Wreath-specific registry.
+
+        The instance is also exposed as `app.state.service_<name>` and
+        returned unchanged.
+        """
+        if name in self._services:
+            raise ValueError(f"duplicate service: {name}")
+        if not callable(getattr(service, "start", None)) or not callable(
+            getattr(service, "drain", None)
+        ):
+            raise TypeError("a service must provide async start() and drain() methods")
+        self._services[name] = service
+        self.state.__setattr__(f"service_{name}", service)
+        return service
 
     def jobs(
         self,
@@ -1812,12 +1846,35 @@ class Wreath:
                     definition.cancel_on_disconnect,
                 )
             )
+        for definition in router.websockets:
+            path = prefix + definition.path if prefix else definition.path
+            requirement = merge_requirements(
+                include_requirement,
+                definition.requirement,
+                requirement_for(definition.endpoint),
+            )
+            endpoint = definition.endpoint
+
+            async def included_websocket(
+                websocket: WebSocket,
+                _endpoint: WebSocketHandler = endpoint,
+            ) -> None:
+                await _endpoint(websocket)
+
+            included_websocket.__name__ = getattr(endpoint, "__name__", "websocket")
+            included_websocket.__qualname__ = getattr(
+                endpoint, "__qualname__", included_websocket.__name__
+            )
+            set_requirement(included_websocket, requirement)
+            self.websocket(path)(included_websocket)
         self._dirty = True
 
     def configure_auth(
         self,
         backend: AuthenticationBackend,
         authorizer: AuthorizationProvider | None = None,
+        *,
+        vocabulary: AuthorizationVocabulary | None = None,
     ) -> None:
         """Install the application-wide authentication backend and policy authorizer.
 
@@ -1833,8 +1890,12 @@ class Wreath:
         Such a route with no authorizer configured raises `RuntimeError` when it is
         requested, rather than allowing the request through.
 
-        Calling this replaces any previous backend and authorizer, and marks the
-        routes for recompilation.
+        `vocabulary` is the complete typed action set for the application.
+        Route compilation refuses an `@authorize` action absent from it; the
+        route manifest reports members that no route currently uses.
+
+        Calling this replaces any previous backend, authorizer, and vocabulary,
+        and marks the routes for recompilation.
         """
         self._auth_backend = backend
         if type(backend) is BearerTokenBackend:
@@ -1843,7 +1904,11 @@ class Wreath:
         else:
             self._bearer_verifier = None
             self._bearer_verifier_is_async = False
+        if vocabulary is not None:
+            if not isinstance(vocabulary, AuthorizationVocabulary):
+                raise TypeError("vocabulary must be an AuthorizationVocabulary")
         self._authorizer = authorizer
+        self._authorization_vocabulary = vocabulary
         self._dirty = True
 
     def add_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
@@ -2259,8 +2324,7 @@ class Wreath:
                     self._handle_http_plain_sync
                     if policy is None
                     and all(
-                        not _iscoroutinefunction(handler)
-                        for handler in self._handler_requirements
+                        not _iscoroutinefunction(handler) for handler in self._handler_requirements
                     )
                     else self._handle_http_plain
                 )
@@ -2307,9 +2371,7 @@ class Wreath:
                 _arm_cancel_on_disconnect(send, declared)
         if native_response:
             protocol = cast(Any, send).__self__
-            return protocol._wreath_response(
-                response.status, response.headers, response.body
-            )
+            return protocol._wreath_response(response.status, response.headers, response.body)
         return self._finish_http_plain(response, send, method, scope, native_response)
 
     def _handle_http_plain_auth_sync(
@@ -2330,9 +2392,7 @@ class Wreath:
         Python :class:`Request` exists.
         """
         if not native_response:
-            return self._handle_http_plain_auth(
-                scope, receive, send, method, path, native_response
-            )
+            return self._handle_http_plain_auth(scope, receive, send, method, path, native_response)
         classify = cast(Any, self._classify)
         classification, payload = classify(method, path)
         if classification == 0 or scope.flight:
@@ -2493,8 +2553,7 @@ class Wreath:
             else:
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2632,12 +2691,7 @@ class Wreath:
             # the wrappers.
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
-            if (
-                native_response
-                and policy is None
-                and method != "HEAD"
-                and value.__class__ is dict
-            ):
+            if native_response and policy is None and method != "HEAD" and value.__class__ is dict:
                 json_body = _json_dumps(value)
             elif (
                 native_response
@@ -2649,8 +2703,7 @@ class Wreath:
             else:
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2718,9 +2771,7 @@ class Wreath:
             value = handler(request)
             if value.__class__ is _COROUTINE:
                 if request is None:
-                    request = Request(
-                        scope, receive, path_params, self._limits, app=self
-                    )
+                    request = Request(scope, receive, path_params, self._limits, app=self)
                 return self._finish_http_plain_await_value(
                     request, value, send, method, scope, native_response
                 )
@@ -2731,8 +2782,7 @@ class Wreath:
             else:
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2763,8 +2813,7 @@ class Wreath:
             resolved = await value
             response = (
                 resolved
-                if resolved.__class__ is Response
-                or resolved.__class__ is PreparedResponse
+                if resolved.__class__ is Response or resolved.__class__ is PreparedResponse
                 else _coerce_response(resolved)
             )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -2960,12 +3009,7 @@ class Wreath:
         try:
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
-            if (
-                native_response
-                and policy is None
-                and method != "HEAD"
-                and value.__class__ is dict
-            ):
+            if native_response and policy is None and method != "HEAD" and value.__class__ is dict:
                 json_body = _json_dumps(value)
             elif (
                 native_response
@@ -2977,8 +3021,7 @@ class Wreath:
             else:
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
@@ -3638,8 +3681,7 @@ class Wreath:
                     value = await value
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
             else:
@@ -3651,8 +3693,7 @@ class Wreath:
                 serialize_start = _monotonic_ns()
                 response = (
                     value
-                    if value.__class__ is Response
-                    or value.__class__ is PreparedResponse
+                    if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
                 flight_phase(_PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start)
@@ -3750,9 +3791,7 @@ class Wreath:
             prepared = response
             protocol = cast(Any, send).__self__
             headers = prepared.headers if policy is None else list(prepared.headers)
-            await protocol._wreath_response(
-                prepared.status, headers, prepared.body
-            )
+            await protocol._wreath_response(prepared.status, headers, prepared.body)
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -3829,9 +3868,7 @@ class Wreath:
         if response.__class__ is PreparedResponse and native_response:
             prepared = response
             protocol = cast(Any, send).__self__
-            return protocol._wreath_response(
-                prepared.status, prepared.headers, prepared.body
-            )
+            return protocol._wreath_response(prepared.status, prepared.headers, prepared.body)
         if type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -4180,6 +4217,34 @@ class Wreath:
             merge_requirements(route.requirement, requirement_for(route.endpoint))
             for route in self._routes
         ]
+        if self._require_access_declarations:
+            missing = [
+                f"{'/'.join(sorted(route.methods)) or 'ANY'} {route.path}"
+                for route, requirement in zip(self._routes, requirements, strict=True)
+                if not requirement.declares_access
+            ]
+            missing.extend(
+                f"WEBSOCKET {path}"
+                for path, handler in self._ws_routes
+                if not requirement_for(handler).declares_access
+            )
+            if missing:
+                raise RuntimeError(
+                    "routes need an explicit access declaration: "
+                    + ", ".join(missing)
+                    + "; add @public(), @identify(), @authenticated(), or an "
+                    "authorization decorator"
+                )
+        if self._authorization_vocabulary is not None:
+            from ._auth.permissions import declared_actions
+
+            declared = {action for actions in declared_actions(self).values() for action in actions}
+            unknown = self._authorization_vocabulary.unknown(declared)
+            if unknown:
+                raise RuntimeError(
+                    "authorization actions are absent from the configured vocabulary: "
+                    + ", ".join(unknown)
+                )
         self._compile_capabilities(requirements)
         # Middleware that scopes itself to some routes. Empty for almost every
         # application, and the emptiness is what keeps the per-route work off
@@ -4210,7 +4275,7 @@ class Wreath:
             frozen_response = self._frozen_routes.get(definition.endpoint)
             try:
                 requestless = len(_signature(definition.endpoint).parameters) == 0
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 requestless = False
             # Typed-signature binding compiles once here; request-only
             # handlers come back unchanged.
@@ -4283,11 +4348,7 @@ class Wreath:
                 handler_requirements[compiled] = requirement
                 if requestless and not definition.dependencies:
                     requestless_handlers.add(compiled)
-                if (
-                    frozen_response is not None
-                    and not chain
-                    and not definition.dependencies
-                ):
+                if frozen_response is not None and not chain and not definition.dependencies:
                     frozen_responses[compiled] = frozen_response
                 flight_route_keys[compiled] = (method, definition.path)
                 if definition.cancel_on_disconnect is not None:
@@ -4946,7 +5007,12 @@ class Wreath:
                     # Supervised jobs/messaging start after their dependencies
                     # (databases, clients) and before user startup handlers, so a
                     # startup handler may enqueue onto a running runner.
-                    if self._job_runners or self._message_buses or self._entity_registries:
+                    if (
+                        self._job_runners
+                        or self._message_buses
+                        or self._entity_registries
+                        or self._services
+                    ):
                         from .services import Supervisor
 
                         supervisor = Supervisor()
@@ -4960,6 +5026,8 @@ class Wreath:
                         # the transport they were reachable on goes away.
                         for registry in self._entity_registries.values():
                             supervisor.add(registry)
+                        for service in self._services.values():
+                            supervisor.add(service)
                         await supervisor.start()
                         self._supervisor = supervisor
                     for handler in self._startup_handlers:

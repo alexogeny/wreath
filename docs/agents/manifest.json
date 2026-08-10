@@ -128,6 +128,7 @@
         "src/wreath/negotiation.py",
         "src/wreath/protobuf.py",
         "src/wreath/request.py",
+        "src/wreath/_prepared.py",
         "src/wreath/response.py"
       ],
       "tests": [
@@ -283,7 +284,7 @@
       "sources": [
         "src/wreath/openapi.py",
         "src/wreath/typegen/",
-        "src/wreath/_pure/typegen.py"
+        "src/wreath/typegen/typescript_renderer.py"
       ],
       "tests": [
         "tests/test_openapi.py",
@@ -354,6 +355,7 @@
       "sources": [
         "src/wreath/middleware/",
         "src/wreath/policy/",
+        "src/wreath/_compression.py",
         "src/wreath/compression.py",
         "src/wreath/cache_control.py",
         "src/wreath/_webpolicy.py",
@@ -1047,7 +1049,7 @@
     },
     {
       "name": "observability",
-      "capability": "Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, and replay",
+      "capability": "Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, replay, and interactive transport simulation",
       "replaces": [
         "structlog",
         "opentelemetry-sdk",
@@ -1065,6 +1067,7 @@
         "docs/reference/metrics.md",
         "docs/reference/recording.md",
         "docs/reference/replay.md",
+        "docs/reference/simulation.md",
         "docs/reference/telemetry.md"
       ],
       "sources": [
@@ -1088,6 +1091,7 @@
         "src/wreath/_statsd.py",
         "src/wreath/doctor.py",
         "src/wreath/inspector.py",
+        "src/wreath/simulation.py",
         "src/wreath/logging.py",
         "src/wreath/metrics.py",
         "src/wreath/recording.py",
@@ -1130,6 +1134,7 @@
         "tests/test_replay_live_faults.py",
         "tests/test_replay_owned_recovery.py",
         "tests/test_replay_robustness.py",
+        "tests/test_transport_simulation.py",
         "tests/test_replay_stage7.py",
         "tests/test_replay_to_test.py",
         "tests/test_statsd.py",
@@ -1188,6 +1193,7 @@
         "tests/test_server_env.py",
         "tests/test_server_fuzz.py",
         "tests/test_server_websocket.py",
+        "tests/test_websocket_service.py",
         "tests/test_server_tls_ingress.py",
         "tests/test_server_cancel_on_disconnect.py",
         "tests/test_disconnect_cancels_query.py",
@@ -1302,7 +1308,7 @@
       "sources": [
         "src/wreath/cache.py",
         "src/wreath/response_cache.py",
-        "src/wreath/_pure/snapshot.py",
+        "src/wreath/_snapshot.py",
         "src/wreath/_orm_events.py"
       ],
       "tests": [

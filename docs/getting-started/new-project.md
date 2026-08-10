@@ -14,6 +14,7 @@ wreath new shop
 cd shop
 cp .env.example .env
 pytest                       # already green
+ty check                     # application and tests are typed
 wreath dev shop.app:app
 ```
 
@@ -25,8 +26,12 @@ shop/
   README.md
   shop/
     __init__.py
-    app.py                   # build() and a module-level app
+    adapters.py              # concrete implementations selected at build()
+    app.py                   # build(settings=, adapters=) and a module-level app
     config.py                # the environment, bound once at startup
+    contracts.py             # request and response dataclasses
+    ports.py                 # Protocols the application needs
+    py.typed                 # PEP 561 typing marker
     routers/
       items.py               # one resource, four concepts
   tests/
@@ -40,6 +45,7 @@ wreath new shop --database postgres    # an ORM model, and the migration loop in
 wreath new shop --frontend react       # a React app wired to `wreath typegen`
 wreath new shop --database postgres --tenancy   # ... isolated by PostgreSQL role
 wreath new shop --forge codeberg       # ... and CI for the host it will live on
+wreath new shop --profile modular-monolith  # bounded contexts and architecture rules
 ```
 
 **It refuses a directory that has anything in it**, and there is no `--force`.
@@ -58,14 +64,14 @@ goes on it:
   binds as the empty string, or fails to coerce. The generated `.env.example`
   carries working values and no prose; what each key *means* lives beside the
   dataclass that reads it.
-- **`Depends` goes in the default, never inside `Annotated`.** Every other
-  marker — `Query`, `Body`, `Path`, `Header` — goes inside `Annotated` so the
-  default stays an ordinary Python default. `Depends` is the exception, and the
-  other spelling is refused at startup rather than quietly binding the parameter
-  from the request body.
-- **A dependency is called with the request**, even one that ignores it — so a
-  shared store is `Depends(open_catalogue, scope="app")` over a function, not
-  `Depends(Catalogue)` over the class.
+- **Ports are explicit at the composition root.** `build(settings=..., adapters=...)`
+  receives a typed `Adapters` bundle. Routers close over the `Catalogue`
+  protocol they need; tests supply a fresh `MemoryCatalogue`. No route locates
+  infrastructure through a process-global container.
+- **Every route declares access.** The generated application enables
+  `require_access_declarations=True`, and its anonymous endpoints carry
+  `@public()`. Adding a route without `@public()`, `@identify()`,
+  `@authenticated()`, or an authorization decorator refuses at startup.
 - **The return annotation is the response contract.** The generated handlers
   return declared dataclasses, not `dict`, because that annotation is what
   wreath validates against, what the OpenAPI document describes, and what
@@ -73,14 +79,45 @@ goes on it:
   `-> dict` generates a client typed `Record<string, unknown>`, which compiles
   and tells the front end nothing.
 - **`build()` as well as `app`.** A factory is what a test wants — one
-  application per test rather than one shared by all of them.
+  application and one adapter graph per test rather than shared state.
+- **A deterministic route manifest.** `wreath doctor routes shop.app:app`
+  emits method, path, operation id, wire types, dependencies, middleware, and
+  the effective access requirement as canonical JSON. Commit it when those
+  changes should be explicit in review, and use `--check` in CI.
 - **`pythonpath = ["."]` in the generated `pyproject.toml`**, because `tests/`
   carries no `__init__.py` and without it `import shop` fails from inside a test.
 
 The scaffold's own tests import the generated project, drive requests through
-it, run its suite, and type-check the generated React app against the generated
-client. A template that has drifted from the framework fails there, rather than
-in your first hour.
+it, run its suite, type-check its Python package, and type-check the generated
+React app against the generated client. A template that has drifted from the
+framework fails there, rather than in your first hour.
+
+## For a modular monolith
+
+```bash
+wreath new backoffice --profile modular-monolith
+```
+
+This keeps one deployable application while slicing source by bounded context:
+
+```text
+backoffice/
+  AGENTS.md
+  backoffice/
+    app.py
+    adapters/
+    domains/
+      items/
+        contracts.py
+        ports.py
+        router.py
+```
+
+Each context owns its wire contracts, required ports, and delivery adapter.
+Concrete implementations live under `adapters/` and are selected only in
+`app.py`. The generated `AGENTS.md` records those import boundaries and the
+route/access rules, so an agent adding the hundredth context gets the same
+constraints as the one that added the second.
 
 ## With a front end
 
@@ -148,7 +185,7 @@ boundary does and does not stop.
 wreath new shop --forge github        # ... or gitlab, codeberg, forgejo, gitea
 ```
 
-Whichever host you name gets the file it actually reads, running the same three
+Whichever host you name gets the file it actually reads, running the same four
 checks:
 
 | forge | file |
@@ -158,7 +195,8 @@ checks:
 | `codeberg`, `forgejo` | `.forgejo/workflows/ci.yml` |
 | `gitea` | `.gitea/workflows/ci.yml` |
 
-The checks are `ruff check .`, `pytest`, and `wreath doctor preflight` — each one
+The checks are `ruff check .`, `ty check`, `pytest`, and
+`wreath doctor preflight` — each one
 a command the scaffold's own suite already runs against a generated project, so
 the pipeline is not asking your CI to be the first thing that tries them.
 

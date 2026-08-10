@@ -18,11 +18,14 @@ from ..migrations import (
     _load_native_artifact,
     _qualified_history_table,
     _verify_native_chain,
+    adopt_single_baseline,
     apply_single_artifact,
     connect_migration,
     detect_single,
+    generate_single_baseline,
     generate_single_plan,
     revert_single_artifact,
+    unpack_catalog_descriptor,
     unpack_named_plan,
 )
 
@@ -132,8 +135,6 @@ def _transitional_findings(registry: Any) -> list[dict[str, Any]]:
     ]
 
 
-
-
 def _unpack_sql_tape(tape: bytes) -> list[dict[str, Any]]:
     if len(tape) < 12 or tape[:4] != b"WMS1":
         raise ValueError("native SQL tape is invalid")
@@ -168,20 +169,14 @@ def _review_sql(statements: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _write_generation_directory(
-    output: Path, payload: dict[str, Any], artifact: Any
-) -> None:
+def _write_generation_directory(output: Path, payload: dict[str, Any], artifact: Any) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise FileExistsError(f"migration output already exists: {output}")
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent)
-    )
+    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     try:
         (temporary / "migration.bin").write_bytes(artifact.data)
-        (temporary / "migration.sql").write_text(
-            payload["review_sql"], encoding="utf-8"
-        )
+        (temporary / "migration.sql").write_text(payload["review_sql"], encoding="utf-8")
         (temporary / "migration.json").write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -189,6 +184,18 @@ def _write_generation_directory(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _reviewed_baseline(output: Path, artifact: Any, *, adopting: bool) -> bool:
+    """Verify a retained review directory; return whether it already existed."""
+    if not output.exists():
+        return False
+    if not adopting:
+        raise FileExistsError(f"migration output already exists: {output}")
+    reviewed = (output / "migration.bin").read_bytes()
+    if reviewed != artifact.data:
+        raise RuntimeError("reviewed baseline artifact differs from the current ORM/catalog root")
+    return True
 
 
 async def _generate(namespace: argparse.Namespace, application: Any) -> dict[str, Any]:
@@ -252,6 +259,76 @@ async def _generate(namespace: argparse.Namespace, application: Any) -> dict[str
         payload["parent_checksum"] = artifact.parent_checksum.hex()
         payload["output"] = str(output)
         _write_generation_directory(output, payload, artifact)
+    return payload
+
+
+async def _baseline(namespace: argparse.Namespace, application: Any) -> dict[str, Any]:
+    registries = getattr(application, "_orm_registries", {})
+    registry = registries.get(namespace.database)
+    if registry is None:
+        known = ", ".join(sorted(registries)) or "none"
+        raise ValueError(
+            f"application has no ORM registry {namespace.database!r}; configured: {known}"
+        )
+    try:
+        migration_id = bytes.fromhex(namespace.migration_id)
+    except ValueError as error:
+        raise ValueError("baseline migration ID must be hexadecimal") from error
+    if len(migration_id) != 16:
+        raise ValueError("baseline migration ID must be exactly 32 hexadecimal characters")
+
+    database = registry.database
+    await database.start()
+    workload = "read"
+    try:
+        try:
+            database.pool(workload)
+        except KeyError:
+            workload = "write"
+        connection = await database.acquire(workload)
+        try:
+            baseline = await generate_single_baseline(
+                registry, connection, migration_id=migration_id
+            )
+        finally:
+            await database.release(workload, connection)
+    finally:
+        await database.stop()
+
+    objects = unpack_catalog_descriptor(baseline.descriptor)
+    output = Path(namespace.output)
+    payload: dict[str, Any] = {
+        "format": "WMA1-baseline",
+        "migration_id": baseline.artifact.migration_id.hex(),
+        "artifact_checksum": baseline.artifact.checksum.hex(),
+        "parent_checksum": baseline.artifact.parent_checksum.hex(),
+        "catalog_fingerprint": baseline.fingerprint.hex(),
+        "object_count": baseline.object_count,
+        "application_ddl_operations": 0,
+        "objects": objects,
+        "review_sql": "",
+        "output": str(output),
+        "adopted": False,
+    }
+    if not _reviewed_baseline(output, baseline.artifact, adopting=namespace.adopt):
+        _write_generation_directory(output, payload, baseline.artifact)
+
+    if namespace.adopt:
+        dsn = os.environ.get(namespace.dsn_env)
+        if not dsn:
+            raise ValueError(
+                f"migration credential variable {namespace.dsn_env!r} is not set; "
+                "baseline adoption never falls back to request-pool credentials"
+            )
+        connection = await connect_migration(dsn)
+        try:
+            await adopt_single_baseline(registry, connection, baseline.artifact.data)
+        finally:
+            await connection.close()
+        payload["adopted"] = True
+        (output / "migration.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     return payload
 
 
@@ -384,15 +461,12 @@ async def _status(namespace: argparse.Namespace, application: Any) -> dict[str, 
     history_checksum = bytes(history_tip[0]) if history_tip is not None else None
     history_target = bytes(history_tip[1]) if history_tip is not None else None
     history_matches = (
-        history_checksum == chain.checksum
-        and history_target == chain.target_fingerprint
+        history_checksum == chain.checksum and history_target == chain.target_fingerprint
     )
     desired = detection.desired_fingerprint
     actual = detection.actual_fingerprint
     return {
-        "current": (
-            actual == chain.target_fingerprint == desired and history_matches
-        ),
+        "current": (actual == chain.target_fingerprint == desired and history_matches),
         "catalog_matches_code": actual == desired,
         "artifacts_match_code": chain.target_fingerprint == desired,
         "history_matches_artifacts": history_matches,
@@ -461,6 +535,11 @@ def execute(
         application = load_application(namespace.target, factory=namespace.factory)
         payload = asyncio.run(_generate(namespace, application))
         title = f"generated {payload['operation_count']} review operations"
+    elif namespace.migration_action == "baseline":
+        application = load_application(namespace.target, factory=namespace.factory)
+        payload = asyncio.run(_baseline(namespace, application))
+        action = "adopted" if payload["adopted"] else "reviewed"
+        title = f"{action} zero-operation baseline {payload['migration_id']}"
     elif namespace.migration_action == "show":
         payload = _show(namespace)
         title = f"migration {payload['migration_id']}"
@@ -486,8 +565,13 @@ def execute(
         print(title)
         for key, value in payload.items():
             if key not in {
-                "current", "migration_id", "operations", "statements", "review_sql",
+                "current",
+                "migration_id",
+                "operations",
+                "statements",
+                "review_sql",
                 "pending_passes",
+                "objects",
             }:
                 print(f"  {key.replace('_', ' ')}: {value}")
         for entry in payload.get("pending_passes", []):
@@ -499,9 +583,9 @@ def execute(
             )
         for operation in payload.get("operations", []):
             target = ".".join(
-                part for part in (
-                    operation["schema"], operation["table"], operation["name"]
-                ) if part
+                part
+                for part in (operation["schema"], operation["table"], operation["name"])
+                if part
             )
             print(f"  {operation['action']} {operation['kind']} {target}")
         if payload.get("review_sql"):

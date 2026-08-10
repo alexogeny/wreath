@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from wreath._pure.snapshot import SnapshotCache as PureSnapshotCache
+from wreath._snapshot import SnapshotCache as PureSnapshotCache
 from wreath.cache import SnapshotCache
 
 BACKENDS = [PureSnapshotCache]

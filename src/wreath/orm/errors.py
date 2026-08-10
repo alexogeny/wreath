@@ -47,6 +47,10 @@ class MultipleResultsError(ORMError):
     """`fetch_one()` matched more than one row."""
 
 
+class NoResultError(ORMError):
+    """A required primary key or query matched no row."""
+
+
 class SchemaMismatchError(ORMError):
     """The database schema disagrees with the compiled models."""
 
@@ -88,6 +92,7 @@ __all__ = [
     "ExtensionNotInstalledError",
     "MappingError",
     "MultipleResultsError",
+    "NoResultError",
     "ORMError",
     "RegistryError",
     "SchemaMismatchError",
@@ -95,6 +100,7 @@ __all__ = [
     "SessionError",
     "UnloadedAttributeError",
     "UnloadedRelationshipError",
+    "StaleDataError",
 ]
 
 

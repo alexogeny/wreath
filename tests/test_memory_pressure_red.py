@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from wreath._pure.snapshot import SnapshotCache
+from wreath._snapshot import SnapshotCache
 from wreath.orm.registry import Registry
 from wreath.postgres import PoolConfig
 from wreath.server import ServerConfig

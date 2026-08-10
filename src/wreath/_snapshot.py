@@ -1,4 +1,4 @@
-"""Pure-Python twin for `SnapshotCache`.
+"""`SnapshotCache`: a read-mostly cache published one whole generation at a time.
 
 An immutable read-mostly cache built by atomic generation publication rather
 than in-place mutation. A refresh assembles a whole new generation off to the
@@ -6,6 +6,27 @@ side; publishing it swaps a single reference, so a reader ever only sees one
 complete generation and never a half-applied update. Old generations stay alive
 as long as a reader still references the value it read. Reads never perform I/O:
 a miss is an explicit miss, not a lazy load.
+
+**This is not a twin, which is why it does not live in `wreath._pure`.** There
+has never been a C `SnapshotCache`; `wreath.cache` carried a
+`hasattr(_core, "SnapshotCache")` guard that never once fired.
+
+**A native port was priced and declined.** `docs/plans/native-shared-primitives.md`
+named this a real candidate with "`kv.c` is the model to copy", so `kv.c` is what
+it was measured against -- 21 interleaved rounds, 40,000 iterations, performance
+governor, an A/A floor of 0.003us:
+
+| arm | median | vs a raw `dict.get` |
+| --- | --- | --- |
+| `dict.get` (the floor a port cannot beat) | 0.075us | -- |
+| `SnapshotCache.get` (this module) | 0.121us | +0.046us |
+| `KV.get` (the C table `kv.c` provides) | 0.128us | +0.053us |
+
+The C model is **0.007us slower** than the Python it was supposed to replace,
+because a read here is one attribute load and a native `dict` lookup, while
+`kv.c` must hash, check a TTL and keep its own bookkeeping. The refresh half is
+an `asyncio.Lock` and does not move to C at all. Reopen this only with a
+different measurement, not a different intuition.
 """
 
 from __future__ import annotations

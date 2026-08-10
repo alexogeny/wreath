@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from _doubles import SilentConnection
 
 from wreath import _nplusone
 from wreath._nplusone import NPlusOneDetected, Origin, QueryLedger, watching
@@ -243,23 +244,11 @@ def test_job_finding_describes_the_task_not_a_route():
 # --- stage 2/3: the job attempt scope ----------------------------------------
 
 
-class _FakeConnection:
-    async def execute(self, sql, *args):
-        return "OK"
-
-    async def fetchval(self, sql, *args):
-        return 1
-
-    async def fetch(self, sql, *args):
-        return []
-
-    async def fetchrow(self, sql, *args):
-        return None
 
 
 class _FakeDatabase:
     def __init__(self):
-        self.connection = _FakeConnection()
+        self.connection = SilentConnection()
 
     async def acquire(self, workload):
         return self.connection

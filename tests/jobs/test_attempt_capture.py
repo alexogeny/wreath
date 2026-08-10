@@ -8,7 +8,7 @@ the queue -- is in `test_attempt_capture_live.py`.
 from __future__ import annotations
 
 import pytest
-from _pgfidelity import check_statement
+from _pgfidelity import check_for
 
 from wreath.jobs import JobRunner, _Claimed
 from wreath.postgres import PostgresError
@@ -30,7 +30,7 @@ class FakeConnection:
         self.fail_on: str | None = None
 
     def _record(self, sql, args):
-        check_statement(sql, args)
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         if self.fail_on is not None and self.fail_on in sql:
             raise PostgresError("relation does not exist")

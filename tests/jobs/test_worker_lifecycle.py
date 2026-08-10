@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from _pgfidelity import check_for
+
 from wreath.jobs import JobRunner, _Claimed
 
 
@@ -22,14 +24,17 @@ class FakeConn:
         self._fetchval = fetchval
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self._fetch
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self._fetchval
 

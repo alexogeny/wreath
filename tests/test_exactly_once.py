@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.jobs import JobRunner
 from wreath.messaging import MessageBus
@@ -68,14 +69,17 @@ class FakeConnection:
         return tx
 
     async def execute(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchval(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self.database.next_id()
 
     async def fetch(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return []
 

@@ -6,6 +6,7 @@ import asyncio
 import time
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.health import (
     callable_check,
@@ -164,6 +165,7 @@ class FakeConnection:
         self.fail = fail
 
     async def fetchval(self, sql: str) -> int:
+        check_for(self, sql, ())
         if self.fail:
             raise ConnectionRefusedError("no route to host")
         return 1

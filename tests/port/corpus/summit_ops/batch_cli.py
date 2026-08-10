@@ -1,4 +1,4 @@
-"""Fleet-transition-plan compute — an argparse CLI run as an AWS Batch job.
+"""Llama trek schedule compute — an argparse CLI run as an AWS Batch job.
 
 Idiom: a non-web Python entrypoint (no FastAPI) that submits/consumes AWS Batch jobs
 and fans out with multiprocessing.

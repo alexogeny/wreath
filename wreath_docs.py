@@ -333,6 +333,7 @@ nav = Nav(
         Page("Logging", "reference/logging.md"),
         Page("Recording policies", "reference/recording.md"),
         Page("Replay and fault injection", "reference/replay.md"),
+        Page("Transport simulation", "reference/simulation.md"),
         Page("State", "reference/state.md"),
         Page("OpenAPI", "reference/openapi.md"),
         Page("Client type generation", "reference/typegen.md"),

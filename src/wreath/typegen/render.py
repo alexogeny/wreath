@@ -1,9 +1,13 @@
-"""Renderer facade: select the pure reference renderer or an optional native
-one, honouring `--pure` and `WREATH_PURE` exactly like Wreath's other accelerators.
+"""Renderer facade: select the reference renderer or an optional native one,
+honouring `--pure` and `WREATH_PURE` exactly like Wreath's other accelerators.
 
-The native renderer is gated behind a benchmark decision and is not built today,
-so this always resolves to the pure implementation. The selection contract is
-kept explicit so a future `_core.typegen_*` drops in without touching callers.
+The native renderer is not built, and that is now a decision rather than a
+pending one: rendering a client is a cold path reached from `wreath typegen`,
+and `render_typescript` already assembles output linearly with a single join.
+See its module docstring. The selection contract is kept because it costs
+nothing and a future `_core.typegen_*` would drop in without touching callers --
+but a build without one is not a gap, and `backend_name` reporting `"pure"` is
+the only place that vocabulary still means anything here.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .._native import _core
-from .._pure import typegen as _pure_typegen
+from . import typescript_renderer as _reference
 
 Renderer = Callable[[tuple[Any, ...], int], bytes]
 
@@ -29,7 +33,7 @@ def select_renderers(*, pure: bool = False) -> tuple[Renderer, Renderer, str]:
     )
     if native_models is not None and native_client is not None:
         return native_models, native_client, "native"
-    return _pure_typegen.render_models, _pure_typegen.render_client, "pure"
+    return _reference.render_models, _reference.render_client, "pure"
 
 
 __all__ = ["Renderer", "select_renderers"]

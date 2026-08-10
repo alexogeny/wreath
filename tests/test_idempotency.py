@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.policy import IdempotencyPolicy
 from wreath.request import Request
@@ -233,10 +234,12 @@ class _FakeConnection:
         self.rows = rows
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchrow(self, sql: str, *args: object):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self.rows.pop(0) if self.rows else None
 

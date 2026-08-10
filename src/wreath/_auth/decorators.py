@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any
 
 from .requirements import (
@@ -11,9 +12,20 @@ from .requirements import (
     add_identify,
     add_permissions,
     add_policy,
+    add_public,
     add_roles,
     add_second_factor,
 )
+
+
+def public() -> Callable[[Any], Any]:
+    """Declare that an endpoint intentionally admits anonymous callers.
+
+    This changes no dispatch behavior. It is the positive declaration consumed
+    by `Wreath(require_access_declarations=True)` and the route manifest, so a
+    reviewed public endpoint is distinguishable from a forgotten guard.
+    """
+    return add_public
 
 
 def authenticated() -> Callable[[Any], Any]:
@@ -125,7 +137,7 @@ def second_factor(*, max_age: float = 300.0) -> Callable[[Any], Any]:
 
 
 def authorize(
-    *, action: str, resource: object | Callable[[Any], object]
+    *, action: str | StrEnum, resource: object | Callable[[Any], object]
 ) -> Callable[[Any], Any]:
     """Require a policy decision from the configured authorizer.
 
@@ -150,11 +162,12 @@ def authorize(
     Raises:
         ValueError: `action` is empty.
     """
-    if not action:
+    value = action.value if isinstance(action, StrEnum) else action
+    if not value:
         raise ValueError("authorization action is required")
 
     def decorate(endpoint: Any) -> Any:
-        return add_policy(endpoint, action, resource)
+        return add_policy(endpoint, value, resource)
 
     return decorate
 

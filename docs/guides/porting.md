@@ -128,11 +128,18 @@ codebase actually imports:
   the class would publish the rest. And strawberry camel-cases field names by
   default while wreath emits the column name verbatim, so a `fleece_kg` field is
   `fleeceKg` today and `fleece_kg` after the port: a rename every client sees.
-- **`httpx.AsyncClient`** → `app.http_client(...)`, a managed pool with lifespan
-  start/drain.
+- **`httpx.AsyncClient`** → one `app.http_client(...)` managed pool, called
+  through a `ServiceClient` (or a generated typed subclass). The pool owns
+  lifespan, retries, rate limits, and the replaceable transport adapter; the
+  service client owns the remote contract. The porter does not recreate
+  httpx's response API.
 - **FastAPI's `TestClient`** → `wreath.testing.TestClient`, which is **async**.
   And `dependency_overrides`, which in a real suite is overwhelmingly used to
-  swap the auth dependency, is usually `TestClient.acting_as("bo", roles=[...])`.
+  swap the auth dependency, is usually
+  `TestClient.acting_as("principal", roles=[...])`. Outbound calls select a
+  `ServiceClient` transport adapter. Database tests keep the same `Session` and
+  select a real or replay PostgreSQL adapter underneath it. Fake repositories
+  are deleted, not translated into another injection mechanism.
 - **`fastapi.status` constants, response classes, `jsonable_encoder`** → direct
   equivalents (or, for `jsonable_encoder`, nothing at all — wreath's codec
   serializes dataclasses and ORM rows directly).
@@ -332,6 +339,108 @@ the summary line says so in words. If you consume the JSON, handle the null; a
 `null` that crashes your dashboard is a better failure than a `1.0` that does not.
 
 It once went *down*, when the catalog learned to recognise more of what a real codebase contains, and that was the right direction: the denominator grew because the tool stopped being silent about caches, migrations, GraphQL, and the test suite. It has since gone up by reading constructs it already recognised more closely, which is also the right direction — and once by *removing* a verdict, when the catalog stopped calling every single-`return` handler's `status_code=` translatable, because for a handler returning a DTO the rewrite it promised produced code that raised on the first request. Do not chase it toward 1.0. A meaningful fraction of any real app (queries, domain logic, third-party integrations) is *correctly* left for a human; the tool's value is that this remainder is **precisely enumerated up front** instead of discovered at runtime. A lower, honest number beats a higher, hopeful one.
+
+## Build one migration inventory for several projects
+
+Before emitting code, keep project ownership, route access, dependencies, and
+Python compatibility in one deterministic inventory:
+
+```bash
+wreath port --inventory --target-python 3.14 \
+  --write-inventory port-inventory.json \
+  services/llama_trek services/camera_trap
+
+wreath port --inventory --target-python 3.14 \
+  --check-inventory port-inventory.json \
+  services/llama_trek services/camera_trap
+
+wreath port --inventory --target-python 3.14 \
+  --write-cedar ported/authorization.py \
+  services/llama_trek services/camera_trap
+```
+
+The analyzer never imports a target. Each route retains its source project,
+method, path, handler, dependency factories, and whether access is declared,
+dependency-guarded, or implicit/inherited. Guard factories with recoverable
+resource/action arguments become policy candidates such as `Trail::read`; the
+inventory keeps incomplete candidates incomplete rather than inventing a grant.
+
+`--write-cedar` turns complete candidates into an importable authorization
+module. It contains a `CedarPolicies` bundle compiled when the module imports,
+an `AUTHORIZER` ready for `app.configure_auth(backend, AUTHORIZER)`, and one
+Wreath `authorize(...)` decorator per guarded route in `ROUTE_DECORATORS`.
+Static Cedar-shaped conditions such as `principal.active` are preserved as
+principal attribute predicates. They are not rewritten into global roles: an
+account kind, status, or scoped administrator flag is provisioned account data,
+and Cedar decides what it means. If the action and resource are known but the
+old allow condition is not, the generator emits a route-scoped `forbid` plus a
+`REVIEW` entry. An incomplete guard produces only a `REVIEW` entry. Thus
+generated code can deny too much until reviewed, but it never fabricates a
+grant.
+
+Dependency factories whose definitions are visible in the inventory have
+their static default arguments resolved. For the semantics that cannot be
+derived from syntax, supply a data-only profile:
+
+```json
+{
+  "authentication_factories": ["TokenVerifier"],
+  "required_condition": "principal.active && context.now >= principal.not_before && context.now < principal.expires_at && principal in resource.scope",
+  "action_conditions": {
+    "create": "!principal.read_only",
+    "update": "!principal.read_only",
+    "delete": "!principal.read_only"
+  },
+  "conditions": {
+    "principal.is_temporary": "principal.temporary"
+  }
+}
+```
+
+```bash
+wreath port --inventory --write-cedar ported/authorization.py \
+  --cedar-semantics cedar-semantics.json services/llama_trek
+```
+
+`authentication_factories` removes authentication-only dependencies from the
+policy candidate set; they belong in the application's configured
+authentication backend. `required_condition` is conjoined with every grant, so
+an action-specific or translated legacy condition cannot bypass account status,
+the validity window, or resource ancestry. `action_conditions` add restrictions
+for an operation; `conditions` translate an explicit legacy predicate. All are
+Cedar expressions compiled with the generated module, so an invalid temporal or
+hierarchical declaration fails at import rather than reaching production. A
+missing provisioned attribute makes the policy fail closed.
+
+Apply the generated decorator below the route decorator, replacing the old
+authorization dependency, and configure the application with its compiled
+authorizer:
+
+```python
+from .authorization import AUTHORIZER, authorize_llama_trek_trek_9
+
+app.configure_auth(authentication_backend, AUTHORIZER)
+
+@router.get("/treks/{trek_id}")
+@authorize_llama_trek_trek_9
+async def trek(request: Request):
+    ...
+```
+
+The exact stable route key and generated function are paired in
+`ROUTE_DECORATORS`; use that registry when applying the module mechanically.
+
+The dependency audit reads `pyproject.toml`, `uv.lock`, and uv source entries.
+It reports whether the declared Python range admits 3.14, distinguishes private
+indexes/path/git/URL sources, names replacements only for capabilities Wreath
+actually ships, and leaves unknown package compatibility `unverified`.
+
+For an existing database whose historical migrations will be replaced by a
+verified live-schema root, add `--migration-strategy baseline`. Historical raw
+SQL/data/schema/manual findings move into `retired` instead of inflating the
+remaining review and unsupported counts. This is a reporting choice only until
+`wreath migrations baseline` verifies the ORM and catalog and the operator
+explicitly adopts its artifact.
 
 ## What the exit code says
 

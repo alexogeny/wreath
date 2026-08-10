@@ -40,6 +40,20 @@ not checked here -- each needs something preflight does not open:
 It exits `1` when anything blocks, so it is a CI step rather than something you
 remember to run.
 
+For the exact route contract rather than a diagnostic summary:
+
+```bash
+wreath doctor routes myapp:app --write route-manifest.json
+wreath doctor routes myapp:app --check route-manifest.json
+```
+
+The first writes canonical, sorted JSON; the second exits `1` if the committed
+file differs. It includes wire request and response shapes, stable operation
+ids, dependencies, global/application/route middleware, the effective merged
+access declaration, policy resources, and typed authorization-vocabulary
+coverage. It contains stable qualified names rather than object reprs, so an
+unchanged application compares byte for byte across processes.
+
 ## It aggregates; it does not invent
 
 Every finding here is one another part of wreath already knows how to produce.

@@ -200,6 +200,7 @@ _CAST_REQUIRES: dict[str, tuple[type, ...]] = {
 }
 
 _PLACEHOLDER_CAST = re.compile(r"\$(\d+)::(\w+)")
+_PLACEHOLDER = re.compile(r"\$(\d+)")
 _STRING_OR_DOLLAR = re.compile(r"'(?:[^']|'')*'|\$\$.*?\$\$", re.DOTALL)
 
 
@@ -230,6 +231,51 @@ def refuse_multiple_commands(sql: str) -> None:
         raise PostgresError("cannot insert multiple commands into a prepared statement")
 
 
+def refuse_parameter_arity(sql: str, args: tuple[Any, ...]) -> None:
+    """`$1..$N` must be exactly the parameters the caller supplied.
+
+    Measured against PostgreSQL 17.10 rather than reasoned about, because two
+    plausible-sounding rules turned out to be wrong: a *repeated* `$1` with one
+    argument is accepted (`SELECT $1::text, $1::text` returns the value twice),
+    and an unquoted mixed-case identifier is accepted too. Neither belongs here.
+
+    What a server actually does is decided by the *declared* parameter count --
+    the driver sends one type slot per argument in `Parse` -- against the
+    indexes the statement *references*:
+
+    ============================  =============================================
+    `SELECT $1, $2` with 1 arg    bind message supplies 1 parameters, but
+                                  prepared statement requires 2
+    `SELECT $1` with 2 args       could not determine data type of parameter $2
+    `SELECT 1` with 1 arg         could not determine data type of parameter $1
+    `SELECT $1, $3` with 2 args   could not determine data type of parameter $2
+    `SELECT $0`                   there is no parameter $0
+    ============================  =============================================
+
+    The gap case is why the unreferenced check runs *before* the count check: a
+    statement using `$1` and `$3` with two arguments fails on the unreferenced
+    `$2`, not on the arity, and a double that reported the arity would be
+    refusing for a reason the server never gives.
+
+    String literals and `$$`-quoted bodies are stripped first, so `SELECT '$1'`
+    is not read as carrying a placeholder.
+    """
+    referenced = {int(index) for index in _PLACEHOLDER.findall(_STRING_OR_DOLLAR.sub("", sql))}
+    if 0 in referenced:
+        raise PostgresError("there is no parameter $0")
+    declared = len(args)
+    unreferenced = sorted(set(range(1, declared + 1)) - referenced)
+    if unreferenced:
+        raise PostgresError(
+            f"could not determine data type of parameter ${unreferenced[0]}"
+        )
+    if referenced and max(referenced) > declared:
+        raise PostgresError(
+            f"bind message supplies {declared} parameters, "
+            f"but prepared statement requires {max(referenced)}"
+        )
+
+
 def refuse_uninferable_cast(sql: str, args: tuple[Any, ...], seen: set[str]) -> None:
     """The trap that survives one call. `seen` is the prepared-statement cache."""
     text = " ".join(sql.split())
@@ -258,6 +304,7 @@ def refuse_what_postgres_refuses(
         return
     refuse_multiple_commands(sql)
     refuse_unbindable(args)
+    refuse_parameter_arity(sql, args)
     refuse_uninferable_cast(sql, args, seen)
 
 
@@ -474,18 +521,22 @@ class _ConnectionDouble:
 
     async def execute(self, sql: object, *args: object) -> str:
         refuse_what_postgres_refuses(sql, args, self._prepared)
+        self._double.calls.append((sql, args))
         return self._next("OK", sql)
 
     async def fetch(self, sql: object, *args: object) -> list[Any]:
         refuse_what_postgres_refuses(sql, args, self._prepared)
+        self._double.calls.append((sql, args))
         return self._next([], sql)
 
     async def fetchrow(self, sql: object, *args: object) -> Any:
         refuse_what_postgres_refuses(sql, args, self._prepared)
+        self._double.calls.append((sql, args))
         return self._next(None, sql)
 
     async def fetchval(self, sql: object, *args: object) -> Any:
         refuse_what_postgres_refuses(sql, args, self._prepared)
+        self._double.calls.append((sql, args))
         return self._next(None, sql)
 
     async def map(self, method: str, sql: object, argument_sets: Any, *, max_in_flight: int = 32):
@@ -659,7 +710,7 @@ class DatabaseDouble:
         "acquired", "released", "_flight_dep_id",
         "listen_faults", "stream_fault", "transaction_faults",
         "notifications", "listened", "streams", "listens",
-        "connection_faults", "poisoned", "_statements", "hold_stream",
+        "connection_faults", "poisoned", "_statements", "hold_stream", "calls",
     )
 
     def __init__(
@@ -699,6 +750,12 @@ class DatabaseDouble:
         #: Whether an un-faulted notification stream stays open rather than
         #: returning. See `_ConnectionDouble.notifications`.
         self.hold_stream = hold_stream
+        #: Every statement executed against this double, in order, as
+        #: `(sql, args)`. Recorded *after* the refusal check, so a statement
+        #: PostgreSQL would have rejected never reaches the log -- the same
+        #: order the hand-rolled doubles use, and the one that makes "what did
+        #: we send?" answerable without a server.
+        self.calls: list[tuple[Any, tuple[Any, ...]]] = []
         #: Notifications the doorbell stream yields before it ends.
         self.notifications = notifications
         #: Channels a caller asked to LISTEN on, in order -- a reconnect is

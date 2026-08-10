@@ -9,6 +9,7 @@ emission (Phase 1) is deferred (see `wreath._port.emit`).
     report = analyze_all(["path/to/app"])
     print(report.to_markdown())
 """
+
 from __future__ import annotations
 
 from ._port import (
@@ -16,13 +17,18 @@ from ._port import (
     TRANSLATED,
     UNSUPPORTED,
     Finding,
+    MigrationInventory,
+    PolicyCandidate,
     PortResult,
+    ProjectReport,
     Report,
+    RouteContract,
     SkippedFile,
     TreeContext,
     analyze,
     analyze_all,
     emit_module,
+    inventory_projects,
     port_tree,
 )
 
@@ -39,4 +45,9 @@ __all__ = [
     "TRANSLATED",
     "NEEDS_REVIEW",
     "UNSUPPORTED",
+    "MigrationInventory",
+    "PolicyCandidate",
+    "ProjectReport",
+    "RouteContract",
+    "inventory_projects",
 ]

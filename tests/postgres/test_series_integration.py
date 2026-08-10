@@ -616,8 +616,13 @@ async def sealing(database):
         )
 
     registry = Registry(database, [SealTrek], validate_schema="off")
-    yield database, Session(registry, "write")
+    session = Session(registry, "write")
+    yield database, session
 
+    # First, and before the `DROP SCHEMA`: the connection this session leased is
+    # only returned by `close()`, and a lease still out when the pool stops costs
+    # the full 10s `shutdown_timeout` before it is closed underneath the session.
+    await session.close()
     await _execute(database, f'DROP SCHEMA IF EXISTS "{SEAL_SCHEMA}" CASCADE')
     for table in (BUCKET_TABLE, CORRECTION_TABLE):
         await _execute(

@@ -1545,3 +1545,214 @@ def _ids(ids: tuple[int, ...]) -> bytes:
     # IDs are sorted so a non-semantic ordering cannot change the image.
     ordered = sorted(ids)
     return _u32(len(ordered)) + b"".join(_u32(i) for i in ordered)
+
+
+# --- the metadata image's decoder, and the keyed fingerprint ----------------
+#
+# These three sit here, beside `MetadataImage.canonical_bytes` and `_u32`/
+# `_text`/`_ids`, because that is what they are the other half of. They spent a
+# while in `wreath._pure.flight` and none of them was ever a twin:
+#
+# * `decode_metadata_image` is the exact inverse of `canonical_bytes` above --
+#   one format, and for a while two files, only one of which claimed to be a
+#   reference implementation. There is no C decoder to be a twin of.
+# * `siphash24` *does* have a C counterpart (`_native/flight.c:74`, reachable
+#   across translation units as `wreath_nfr_fingerprint`), but it is not a twin
+#   either: the native packer hashes in C and never calls this, and this one
+#   runs on the fallback packing path that `logging.py`'s `publish` returns
+#   False for. Exporting the C to Python would accelerate only the path taken
+#   when the extension is *not* publishing, and would put a hard `_flight`
+#   dependency on `_logsite`, which has none and must not gain one -- Windows
+#   builds no `_flight` at all (`setup.py:398`).
+#
+# The two implementations must still agree byte for byte or a fingerprint would
+# differ between the native and pure halves of one process and break correlation
+# within a recording. `tests/test_flight_capture.py:52` pins the shared vector.
+
+#: Refuse to allocate for absurd declared sizes before the bytes are present.
+MAX_CHUNK_BYTES = 64 * 1024 * 1024
+MAX_ROWS = 5_000_000
+
+
+# --- metadata image (de)serialization --------------------------------------
+#
+# Encoding mirrors MetadataImage.canonical_bytes exactly so a round trip is the
+# identity and the container hash stays stable. Decoding is defensive: every
+# length is bounds-checked before it is used to slice.
+
+
+class _Reader:
+    __slots__ = ("_data", "_pos")
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._pos = 0
+
+    def u32(self) -> int:
+        if self._pos + 4 > len(self._data):
+            raise SchemaError("metadata truncated reading a u32")
+        (value,) = struct.unpack_from(BYTE_ORDER + "I", self._data, self._pos)
+        self._pos += 4
+        return value
+
+    def text(self) -> str:
+        length = self.u32()
+        if length > MAX_CHUNK_BYTES:
+            raise SchemaError("metadata string declares an implausible length")
+        end = self._pos + length
+        if end > len(self._data):
+            raise SchemaError("metadata truncated reading a string")
+        raw = self._data[self._pos : end]
+        self._pos = end
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SchemaError("metadata string is not valid UTF-8") from exc
+
+    def count(self) -> int:
+        n = self.u32()
+        if n > MAX_ROWS:
+            raise SchemaError(f"metadata declares {n} rows, over the limit")
+        return n
+
+    def ids(self) -> tuple[int, ...]:
+        return tuple(self.u32() for _ in range(self.count()))
+
+    def at_end(self) -> bool:
+        return self._pos == len(self._data)
+
+
+def decode_metadata_image(data: bytes) -> MetadataImage:
+    reader = _Reader(data)
+    if data[:7] != b"WFRMETA":
+        raise SchemaError("metadata image missing its marker")
+    reader._pos = 7
+    version = reader.u32()
+    if version != METADATA_VERSION:
+        raise SchemaError(f"unsupported metadata version {version}")
+
+    routes: list[RouteMeta] = []
+    for _ in range(reader.count()):
+        route_id = reader.u32()
+        method = reader.text()
+        path = reader.text()
+        operation_id = reader.text()
+        plan_id = reader.u32()
+        tags = tuple(reader.text() for _ in range(reader.count()))
+        dependency_ids = reader.ids()
+        middleware_ids = reader.ids()
+        auth_policy_id = reader.u32()
+        coverage = reader.text()
+        routes.append(
+            RouteMeta(
+                route_id=route_id,
+                method=method,
+                path=path,
+                operation_id=operation_id,
+                plan_id=plan_id,
+                tags=tags,
+                dependency_ids=dependency_ids,
+                middleware_ids=middleware_ids,
+                auth_policy_id=auth_policy_id,
+                coverage=coverage,
+            )
+        )
+
+    plans: list[PlanMeta] = []
+    for _ in range(reader.count()):
+        plan_id = reader.u32()
+        params = tuple(
+            (reader.text(), reader.text(), reader.text())
+            for _ in range(reader.count())
+        )
+        body_type = reader.text()
+        returns_type = reader.text()
+        serializer_id = reader.u32()
+        validator_id = reader.u32()
+        limit_ids = reader.ids()
+        plans.append(
+            PlanMeta(
+                plan_id=plan_id,
+                params=params,
+                body_type=body_type,
+                returns_type=returns_type,
+                serializer_id=serializer_id,
+                validator_id=validator_id,
+                limit_ids=limit_ids,
+            )
+        )
+
+    def _named() -> tuple[NamedMeta, ...]:
+        return tuple(
+            NamedMeta(entry_id=reader.u32(), name=reader.text())
+            for _ in range(reader.count())
+        )
+
+    image = MetadataImage(
+        version=version,
+        routes=tuple(routes),
+        plans=tuple(plans),
+        dependencies=_named(),
+        middleware=_named(),
+        auth_policies=_named(),
+        serializers=_named(),
+        validators=_named(),
+        limits=_named(),
+        clients=_named(),
+        databases=_named(),
+        models=_named(),
+        components=_named(),
+    )
+    if not reader.at_end():
+        raise SchemaError("trailing bytes after the metadata image")
+    return image
+
+
+_U64 = 0xFFFFFFFFFFFFFFFF
+def _rotl64(x: int, b: int) -> int:
+    return ((x << b) | (x >> (64 - b))) & _U64
+
+
+def siphash24(data: bytes, k0: int, k1: int) -> int:
+    """SipHash-2-4, the pure twin of siphash24() in flight.c. The recorder's
+    keyed redaction hash; the differential tests share a key so HASHED capture
+    slabs compare byte-for-byte. Word loads are little-endian."""
+    v0 = 0x736F6D6570736575 ^ k0
+    v1 = 0x646F72616E646F6D ^ k1
+    v2 = 0x6C7967656E657261 ^ k0
+    v3 = 0x7465646279746573 ^ k1
+
+    def _round() -> None:
+        nonlocal v0, v1, v2, v3
+        v0 = (v0 + v1) & _U64
+        v1 = _rotl64(v1, 13) ^ v0
+        v0 = _rotl64(v0, 32)
+        v2 = (v2 + v3) & _U64
+        v3 = _rotl64(v3, 16) ^ v2
+        v0 = (v0 + v3) & _U64
+        v3 = _rotl64(v3, 21) ^ v0
+        v2 = (v2 + v1) & _U64
+        v1 = _rotl64(v1, 17) ^ v2
+        v2 = _rotl64(v2, 32)
+
+    length = len(data)
+    end = length - (length % 8)
+    for off in range(0, end, 8):
+        m = int.from_bytes(data[off : off + 8], "little")
+        v3 ^= m
+        _round()
+        _round()
+        v0 ^= m
+    b = (length & 0xFF) << 56
+    for i in range(length - end):
+        b |= data[end + i] << (8 * i)
+    v3 ^= b
+    _round()
+    _round()
+    v0 ^= b
+    v2 ^= 0xFF
+    _round()
+    _round()
+    _round()
+    _round()
+    return v0 ^ v1 ^ v2 ^ v3

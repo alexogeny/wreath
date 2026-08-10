@@ -39,9 +39,11 @@ from .compiler import (
     _count_write_sql_builds,
     compile_count,
     compile_delete,
+    compile_delete_where,
     compile_insert,
     compile_select,
     compile_update,
+    compile_update_where,
     qualified,
     quote,
 )
@@ -49,6 +51,7 @@ from .errors import (
     DetachedInstanceError,
     MappingError,
     MultipleResultsError,
+    NoResultError,
     ORMError,
     RegistryError,
     SessionClosedError,
@@ -633,6 +636,17 @@ class Session:
             query = query.include(*options)
         return await self.fetch_one(query.limit(1))
 
+    async def require(
+        self, model: type, primary_key: Any, *, load: Iterable[Any] = ()
+    ) -> Any:
+        """Fetch one object by primary key, raising when it does not exist."""
+        result = await self.get(model, primary_key, load=load)
+        if result is None:
+            raise NoResultError(
+                f"{model.__name__} with primary key {primary_key!r} does not exist"
+            )
+        return result
+
     async def fetch(self, query: Select) -> list[Any]:
         """Run `query` and hydrate every row."""
         self._check_usable()
@@ -850,6 +864,15 @@ class Session:
                 f"{query.model.__name__}; use fetch() or narrow the query"
             )
         return results[0] if results else None
+
+    async def require_one(self, query: Select) -> Any:
+        """Run `query` and require exactly one result."""
+        result = await self.fetch_one(query)
+        if result is None:
+            raise NoResultError(
+                f"require_one() matched no rows for {query.model.__name__}"
+            )
+        return result
 
     async def count(self, query: Select) -> int:
         """Count the rows `query` matches, without fetching or hydrating them.
@@ -1165,6 +1188,91 @@ class Session:
         self._deleted_ids.clear()
 
     # -- writes -------------------------------------------------------------
+
+    async def create(self, model: type, **values: Any) -> Any:
+        """Construct, insert, and return one mapped model.
+
+        The model constructor remains the single validation path. This is a
+        session convenience, not a second model or repository abstraction.
+        """
+        self._check_usable()
+        self._registry.spec_for(model)
+        instance = model(**values)
+        self.add(instance)
+        await self.flush()
+        return instance
+
+    async def update_where(self, query: Select, **values: Any) -> int:
+        """Update rows selected by an explicit predicate and return its count."""
+        spec = self._registry.spec_for(query.model)
+        if getattr(query.model, "__wreath_compiled_rules__", ()):
+            raise SessionError(
+                f"{query.model.__name__} has cross-field rules; update loaded "
+                "objects so those rules run once, or use explicit SQL"
+            )
+        self._refuse_bulk_audit(query.model)
+        sql, bind_values, _oids = compile_update_where(
+            self._registry, query, values
+        )
+        return await self._execute_bulk(spec, "UPDATE", sql, bind_values)
+
+    async def delete_where(self, query: Select) -> int:
+        """Delete rows selected by an explicit predicate and return its count."""
+        spec = self._registry.spec_for(query.model)
+        self._refuse_bulk_audit(query.model)
+        sql, bind_values, _oids = compile_delete_where(self._registry, query)
+        return await self._execute_bulk(spec, "DELETE", sql, bind_values)
+
+    def _refuse_bulk_audit(self, model: type) -> None:
+        if getattr(model, "__wreath_facets__", {}).get("audit") is not None:
+            raise SessionError(
+                f"{model.__name__} is audited; a set-based write cannot produce "
+                "one truthful change record per row. Update loaded objects or "
+                "use an explicit audited statement."
+            )
+
+    async def _execute_bulk(
+        self,
+        spec: ModelSpec,
+        verb: str,
+        sql: str,
+        bind_values: tuple[Any, ...],
+    ) -> int:
+        if self._depth:
+            count = await self._execute_bulk_inner(verb, sql, bind_values)
+            if count:
+                self._written |= frozenset((spec.model_type.__name__,))
+                self._detach_model(spec)
+            return count
+        async with self.begin():
+            count = await self._execute_bulk_inner(verb, sql, bind_values)
+            if count:
+                self._written |= frozenset((spec.model_type.__name__,))
+        # An internally owned transaction can still fail while leaving the
+        # context manager (for example, while COMMIT is written). Do not
+        # invalidate live objects until that commit has actually succeeded.
+        # Caller-owned transactions detach immediately above because returning
+        # a stale instance while that transaction continues would be a lie; a
+        # later rollback merely leaves the conservative, reloadable DETACHED
+        # state behind.
+        if count:
+            self._detach_model(spec)
+        return count
+
+    async def _execute_bulk_inner(
+        self, verb: str, sql: str, bind_values: tuple[Any, ...]
+    ) -> int:
+        connection = await self._acquire()
+        status = await connection.execute(sql, *bind_values)
+        return _affected_count(status, verb)
+
+    def _detach_model(self, spec: ModelSpec) -> None:
+        for key, instance in tuple(self._identity.items()):
+            if key[0] is not spec:
+                continue
+            self._identity.pop(key)
+            instance._orm_state = DETACHED
+            instance._orm_owner = None
 
     def add(self, instance: Any) -> None:
         """Schedule `instance` for insertion on the next flush."""
@@ -1634,6 +1742,22 @@ def _check_affected(status: Any, spec: ModelSpec, verb: str) -> None:
     raise StaleDataError(
         f"{verb} on {spec.model_type.__name__} matched no row; it was deleted or "
         "its key changed in another session"
+    )
+
+
+def _affected_count(status: Any, verb: str) -> int:
+    """Read PostgreSQL's ``VERB n`` command tag without inventing a count."""
+    if isinstance(status, str):
+        reported_verb, _separator, reported_count = status.partition(" ")
+        if (
+            reported_verb == verb
+            and reported_count.isascii()
+            and reported_count.isdecimal()
+        ):
+            return int(reported_count)
+    raise SessionError(
+        f"the PostgreSQL adapter returned {status!r} for {verb}; expected "
+        f"a {verb} <row-count> command tag"
     )
 
 

@@ -314,10 +314,8 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
 
     database = Database("main", _DSN, pools={"write": {"min_size": 1, "max_size": 2}})
     await database.start()
+    session = Session(Registry(database, list(MODELS), validate_schema="off"), "write")
     try:
-        session = Session(
-            Registry(database, list(MODELS), validate_schema="off"), "write"
-        )
         view = sealed_activity(ZONE)
 
         # `local_midnight` comes back naive -- it is a wall clock, which is what
@@ -395,6 +393,10 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
             "data is indistinguishable from a number that changed on its own"
         )
     finally:
+        # Before `stop()`: the session's lease is only returned by `close()`, and
+        # a connection still out costs the pool its whole 10s `shutdown_timeout`
+        # before being closed underneath the session anyway.
+        await session.close()
         await database.stop()
         connection = await connect(_DSN)
         try:

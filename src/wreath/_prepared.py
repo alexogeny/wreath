@@ -1,10 +1,18 @@
-"""Pure-Python twin for the immutable :class:`PreparedResponse`.
+"""The immutable :class:`PreparedResponse`.
 
 A prepared response computes its status line, headers, and body once and then
 replays the same two ASGI messages on every call. Nothing mutates on the send
 path, so a single instance is safe to reuse from any number of concurrent
 requests and on any conforming ASGI server. ``Date`` and ``Server`` stay
 server-owned; a prepared response never invents them.
+
+**This is not a twin, which is why it does not live in `wreath._pure`.** There
+is no C `PreparedResponse` and there is no case for one: Wreath's own server
+recognises the type and emits it through its one-shot response ABI without ever
+calling `__call__` (`_native/server.h:96`), so the replay below runs only on a
+portable ASGI server. Measured against two bare `await send(...)` calls it costs
+**+0.08us on a 0.24us floor**, which is the whole budget a C version could
+recover, on the one path that is already not the fast one.
 """
 
 from __future__ import annotations
@@ -12,8 +20,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
-from .._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
-from .json import json_dumps as _json_dumps
+from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
+
+# The pure encoder rather than the `_json` facade, which is what this module used
+# from inside `_pure` and so what its output is pinned to. Switching to the
+# facade would also pick up the temporal hook `_json` installs -- a behaviour
+# change, not a move -- so it is left for whoever removes `_pure/json.py`.
+from ._pure.json import json_dumps as _json_dumps
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 

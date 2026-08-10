@@ -95,11 +95,12 @@ class CiPlan:
 def plan(project: str) -> CiPlan:
     """The checks a generated project ships with.
 
-    Three, and deliberately not more. Each one is a command the suite already
+    Four, and deliberately not more. Each one is a command the suite already
     proves works against a generated project, which is the only reason to
     believe a file nobody can execute here:
 
     * `ruff check .` -- the generated `pyproject.toml` configures it.
+    * `ty check` -- the package, its ports, adapters, and tests type-check.
     * `pytest` -- `tests/test_scaffold.py::test_the_generated_project_passes_
       its_own_tests` runs exactly this.
     * `wreath doctor preflight` -- and `test_the_generated_application_passes_
@@ -122,6 +123,7 @@ def plan(project: str) -> CiPlan:
         project=project,
         checks=(
             Check("lint", "Lint", ("uv run ruff check .",)),
+            Check("types", "Types", ("uv run ty check",)),
             Check("test", "Tests", ("cp .env.example .env", "uv run pytest")),
             Check(
                 "preflight",

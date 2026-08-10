@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Wreath
 from wreath.policy import HttpPolicy
@@ -212,10 +213,12 @@ class FakeStatement:
         self._results = results
 
     async def fetchrow(self, *args: Any) -> Any:
+        check_for(self, self.sql, args)
         self.calls.append(args)
         return self._results.get(self.sql)
 
     async def execute(self, *args: Any) -> str:
+        check_for(self, self.sql, args)
         self.calls.append(args)
         return "OK"
 

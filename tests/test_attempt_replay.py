@@ -8,6 +8,7 @@ replay does with the recording it is handed.
 from __future__ import annotations
 
 import pytest
+from _doubles import SilentConnection
 
 from wreath.jobs import JobRunner
 from wreath.objects import ObjectError
@@ -30,20 +31,6 @@ from wreath.replay import (
 )
 
 
-class FakeConnection:
-    async def execute(self, sql, *args):
-        return "OK"
-
-    async def fetch(self, sql, *args):
-        return []
-
-    async def fetchval(self, sql, *args):
-        return 1
-
-    async def fetchrow(self, sql, *args):
-        return None
-
-
 class FakeDatabase:
     """The *live* database. Anything that reaches it during a replay is a bug."""
 
@@ -54,7 +41,7 @@ class FakeDatabase:
 
     async def acquire(self, workload):
         self.touched += 1
-        return FakeConnection()
+        return SilentConnection()
 
     async def release(self, workload, connection):
         pass

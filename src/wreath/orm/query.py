@@ -204,6 +204,33 @@ class Select:
         )
 
 
+def where_fields(model: type, values: dict[str, Any]) -> tuple[Predicate, ...]:
+    """Build equality predicates from a runtime mapping of model field names.
+
+    This is intentionally narrower than a string query language: keys are
+    exact Wreath column names. Relationship paths and lookup suffixes are
+    refused, so a port cannot quietly preserve legacy ``field__operator``
+    interpretation under a compatibility surface. Write those predicates with
+    the model expressions themselves.
+    """
+    columns = getattr(model, "__wreath_column_map__", None)
+    if not isinstance(columns, dict):
+        raise TypeError(f"{model!r} is not a mapped Wreath model")
+    predicates: list[Predicate] = []
+    for name, value in values.items():
+        if not isinstance(name, str):
+            raise TypeError(f"where_fields() keys must be str, got {type(name).__name__}")
+        if "__" in name:
+            raise ValueError(
+                f"where_fields() does not interpret lookup path {name!r}; "
+                "write the relationship or operator expression explicitly"
+            )
+        if name not in columns:
+            raise ValueError(f"{model.__name__} has no column {name!r}")
+        predicates.append(getattr(model, name) == value)
+    return tuple(predicates)
+
+
 def _check_field(model: type, field: Any) -> ColumnExpr:
     if not isinstance(field, ColumnExpr):
         raise TypeError(

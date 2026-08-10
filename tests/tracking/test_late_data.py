@@ -85,10 +85,14 @@ async def world():
 
     database = Database("main", _DSN, pools={"write": {"min_size": 1, "max_size": 2}})
     await database.start()
+    session = Session(Registry(database, list(MODELS), validate_schema="off"), "write")
     try:
-        session = Session(Registry(database, list(MODELS), validate_schema="off"), "write")
         yield database, session
     finally:
+        # Ahead of `stop()`: the session's lease is only returned by `close()`,
+        # and a connection still out when the pool stops costs the whole 10s
+        # `shutdown_timeout` before it is closed underneath the session anyway.
+        await session.close()
         await database.stop()
         connection = await connect(_DSN)
         try:

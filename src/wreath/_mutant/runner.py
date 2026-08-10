@@ -821,16 +821,48 @@ def _run_live_mutants(
     cancelled_at_seal = 0
     first_started: float | None = None
 
+    def record_completed(
+        ordinal: int,
+        mutation: Mutation,
+        nodeid: str,
+        result: tuple[Outcome, tuple[str, ...], float, str],
+    ) -> None:
+        nonlocal completed_probes
+        completed_probes += 1
+        outcome, killers, seconds, note = result
+        if outcome == Outcome.KILLED:
+            killed[ordinal] = Verdict(
+                mutation,
+                outcome,
+                candidates=(nodeid,),
+                killers=killers,
+                seconds=seconds,
+                note=note,
+            )
+            emit(
+                "finished",
+                ordinal=ordinal,
+                outcome=outcome.value,
+                killers=list(killers),
+            )
+        else:
+            emit("finished", ordinal=ordinal, outcome="retry", killers=[])
+
     while not baseline_wait.exists() or active:
         if baseline_wait.exists() and active:
             # The complete candidate index is now available. Do not let a
             # speculative child extend the tail; the final scheduler will run
-            # it against all sealed candidates instead.
-            for ordinal, (running, _mutation, _nodeid) in tuple(active.items()):
-                done, _status = os.waitpid(running.pid, os.WNOHANG)
-                if not done:
-                    os.kill(running.pid, signal.SIGKILL)
-                    os.waitpid(running.pid, 0)
+            # it against all sealed candidates instead. A child may have
+            # completed between the preceding poll and the atomic seal. Its
+            # result is conclusive and must be consumed before cancellation.
+            for ordinal, (running, mutation, nodeid) in tuple(active.items()):
+                result = poll_mutant(running)
+                if result is not None:
+                    del active[ordinal]
+                    record_completed(ordinal, mutation, nodeid, result)
+                    continue
+                os.kill(running.pid, signal.SIGKILL)
+                os.waitpid(running.pid, 0)
                 running.target.unlink(missing_ok=True)
                 emit("finished", ordinal=ordinal, outcome="retry", killers=[])
                 cancelled_at_seal += 1
@@ -889,26 +921,8 @@ def _run_live_mutants(
             if result is None:
                 continue
             completed = True
-            completed_probes += 1
             del active[ordinal]
-            outcome, killers, seconds, note = result
-            if outcome == Outcome.KILLED:
-                killed[ordinal] = Verdict(
-                    mutation,
-                    outcome,
-                    candidates=(nodeid,),
-                    killers=killers,
-                    seconds=seconds,
-                    note=note,
-                )
-                emit(
-                    "finished",
-                    ordinal=ordinal,
-                    outcome=outcome.value,
-                    killers=list(killers),
-                )
-            else:
-                emit("finished", ordinal=ordinal, outcome="retry", killers=[])
+            record_completed(ordinal, mutation, nodeid, result)
         if not completed:
             time.sleep(0.01)
     return (

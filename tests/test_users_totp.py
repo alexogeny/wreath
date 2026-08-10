@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Wreath
 from wreath._secondfactor import (
@@ -915,6 +916,7 @@ class _FakeSession:
         return next((row for row in self.rows if row.id == wanted), None)
 
     def raw(self, sql: str, *args: Any) -> _RawStatement:
+        check_for(self, sql, args)
         self.statements.append((sql, args))
         return _RawStatement(self)
 

@@ -96,9 +96,15 @@ async def session(seeded_schema):
 
     database = Database("main", _DSN, pools={"read": {"min_size": 1, "max_size": 2}})
     await database.start()
+    session = Session(Registry(database, list(MODELS), validate_schema="off"), "read")
     try:
-        yield Session(Registry(database, list(MODELS), validate_schema="off"), "read")
+        yield session
     finally:
+        # `close()` returns the leased connection. Without it the pool has a
+        # borrowed connection nobody will hand back, so `stop()` waits out the
+        # whole 10s `shutdown_timeout` and then closes it underneath the session
+        # anyway -- 10.01s of teardown against calls of 0.01-0.22s.
+        await session.close()
         await database.stop()
 
 

@@ -236,13 +236,13 @@ ORDER BY object_kind, schema_name, table_name, object_name
 #: tenant-local target named would make every tenant differ. The `CASE` is the
 #: whole distinction and it is why this is a derivation rather than a blanket
 #: `replace` of `nspname`.
-_FLEET_CATALOG_SQL = _SINGLE_CATALOG_SQL.replace(
-    "n.nspname::text AS schema_name", "''::text AS schema_name"
-).replace(
-    "        n.nspname::text,", "        ''::text,"
-).replace(
-    "COALESCE(fn.nspname, '')",
-    "CASE WHEN fn.nspname = $1::text THEN '' ELSE COALESCE(fn.nspname, '') END",
+_FLEET_CATALOG_SQL = (
+    _SINGLE_CATALOG_SQL.replace("n.nspname::text AS schema_name", "''::text AS schema_name")
+    .replace("        n.nspname::text,", "        ''::text,")
+    .replace(
+        "COALESCE(fn.nspname, '')",
+        "CASE WHEN fn.nspname = $1::text THEN '' ELSE COALESCE(fn.nspname, '') END",
+    )
 )
 
 
@@ -735,6 +735,22 @@ class MigrationGeneration:
     sql: NativeMigrationSql
 
 
+@dataclass(frozen=True, slots=True)
+class MigrationBaseline:
+    """A reviewed zero-operation root adopting one existing live schema.
+
+    `artifact` is a normal checksummed WMA1 artifact, but its source and
+    target fingerprints are identical and all three operation tapes are empty.
+    Applying it therefore records history and executes no DDL.  `descriptor`
+    is the bounded WMD1 catalog inventory used for human review.
+    """
+
+    artifact: NativeMigrationArtifact
+    fingerprint: bytes
+    descriptor: bytes
+    object_count: int
+
+
 def _metal() -> Any:
     # `ignore_pure`: migrations have no pure twin -- the planner, the diff and
     # the SQL emitter live only in C -- so `WREATH_PURE=1` must not turn every
@@ -780,9 +796,7 @@ def _predicate_digest(predicate: str) -> str:
     and `md5()` is the one digest built into every server; it is a name, not a
     security boundary.
     """
-    return hashlib.md5(
-        predicate.encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:8]
+    return hashlib.md5(predicate.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
 
 
 def _descriptor_record(
@@ -795,9 +809,7 @@ def _descriptor_record(
     parts = tuple(value.encode("utf-8") for value in (schema, table, name, signature))
     if any(len(value) > 0xFFFF for value in parts):
         raise ValueError("migration descriptor value exceeds 65535 bytes")
-    return struct.pack(
-        "<HHHHI", *(len(value) for value in parts), kind
-    ) + b"".join(parts)
+    return struct.pack("<HHHHI", *(len(value) for value in parts), kind) + b"".join(parts)
 
 
 def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
@@ -830,9 +842,7 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
         # Empty for a fleet, so nothing downstream can name one tenant: the
         # image is hashed over these bytes and the DDL is rendered from them.
         schema = "" if fleet else spec.schema
-        records.append(
-            _descriptor_record(schema, spec.table, "", 1, "table\x1fr\x1fp")
-        )
+        records.append(_descriptor_record(schema, spec.table, "", 1, "table\x1fr\x1fp"))
         for column in spec.columns:
             # An extension type spells itself; a built-in leaves the slot empty
             # so its signature is unchanged. See `_SINGLE_CATALOG_SQL`, which
@@ -844,13 +854,11 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
             # every run would rediscover it as drift, and nothing would say why.
             if isinstance(column.pg_type, ExtensionType):
                 column.pg_type.require_oid(
-                    f"the migration descriptor for "
-                    f"{spec.model_type.__name__}.{column.python_name}"
+                    f"the migration descriptor for {spec.model_type.__name__}.{column.python_name}"
                 )
             spelling = (
                 column.pg_type.sql
-                if column.pg_type.oid >= 16384
-                or column.pg_type.oid in _MODIFIER_BEARING_OIDS
+                if column.pg_type.oid >= 16384 or column.pg_type.oid in _MODIFIER_BEARING_OIDS
                 else ""
             )
             # Field 5 is `attgenerated` and field 6 is `pg_get_expr(adbin)`. A
@@ -880,17 +888,11 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
             )
         primary_columns = ",".join(column.database_name for column in spec.primary_key)
         primary_name = f"p:{primary_columns}:::"
-        records.append(
-            _descriptor_record(schema, spec.table, primary_name, 3, primary_name)
-        )
+        records.append(_descriptor_record(schema, spec.table, primary_name, 3, primary_name))
         for column in spec.columns:
             if column.unique and not column.primary_key:
                 unique_name = f"u:{column.database_name}:::"
-                records.append(
-                    _descriptor_record(
-                        schema, spec.table, unique_name, 3, unique_name
-                    )
-                )
+                records.append(_descriptor_record(schema, spec.table, unique_name, 3, unique_name))
             if column.indexed:
                 # btree keeps the bare "i:<col>" name so its object id (and the
                 # derived index name) is unchanged; a non-btree method is folded
@@ -903,9 +905,7 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
                     # Three fixed trailing fields for an approximate index: an
                     # (always empty here) predicate slot, the operator class,
                     # and the method options. Matches `_SINGLE_CATALOG_SQL`.
-                    options = ",".join(
-                        f"{name}={value}" for name, value in column.index_with
-                    )
+                    options = ",".join(f"{name}={value}" for name, value in column.index_with)
                     # A declared operator class that *is* this database's default
                     # for the method is written as the empty string, because that
                     # is what `_SINGLE_CATALOG_SQL` records for it -- PostgreSQL
@@ -943,8 +943,7 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
                 # make every tenant differ from every other.
                 target_schema = "" if fleet else target.schema
                 foreign_name = (
-                    f"f:{column.database_name}:{target_schema}:{target.table}:"
-                    f"{reference.column}"
+                    f"f:{column.database_name}:{target_schema}:{target.table}:{reference.column}"
                 )
                 # The name is the FK's identity (columns + target); the signature
                 # adds the referential actions so a changed ON DELETE/UPDATE or
@@ -954,15 +953,11 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
                     f"{1 if reference.deferrable else 0}"
                 )
                 records.append(
-                    _descriptor_record(
-                        schema, spec.table, foreign_name, 3, foreign_signature
-                    )
+                    _descriptor_record(schema, spec.table, foreign_name, 3, foreign_signature)
                 )
         for constraint in spec.table_uniques:
             unique_name = f"u:{','.join(constraint.columns)}:::"
-            records.append(
-                _descriptor_record(schema, spec.table, unique_name, 3, unique_name)
-            )
+            records.append(_descriptor_record(schema, spec.table, unique_name, 3, unique_name))
         for table_index in spec.table_indexes:
             prefix = "ui" if table_index.unique else "i"
             columns = ",".join(table_index.columns)
@@ -978,13 +973,9 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
                 # ':'-delimited and SQL predicates contain '::' -- so the name
                 # carries a digest and the signature carries the text, after a
                 # 0x1f, the way a foreign key carries its referential actions.
-                index_name = (
-                    f"{prefix}:{columns}:btree:{_predicate_digest(predicate)}"
-                )
+                index_name = f"{prefix}:{columns}:btree:{_predicate_digest(predicate)}"
                 signature = f"index:{prefix}:{columns}:btree\x1f{predicate}"
-            records.append(
-                _descriptor_record(schema, spec.table, index_name, 4, signature)
-            )
+            records.append(_descriptor_record(schema, spec.table, index_name, 4, signature))
     return b"WMD1" + struct.pack("<II", 1, len(records)) + b"".join(records)
 
 
@@ -1150,9 +1141,7 @@ async def generate_single_plan(
     desired = _metal()._migration_compile_desired(desired_descriptor)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
-        raise ValueError(
-            "generate_single_plan requires exactly one resolved physical schema"
-        )
+        raise ValueError("generate_single_plan requires exactly one resolved physical schema")
     actual = await _decode_catalog_snapshot(
         connection,
         _FLEET_CATALOG_SQL if fleet else _SINGLE_CATALOG_SQL,
@@ -1164,9 +1153,7 @@ async def generate_single_plan(
         raise RuntimeError("native named plan and image diff disagree")
     derived_operations = _metal()._migration_operations_from_plan(plan.tape)
     if derived_operations != diff.tape:
-        raise RuntimeError(
-            "native named plan describes different operations than the image diff"
-        )
+        raise RuntimeError("native named plan describes different operations than the image diff")
     sql = _render_sql_plan(plan)
     return MigrationGeneration(
         desired_fingerprint=_fingerprint_image(desired),
@@ -1174,6 +1161,111 @@ async def generate_single_plan(
         diff=diff,
         plan=plan,
         sql=sql,
+    )
+
+
+_EMPTY_OPERATION_TAPE = b"WMO1" + struct.pack("<II", 1, 0)
+_EMPTY_NAMED_PLAN = b"WMP1" + struct.pack("<II", 1, 0)
+_EMPTY_SQL_TAPE = b"WMS1" + struct.pack("<II", 1, 0)
+
+
+def unpack_catalog_descriptor(descriptor: bytes) -> list[dict[str, Any]]:
+    """Decode a bounded WMD1 catalog inventory into reviewable values.
+
+    This is an operator view, not migration execution input.  Execution always
+    consumes the native image and verified artifact; editing this list changes
+    nothing about what can be adopted.
+    """
+    if len(descriptor) < 12 or descriptor[:4] != b"WMD1":
+        raise ValueError("catalog descriptor is not WMD1")
+    version, count = struct.unpack_from("<II", descriptor, 4)
+    if version != 1:
+        raise ValueError(f"unsupported WMD1 catalog descriptor version {version}")
+    offset = 12
+    objects: list[dict[str, Any]] = []
+    kinds = {1: "table", 2: "column", 3: "constraint", 4: "index"}
+    for index in range(count):
+        if len(descriptor) - offset < 12:
+            raise ValueError(f"catalog descriptor is truncated at object {index}")
+        schema_len, table_len, name_len, signature_len, kind = struct.unpack_from(
+            "<HHHHI", descriptor, offset
+        )
+        offset += 12
+        payload_len = schema_len + table_len + name_len + signature_len
+        if table_len == 0 or payload_len > len(descriptor) - offset:
+            raise ValueError(f"catalog descriptor object {index} is invalid")
+        ends = (
+            offset + schema_len,
+            offset + schema_len + table_len,
+            offset + schema_len + table_len + name_len,
+            offset + payload_len,
+        )
+        schema = descriptor[offset : ends[0]].decode("utf-8")
+        table = descriptor[ends[0] : ends[1]].decode("utf-8")
+        name = descriptor[ends[1] : ends[2]].decode("utf-8")
+        signature = descriptor[ends[2] : ends[3]].decode("utf-8")
+        offset = ends[3]
+        objects.append(
+            {
+                "kind": kinds.get(kind, f"unknown-{kind}"),
+                "schema": schema,
+                "table": table,
+                "name": name,
+                "signature": signature,
+            }
+        )
+    if offset != len(descriptor):
+        raise ValueError("catalog descriptor has trailing bytes")
+    return objects
+
+
+async def generate_single_baseline(
+    registry: Any,
+    connection: Any,
+    *,
+    migration_id: bytes,
+) -> MigrationBaseline:
+    """Adopt current PostgreSQL state as a root without replaying its history.
+
+    The live catalog and declared ORM image must match exactly.  Drift is never
+    folded into a baseline: doing that would bless a model that does not
+    describe the database and make the first later migration plan relative to
+    the wrong state.  The returned artifact contains no operation and therefore
+    cannot execute DDL when applied.
+    """
+    if len(migration_id) != 16:
+        raise ValueError("baseline migration_id must be exactly 16 bytes")
+    await _resolve_default_opclasses(registry, connection)
+    schemas = {spec.schema for spec in registry.specs}
+    if len(schemas) != 1:
+        raise ValueError("generate_single_baseline requires exactly one resolved physical schema")
+    schema = next(iter(schemas))
+    desired = _compile_registry_image(registry)
+    actual = await _decode_catalog_snapshot(connection, _SINGLE_CATALOG_SQL, (schema,))
+    diff = _diff_packed_images(desired, actual.image)
+    desired_fingerprint = _fingerprint_image(desired)
+    actual_fingerprint = _fingerprint_image(actual.image)
+    if diff.operation_count or desired_fingerprint != actual_fingerprint:
+        raise ValueError(
+            "cannot baseline schema with drift: "
+            f"{diff.operation_count} operation(s), desired "
+            f"{desired_fingerprint.hex()}, actual {actual_fingerprint.hex()}"
+        )
+    artifact = _build_native_artifact(
+        migration_id=migration_id,
+        parent_checksum=bytes(32),
+        source_fingerprint=actual_fingerprint,
+        target_fingerprint=actual_fingerprint,
+        operation_tape=_EMPTY_OPERATION_TAPE,
+        named_plan=_EMPTY_NAMED_PLAN,
+        sql_tape=_EMPTY_SQL_TAPE,
+    )
+    objects = unpack_catalog_descriptor(actual.descriptor)
+    return MigrationBaseline(
+        artifact=artifact,
+        fingerprint=actual_fingerprint,
+        descriptor=actual.descriptor,
+        object_count=len(objects),
     )
 
 
@@ -1234,9 +1326,7 @@ async def apply_single_artifact(
     artifact = _load_native_artifact(artifact_data)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
-        raise ValueError(
-            "apply_single_artifact requires exactly one resolved physical schema"
-        )
+        raise ValueError("apply_single_artifact requires exactly one resolved physical schema")
     await _bootstrap_migration_history(connection)
     outcome = await _apply_artifact_to_schema(
         connection,
@@ -1248,6 +1338,98 @@ async def apply_single_artifact(
     if outcome is None:  # pragma: no cover - skip_if_applied is False here
         raise RuntimeError("artifact reported already applied without being asked")
     return outcome
+
+
+async def adopt_single_baseline(
+    registry: Any,
+    connection: Any,
+    artifact_data: bytes,
+) -> MigrationApplyResult:
+    """Record one zero-operation root after re-verifying code and catalog.
+
+    The only DDL this may issue is creation of Wreath's own migration-history
+    schema/table.  It never builds or executes an application DDL block.  A
+    prior history row, non-root artifact, operation, or fingerprint mismatch is
+    refused inside the same advisory-locked transaction that records adoption.
+    """
+    artifact = _load_native_artifact(artifact_data)
+    if artifact.parent_checksum != bytes(32):
+        raise ValueError("a baseline must be a root artifact")
+    if artifact.source_fingerprint != artifact.target_fingerprint:
+        raise ValueError("a baseline source and target fingerprint must be identical")
+    for label, tape, magic in (
+        ("operation", artifact.operation_tape, b"WMO1"),
+        ("named plan", artifact.named_plan, b"WMP1"),
+        ("SQL", artifact.sql_tape, b"WMS1"),
+    ):
+        if len(tape) != 12 or tape[:4] != magic or tape[8:12] != bytes(4):
+            raise ValueError(f"a baseline {label} tape must be empty")
+    schemas = {spec.schema for spec in registry.specs}
+    if len(schemas) != 1:
+        raise ValueError("adopt_single_baseline requires exactly one resolved physical schema")
+    schema = next(iter(schemas))
+    await _resolve_default_opclasses(registry, connection)
+    desired = _compile_registry_image(registry)
+    desired_fingerprint = _fingerprint_image(desired)
+    if desired_fingerprint != artifact.target_fingerprint:
+        raise RuntimeError(
+            "cannot adopt baseline: current ORM fingerprint "
+            f"{desired_fingerprint.hex()} does not match reviewed baseline "
+            f"{artifact.target_fingerprint.hex()}"
+        )
+    await _bootstrap_migration_history(connection)
+    history = _qualified_history_table()
+    await connection.execute("BEGIN")
+    committed = False
+    try:
+        await connection.fetchval(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+            f"wreath:migrations:{schema}",
+        )
+        previous = await connection.fetchrow(
+            f"""SELECT checksum
+                FROM {history}
+                WHERE target_schema = $1
+                ORDER BY sequence DESC
+                LIMIT 1""",
+            schema,
+        )
+        if previous is not None:
+            raise RuntimeError(
+                f"cannot adopt baseline: schema {schema!r} already has Wreath history"
+            )
+        actual = await _decode_catalog_snapshot(connection, _SINGLE_CATALOG_SQL, (schema,))
+        actual_fingerprint = _fingerprint_image(actual.image)
+        if actual_fingerprint != artifact.target_fingerprint:
+            raise RuntimeError(
+                "cannot adopt baseline: live catalog fingerprint "
+                f"{actual_fingerprint.hex()} does not match reviewed baseline "
+                f"{artifact.target_fingerprint.hex()}"
+            )
+        await connection.execute(
+            f"""INSERT INTO {history} (
+                target_schema, migration_id, checksum, parent_checksum,
+                source_fingerprint, target_fingerprint, destructive_approved
+            ) VALUES ($1, $2, $3, $4, $5, $6, false)""",
+            schema,
+            artifact.migration_id,
+            artifact.checksum,
+            artifact.parent_checksum,
+            artifact.source_fingerprint,
+            artifact.target_fingerprint,
+        )
+        await connection.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            await connection.execute("ROLLBACK")
+    return MigrationApplyResult(
+        migration_id=artifact.migration_id,
+        checksum=artifact.checksum,
+        source_fingerprint=artifact.source_fingerprint,
+        target_fingerprint=artifact.target_fingerprint,
+        destructive_approved=False,
+    )
 
 
 async def _apply_artifact_to_schema(
@@ -1274,9 +1456,7 @@ async def _apply_artifact_to_schema(
     resumed run into a wall of errors that all mean "this one is fine".
     """
     module = _metal()
-    ddl_block = module._migration_build_ddl_block(
-        artifact.sql_tape, allow_destructive
-    )
+    ddl_block = module._migration_build_ddl_block(artifact.sql_tape, allow_destructive)
     history = _qualified_history_table()
     zero_checksum = bytes(32)
     await connection.execute("BEGIN")
@@ -1545,9 +1725,7 @@ async def apply_fleet(
                     if stop_on_error:
                         break
                     continue
-                outcomes.append(
-                    TenantOutcome(schema, "skipped" if result is None else "applied")
-                )
+                outcomes.append(TenantOutcome(schema, "skipped" if result is None else "applied"))
         finally:
             await connection.execute(
                 "SELECT pg_advisory_unlock(hashtextextended($1::text, 0))",
@@ -1660,9 +1838,7 @@ async def _pending_pass_hazards(
         _column_fact(schema, tbl, column): (schema, tbl, column, action)
         for schema, tbl, column, action in candidates
     }
-    pending = await _pass_ledger.pending_facts(
-        connection, schema=ledger_schema, facts=tuple(facts)
-    )
+    pending = await _pass_ledger.pending_facts(connection, schema=ledger_schema, facts=tuple(facts))
     hazards: list[PendingPassHazard] = []
     for entry in pending:
         schema, tbl, column, action = facts[entry.fact]
@@ -1755,9 +1931,7 @@ async def _recoded_column_hazards(
     return tuple(hazards)
 
 
-def _downgrade_hazards(
-    registry: Any, reverse_plan: bytes
-) -> tuple[DowngradeHazard, ...]:
+def _downgrade_hazards(registry: Any, reverse_plan: bytes) -> tuple[DowngradeHazard, ...]:
     """Scan the reverse plan against live ORM intent for stranded references."""
     module = _metal()
     desired_image = _compile_registry_image(registry)
@@ -1800,9 +1974,7 @@ async def revert_single_artifact(
     artifact = _load_native_artifact(artifact_data)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
-        raise ValueError(
-            "revert_single_artifact requires exactly one resolved physical schema"
-        )
+        raise ValueError("revert_single_artifact requires exactly one resolved physical schema")
     schema = next(iter(schemas))
     module = _metal()
     reverse_plan = module._migration_reverse_plan(artifact.named_plan)
@@ -1831,8 +2003,7 @@ async def revert_single_artifact(
         )
         if previous is None:
             raise RuntimeError(
-                "cannot downgrade migration: database has no Wreath history for schema "
-                f"{schema!r}"
+                f"cannot downgrade migration: database has no Wreath history for schema {schema!r}"
             )
         if bytes(previous[0]) != artifact.checksum:
             raise RuntimeError(
@@ -1841,9 +2012,7 @@ async def revert_single_artifact(
                 f"{bytes(previous[0]).hex()} for schema {schema!r}; only the most "
                 "recently applied migration can be reverted"
             )
-        actual = await _decode_catalog_snapshot(
-            connection, _SINGLE_CATALOG_SQL, (schema,)
-        )
+        actual = await _decode_catalog_snapshot(connection, _SINGLE_CATALOG_SQL, (schema,))
         actual_fingerprint = _fingerprint_image(actual.image)
         if actual_fingerprint != artifact.target_fingerprint:
             raise RuntimeError(
@@ -1859,9 +2028,7 @@ async def revert_single_artifact(
         if recoded:
             raise DowngradeWouldStrandRecodedData(schema, recoded)
         await connection.execute(ddl_block)
-        resulting = await _decode_catalog_snapshot(
-            connection, _SINGLE_CATALOG_SQL, (schema,)
-        )
+        resulting = await _decode_catalog_snapshot(connection, _SINGLE_CATALOG_SQL, (schema,))
         resulting_fingerprint = _fingerprint_image(resulting.image)
         if resulting_fingerprint != artifact.source_fingerprint:
             raise RuntimeError(
@@ -1952,9 +2119,7 @@ def _load_native_artifact(data: bytes) -> NativeMigrationArtifact:
             "the installed Wreath-metal PostgreSQL extension lacks migration artifacts; "
             "rebuild Wreath's native extensions"
         )
-    migration_id, parent, source, target, tape, plan, sql = (
-        module._migration_verify_artifact(data)
-    )
+    migration_id, parent, source, target, tape, plan, sql = module._migration_verify_artifact(data)
     return NativeMigrationArtifact(
         data=data,
         checksum=data[136:168],
@@ -1987,6 +2152,7 @@ __all__ = [
     "TransitionalContractUnproven",
     "FleetResolution",
     "MigrationConfig",
+    "MigrationBaseline",
     "MigrationDetection",
     "MigrationGeneration",
     "MigrationApplyResult",
@@ -2000,13 +2166,16 @@ __all__ = [
     "ResolutionPolicy",
     "TenantState",
     "apply_single_artifact",
+    "adopt_single_baseline",
     "connect_migration",
     "detect_single",
     "generate_single_plan",
+    "generate_single_baseline",
     "pack_tenant_directory",
     "resolve_fleet",
     "revert_single_artifact",
     "scan_transitional_reads",
     "transitional_read",
+    "unpack_catalog_descriptor",
     "waive_transitional",
 ]

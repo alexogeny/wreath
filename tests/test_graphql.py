@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, make_dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +26,7 @@ from wreath._graphql.parser import (
     Limits,
     parse,
 )
-from wreath._graphql.schema import policy_resource
+from wreath._graphql.schema import build_schema, policy_resource
 from wreath.app import Wreath
 from wreath.auth import Identity
 from wreath.authorization import CedarAuthorizer, CedarPolicies, EntityUid
@@ -1003,6 +1004,97 @@ async def test_a_batch_resolver_returning_the_wrong_count_is_an_error(
 
 
 # --- custom roots and mutations ---------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TrekSummary:
+    label: str
+    count: int
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryDetail:
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class NestedSummary:
+    detail: SummaryDetail
+    history: list[SummaryDetail]
+
+
+@pytest.mark.asyncio
+async def test_a_custom_root_can_return_a_registered_native_dataclass(
+    registry: Registry,
+) -> None:
+    api = GraphQL(registry, models=[User], dataclasses=[TrekSummary])
+
+    @api.query("summary", returns="TrekSummary")
+    async def summary(info):
+        return TrekSummary("ridge", 3)
+
+    body = await api.run(
+        "{ summary { label count note } }", Session(registry, "read")
+    )
+
+    assert body == {
+        "data": {"summary": {"label": "ridge", "count": 3, "note": None}}
+    }
+    assert "type TrekSummary" in api.sdl()
+
+
+def test_graphql_refuses_non_dataclass_custom_types(registry: Registry) -> None:
+    with pytest.raises(TypeError, match="dataclass types"):
+        GraphQL(registry, models=[User], dataclasses=[object])
+    with pytest.raises(TypeError, match="dataclass types"):
+        GraphQL(registry, models=[User], dataclasses=[TrekSummary("ridge", 3)])
+
+
+def test_graphql_dataclass_names_cannot_collide(registry: Registry) -> None:
+    duplicate_model = make_dataclass("User", [("label", str)])
+    with pytest.raises(ValueError, match="already registered"):
+        build_schema(registry, [User], dataclasses=[duplicate_model])
+
+    first = make_dataclass("Duplicate", [("label", str)])
+    second = make_dataclass("Duplicate", [("count", int)])
+    with pytest.raises(ValueError, match="already registered"):
+        build_schema(registry, [], dataclasses=[first, second])
+
+
+def test_graphql_dataclass_nested_types_are_an_explicit_allowlist(
+    registry: Registry,
+) -> None:
+    with pytest.raises(TypeError, match="not registered"):
+        build_schema(registry, [], dataclasses=[NestedSummary])
+
+    schema = build_schema(
+        registry, [User], dataclasses=[SummaryDetail, NestedSummary]
+    )
+    assert schema.types["NestedSummary"].fields["detail"].type_name == "SummaryDetail"
+    assert schema.types["NestedSummary"].fields["history"].type_name == "SummaryDetail"
+    assert schema.types["NestedSummary"].fields["history"].is_list
+    assert "nestedSummary" not in schema.roots
+    assert "summaryDetail" not in schema.roots
+    assert "user" in schema.roots
+
+
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        (str | int | None, "unsupported GraphQL union annotation"),
+        (list[int, str], "GraphQL list annotation needs one item type"),
+        (set[str], "unsupported GraphQL dataclass annotation"),
+        (object, "unsupported GraphQL dataclass annotation"),
+        (TrekSummary("ridge", 3), "unsupported GraphQL dataclass annotation"),
+    ],
+)
+def test_graphql_refuses_ambiguous_dataclass_annotations(
+    registry: Registry, annotation: Any, message: str
+) -> None:
+    invalid = make_dataclass("InvalidShape", [("value", annotation)])
+    with pytest.raises(TypeError, match=message):
+        build_schema(registry, [], dataclasses=[invalid])
 
 
 @pytest.mark.asyncio

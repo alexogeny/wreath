@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Response, Wreath
 from wreath.background import BackgroundTask
@@ -18,12 +19,14 @@ class FakeConnection:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         if sql == "SET default_transaction_read_only = on":
             self.read_only = True
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return 1
 

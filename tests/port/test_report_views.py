@@ -37,7 +37,7 @@ async def by_tag(tag: str):
 
 @router.get("/llamas/{pk}")
 async def one(pk: str):
-    return await Llama.objects.get(pk=pk)
+    return await Llama.objects.get(**{"pk": pk})
 """
 
 
@@ -59,7 +59,7 @@ def test_by_rule_clusters_and_ranks_by_count(app: Path) -> None:
     rows = report.rule_counts()
 
     counts = dict((rule, n) for rule, _cat, _tag, n in rows)
-    assert counts["orm.query.filter"] == 2
+    assert counts["orm.query.filter"] == 1
     assert counts["orm.query.get"] == 1
     # Heaviest first: that ranking is the entire reason for the view.
     assert [n for *_, n in rows] == sorted((n for *_, n in rows), reverse=True)
@@ -103,7 +103,7 @@ def test_context_shows_the_source_and_marks_the_hit(app: Path) -> None:
 
     rendered = render_sites(report, {"orm.query.get"}, 2)
 
-    assert "Llama.objects.get(pk=pk)" in rendered
+    assert 'Llama.objects.get(**{"pk": pk})' in rendered
     marked = [line for line in rendered.splitlines() if line.lstrip().startswith(">")]
     assert len(marked) == 1 and "Llama.objects.get" in marked[0]
 
@@ -127,7 +127,7 @@ def test_context_resolves_against_the_root_the_finding_came_from(tmp_path: Path)
 
     rendered = render_sites(report, {"orm.query.get"}, 1)
 
-    assert rendered.count("Llama.objects.get(pk=pk)") == 2
+    assert rendered.count('Llama.objects.get(**{"pk": pk})') == 2
 
 
 def test_the_views_do_not_change_the_exit_code(app: Path, capsys) -> None:

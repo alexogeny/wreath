@@ -18,9 +18,9 @@ Three deliberate limits:
 * **It refuses a directory with anything in it.** No `--force`. Overwriting
   somebody's work to save them a `mkdir` is not a trade this makes.
 * **It generates the minimum that is real**, rather than a demonstration of
-  every subsystem. An items router with an app-scoped store is four concepts:
-  a router, a bound body, a dependency that outlives a request, and a test that
-  drives it. A scaffold showing thirty is one nobody reads.
+  every subsystem. An items context shows wire contracts, one typed port, one
+  adapter, a router, and a test that supplies its own adapter. A scaffold
+  showing thirty subsystems is one nobody reads.
 * **Nothing generated is a build product.** `--frontend react` writes the app
   shell and gitignores `web/src/api/`, because the client is derived from the
   route table by `wreath typegen` and a copy of it in git is a client that lies
@@ -47,6 +47,7 @@ class Options:
     name: str
     directory: Path
     frontend: str = "none"
+    profile: str = "service"
     database: str = "none"
     tenancy: bool = False
     forge: str = "none"
@@ -74,12 +75,34 @@ def plan(options: Options) -> dict[str, str]:
         ".env.example": _env_example(options),
         "README.md": _readme(options),
         f"{name}/__init__.py": _package_init(options),
+        f"{name}/py.typed": "",
         f"{name}/config.py": _config(options),
         f"{name}/app.py": _app(options),
-        f"{name}/routers/__init__.py": _routers_init(options),
-        f"{name}/routers/items.py": _items_router(options),
         "tests/test_items.py": _tests(options),
     }
+    if options.profile == "modular-monolith":
+        files.update(
+            {
+                "AGENTS.md": _agents(options),
+                f"{name}/adapters/__init__.py": _adapters(options),
+                f"{name}/adapters/memory.py": _memory_adapter(options),
+                f"{name}/domains/__init__.py": '"""Bounded contexts."""\n',
+                f"{name}/domains/items/__init__.py": '"""The items context."""\n',
+                f"{name}/domains/items/contracts.py": _contracts(options),
+                f"{name}/domains/items/ports.py": _ports(options),
+                f"{name}/domains/items/router.py": _items_router(options),
+            }
+        )
+    else:
+        files.update(
+            {
+                f"{name}/adapters.py": _adapters(options),
+                f"{name}/contracts.py": _contracts(options),
+                f"{name}/ports.py": _ports(options),
+                f"{name}/routers/__init__.py": _routers_init(options),
+                f"{name}/routers/items.py": _items_router(options),
+            }
+        )
     if options.database == "postgres":
         files[f"{name}/models.py"] = _models(options)
         files["tests/test_models.py"] = _model_tests(options)
@@ -112,6 +135,10 @@ def create(options: Options) -> list[str]:
     if options.forge != "none" and options.forge not in FORGES:
         raise ScaffoldError(
             f"unknown forge {options.forge!r}; supported: {', '.join(FORGES)}"
+        )
+    if options.profile not in ("service", "modular-monolith"):
+        raise ScaffoldError(
+            f"unknown profile {options.profile!r}; supported: service, modular-monolith"
         )
     if options.tenancy and options.database != "postgres":
         raise ScaffoldError(
@@ -161,7 +188,7 @@ dependencies = ["wreath"]
 # Installed by a bare `uv sync`, which is what the CI files run. Not
 # `[project.optional-dependencies]`: a test tool is not something anybody
 # installing this service should be able to ask for.
-dev = ["pytest>=8.4", "ruff>=0.12"]
+dev = ["pytest>=8.4", "ruff>=0.12", "ty>=0.0.59"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -169,6 +196,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["{options.name}*"]
+
+[tool.setuptools.package-data]
+"{options.name}" = ["py.typed"]
 
 [tool.pytest.ini_options]
 # `tests/` carries no `__init__.py`, so without this the project root is not on
@@ -187,6 +217,9 @@ extend-select = ["I"]
 # point every import block in the project is suddenly mis-sorted by a rule
 # nobody edited.
 known-first-party = ["{options.name}"]
+
+[tool.ty.src]
+include = ["{options.name}", "tests"]
 '''
 
 
@@ -320,18 +353,35 @@ SETTINGS = _environment().bind(Settings, prefix=PREFIX)
 
 
 def _app(options: Options) -> str:
-    # Assembled as two sorted groups rather than appended in the order the
-    # options happen to be handled. The generated project runs `ruff check .`
-    # with `I` selected, so an import block written in feature order is a
-    # project whose own lint fails on delivery -- and `SETTINGS` is left out
-    # entirely without a database, because `app.py` reads it only for the DSN.
     wreath_imports = ["from wreath import Wreath"]
-    local_imports = ["from .routers.items import items"]
+    if options.profile == "modular-monolith":
+        local_imports = [
+            "from .adapters import Adapters",
+            "from .config import SETTINGS, Settings",
+            "from .domains.items.router import build_items_router",
+        ]
+    else:
+        local_imports = [
+            "from .adapters import Adapters",
+            "from .config import SETTINGS, Settings",
+            "from .routers.items import build_items_router",
+        ]
     database_wiring = ""
-    signature = "build() -> Wreath:"
-    build_doc = '"""Assemble the application."""'
+    signature = (
+        "build(*, settings: Settings = SETTINGS, "
+        "adapters: Adapters | None = None) -> Wreath:"
+    )
+    build_doc = '''"""Assemble one application from immutable settings and explicit ports.
+
+    Passing adapters is the composition seam for tests and deployments. Nothing
+    in a route reaches into a process-global container, so two applications in
+    one process may use different implementations without interfering.
+    """'''
     if options.database == "postgres":
-        signature = "build(*, database: bool = True) -> Wreath:"
+        signature = (
+            "build(*, settings: Settings = SETTINGS, adapters: Adapters | None = None, "
+            "database: bool = True) -> Wreath:"
+        )
         build_doc = '''"""Assemble the application.
 
     `database=False` builds everything except the database registration. The
@@ -344,7 +394,7 @@ def _app(options: Options) -> str:
     schema. Serving always uses the default.
     """'''
     if options.database == "postgres":
-        local_imports += ["from .config import SETTINGS", "from .models import MODELS"]
+        local_imports.append("from .models import MODELS")
         schema_mode = ""
         tenancy_wiring = ""
         if options.tenancy:
@@ -374,7 +424,7 @@ def _app(options: Options) -> str:
         # validates the live schema against the models and refuses to start on
         # a mismatch, which is the one moment that mismatch is cheap to find --
         # and is why `database=False` exists at all.
-        application.postgres("main", dsn=SETTINGS.database_url)
+        application.postgres("main", dsn=settings.database_url)
         application.orm(
             database="main", models=list(MODELS){schema_mode})
 {tenancy_wiring}'''
@@ -395,8 +445,11 @@ from __future__ import annotations
 
 def {signature}
     {build_doc}
-    application = Wreath()
-{database_wiring}    application.include_router(items)
+    active_adapters = adapters or Adapters.defaults()
+    application = Wreath(require_access_declarations=True)
+{database_wiring}    application.include_router(
+        build_items_router(settings, active_adapters.catalogue)
+    )
     return application
 
 
@@ -405,42 +458,71 @@ app = build()
 
 
 def _items_router(options: Options) -> str:
-    return '''"""One resource, showing the four things every wreath router does.
+    if options.profile == "modular-monolith":
+        imports = '''from ...config import Settings
+from .contracts import Item, ItemPage, NewItem
+from .ports import Catalogue'''
+    else:
+        imports = '''from ..config import Settings
+from ..contracts import Item, ItemPage, NewItem
+from ..ports import Catalogue'''
+    return f'''"""HTTP delivery for the items context.
 
-* a `Router` with a prefix, included by `app.py` rather than reaching for the
-  application object here;
-* parameters declared in `Annotated`, so the ordinary Python default stays an
-  ordinary Python default and validation is compiled at startup;
-* a store that outlives one request, owned explicitly through
-  `Depends(..., scope="app")` -- not a module-level global, which two
-  applications in one process would share without either of them saying so;
-* a return annotation, which *is* the response contract wreath validates
-  against.
-
-The store is in memory, so it is per worker and it is gone when the process
-restarts. That is fine for a scaffold and wrong for a deployment: run
-`wreath new` with `--database postgres` for the shape that is not.
+The router is a factory because its port is supplied by `app.build`. Routes
+close over that typed port; they do not locate an adapter through global state.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from itertools import count
 from typing import Annotated
 
 from wreath import Request, Router
-from wreath.binding import Body, Depends, Query
+from wreath.auth import public
+from wreath.binding import Body, Query
 from wreath.exceptions import NotFound
 
-from ..config import SETTINGS
+{imports}
 
-items = Router(prefix="/items", tags=("items",))
+
+def build_items_router(settings: Settings, catalogue: Catalogue) -> Router:
+    """Bind HTTP to the context using the adapter selected at composition."""
+    items = Router(prefix="/items", tags=("items",))
+
+    @items.get("/", summary="Every item, newest last", operation_id="listItems")
+    @public()
+    async def list_items(
+        request: Request,
+        limit: Annotated[int, Query(minimum=1, maximum=100)] = settings.page_size,
+    ) -> ItemPage:
+        return ItemPage(items=catalogue.all(limit))
+
+    @items.get("/{{item_id}}", summary="One item by id", operation_id="readItem")
+    @public()
+    async def read_item(request: Request, item_id: int) -> Item:
+        item = catalogue.get(item_id)
+        if item is None:
+            raise NotFound(f"no item {{item_id}}")
+        return item
+
+    @items.post("/", status_code=201, summary="Add an item", operation_id="addItem")
+    @public()
+    async def add_item(request: Request, body: Annotated[NewItem, Body()]) -> Item:
+        return catalogue.add(body)
+
+    return items
+'''
+
+
+def _contracts(options: Options) -> str:
+    return '''"""Wire contracts owned by the items context."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
 class Item:
-    """One item, as it goes out on the wire."""
-
     id: int
     name: str
     price: float
@@ -448,35 +530,71 @@ class Item:
 
 @dataclass(frozen=True, slots=True)
 class ItemPage:
-    """One page of items.
-
-    A declared type rather than `-> dict`, because the return annotation *is*
-    the response contract: wreath validates against it, the OpenAPI document
-    describes it, and `wreath typegen` turns it into a TypeScript interface. A
-    handler annotated `-> dict` generates a client typed `Record<string,
-    unknown>`, which compiles and tells the front end nothing.
-    """
-
     items: list[Item]
 
 
 @dataclass(frozen=True, slots=True)
 class NewItem:
-    """One item, as it comes in.
-
-    A separate type from `Item` on purpose: the client does not choose the id,
-    and a request body that accepts one is a request body that can collide.
-    Extra fields are always rejected, so a typo in a client is a 422 rather than
-    a value that silently does nothing.
-    """
-
     name: str
     price: float
+'''
 
 
-class Catalogue:
-    """The items this process is holding, and the next id to hand out."""
+def _ports(options: Options) -> str:
+    contracts = ".contracts" if options.profile == "modular-monolith" else ".contracts"
+    return f'''"""Ports the items context requires from infrastructure."""
 
+from __future__ import annotations
+
+from typing import Protocol
+
+from {contracts} import Item, NewItem
+
+
+class Catalogue(Protocol):
+    def all(self, limit: int) -> list[Item]: ...
+
+    def add(self, new: NewItem) -> Item: ...
+
+    def get(self, item_id: int) -> Item | None: ...
+'''
+
+
+def _adapters(options: Options) -> str:
+    if options.profile == "modular-monolith":
+        return '''"""The application's concrete adapter bundle."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..domains.items.ports import Catalogue
+from .memory import MemoryCatalogue
+
+
+@dataclass(frozen=True, slots=True)
+class Adapters:
+    catalogue: Catalogue
+
+    @classmethod
+    def defaults(cls) -> Adapters:
+        return cls(catalogue=MemoryCatalogue())
+
+
+__all__ = ["Adapters", "MemoryCatalogue"]
+'''
+    return '''"""Concrete adapters selected at the application boundary."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from itertools import count
+
+from .contracts import Item, NewItem
+from .ports import Catalogue
+
+
+class MemoryCatalogue:
     def __init__(self) -> None:
         self._items: list[Item] = []
         self._ids = count(1)
@@ -493,65 +611,55 @@ class Catalogue:
         return next((item for item in self._items if item.id == item_id), None)
 
 
-def open_catalogue(request: Request) -> Catalogue:
-    """Build the catalogue this application shares.
+@dataclass(frozen=True, slots=True)
+class Adapters:
+    catalogue: Catalogue
 
-    A dependency is always called with the request, even one that ignores it --
-    which is why this is a function rather than `Depends(Catalogue)`.
-
-    **`Depends` goes in the default, never inside `Annotated`.** Every other
-    marker -- `Query`, `Body`, `Path`, `Header` -- goes inside `Annotated` so the
-    default stays an ordinary Python default; `Depends` is the exception, and
-    wreath refuses the other spelling at startup rather than quietly binding the
-    parameter from the request body. `scope="app"` is what makes it one
-    catalogue for the application instead of a fresh one per request.
-
-    The handler parameters below carry **no annotation**, deliberately: a
-    handler's annotations are its wire contract, and `wreath typegen` refuses
-    an annotation it cannot render into a client -- which a dependency's type
-    is not, since it never crosses the wire.
-    """
-    return Catalogue()
+    @classmethod
+    def defaults(cls) -> Adapters:
+        return cls(catalogue=MemoryCatalogue())
+'''
 
 
+def _memory_adapter(options: Options) -> str:
+    return '''"""Development and test adapters for the items context."""
 
-# `operation_id` names the generated client's method and its React hook --
-# `listItems()` and `useListItems()`. Without one the name is derived from the
-# method and path (`getItems`, `postItems`), which is fine until two routes
-# derive the same one. Naming it here also means renaming the *path* does not
-# rename every call site in the front end.
+from __future__ import annotations
 
+from itertools import count
 
-@items.get("/", summary="Every item, newest last", operation_id="listItems")
-async def list_items(
-    request: Request,
-    limit: Annotated[int, Query(minimum=1, maximum=100)] = SETTINGS.page_size,
-    catalogue=Depends(open_catalogue, scope="app"),
-) -> ItemPage:
-    return ItemPage(items=catalogue.all(limit))
+from ..domains.items.contracts import Item, NewItem
 
 
-@items.get("/{item_id}", summary="One item by id", operation_id="readItem")
-async def read_item(
-    request: Request,
-    item_id: int,
-    catalogue=Depends(open_catalogue, scope="app"),
-) -> Item:
-    item = catalogue.get(item_id)
-    if item is None:
-        # A wreath exception, so the response is an RFC 9457 problem document
-        # rather than `{"detail": ...}`.
-        raise NotFound(f"no item {item_id}")
-    return item
+class MemoryCatalogue:
+    def __init__(self) -> None:
+        self._items: list[Item] = []
+        self._ids = count(1)
+
+    def all(self, limit: int) -> list[Item]:
+        return self._items[:limit]
+
+    def add(self, new: NewItem) -> Item:
+        item = Item(id=next(self._ids), name=new.name, price=new.price)
+        self._items.append(item)
+        return item
+
+    def get(self, item_id: int) -> Item | None:
+        return next((item for item in self._items if item.id == item_id), None)
+'''
 
 
-@items.post("/", status_code=201, summary="Add an item", operation_id="addItem")
-async def add_item(
-    request: Request,
-    body: Annotated[NewItem, Body()],
-    catalogue=Depends(open_catalogue, scope="app"),
-) -> Item:
-    return catalogue.add(body)
+def _agents(options: Options) -> str:
+    return f'''# {options.name} architecture
+
+- Put business capabilities under `{options.name}/domains/<context>/`.
+- A context may import shared wire primitives, but never another context's adapter.
+- Define infrastructure needs as `Protocol` ports beside the context that owns them.
+- Select concrete adapters only in `{options.name}/app.py`; tests pass doubles to
+  `build(settings=..., adapters=...)`.
+- Every route must declare `@public()` or an authentication/authorization guard.
+- Give every route a stable `operation_id`; review `wreath doctor routes
+  {options.name}.app:app` when the surface changes.
 '''
 
 
@@ -608,7 +716,7 @@ MODELS = (Item,)
 
 
 def _tests(options: Options) -> str:
-    build_call = "build(database=False)" if options.database == "postgres" else "build()"
+    database_arg = ", database=False" if options.database == "postgres" else ""
     build_note = (
         """
 
@@ -628,24 +736,29 @@ pytest.{build_note}
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 from wreath.testing import TestClient
 
+from {options.name}.adapters import Adapters, MemoryCatalogue
 from {options.name}.app import build
+from {options.name}.config import SETTINGS
 
 
-def _drive(scenario):
-    """Run one async scenario against a fresh application and its lifespan."""
+def _drive(scenario: Callable[[TestClient], Awaitable[None]]) -> None:
+    """Run one scenario with an explicitly selected test adapter."""
 
-    async def run():
-        async with TestClient({build_call}) as client:
+    async def run() -> None:
+        adapters = Adapters(catalogue=MemoryCatalogue())
+        application = build(settings=SETTINGS, adapters=adapters{database_arg})
+        async with TestClient(application) as client:
             await scenario(client)
 
     asyncio.run(run())
 
 
-def test_an_empty_catalogue_lists_nothing():
-    async def scenario(client):
+def test_an_empty_catalogue_lists_nothing() -> None:
+    async def scenario(client: TestClient) -> None:
         response = await client.get("/items")
         assert response.status == 200
         assert response.json() == {{"items": []}}
@@ -653,8 +766,8 @@ def test_an_empty_catalogue_lists_nothing():
     _drive(scenario)
 
 
-def test_an_added_item_comes_back_with_an_id():
-    async def scenario(client):
+def test_an_added_item_comes_back_with_an_id() -> None:
+    async def scenario(client: TestClient) -> None:
         created = await client.post("/items", json={{"name": "broom", "price": 4.5}})
         assert created.status == 201
         assert created.json()["id"] == 1
@@ -665,7 +778,7 @@ def test_an_added_item_comes_back_with_an_id():
     _drive(scenario)
 
 
-def test_an_unknown_item_is_a_problem_document_not_a_bare_404():
+def test_an_unknown_item_is_a_problem_document_not_a_bare_404() -> None:
     """wreath answers RFC 9457, so the body is a document rather than a string.
 
     Two things worth knowing from this one test: the attribute is `status` and
@@ -676,7 +789,7 @@ def test_an_unknown_item_is_a_problem_document_not_a_bare_404():
     being registered at all would also answer 404.
     """
 
-    async def scenario(client):
+    async def scenario(client: TestClient) -> None:
         response = await client.get("/items/404")
         assert response.status == 404
         assert dict(response.headers)[b"content-type"].startswith(
@@ -686,10 +799,10 @@ def test_an_unknown_item_is_a_problem_document_not_a_bare_404():
     _drive(scenario)
 
 
-def test_an_unknown_body_field_is_refused_rather_than_ignored():
+def test_an_unknown_body_field_is_refused_rather_than_ignored() -> None:
     """Extra fields are always rejected -- a client typo is a 422, not a no-op."""
 
-    async def scenario(client):
+    async def scenario(client: TestClient) -> None:
         response = await client.post(
             "/items", json={{"name": "mop", "price": 3.0, "colour": "red"}})
         assert response.status == 422
@@ -908,16 +1021,21 @@ def _readme(options: Options) -> str:
         "",
         "```bash",
         "pytest",
+        "ty check",
         "```",
         "",
         "## Before you deploy",
         "",
         "```bash",
         f"wreath doctor preflight {name}.app:app --environ",
+        f"wreath doctor routes {name}.app:app --write route-manifest.json",
         "```",
         "",
         "One report of everything wreath can check about a built application,",
         "and a named list of what it cannot -- each with the command that does.",
+        "Commit `route-manifest.json` when you want route, wire-type, dependency,",
+        "middleware, and access changes to be explicit in review; use `--check`",
+        "instead of `--write` in CI.",
         "",
         "## Finding what already ships",
         "",
@@ -928,6 +1046,16 @@ def _readme(options: Options) -> str:
         "wreath is wide on purpose. Before adding a dependency or writing a rate",
         "limiter, ask it; the answer is usually a module you already have.",
     ]
+    if options.profile == "modular-monolith":
+        sections += [
+            "",
+            "## Architecture",
+            "",
+            f"Business capabilities live under `{name}/domains/<context>/`.",
+            "Each context owns its wire contracts, ports, and HTTP adapter; the",
+            f"composition root in `{name}/app.py` is the only place that selects",
+            "concrete infrastructure. Read `AGENTS.md` before adding a context.",
+        ]
     if options.database == "postgres":
         sections += [
             "",

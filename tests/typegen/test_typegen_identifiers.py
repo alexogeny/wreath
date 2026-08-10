@@ -1,7 +1,7 @@
 """The generated identifier must be spelled the same by every producer.
 
 The planner (``typegen.targets.typescript``) *declares* the per-operation
-parameter interface, and the renderer (``_pure.typegen``) *references* it. Each
+parameter interface, and the renderer (``typegen.typescript_renderer``) *references* it. Each
 derives the name from the operation id independently, so a disagreement between
 their two ``_pascal`` implementations emits a client that references an
 interface the models module never declared -- TypeScript that does not compile,
@@ -18,10 +18,10 @@ import re
 import pytest
 
 from wreath import Wreath
-from wreath._pure.typegen import _pascal as renderer_pascal
 from wreath.typegen.inspect import _pascal as planner_pascal
 from wreath.typegen.inspect import build_api_model
 from wreath.typegen.targets.typescript import render_typescript
+from wreath.typegen.typescript_renderer import _pascal as renderer_pascal
 
 #: Ordinary names, plus the degenerate ones that split into no words at all.
 NAMES = [
@@ -45,7 +45,7 @@ NAMES = [
 def test_planner_and_renderer_agree_on_pascal_case(name: str) -> None:
     """One name, one spelling, on both sides of the renderer boundary.
 
-    ``_pure.typegen`` keeps its own copy because it is the reference twin of an
+    ``typescript_renderer`` keeps its own copy because it is the reference twin of an
     optional native renderer and must stay self-contained; this asserts the copy
     still matches rather than assuming it.
     """

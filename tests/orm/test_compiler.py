@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.orm import and_, not_, or_
+from wreath.orm import and_, not_, or_, where_fields
 from wreath.orm import compiler as compiler_module
 from wreath.orm.compiler import (
     _collect_binds,
@@ -19,6 +19,23 @@ from wreath.orm.types import Int64, Text
 from .conftest import FakeDatabase, Membership, Post, User
 
 USERS = '"public"."users" AS "t0"'
+
+
+def test_where_fields_builds_plain_runtime_equalities(registry: Registry) -> None:
+    query = User.select().where(*where_fields(User, {"email": "a@b.c", "name": "Ada"}))
+    compiled = compile_select(registry, query)
+    assert '"t0"."email" = $1 AND "t0"."name" = $2' in compiled.sql
+    assert compiled.bind_values == ("a@b.c", "Ada")
+
+
+def test_where_fields_refuses_a_legacy_lookup_language() -> None:
+    with pytest.raises(ValueError, match="does not interpret lookup path"):
+        where_fields(User, {"email__icontains": "ada"})
+
+
+def test_where_fields_refuses_an_unknown_column() -> None:
+    with pytest.raises(ValueError, match="has no column"):
+        where_fields(User, {"nickname": "Ada"})
 
 
 def test_select_all_columns_is_explicit_never_star(registry: Registry) -> None:

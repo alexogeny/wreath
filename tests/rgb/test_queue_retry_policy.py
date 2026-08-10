@@ -7,35 +7,15 @@ found in one and checked in the other.
 from __future__ import annotations
 
 import pytest
+from _doubles import RecordingConnection
 
 from wreath.jobs import JobRunner
 from wreath.messaging import MessageBus
 
 
-class FakeConnection:
-    def __init__(self):
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, sql, *args):
-        self.calls.append((sql, args))
-        return "OK"
-
-    async def fetchval(self, sql, *args):
-        self.calls.append((sql, args))
-        return 1
-
-    async def fetch(self, sql, *args):
-        self.calls.append((sql, args))
-        return []
-
-    async def fetchrow(self, sql, *args):
-        self.calls.append((sql, args))
-        return None
-
-
 class FakeDatabase:
     def __init__(self):
-        self.connection = FakeConnection()
+        self.connection = RecordingConnection()
 
     async def acquire(self, workload):
         return self.connection

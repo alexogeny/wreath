@@ -19,9 +19,11 @@ layer is already solved one level down.
 
 from __future__ import annotations
 
+import datetime as dt
+import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, fields, is_dataclass
+from typing import Any, get_args, get_origin, get_type_hints
 
 from .._auth.cedar_engine import CedarParseError, EntityUid
 
@@ -107,8 +109,8 @@ def policy_resource(policy: str) -> EntityUid:
 class SchemaField:
     """One field on an object type.
 
-    Exactly one of `column`, `relationship`, or `resolver` is set; that is
-    what the executor dispatches on.
+    Exactly one of `column`, `attribute`, `relationship`, or `resolver` is set;
+    that is what the executor dispatches on.
     """
 
     name: str
@@ -119,6 +121,8 @@ class SchemaField:
     relationship: Any = None
     #: Set for a column field; None otherwise.
     column: Any = None
+    #: Set for a field projected directly from a registered dataclass.
+    attribute: str | None = None
     #: Set for a custom/computed field; None otherwise.
     resolver: Any = None
     #: Authorization resource for this field. Defaults to "Type.field" at
@@ -255,6 +259,7 @@ def build_schema(
     models: list[Any] | None = None,
     *,
     expose: Iterable[str] = (),
+    dataclasses: Iterable[type] = (),
 ) -> Schema:
     """Build a schema from `registry`, optionally narrowed to `models`.
 
@@ -320,8 +325,44 @@ def build_schema(
             )
         types[name] = object_type
 
-    exposed = {object_type.spec for object_type in types.values()}
+    declared_dataclasses = tuple(dataclasses)
+    for model in declared_dataclasses:
+        if not isinstance(model, type) or not is_dataclass(model):
+            raise TypeError(
+                "GraphQL dataclasses must contain dataclass types; "
+                f"got {model!r}"
+            )
+        if model.__name__ in types:
+            raise ValueError(f"GraphQL type {model.__name__!r} is already registered")
+        hints = get_type_hints(model)
+        object_type = ObjectType(name=model.__name__, spec=None, fields={})
+        for item in fields(model):
+            annotation = hints.get(item.name, item.type)
+            type_name, is_list, non_null = _dataclass_annotation(annotation)
+            object_type.fields[item.name] = SchemaField(
+                name=item.name,
+                type_name=type_name,
+                non_null=non_null,
+                is_list=is_list,
+                attribute=item.name,
+                policy=f"{model.__name__}.{item.name}",
+            )
+        types[model.__name__] = object_type
+    known_scalars = frozenset(
+        {"String", "Int", "Float", "Boolean", "ID", "JSON", "Date", "DateTime"}
+    )
+    for model in declared_dataclasses:
+        for schema_field in types[model.__name__].fields.values():
+            if schema_field.type_name not in known_scalars and schema_field.type_name not in types:
+                raise TypeError(
+                    f"{model.__name__}.{schema_field.name} refers to GraphQL type "
+                    f"{schema_field.type_name!r}, which is not registered"
+                )
+
+    exposed = frozenset(specs)
     for object_type in types.values():
+        if object_type.spec is None:
+            continue
         for relationship in object_type.spec.relationships:
             target = relationship.target
             if target not in exposed:
@@ -343,6 +384,8 @@ def build_schema(
 
     roots: dict[str, RootField] = {}
     for object_type in types.values():
+        if object_type.spec is None:
+            continue
         singular = object_type.name[0].lower() + object_type.name[1:]
         roots[singular] = RootField(
             singular, object_type.name, False, object_type.spec,
@@ -355,3 +398,40 @@ def build_schema(
         )
 
     return Schema(registry=registry, types=types, roots=roots)
+
+
+def _dataclass_annotation(annotation: Any) -> tuple[str, bool, bool]:
+    """Map one native dataclass annotation to GraphQL shape metadata."""
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    non_null = True
+    if type(None) in arguments:
+        remaining = tuple(item for item in arguments if item is not type(None))
+        non_null = False
+        if len(remaining) != 1:
+            raise TypeError(f"unsupported GraphQL union annotation {annotation!r}")
+        annotation = remaining[0]
+        origin = get_origin(annotation)
+        arguments = get_args(annotation)
+    is_list = origin in (list, tuple)
+    if is_list:
+        if len(arguments) != 1:
+            raise TypeError(f"GraphQL list annotation needs one item type: {annotation!r}")
+        annotation = arguments[0]
+    scalars = {
+        str: "String",
+        int: "Int",
+        float: "Float",
+        bool: "Boolean",
+        uuid.UUID: "ID",
+        dt.date: "Date",
+        dt.datetime: "DateTime",
+        dict: "JSON",
+        Any: "JSON",
+    }
+    type_name = scalars.get(annotation)
+    if isinstance(annotation, type) and is_dataclass(annotation):
+        type_name = annotation.__name__
+    if type_name is None:
+        raise TypeError(f"unsupported GraphQL dataclass annotation {annotation!r}")
+    return type_name, is_list, non_null

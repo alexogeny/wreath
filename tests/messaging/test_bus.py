@@ -5,45 +5,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from _pgfidelity import check_statement
 
 from wreath._jobcore import PayloadTooLarge
+from wreath._replay_adapters import DatabaseDouble
 from wreath.messaging import MessageBus
-
-
-class FakeConnection:
-    def __init__(self):
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, sql, *args):
-        check_statement(sql, args)
-        self.calls.append((sql, args))
-        return "OK"
-
-    async def fetchval(self, sql, *args):
-        """The version-2 `trace_context` column probe, and nothing else.
-
-        `None`, because a real server answers no rows at all when the column is
-        absent and the driver reads that as None. This double models a schema
-        that has not had the version-2 step applied; the upgraded one is
-        modelled in `tests/messaging/test_trace.py`.
-        """
-        check_statement(sql, args)
-        self.calls.append((sql, args))
-        return None
-
-
-class FakeDatabase:
-    def __init__(self):
-        self.connection = FakeConnection()
-        self.acquired = 0
-
-    async def acquire(self, workload):
-        self.acquired += 1
-        return self.connection
-
-    async def release(self, workload, connection):
-        pass
 
 
 def _bus(db):
@@ -51,23 +16,23 @@ def _bus(db):
 
 
 async def test_publish_ephemeral_notifies():
-    db = FakeDatabase()
+    db = DatabaseDouble()
     bus = _bus(db)
     await bus.publish("booking_created", {"id": 1})
-    call = next(c for c in db.connection.calls if "pg_notify" in c[0])
+    call = next(c for c in db.calls if "pg_notify" in c[0])
     wire, body = call[1]
     assert wire.startswith("wm_")
     assert json.loads(body) == {"id": 1}
 
 
 async def test_publish_ephemeral_oversized_rejected():
-    bus = _bus(FakeDatabase())
+    bus = _bus(DatabaseDouble())
     with pytest.raises(PayloadTooLarge):
         await bus.publish("booking_created", {"blob": "x" * 8000})
 
 
 def test_durable_subscription_requires_group():
-    bus = _bus(FakeDatabase())
+    bus = _bus(DatabaseDouble())
     with pytest.raises(ValueError):
         @bus.subscribe("booking_created", durable=True)
         async def handler(message):
@@ -75,7 +40,7 @@ def test_durable_subscription_requires_group():
 
 
 async def test_publish_durable_fans_out_per_group():
-    db = FakeDatabase()
+    db = DatabaseDouble()
     bus = _bus(db)
 
     @bus.subscribe("booking_created", group="billing", durable=True)
@@ -87,7 +52,7 @@ async def test_publish_durable_fans_out_per_group():
         pass
 
     await bus.publish("booking_created", {"id": 9}, durable=True)
-    inserts = [args for sql, args in db.connection.calls if "INSERT INTO" in sql]
+    inserts = [args for sql, args in db.calls if "INSERT INTO" in sql]
     # One statement, every group: (channel, payload, tenant, group, dedup, ...)
     assert len(inserts) == 1
     groups = sorted(inserts[0][3::2])
@@ -95,7 +60,7 @@ async def test_publish_durable_fans_out_per_group():
 
 
 def test_schema_sql_has_messages_table():
-    sql = _bus(FakeDatabase()).schema_sql()
+    sql = _bus(DatabaseDouble()).schema_sql()
     assert "CREATE TABLE IF NOT EXISTS" in sql and ".messages" in sql
     assert "messages_claim_idx" in sql
     assert "messages_dedup_idx" in sql
@@ -113,7 +78,7 @@ async def test_a_failing_reclaim_is_counted_rather_than_swallowed():
     import asyncio
     import types
 
-    bus = _bus(FakeDatabase())
+    bus = _bus(DatabaseDouble())
     bus._lease = 0.001
     bus._supervisor = types.SimpleNamespace(stopping=asyncio.Event())
 
@@ -141,7 +106,7 @@ async def test_the_sweeper_does_not_swallow_cancellation():
     import asyncio
     import types
 
-    bus = _bus(FakeDatabase())
+    bus = _bus(DatabaseDouble())
     bus._lease = 10.0
     bus._supervisor = types.SimpleNamespace(stopping=asyncio.Event())
     started = asyncio.Event()

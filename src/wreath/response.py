@@ -32,7 +32,7 @@ from ._native import _core
 # server recognizes the exact type and emits the same status, headers, and body
 # through its one-shot response ABI, avoiding ASGI message interpretation while
 # keeping this dependency-free implementation authoritative on every server.
-from ._pure.response import PreparedResponse as PreparedResponse
+from ._prepared import PreparedResponse as PreparedResponse
 from .background import Background
 from .cache_control import CacheControl
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity, authenticated
@@ -16,12 +17,14 @@ class FakeConnection:
         self.lookups = 0
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         return "OK"
 
     async def prepare(self, sql: str) -> None:
         return None
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
+        check_for(self, sql, args)
         self.lookups += 1
         if args == ("valid",):
             return {"id": "7", "roles": frozenset({"member"})}

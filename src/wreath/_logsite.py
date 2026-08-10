@@ -45,8 +45,8 @@ from ._flight_schema import (
     LogArgType,
     LogCell,
     Severity,
+    siphash24,
 )
-from ._pure.flight import siphash24
 
 #: Call sites retained per registry. A site is ~200 bytes of Python objects, so
 #: this is a small fixed cost; overflow degrades to uninterned records rather

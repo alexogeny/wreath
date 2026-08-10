@@ -44,14 +44,14 @@ valid zstd that no decoder complains about, so the failure surfaces as a
 `Content-Length` 9 bytes too long rather than as an error. `ZstdCompressor.finish`
 raising is what keeps that attributable.
 
-These are re-exports from `wreath._pure.compression`, which is private and so has
+These are re-exports from `wreath._compression`, which is private and so has
 no reference page of its own; the `:::` generator renders them under this module
 for that reason, and their signatures are below.
 """
 
 from __future__ import annotations
 
-from ._pure.compression import (
+from ._compression import (
     ZSTD_DEFAULT_LEVEL,
     ZSTD_MAX_LEVEL,
     ZSTD_MIN_LEVEL,

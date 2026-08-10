@@ -23,7 +23,7 @@ ordinary Python default — `limit: Annotated[int, Query(...)] = 20`, never
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -62,7 +62,6 @@ def _permission_requirement(permissions: Iterable[str]) -> AuthRequirement:
         authenticated=True,
         permission_checks=(SetRequirement(values, "all"),),
     )
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +120,15 @@ class RouteDefinition:
     #: Setting it here overrides that either way, for every method the route
     #: answers.
     cancel_on_disconnect: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketRouteDefinition:
+    """One reusable WebSocket route with inherited access requirements."""
+
+    path: str
+    endpoint: Callable[[Any], Awaitable[None]]
+    requirement: AuthRequirement = AuthRequirement()
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +226,7 @@ class Router:
         "_requirement",
         "_routes",
         "_tags",
+        "_websockets",
     )
 
     def __init__(
@@ -235,6 +244,7 @@ class Router:
         self._dependencies = tuple(dependencies)
         self._requirement = _permission_requirement(permissions)
         self._routes: list[RouteDefinition | _IncludedRoutes] = []
+        self._websockets: list[WebSocketRouteDefinition] = []
 
     @property
     def routes(self) -> tuple[RouteDefinition, ...]:
@@ -250,6 +260,11 @@ class Router:
         the position it was included.
         """
         return _flatten_routes(tuple(self._routes))
+
+    @property
+    def websockets(self) -> tuple[WebSocketRouteDefinition, ...]:
+        """WebSocket routes owned by this router, including mounted snapshots."""
+        return tuple(self._websockets)
 
     def route(
         self,
@@ -330,15 +345,11 @@ class Router:
         route_middleware = self._middleware + tuple(middleware)
         route_tags = self._tags + tuple(tags)
         route_dependencies = self._dependencies + tuple(dependencies)
-        requirement = merge_requirements(
-            self._requirement, _permission_requirement(permissions)
-        )
+        requirement = merge_requirements(self._requirement, _permission_requirement(permissions))
         if not 100 <= status_code <= 599:
             raise ValueError("status_code must be between 100 and 599")
         response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
-        route_security = tuple(
-            (name, tuple(scopes)) for name, scopes in (security or {}).items()
-        )
+        route_security = tuple((name, tuple(scopes)) for name, scopes in (security or {}).items())
 
         def register(handler: Handler) -> Handler:
             self._routes.append(
@@ -388,6 +399,30 @@ class Router:
     def delete(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
         """Register a handler for `path` on DELETE; keywords are those of `route()`."""
         return self.route(path, methods=("DELETE",), **metadata)
+
+    def websocket(
+        self,
+        path: str,
+        *,
+        permissions: Iterable[str] = (),
+    ) -> Callable[[Callable[[Any], Awaitable[None]]], Callable[[Any], Awaitable[None]]]:
+        """Register a reusable WebSocket route.
+
+        Router-level and route-level permissions are enforced during the
+        handshake when the router is included in an application. Message-loop
+        flow control remains the handler's choice; `WebSocketService` is the
+        bounded generic manager when it needs framework ownership.
+        """
+        full_path = _path(self._prefix, path)
+        requirement = merge_requirements(self._requirement, _permission_requirement(permissions))
+
+        def register(
+            handler: Callable[[Any], Awaitable[None]],
+        ) -> Callable[[Any], Awaitable[None]]:
+            self._websockets.append(WebSocketRouteDefinition(full_path, handler, requirement))
+            return handler
+
+        return register
 
     def include_router(
         self,
@@ -449,6 +484,17 @@ class Router:
                 merge_requirements(self._requirement, include_requirement),
             )
         )
+        inherited = merge_requirements(self._requirement, include_requirement)
+        for definition in router.websockets:
+            path = _path(include_prefix, definition.path)
+            path = _path(self._prefix, path)
+            self._websockets.append(
+                WebSocketRouteDefinition(
+                    path,
+                    definition.endpoint,
+                    merge_requirements(inherited, definition.requirement),
+                )
+            )
 
 
-__all__ = ["RouteDefinition", "Router"]
+__all__ = ["RouteDefinition", "Router", "WebSocketRouteDefinition"]

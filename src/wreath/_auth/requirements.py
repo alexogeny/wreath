@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Any, Literal
 
 Mode = Literal["all", "any"]
@@ -54,6 +55,51 @@ class PolicyRequirement:
     resource: object | Callable[[Any], object]
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class AuthorizationVocabulary:
+    """The complete, typed set of policy actions an application may declare.
+
+    Build it from one or more `StrEnum` classes and use those enum members in
+    `@authorize`. Wreath stores the wire value, so the route
+    manifest and Cedar still see ordinary strings while a misspelled action is
+    caught by the type checker before startup.
+    """
+
+    actions: tuple[str, ...]
+
+    def __init__(self, *enums: type[StrEnum]) -> None:
+        if not enums:
+            raise ValueError("an authorization vocabulary needs at least one StrEnum")
+        actions: list[str] = []
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for enum in enums:
+            if not isinstance(enum, type) or not issubclass(enum, StrEnum):
+                raise TypeError("authorization vocabularies are built from StrEnum classes")
+            for member in enum:
+                if member.value in seen:
+                    duplicates.add(member.value)
+                seen.add(member.value)
+                actions.append(member.value)
+        if any(not action for action in actions):
+            raise ValueError("authorization actions cannot be empty")
+        if duplicates:
+            raise ValueError(
+                "authorization actions must be unique: " + ", ".join(sorted(duplicates))
+            )
+        object.__setattr__(self, "actions", tuple(sorted(actions)))
+
+    def unknown(self, actions: Iterable[str]) -> tuple[str, ...]:
+        """Declared actions absent from this vocabulary, sorted for diagnostics."""
+        declared = set(actions)
+        return tuple(sorted(declared.difference(self.actions)))
+
+    def unused(self, actions: Iterable[str]) -> tuple[str, ...]:
+        """Vocabulary actions no route or mounted surface currently declares."""
+        declared = set(actions)
+        return tuple(sorted(set(self.actions).difference(declared)))
+
+
 @dataclass(frozen=True, slots=True)
 class AuthRequirement:
     authenticated: bool = False
@@ -72,6 +118,11 @@ class AuthRequirement:
     #: factor and has not proved it lately, and only one of those two facts is
     #: interesting before a destructive action.
     second_factor: float | None = None
+    #: An explicit declaration that this endpoint intentionally admits an
+    #: anonymous caller. It changes no request behavior; its value is that a
+    #: strict application can distinguish a reviewed public route from an
+    #: endpoint whose authentication decorator was forgotten.
+    public: bool = False
 
     @property
     def needs_backend(self) -> bool:
@@ -91,6 +142,11 @@ class AuthRequirement:
         that reports safety while providing none.
         """
         return self.identify or self.access_level > 0
+
+    @property
+    def declares_access(self) -> bool:
+        """Whether the endpoint explicitly says who may call it."""
+        return self.public or self.identify or self.access_level > 0
 
     @property
     def access_level(self) -> int:
@@ -135,6 +191,16 @@ def requirement_for(endpoint: Any) -> AuthRequirement:
 
 def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
     """Combine inherited requirements without allowing a child to weaken a parent."""
+    public = any(requirement.public for requirement in requirements)
+    protected = any(
+        requirement.identify or requirement.access_level > 0
+        for requirement in requirements
+    )
+    if public and protected:
+        raise ValueError(
+            "public() cannot be combined with authentication or authorization "
+            "requirements"
+        )
     # The strictest window wins, which is the same rule the rest of this
     # function follows in a different shape: a router that demands a factor
     # within five minutes must not be relaxed to an hour by a route mounted
@@ -145,6 +211,7 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
         if requirement.second_factor is not None
     ]
     return AuthRequirement(
+        public=public,
         second_factor=min(windows) if windows else None,
         authenticated=any(requirement.authenticated for requirement in requirements),
         identify=any(requirement.identify for requirement in requirements),
@@ -165,12 +232,32 @@ def set_requirement(endpoint: Any, requirement: AuthRequirement) -> Any:
     return endpoint
 
 
+def _protected_requirement(endpoint: Any) -> AuthRequirement:
+    current = requirement_for(endpoint)
+    if current.public:
+        raise ValueError(
+            "public() cannot be combined with authentication or authorization "
+            "requirements"
+        )
+    return current
+
+
+def add_public(endpoint: Any) -> Any:
+    current = requirement_for(endpoint)
+    if current.identify or current.access_level > 0:
+        raise ValueError(
+            "public() cannot be combined with authentication or authorization "
+            "requirements"
+        )
+    return set_requirement(endpoint, replace(current, public=True))
+
+
 def add_authenticated(endpoint: Any) -> Any:
-    return set_requirement(endpoint, replace(requirement_for(endpoint), authenticated=True))
+    return set_requirement(endpoint, replace(_protected_requirement(endpoint), authenticated=True))
 
 
 def add_identify(endpoint: Any) -> Any:
-    return set_requirement(endpoint, replace(requirement_for(endpoint), identify=True))
+    return set_requirement(endpoint, replace(_protected_requirement(endpoint), identify=True))
 
 
 def add_second_factor(endpoint: Any, max_age: float) -> Any:
@@ -179,7 +266,7 @@ def add_second_factor(endpoint: Any, max_age: float) -> Any:
     Two decorators on one endpoint keep the shorter window, for the same reason
     `merge_requirements` does: stacking requirements adds, never subtracts.
     """
-    current = requirement_for(endpoint)
+    current = _protected_requirement(endpoint)
     window = (
         max_age if current.second_factor is None else min(current.second_factor, max_age)
     )
@@ -189,7 +276,7 @@ def add_second_factor(endpoint: Any, max_age: float) -> Any:
 
 
 def add_roles(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
-    current = requirement_for(endpoint)
+    current = _protected_requirement(endpoint)
     return set_requirement(
         endpoint,
         replace(
@@ -203,7 +290,7 @@ def add_roles(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
 def add_policy(
     endpoint: Any, action: str, resource: object | Callable[[Any], object]
 ) -> Any:
-    current = requirement_for(endpoint)
+    current = _protected_requirement(endpoint)
     return set_requirement(
         endpoint,
         replace(
@@ -215,7 +302,7 @@ def add_policy(
 
 
 def add_permissions(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
-    current = requirement_for(endpoint)
+    current = _protected_requirement(endpoint)
     return set_requirement(
         endpoint,
         replace(

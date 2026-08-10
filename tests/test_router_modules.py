@@ -7,6 +7,7 @@ import pytest
 from wreath import Depends, Router, Wreath
 from wreath.auth import Identity
 from wreath.testing import TestClient
+from wreath.websocket import WebSocket
 
 
 class HeaderIdentityBackend:
@@ -72,9 +73,7 @@ async def test_nested_router_flattens_prefixes_and_inherits_metadata() -> None:
         assert denied.status == 403
         response = await client.get(
             "/v1/admin/users/7",
-            headers={
-                "authorization": "Bearer api:access,admin:access,users:read"
-            },
+            headers={"authorization": "Bearer api:access,admin:access,users:read"},
         )
 
     assert response.status == 200
@@ -154,6 +153,54 @@ def test_router_permission_requirement_demands_an_identity() -> None:
         return []
 
     assert router.routes[0].requirement.authenticated is True
+
+
+@pytest.mark.asyncio
+async def test_nested_router_websocket_composes_prefixes_and_permissions() -> None:
+    child = Router(prefix="/stream", permissions=("stream:read",))
+
+    @child.websocket("/{channel}")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
+    parent = Router(prefix="/llama", permissions=("trek:enter",))
+    parent.include_router(child)
+    app = Wreath(hardening="off")
+    app.configure_auth(HeaderIdentityBackend())
+    app.include_router(parent, prefix="/v1", permissions=("api:use",))
+
+    async def drive(authorization: bytes | None) -> list[dict[str, Any]]:
+        incoming = iter(({"type": "websocket.connect"},))
+        sent: list[dict[str, Any]] = []
+        headers = [] if authorization is None else [(b"authorization", authorization)]
+
+        async def receive() -> dict[str, Any]:
+            return next(incoming)
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        await app(
+            {
+                "type": "websocket",
+                "path": "/v1/llama/stream/ridge",
+                "query_string": b"",
+                "headers": headers,
+                "subprotocols": [],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    denied = await drive(b"Bearer api:use,trek:enter")
+    allowed = await drive(b"Bearer api:use,trek:enter,stream:read")
+
+    assert denied == [{"type": "websocket.close", "code": 1008}]
+    assert allowed[0]["type"] == "websocket.accept"
+    assert allowed[-1] == {"type": "websocket.close", "code": 1000, "reason": ""}
+    assert app._ws_routes[0][0] == "/v1/llama/stream/{channel}"
 
 
 @pytest.mark.parametrize("status", [99, 600])

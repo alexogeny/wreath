@@ -17,8 +17,9 @@ import pytest
 from wreath import _flight_schema as fs
 from wreath._flight_schema import CaptureDisposition as D
 from wreath._flight_schema import CaptureFieldClass as FC
+from wreath._flight_schema import siphash24
 from wreath._pure import flight as codec
-from wreath._pure.flight import PureRecorder, siphash24
+from wreath._pure.flight import PureRecorder
 
 _flight = pytest.importorskip("wreath._native._flight")
 

@@ -121,6 +121,53 @@ async def read(
 `session.get` returns `None` for a missing primary key rather than raising, and a
 session that is never queried leases no connection at all.
 
+When absence is exceptional, state that contract rather than checking twice:
+
+```python
+widget = await session.require(Widget, widget_id)
+only = await session.require_one(Widget.select().where(Widget.slug == slug))
+created = await session.create(Widget, slug=slug, price=250)
+```
+
+`require` and `require_one` raise `NoResultError` on no match;
+`require_one` still raises `MultipleResultsError` on more than one. `create`
+uses the model constructor and ordinary flush path, so it is convenience over
+the same validation and unit of work, not a repository abstraction.
+
+When a boundary has already produced a plain mapping of field names, convert
+it without inventing a lookup mini-language:
+
+```python
+from wreath.orm import where_fields
+
+query = Widget.select().where(*where_fields(Widget, filters))
+```
+
+`where_fields` accepts exact mapped-column names and builds equality
+predicates. Unknown columns and names containing `__` are refused. Operators,
+JSON containment, and relationship traversal stay explicit query expressions;
+runtime strings never acquire hidden query semantics.
+
+Set-based writes are explicit and predicate-bounded:
+
+```python
+changed = await session.update_where(
+    Widget.select().where(Widget.retired_at.is_null()), retired=True
+)
+removed = await session.delete_where(
+    Widget.select().where(Widget.expires_at < cutoff)
+)
+```
+
+Both return PostgreSQL's affected-row count and refuse a query with no
+`where()` predicate. Projection, eager loading, ordering, paging and row locks
+are read semantics and are rejected. A successful set-based write detaches
+that model's objects from the session identity map so an object loaded before
+the statement cannot masquerade as current. Audited models and cross-field
+rule updates must use loaded objects (or an explicit SQL operation that records
+the corresponding audit data); the bulk path refuses to bypass those
+semantics.
+
 ## User story: name the reads instead of rebuilding them
 
 > *As an application author, I have four handlers that all fetch llamas — by
