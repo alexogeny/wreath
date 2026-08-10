@@ -13,9 +13,10 @@ supports `{% if %}`/`{% else %}`/`{% endif %}`, `{% for x in xs %}`/
 `{% endfor %}`, and compile-time `{% include "other.html" %}`. It evaluates
 no arbitrary Python.
 
-Rendering is the request-time hot path, so it is the native target: the C
-engine in `_native/templates.c` executes the same tape and produces
-byte-identical UTF-8. Parsing stays in Python.
+Rendering is the request-time hot path and runs in C: `_native/templates.c`
+executes the tape. Parsing stays in Python -- the compiler, the escaping and the
+two error types live in `src/wreath/_template_tape.py`, and the engine is handed
+the error types so a caller catches one class either way.
 """
 
 from __future__ import annotations
@@ -25,14 +26,16 @@ from typing import Any
 
 from ._fsguard import _HAVE_DIR_FD, ContainmentError, open_beneath, open_root
 from ._native import _core
-from ._pure.templates import (
+
+# The compiler and the vocabulary the C engine executes -- see
+# `wreath._template_tape`.
+from ._template_tape import (
     MAX_OUTPUT_BYTES,
     Markup,
     TemplateRenderError,
     TemplateSyntaxError,
     compile_tape,
     escape,
-    render_tape,
 )
 
 
@@ -46,17 +49,14 @@ def _read_all(fd: int) -> bytes:
     return b"".join(chunks)
 
 
-if _core is not None and hasattr(_core, "template_render"):
-    # The native engine needs the Markup and error types to match escaping and
-    # error behaviour exactly; it never imports this module itself.
-    _core.template_configure(Markup, TemplateRenderError)
-    _native_render = _core.template_render
-    _native_compile = getattr(_core, "template_compile", None)
-    _native_render_compiled = getattr(_core, "template_render_compiled", None)
-else:
-    _native_render = None
-    _native_compile = None
-    _native_render_compiled = None
+# The native engine needs the Markup and error types to match escaping and
+# error behaviour exactly; it never imports them itself. There is one of each --
+# `_template_tape`'s -- so what it is handed here is what a caller wraps a value
+# in and what a caller catches.
+_core.template_configure(Markup, TemplateRenderError)
+_native_render = _core.template_render
+_native_compile = _core.template_compile
+_native_render_compiled = _core.template_render_compiled
 
 
 class Template:
@@ -82,11 +82,9 @@ class Template:
         self, context: dict[str, Any], max_output: int = MAX_OUTPUT_BYTES
     ) -> bytes:
         """Render to UTF-8 bytes from an explicit context mapping."""
-        if _native_render_compiled is not None and self._program is not None:
+        if self._program is not None:
             return _native_render_compiled(self._program, context, max_output)
-        if _native_render is not None:
-            return _native_render(self._tape, context, max_output)
-        return render_tape(self._tape, context, max_output)
+        return _native_render(self._tape, context, max_output)
 
 
 class TemplateDirectory:

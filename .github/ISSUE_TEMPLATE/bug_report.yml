@@ -48,9 +48,9 @@ body:
         A runnable snippet beats a description of one. `wreath new` gives you a
         project that already runs if you need somewhere to start.
 
-        If it only reproduces under the native extension, say so — `WREATH_PURE=1`
-        selects the pure-Python twin, and whether the bug survives that is
-        usually the most useful single fact in the report.
+        If it only reproduces on a particular build — free-threaded, the JIT
+        enabled, HTTP/3 compiled in — say which, because that is usually the
+        most useful single fact in the report.
       render: python
     validations:
       required: true

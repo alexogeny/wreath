@@ -1,17 +1,21 @@
-"""Pure-Python twin for Wreath's small, safe server-side template language.
+"""The template language up to the tape: opcodes, compiler, escaping, errors.
 
-The language is deliberately tiny and evaluates no arbitrary Python:
+**The tape is the seam, and only one side of it is C.** Turning source into a
+tape happens once, when a `Template` is built at startup, so there is nothing
+there for C to win and no C tokenizer exists -- `_core.template_compile` takes an
+*already compiled* tape and lowers it to a native program. Rendering is the
+request-time hot path, and `_native/templates.c` is what executes the tape.
 
-* `{{ path }}` — escaped interpolation of a dotted lookup path.
-* `{% if path %}` / `{% else %}` / `{% endif %}`.
-* `{% for name in path %}` / `{% endfor %}`.
-* `{% include "other.html" %}` — spliced in at compile time.
+That split is also why the compile-time refusals below need no native
+counterpart. A lookup path may not contain a segment starting with `_`, and the
+native engine never has to check that, because the only tapes it executes are
+ones this compiler produced.
 
-Lookup resolves each dotted segment by subscript first (mapping keys) then by
-attribute. Values are HTML-escaped unless wrapped in `Markup`; plain
-strings are always untrusted. Parsing and jump resolution happen once, at
-compile time, producing a flat opcode tape that both this reference VM and the
-native engine execute identically.
+`Markup`, `escape` and the two error types are shared for a second reason:
+`wreath.templates` hands `Markup` and `TemplateRenderError` to
+`_core.template_configure`, so the C engine escapes against the same class a
+caller wraps a value in and raises the same class a caller catches. Two
+definitions would be two answers to `type(value) is Markup`.
 """
 
 from __future__ import annotations
@@ -32,8 +36,6 @@ OP_ENDIF = 6  # (OP_ENDIF,)
 # Bounds enforced identically by both engines.
 MAX_LOOP_DEPTH = 64
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
-
-_MISSING: Any = object()
 
 
 class TemplateSyntaxError(Exception):
@@ -70,13 +72,6 @@ def escape(value: str) -> str:
         .replace('"', "&#34;")
         .replace("'", "&#39;")
     )
-
-
-def _render_value(value: Any) -> bytes:
-    if type(value) is Markup:
-        return str(value).encode("utf-8")
-    text = value if type(value) is str else str(value)
-    return escape(text).encode("utf-8")
 
 
 # --- parsing / compilation --------------------------------------------------
@@ -252,108 +247,3 @@ def _parse_include_target(rest: str, line: int) -> str:
     if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
         return rest[1:-1]
     raise TemplateSyntaxError("include target must be a quoted string", line=line)
-
-
-# --- reference VM -----------------------------------------------------------
-
-
-def _lookup(context: dict[str, Any], path: tuple[str, ...], line: int) -> Any:
-    current: Any = context
-    first = True
-    for segment in path:
-        found: Any = _MISSING
-        try:
-            found = current[segment]
-        except (KeyError, TypeError, IndexError):
-            found = _MISSING
-        if found is _MISSING:
-            try:
-                found = getattr(current, segment)
-            except AttributeError:
-                if first:
-                    raise TemplateRenderError(
-                        f"{segment!r} is undefined", line=line
-                    ) from None
-                raise TemplateRenderError(
-                    f"cannot resolve {'.'.join(path)!r} at {segment!r}", line=line
-                ) from None
-        current = found
-        first = False
-    return current
-
-
-def render_tape(
-    tape: tuple[tuple[Any, ...], ...],
-    context: dict[str, Any],
-    max_output: int = MAX_OUTPUT_BYTES,
-) -> bytes:
-    out: list[bytes] = []
-    size = 0
-    # Each loop frame: [iterator, var, body_start, had_old, old_value].
-    loops: list[list[Any]] = []
-    ip = 0
-    n = len(tape)
-    local = dict(context)
-    while ip < n:
-        instruction = tape[ip]
-        op = instruction[0]
-        if op == OP_TEXT:
-            fragment = instruction[1]
-            size += len(fragment)
-            if size > max_output:
-                raise TemplateRenderError("template output too large")
-            out.append(fragment)
-            ip += 1
-        elif op == OP_VAR:
-            value = _lookup(local, instruction[1], instruction[2])
-            fragment = _render_value(value)
-            size += len(fragment)
-            if size > max_output:
-                raise TemplateRenderError("template output too large")
-            out.append(fragment)
-            ip += 1
-        elif op == OP_IF:
-            value = _lookup(local, instruction[1], instruction[3])
-            ip = ip + 1 if value else instruction[2]
-        elif op == OP_JUMP:
-            ip = instruction[1]
-        elif op == OP_ENDIF:
-            ip += 1
-        elif op == OP_FOR:
-            _, var, path, end, line = instruction
-            iterable = _lookup(local, path, line)
-            try:
-                iterator = iter(iterable)
-            except TypeError:
-                raise TemplateRenderError(
-                    f"{'.'.join(path)!r} is not iterable", line=line
-                ) from None
-            try:
-                item = next(iterator)
-            except StopIteration:
-                ip = end
-                continue
-            if len(loops) >= MAX_LOOP_DEPTH:
-                raise TemplateRenderError("template loop nesting too deep")
-            had = var in local
-            loops.append([iterator, var, ip + 1, had, local.get(var)])
-            local[var] = item
-            ip += 1
-        elif op == OP_ENDFOR:
-            frame = loops[-1]
-            iterator, var, body_start, had, old = frame
-            try:
-                item = next(iterator)
-            except StopIteration:
-                loops.pop()
-                if had:
-                    local[var] = old
-                else:
-                    local.pop(var, None)
-                ip += 1
-            else:
-                local[var] = item
-                ip = body_start
-        else:  # pragma: no cover - compiler never emits other opcodes
-            raise TemplateRenderError(f"invalid opcode {op}")
-    return b"".join(out)

@@ -1,8 +1,10 @@
 /* wreath._native._core: template tape executor.
  *
- * Executes the flat opcode tape compiled by wreath._pure.templates.compile_tape,
- * producing byte-identical UTF-8 to wreath._pure.templates.render_tape. Parsing
- * and jump resolution stay in Python; only request-time rendering is here.
+ * Executes the flat opcode tape compiled by wreath._template_tape.compile_tape.
+ * Parsing and jump resolution stay in Python -- they run once, at startup; only
+ * request-time rendering is here. `template_render` walks the tape and
+ * `template_render_compiled` runs a lowered program, and the two must produce
+ * identical bytes.
  */
 #include "wreathcore.h"
 
@@ -18,7 +20,7 @@ static PyObject *T_Markup = NULL;      /* the Markup type object */
 static PyObject *RenderError = NULL;   /* TemplateRenderError */
 static const WreathRecordCAPI *record_capi = NULL;
 
-/* Opcodes -- must match wreath._pure.templates. */
+/* Opcodes -- must match wreath._template_tape. */
 #define OP_TEXT 0
 #define OP_VAR 1
 #define OP_FOR 2
@@ -274,7 +276,7 @@ raise_render(int line, PyObject *message)
 }
 
 /* Resolve a dotted lookup path against ``context``; returns a new reference or
- * NULL with a Python error set. Mirrors wreath._pure.templates._lookup. */
+ * NULL with a Python error set. */
 static PyObject *
 lookup_path(PyObject *context, PyObject *path, int line,
             const loop_frame *frames, int binding, lookup_cache *cache)
@@ -358,7 +360,7 @@ lookup_path(PyObject *context, PyObject *path, int line,
             }
         }
         if (found == NULL) {
-            /* Subscript missed; mirror the pure lookup's attribute fallback. */
+            /* Subscript missed; mirror the Python lookup's attribute fallback. */
             found = PyObject_GetAttr(current, segment);
             if (found == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_AttributeError)) {

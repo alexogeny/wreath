@@ -1,9 +1,13 @@
-"""Template engine behaviour and native/pure byte-parity.
+"""Template rendering: what the engine produces, and the two ways it runs a tape.
 
-The pure VM in wreath._pure.templates is the reference; the native engine must
-produce byte-identical UTF-8 and raise the same errors. Parity cases run
-against both engines directly so the comparison does not depend on which one
-the facade happens to select.
+`template_render` walks the tape directly; `template_render_compiled` lowers it
+to a native program first and then runs that. They are separate code paths over
+one input, so every case below drives both and holds them to the same written-
+down bytes -- not to each other, which would pass on any shared mistake.
+
+The tape they execute, the escaping, and the error types come from
+`wreath._template_tape`, so `Markup` here and the `Markup` `wreath.templates`
+exports are one class rather than two that agree.
 """
 
 from __future__ import annotations
@@ -11,27 +15,41 @@ from __future__ import annotations
 import pytest
 
 from wreath._native import _core
-from wreath._pure.templates import Markup as PureMarkup
-from wreath._pure.templates import (
-    TemplateRenderError,
-    compile_tape,
-    render_tape,
-)
+from wreath._template_tape import Markup, TemplateRenderError, compile_tape
 from wreath.templates import (
-    Markup,
     Template,
     TemplateDirectory,
     TemplateSyntaxError,
     escape,
 )
 
-_HAS_NATIVE = _core is not None and hasattr(_core, "template_render")
-_HAS_COMPILED = _core is not None and hasattr(_core, "template_render_compiled")
+# Configure the engine explicitly, so escaping and error construction match
+# whatever this module holds independent of import order in the facade.
+_core.template_configure(Markup, TemplateRenderError)
 
-if _HAS_NATIVE:
-    # Configure the native engine with the pure types so escaping and error
-    # construction match exactly, independent of import order in the facade.
-    _core.template_configure(PureMarkup, TemplateRenderError)
+_LIMIT = 16 * 1024 * 1024
+
+
+def render(tape: tuple, context: dict, max_output: int = _LIMIT) -> bytes:
+    """Render `tape` both ways, assert the two agree, and return the bytes."""
+    walked = _core.template_render(tape, context, max_output)
+    compiled = _core.template_render_compiled(
+        _core.template_compile(tape), context, max_output
+    )
+    assert compiled == walked, "the compiled program disagreed with the walked tape"
+    return walked
+
+
+def render_error(tape: tuple, context: dict, max_output: int = _LIMIT) -> BaseException:
+    """The error both paths raise, asserted identical, and returned."""
+    walked = _capture(lambda: _core.template_render(tape, context, max_output))
+    program = _core.template_compile(tape)
+    compiled = _capture(
+        lambda: _core.template_render_compiled(program, context, max_output)
+    )
+    assert type(compiled) is type(walked)
+    assert str(compiled) == str(walked)
+    return walked
 
 
 class Obj:
@@ -43,7 +61,7 @@ PARITY_CASES = [
     ("<h1>{{ title }}</h1>", {"title": "A & B <script>\"'"}),
     ("plain text & <b> no tags", {}),
     ("{{ n }} items", {"n": 42}),
-    ("{{ safe }}", {"safe": PureMarkup("<b>bold</b>")}),
+    ("{{ safe }}", {"safe": Markup("<b>bold</b>")}),
     (
         "{% for r in rows %}<tr><td>{{ r.id }}</td><td>{{ r.msg }}</td></tr>{% endfor %}",
         {"rows": [{"id": 1, "msg": "a<b"}, {"id": 2, "msg": "c&d'e"}]},
@@ -74,19 +92,8 @@ PARITY_CASES = [
 
 
 @pytest.mark.parametrize("source, context", PARITY_CASES)
-def test_pure_native_byte_parity(source: str, context: dict) -> None:
-    tape = compile_tape(source)
-    pure = render_tape(tape, context)
-    assert isinstance(pure, bytes)
-    if _HAS_NATIVE:
-        native = _core.template_render(tape, context, 16 * 1024 * 1024)
-        assert native == pure
-    if _HAS_COMPILED:
-        program = _core.template_compile(tape)
-        compiled = _core.template_render_compiled(
-            program, context, 16 * 1024 * 1024
-        )
-        assert compiled == pure
+def test_both_execution_paths_render_one_answer(source: str, context: dict) -> None:
+    assert isinstance(render(compile_tape(source), context), bytes)
 
 
 class Weird(int):
@@ -117,12 +124,10 @@ NUMERIC_CASES = [
 
 
 @pytest.mark.parametrize("context", NUMERIC_CASES, ids=lambda case: repr(case["v"]))
-def test_non_string_values_render_as_str_in_both_engines(context: dict) -> None:
-    tape = compile_tape("{{ v }}")
-    pure = render_tape(tape, context)
-    assert pure == str(context["v"]).encode()
-    if _HAS_NATIVE:
-        assert _core.template_render(tape, context, 16 * 1024 * 1024) == pure
+def test_non_string_values_render_as_str(context: dict) -> None:
+    # Against `str()`, which is the contract, rather than against the other
+    # execution path -- the two agreeing is a separate and weaker claim.
+    assert render(compile_tape("{{ v }}"), context) == str(context["v"]).encode()
 
 
 def test_a_number_inside_a_loop_renders_once_per_row() -> None:
@@ -135,9 +140,7 @@ def test_a_number_inside_a_loop_renders_once_per_row() -> None:
     tape = compile_tape("{% for r in rows %}<i>{{ r.id }}</i>{% endfor %}")
     rows = [{"id": index} for index in range(13)]
     expected = b"".join(f"<i>{index}</i>".encode() for index in range(13))
-    assert render_tape(tape, {"rows": rows}) == expected
-    if _HAS_NATIVE:
-        assert _core.template_render(tape, {"rows": rows}, 1 << 20) == expected
+    assert render(tape, {"rows": rows}, 1 << 20) == expected
 
 
 @pytest.mark.parametrize(
@@ -148,42 +151,13 @@ def test_a_number_inside_a_loop_renders_once_per_row() -> None:
         ("{% for x in v %}{% endfor %}", {"v": 5}),
     ],
 )
-def test_error_parity(source: str, context: dict) -> None:
-    tape = compile_tape(source)
-    pure_err = _capture(lambda: render_tape(tape, context))
-    assert isinstance(pure_err, TemplateRenderError)
-    if _HAS_NATIVE:
-        native_err = _capture(
-            lambda: _core.template_render(tape, context, 16 * 1024 * 1024)
-        )
-        assert type(native_err) is type(pure_err)
-        assert str(native_err) == str(pure_err)
-    if _HAS_COMPILED:
-        program = _core.template_compile(tape)
-        compiled_err = _capture(
-            lambda: _core.template_render_compiled(
-                program, context, 16 * 1024 * 1024
-            )
-        )
-        assert type(compiled_err) is type(pure_err)
-        assert str(compiled_err) == str(pure_err)
+def test_a_bad_lookup_is_a_render_error_on_both_paths(source: str, context: dict) -> None:
+    assert isinstance(render_error(compile_tape(source), context), TemplateRenderError)
 
 
-def test_output_size_overflow_both_engines() -> None:
+def test_output_past_the_size_bound_is_refused_on_both_paths() -> None:
     tape = compile_tape("{{ x }}")
-    context = {"x": "a" * 100}
-    assert isinstance(_capture(lambda: render_tape(tape, context, 10)), TemplateRenderError)
-    if _HAS_NATIVE:
-        assert isinstance(
-            _capture(lambda: _core.template_render(tape, context, 10)),
-            TemplateRenderError,
-        )
-    if _HAS_COMPILED:
-        program = _core.template_compile(tape)
-        assert isinstance(
-            _capture(lambda: _core.template_render_compiled(program, context, 10)),
-            TemplateRenderError,
-        )
+    assert isinstance(render_error(tape, {"x": "a" * 100}, 10), TemplateRenderError)
 
 
 def test_escaping_covers_all_five() -> None:
