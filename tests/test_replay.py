@@ -1,9 +1,9 @@
 """Stage 6/7: transport replay, fault injection, and endpoint-plan replay.
 
-Transport cases run over the native HTTP/1 protocol (and the pure twin) driven by
-a fake transport; the replay module ships its own fake transport so these never
-depend on the server test harness. We only ever assert owned outcomes: normalized
-response bytes, terminal disposition, and owned status/headers/body.
+Transport cases run over the HTTP/1 protocol driven by a fake transport; the
+replay module ships its own fake transport so these never depend on the server
+test harness. We only ever assert owned outcomes: normalized response bytes,
+terminal disposition, and owned status/headers/body.
 """
 
 from __future__ import annotations
@@ -34,16 +34,14 @@ try:
 except ImportError:
     _NATIVE_HTTP1 = None
 
-from wreath._pure.server import Http1Protocol as _PURE_HTTP1
 
-PROTOCOLS = [pytest.param(_PURE_HTTP1, id="pure")]
-PROTOCOLS.append(
+PROTOCOLS = [
     pytest.param(
         _NATIVE_HTTP1,
-        id="native",
+        id="http1",
         marks=pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built"),
     )
-)
+]
 proto = pytest.mark.parametrize("protocol_cls", PROTOCOLS)
 
 GET_PING = b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"

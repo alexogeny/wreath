@@ -45,16 +45,14 @@ try:
 except ImportError:
     _NATIVE_HTTP1 = None
 
-from wreath._pure.server import Http1Protocol as _PURE_HTTP1
 
-PROTOCOLS = [pytest.param(_PURE_HTTP1, id="pure")]
-PROTOCOLS.append(
+PROTOCOLS = [
     pytest.param(
         _NATIVE_HTTP1,
-        id="native",
+        id="http1",
         marks=pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built"),
     )
-)
+]
 proto = pytest.mark.parametrize("protocol_cls", PROTOCOLS)
 
 GET = b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
@@ -135,11 +133,10 @@ async def test_malformed_request_line_maps_to_an_owned_error_not_a_crash(
 @pytest.mark.asyncio
 async def test_timeout_fault_fires_the_drivers_own_request_deadline(protocol_cls: type) -> None:
     # A TIMEOUT fault is not a fabricated outcome: it fires the *driver's own*
-    # armed deadline enforcement (native ``_replay_fire_timeout`` -> C
-    # ``enforce_deadline``; the pure twin mirrors it). A complete head that
-    # promises a body which never fully arrives leaves the request deadline armed
-    # and the response unanswered -> the owned path emits a real 408, identically
-    # on both twins.
+    # armed deadline enforcement (``_replay_fire_timeout`` -> C
+    # ``enforce_deadline``). A complete head that promises a body which never
+    # fully arrives leaves the request deadline armed and the response
+    # unanswered -> the owned path emits a real 408.
     app = wreath.Wreath()
 
     @app.post("/upload")

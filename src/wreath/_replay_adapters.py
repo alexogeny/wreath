@@ -81,7 +81,7 @@ class AdapterFault(StrEnum):
     #
     # STREAM_END and STREAM_ERROR are deliberately distinct. `Connection.
     # notifications()` *returns* when the connection closes rather than raising
-    # (`_pure/postgres.py:985`), so a supervisor written around `except` sees
+    # (`wreath._pgdriver`), so a supervisor written around `except` sees
     # nothing at all -- which is exactly how the bus doorbell died silently for
     # the life of a process. A corpus that only models the raising case would
     # re-bless that bug.
@@ -216,9 +216,11 @@ def refuse_unbindable(args: tuple[Any, ...]) -> None:
     because both raise `TypeError`.
 
     Derivation, not duplication: when the driver learns to encode a type, this
-    stops refusing it without anyone editing this function.
+    stops refusing it without anyone editing this function. Asked of
+    `wreath.postgres`, which is the module that already knows which backend
+    loaded -- so "the driver" means the one this process is running.
     """
-    from ._pure.postgres import _infer_oid
+    from .postgres import _infer_oid
 
     for value in args:
         _infer_oid(value)
@@ -396,8 +398,14 @@ def driver_row_value(oid: int, value: object) -> object:
     A fake that scripts the *decoded* value it wishes it had is modelling a
     driver that does not exist. Add a codec and this starts returning the
     decoded type on its own; there is no second table to update.
+
+    Which is the reason it asks `wreath.postgres` rather than `_pgdriver`: the
+    extension codec table `register_extension_codec` fills belongs to the
+    backend that loaded, so decoding a registered `vector` through the base
+    class returns `b"[1,2,3]"` for a column the shipped driver returns
+    `[1.0, 2.0, 3.0]` for -- the same class of fiction, pointing the other way.
     """
-    from ._pure.postgres import _decode_value
+    from .postgres import _decode_value
 
     if value is None:
         return None

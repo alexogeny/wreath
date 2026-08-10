@@ -38,8 +38,8 @@ stream, a mid-message reset, a request-deadline timeout, a database pool timeout
 an outbound connect failure — so the owned *recovery* behavior can be exercised
 and asserted deterministic. Faults drive the *real* owned mechanism, never a
 simulated outcome: a `TIMEOUT` fault, for instance, fires the protocol driver's
-own armed request/keep-alive deadline enforcement (the native `_replay_fire_timeout`
-→ `enforce_deadline` in C, mirrored by the pure twin), so an incomplete
+own armed request/keep-alive deadline enforcement (`_replay_fire_timeout` →
+`enforce_deadline` in C), so an incomplete
 body-awaiting request emits a genuine `408` from the same code the live server
 runs. Fault injection is replay/test-only: it runs over fake transports and
 injected adapters, never a real resource, and cannot broaden any capture policy.

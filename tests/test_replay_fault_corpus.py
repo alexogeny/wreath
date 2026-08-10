@@ -37,14 +37,12 @@ try:
 except ImportError:
     _NATIVE_HTTP1 = None
 
-from wreath._pure.server import Http1Protocol as _PURE_HTTP1
 
 proto = pytest.mark.parametrize(
     "protocol_cls",
     [
-        pytest.param(_PURE_HTTP1, id="pure"),
         pytest.param(
-            _NATIVE_HTTP1, id="native",
+            _NATIVE_HTTP1, id="http1",
             marks=pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built"),
         ),
     ],

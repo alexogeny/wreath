@@ -721,12 +721,12 @@ async def replay_transport_h2(
 
 
 def _default_h2_protocol_cls() -> type | None:
-    return getattr(_extension("_server", ignore_pure=True), "Http2Protocol", None)
+    return getattr(_extension("_server"), "Http2Protocol", None)
 
 
 def _fire_timeout(protocol: Any) -> None:
     """Fire the driver's owned request/keep-alive timeout enforcement. Both the
-    native and pure HTTP/1 drivers expose `_replay_fire_timeout` for exactly
+    the HTTP/1 driver exposes `_replay_fire_timeout` for exactly
     this; a driver without it (e.g. HTTP/2) is a no-op.
 
     The `callable` guard is what tolerates a driver that does not implement it.
@@ -759,26 +759,24 @@ def _deliver_close(protocol: Any, kind: int) -> None:
 
 
 def _default_protocol_cls() -> type:
-    """The native HTTP/1 protocol when built, else the pure twin.
+    """The native HTTP/1 protocol, or a named refusal when it is not built.
 
-    **`ignore_pure` is deliberate, and it is the one place replay disagrees with
-    `wreath.server`.** `WREATH_PURE=1` selects the readable reference driver,
-    which is a reference and not a performance peer -- replaying a recording
-    through it would report the timings of the frameworks Wreath exists not to
-    be, rather than Wreath's own. So replay asks for the compiled driver in
-    both modes while `server._select_protocol` honours the variable.
+    Replay drives the *shipped* driver: a recording replayed through anything
+    else reports the timings and the framing decisions of that other thing, and
+    the whole point of a recording is that it is what actually happened.
 
     This used to be the *absence* of a gate rather than the presence of a
     decision, which is how it went unnoticed. `tests/test_native_loader.py` pins
     both halves; flip either and it says so.
     """
-    native = _extension("_server", ignore_pure=True)
-    if native is not None:
-        return cast(type, native.Http1Protocol)
-
-    from ._pure.server import Http1Protocol
-
-    return Http1Protocol
+    native = _extension("_server")
+    if native is None:
+        raise RuntimeError(
+            "wreath._native._server is not built, so there is no HTTP/1 driver "
+            "to replay a recording through. Build it with "
+            "`python setup.py build_ext --inplace`."
+        )
+    return cast(type, native.Http1Protocol)
 
 
 # --- fault injection ---------------------------------------------------------

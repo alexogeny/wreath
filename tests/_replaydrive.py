@@ -663,18 +663,14 @@ JOB_LAUNCH = Driver(
 
 
 def transport_drivers() -> tuple[Driver, ...]:
-    """The HTTP/1 drivers available in this build (the native one is optional)."""
+    """The HTTP/1 driver, when this build has `_server`."""
     import importlib
 
-    from wreath._pure.server import Http1Protocol as pure
-
-    drivers = [transport_driver(pure, "pure")]
     try:
         native = importlib.import_module("wreath._native._server")
     except ImportError:
-        return tuple(drivers)
-    drivers.append(transport_driver(native.Http1Protocol, "native"))
-    return tuple(drivers)
+        return ()
+    return (transport_driver(native.Http1Protocol, "http1"),)
 
 
 def all_drivers() -> tuple[Driver, ...]:
