@@ -10,17 +10,13 @@ import pytest
 
 from wreath import Request, Response, Wreath
 from wreath._native import _core
-from wreath._pure.observability import format_server_timing as pure_format
 from wreath.policy import HttpPolicy, ServerTimingPolicy, elapsed
 from wreath.testing import TestClient
 
-_FORMATTERS = [pure_format]
-if _core is not None and hasattr(_core, "format_server_timing"):
-    _FORMATTERS.append(_core.format_server_timing)
+formatter = _core.format_server_timing
 
 
-@pytest.mark.parametrize("formatter", _FORMATTERS)
-def test_formatter_renders_milliseconds(formatter: Any) -> None:
+def test_formatter_renders_milliseconds() -> None:
     assert formatter(b"total", 0.0) == b"total;dur=0.000"
     assert formatter(b"total", 1.5) == b"total;dur=1500.000"
     assert formatter(b"app", 0.0123456) == b"app;dur=12.346"
@@ -31,11 +27,15 @@ def test_formatter_renders_milliseconds(formatter: Any) -> None:
         formatter(b"n" * 65, 1.0)
 
 
-def test_native_formatter_agrees_with_pure_reference() -> None:
-    if _core is None or not hasattr(_core, "format_server_timing"):
-        pytest.skip("native core unavailable")
+def test_formatter_renders_dur_in_milliseconds_to_three_places() -> None:
+    """`dur` is milliseconds, per the W3C Server Timing spec's `dur` description.
+
+    The expectation is derived from that unit rather than read off the
+    implementation: seconds times 1000, rendered to three decimal places, which
+    makes the seconds-to-milliseconds conversion the thing under test.
+    """
     for seconds in (0.0, 1e-9, 0.5, 1.23456789, 1000.0):
-        assert _core.format_server_timing(b"total", seconds) == pure_format(b"total", seconds)
+        assert formatter(b"total", seconds) == f"total;dur={seconds * 1000:.3f}".encode()
 
 
 async def test_header_reports_a_plausible_duration() -> None:

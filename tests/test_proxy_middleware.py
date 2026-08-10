@@ -9,7 +9,6 @@ import pytest
 
 from wreath import Wreath
 from wreath._native import _core
-from wreath._pure.proxy import TrustedNetworks as PureTrustedNetworks
 from wreath.policy import (
     CsrfPolicy,
     HttpPolicy,
@@ -19,9 +18,7 @@ from wreath.policy import (
 )
 from wreath.request import Request
 
-_IMPLEMENTATIONS = [PureTrustedNetworks]
-if _core is not None and hasattr(_core, "TrustedNetworks"):
-    _IMPLEMENTATIONS.append(_core.TrustedNetworks)
+_IMPLEMENTATIONS = [_core.TrustedNetworks]
 
 _SECRET = "x" * 32
 
@@ -165,20 +162,34 @@ def test_forwarded_client_renders_canonically(implementation: Any) -> None:
         assert networks.forwarded_client(value.encode()) == str(ipaddress.ip_address(value))
 
 
-def test_native_matcher_agrees_with_pure_reference() -> None:
-    if _core is None or not hasattr(_core, "TrustedNetworks"):
-        pytest.skip("native core unavailable")
-    nets = ("10.0.0.0/8", "2001:db8::/32")
-    native, pure = _core.TrustedNetworks(nets), PureTrustedNetworks(nets)
-    for value in (
-        b"203.0.113.9, 10.1.2.3",
-        b"1.2.3.4, 203.0.113.9, 10.1.2.3",
-        b"2001:db8::1, 10.0.0.1",
-        b"unknown",
-        b"10.0.0.1",
-        b"[::ffff:203.0.113.9]:80, 10.0.0.1",
+@pytest.mark.parametrize("implementation", _IMPLEMENTATIONS)
+def test_the_client_is_the_rightmost_hop_no_trusted_proxy_claims(implementation: Any) -> None:
+    """`X-Forwarded-For` is walked right to left, and the answers are written down.
+
+    Only the rightmost entry is attested by the connection itself; everything to
+    its left was written by whoever was upstream and can be forged. So the
+    client is the first hop from the right that no trusted network contains --
+    an implementation that took the leftmost entry would let a caller name any
+    address it liked, which is the bug this exists to make impossible.
+    """
+    networks = implementation(("10.0.0.0/8", "2001:db8::/32"))
+    for header, expected in (
+        # One trusted proxy in front: skip it, the client is what it forwarded.
+        (b"203.0.113.9, 10.1.2.3", "203.0.113.9"),
+        # A forged hop to the left of a real one changes nothing.
+        (b"1.2.3.4, 203.0.113.9, 10.1.2.3", "203.0.113.9"),
+        # Every hop trusted: no untrusted claim exists, so the chain's origin
+        # is the best answer available rather than nothing at all.
+        (b"2001:db8::1, 10.0.0.1", "2001:db8::1"),
+        (b"10.0.0.1", "10.0.0.1"),
+        # RFC 7239 permits an obfuscated or unknown node. It is not an address,
+        # so there is no client -- not a fabricated one.
+        (b"unknown", None),
+        # Bracketed, ported, and IPv4-mapped: unwrapped so it can be matched
+        # against an IPv4 network, which `::ffff:203.0.113.9` never would be.
+        (b"[::ffff:203.0.113.9]:80, 10.0.0.1", "203.0.113.9"),
     ):
-        assert native.forwarded_client(value) == pure.forwarded_client(value), value
+        assert networks.forwarded_client(header) == expected, header
 
 
 # --- middleware behavior ----------------------------------------------------
