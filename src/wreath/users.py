@@ -718,7 +718,7 @@ def user_router(
     enrolled in a `second_factor_router` built over **this same `UserStore`**,
     the login answers 500 `{"error": "second_factor_not_wired", "detail": ...}`
     and writes no session. The detail names what to pass. Yes, that locks out a
-    misconfigured deployment; docs/decisions/0019 is why that is the right way
+    misconfigured deployment; refusing rather than half-wiring is why that is the right way
     round, and a user with nothing enrolled is unaffected either way.
 
     **Signing in and signing out both end a half-finished ceremony.** A begun
@@ -837,7 +837,7 @@ def user_router(
             # has nothing to check it with.
             #
             # It locks out a misconfigured deployment, which is the trade
-            # docs/decisions/0019 makes deliberately: a door that refuses and
+            # the refuse-rather-than-half-wire rule makes deliberately: a door that refuses and
             # names its own misconfiguration beats one that opens quietly. 500,
             # because the fault is the server's, and the same code as
             # `session_middleware_required` above, which is the same kind of
