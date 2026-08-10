@@ -12,9 +12,9 @@ widget = cache.get(widget_id)            # no I/O; explicit miss
 Readers always observe one complete generation; a refresh publishes a new one
 atomically and leaves the previous generation intact on failure.
 
-The read path is a dict lookup that CPython already services in C, so the pure
-implementation is the shipped one; the facade still selects a native
-`SnapshotCache` if a measured one is ever added to `_core`.
+The read path is a dict lookup that CPython already services in C, and a native
+port was measured against `kv.c` and came out slower, so there is one
+implementation rather than a selection. See `wreath._snapshot`.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import asyncio
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from ._native import _core
 from ._orm_events import (
     WRITE_CHANNEL,
     WriteBroadcast,
@@ -31,10 +30,11 @@ from ._orm_events import (
     unsubscribe_writes,
 )
 
-if _core is not None and hasattr(_core, "SnapshotCache"):
-    SnapshotCache = _core.SnapshotCache
-else:
-    from ._pure.snapshot import SnapshotCache
+# One implementation, not a selection. The `hasattr(_core, "SnapshotCache")`
+# guard that used to stand here never fired -- no C `SnapshotCache` was ever
+# written -- and a port was measured and declined rather than left pending. The
+# numbers, and the `kv.c` arm that decided it, are in `_snapshot`'s docstring.
+from ._snapshot import SnapshotCache as SnapshotCache
 
 # A small bounded LRU/TTL store for hot request-path caching (response cache,
 # idempotency replay), now a shell over `wreath.kv.KV`.
