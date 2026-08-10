@@ -25,7 +25,7 @@
 /* --- id generation -------------------------------------------------------- */
 /* A per-worker splitmix64 stream for span/trace ids. Seeded once, off the
  * request path, from the OS CSPRNG when available. Not a cryptographic stream
- * itself; ADR 0021 tracks upgrading to a refilled CSPRNG pool. */
+ * itself; `docs/plans/native-flight-recorder-stage-1.md` tracks upgrading to a refilled CSPRNG pool. */
 static uint64_t
 splitmix64(uint64_t *state)
 {
@@ -898,7 +898,7 @@ ring_publish(wreath_nfr_worker *worker, const void *cell)
  * it here so records ride the same single-writer ring, the same one capacity
  * check and release store, and the same RING_FULL accounting as a completion.
  * The native emitter replaced the packing above this line, not this call --
- * which is what the ADR promised the seam would survive. */
+ * which is what the design promised the seam would survive. */
 int
 wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell)
 {
@@ -908,8 +908,8 @@ wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell)
 /* The keyed redaction fingerprint, for callers outside this translation unit.
  *
  * The log emitter hashes with the *site registry's* key rather than the
- * worker's, because the pure Python packer uses that key and the two must agree
- * byte for byte -- a fingerprint that differed between the native and pure
+ * worker's, because the Python packer uses that key and the two must agree
+ * byte for byte -- a fingerprint that differed between the C and Python
  * halves of one process would break correlation within a single recording. So
  * the key travels in rather than being read off the worker. */
 uint64_t

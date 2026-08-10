@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
+from wreath import _flight_reference as codec
 from wreath import _flight_schema as fs
 from wreath._flight_metadata import build_metadata_image
-from wreath._pure import flight as codec
 from wreath.recording import (
     BodyCapture,
     CaptureBudget,

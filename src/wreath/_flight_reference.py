@@ -1,9 +1,10 @@
-"""Pure reference codec for the Native Flight Recorder container format.
+"""Reference codec for the Native Flight Recorder container format.
 
 This is the readable schema/overflow oracle for NFR, not a performance path: the
-future native spine writes cells; this module encodes/decodes the metadata image
+native spine writes cells; this module encodes/decodes the metadata image
 container and validates the fixed cell records so tests have an independent,
-byte-exact reference. It never records runtime telemetry.
+byte-exact reference to check the recorder against. It never records runtime
+telemetry.
 
 The container is a small chunked binary format (a Stage-0 subset of the `WFR1`
 recording container described in the plan): a fixed header, a metadata chunk, and
@@ -18,7 +19,7 @@ import time
 import zlib
 from dataclasses import dataclass
 
-from .._flight_schema import (
+from ._flight_schema import (
     _U64,
     BYTE_ORDER,
     CELL_SIZE,
@@ -146,7 +147,7 @@ _HEXCHARS = frozenset(b"0123456789abcdef")
 
 
 def parse_traceparent(data: bytes) -> tuple[int, int, int, bool] | None:
-    """Strict W3C `traceparent` parse, the pure twin of the C parser.
+    """Strict W3C `traceparent` parse, independent of the C parser.
 
     Returns `(trace_hi, trace_lo, parent_span, sampled)` or `None` for any
     malformed value. Lowercase hex only; rejects an `ff` version and all-zero
@@ -182,7 +183,7 @@ def parse_traceparent(data: bytes) -> tuple[int, int, int, bool] | None:
 # a performance path; the differential tests drive the same sequence through this
 # and the native Recorder and assert identical drained cells and counters.
 
-from .._flight_schema import (  # noqa: E402 - grouped with the oracle it serves
+from ._flight_schema import (  # noqa: E402 - grouped with the oracle it serves
     _CAPTURE_FIELD_HEADER,
     _CAPTURE_SLAB_HEADER,
     CAPTURE_FIELD_ALIGN,
@@ -224,7 +225,7 @@ def _mix64(x: int) -> int:
 class _PureRequest:
     __slots__ = ("_worker", "request_id", "active_slot", "_ctx", "_finished")
 
-    def __init__(self, worker: PureRecorder, request_id: int, slot: int, ctx: dict) -> None:
+    def __init__(self, worker: ReferenceRecorder, request_id: int, slot: int, ctx: dict) -> None:
         self._worker = worker
         self.request_id = request_id
         self.active_slot = slot
@@ -267,8 +268,8 @@ class _PureRequest:
             self._finished = True
 
 
-class PureRecorder:
-    """Pure twin of `wreath._native._flight.Recorder` (observable behavior)."""
+class ReferenceRecorder:
+    """A readable model of `wreath._native._flight.Recorder`'s observable behaviour."""
 
     def __init__(self, mode: int, worker_id: int = 0, ring_records: int = 16384,
                  active_requests: int = 2048, histogram_count: int = 1,
@@ -669,8 +670,9 @@ class PureRecorder:
         return b"".join(taken)
 
     def drain_captures(self, max_slabs: int = 256) -> list[bytes]:
-        """Pop committed capture slabs (bytes), returning each to the pool. The
-        pure twin of Recorder.drain_captures on the sink/test side."""
+        """Pop committed capture slabs (bytes), returning each to the pool.
+
+        The sink/test side of `Recorder.drain_captures`."""
         if self._capture_capacity == 0 or max_slabs <= 0:
             return []
         taken = self._capture_committed[:max_slabs]

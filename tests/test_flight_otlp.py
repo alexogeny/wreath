@@ -1,6 +1,6 @@
 """Stage 4b -- mapping reassembled traces to OTLP/JSON request dicts.
 
-These pin the pure ``wreath._otlp`` mapping: server spans, phase child spans,
+These pin the ``wreath._otlp`` mapping: server spans, phase child spans,
 synthesized IDs for unpropagated requests, failure status, the metrics request,
 and the bounded export queue. No OpenTelemetry SDK is imported anywhere.
 """
