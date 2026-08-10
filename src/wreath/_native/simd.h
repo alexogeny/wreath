@@ -9,7 +9,7 @@
  *   sse2    sixteen bytes per step, baseline on every x86-64, no dispatch
  *   avx2    thirty-two bytes per step, selected per call
  *
- * **No cached feature flag.** ADR 0007 forbids process-global mutable state,
+ * **No cached feature flag.** no process-global mutable state is allowed in C,
  * and a `static int have_avx2` is exactly that: a write shared by every thread
  * on the free-threaded build, for a value that never changes.
  * `__builtin_cpu_supports` needs no cache -- it is a load and a bit test
@@ -59,8 +59,8 @@
  * Detection only. The kernels themselves are not here: they answer a different
  * shape of question from everything else in this header -- "transform this
  * whole buffer" rather than "how many bytes may I pass over?" -- and they are
- * one arm, not four, because the fallback is `wreath._webpush`'s pure-Python
- * twin rather than another C arm.
+ * one arm, not four, because the fallback is `wreath._webpush`'s Python
+ * implementation rather than another C arm.
  *
  * Both features are optional on x86-64 (Westmere, 2010, was the first part with
  * either) and both must be tested at run time: a binary built on a machine that
@@ -72,7 +72,7 @@
  * Gated on GNU/clang for the same reason the AVX2 arm above is: MSVC has the
  * intrinsics but not per-function target selection, so compiling them would
  * mean compiling them for *every* function in the translation unit. There the
- * pure twin is the whole implementation.
+ * Python arm is the whole implementation.
  */
 #if defined(WREATH_HAVE_SSE2) && (defined(__GNUC__) || defined(__clang__))
 #include <tmmintrin.h>

@@ -26,7 +26,7 @@
  *     csrf_new_token   1470ns -> 969ns   1.52x
  *     csrf_validate    1529ns -> 1018ns  1.50x
  *
- * On ADR 0007: these states are process-global and derived from key material,
+ * On process-global state: these are and derived from key material,
  * which the note above `fill_random` refuses for pre-drawn *random* bytes. The
  * trade differs. Cached randomness is unused key material that exists only
  * because it was kept; these states are a pure function of a secret the caller

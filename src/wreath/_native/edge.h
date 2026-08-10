@@ -1,7 +1,7 @@
 /* Shared declarations for wreath._native._edge.
  *
- * `wreath.edge` is native-only by design (AGENTS.md): there is no pure twin
- * behind any of this. The module has two halves that share the RFC 9110 7.6.1
+ * `wreath.edge` has no Python path by design (AGENTS.md): a fallback here would
+ * degrade silently. The module has two halves that share the RFC 9110 7.6.1
  * rules and nothing else -- `edge_headers.c`, which transforms a header list for
  * the Python `ReverseProxy`, and `edge_serve.c`, which is the proxy that never
  * builds one.
