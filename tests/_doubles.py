@@ -15,7 +15,7 @@ Every statement is put through `check_for`, so these refuse what PostgreSQL
 refuses -- `= ANY($1)` with a Python list, two commands in one statement, and a
 cast on a placeholder that only bites on the second execution. All three are
 defects that reached working-looking code because a double accepted them; see
-`docs/decisions/0020-a-double-is-never-more-capable.md`.
+the never-more-capable rule for doubles in `AGENTS.md`.
 """
 
 from __future__ import annotations
