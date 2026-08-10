@@ -151,13 +151,16 @@ Python here for the same reason schemas, routes and validators are.
 If you need any of that, you need the `protobuf` package and a code-generation
 step, and that is a reasonable thing to want — it is just a different tool.
 
-## Native and pure
+## Where the codec lives
 
-Like JSON and MessagePack, the codec ships twice: `src/wreath/_pure/protobuf.py`
-is the reference implementation, and `src/wreath/_native/protobuf.c` is a faster
-twin of it. `tests/test_protobuf_parity.py` holds the two byte-for-byte over a
-corpus that walks every width transition, and `WREATH_PURE=1` selects the
-reference if you ever need to rule the C out.
+Like JSON and MessagePack, the codec is C: `src/wreath/_native/protobuf.c`.
+`tests/test_protobuf_parity.py` holds it byte-for-byte to the protobuf wire
+format — tag byte, varint, zigzag, little-endian fixed, length prefix, written
+out from the specification — over a corpus that walks every width transition.
+
+The vocabulary a plan is written in, the `KIND_*` codes and `FLAG_*` bits, is
+`src/wreath/_protobuf_plan.py`: the declaration compiler runs in Python at class
+creation and the codec switches on the same integers, so neither owns them.
 
 Reference: [`wreath.protobuf`](../reference/protobuf.md).
 

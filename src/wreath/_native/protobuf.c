@@ -1,11 +1,11 @@
 /* Protocol Buffers wire codec.
  *
- * The byte-for-byte twin of src/wreath/_pure/protobuf.py, which remains the
- * reference implementation and the parity contract; tests/test_protobuf_parity.py
- * asserts the two agree over a corpus, and tests/test_protobuf.py pins both to
- * hand-computed vectors from the encoding specification.
+ * Held byte-for-byte to the protobuf wire specification:
+ * tests/test_protobuf_parity.py writes the encoding rules out -- tag byte,
+ * varint, zigzag, little-endian fixed, length prefix -- and asserts against
+ * them, and tests/test_protobuf.py pins hand-computed vectors.
  *
- * Scope matches the pure codec deliberately. This file is bytes-to-values only:
+ * Scope is deliberate. This file is bytes-to-values only:
  * it walks a *plan* compiled by wreath/protobuf.py at class creation and never
  * touches a dataclass, so object construction stays in Python and the only
  * thing crossing the boundary is a tuple of ints.
@@ -13,7 +13,7 @@
  *   plan row  (number, kind, flags, subplan|None)
  *   values    a list in plan order -- position is identity, no name lookup
  *
- * Decoding choices that must not drift from the pure twin:
+ * Decoding choices the specification fixes:
  *   - A varint is bounded at ten bytes. This codec reads buffers a peer
  *     controls, and an unbounded continuation run is how a decoder walks off
  *     the end of one.
@@ -31,8 +31,9 @@
 #include <math.h>
 #include <string.h>
 
-/* Kind codes. These are the contract with _pure/protobuf.py: the two switch on
- * the same numbering, so a change here is a change there. */
+/* Kind codes. These are the contract with wreath/_protobuf_plan.py, which is
+ * where the declaration compiler and both codecs read the same numbering from,
+ * so a change here is a change there. */
 #define PB_KIND_INT32 1
 #define PB_KIND_INT64 2
 #define PB_KIND_UINT32 3
@@ -73,13 +74,10 @@
 /* The exception every refusal raises. Held for the process lifetime, exactly as
  * json.c holds the temporal types.
  *
- * Resolved lazily rather than only by protobuf_configure(), because the
- * configure call lives on the path where wreath.protobuf *selects* this module
- * -- and under WREATH_PURE=1 it selects the pure twin instead while a parity
- * test still imports this module directly. Depending on that call would mean
- * the same malformed buffer raised ProtobufDecodeError or a bare ValueError
- * depending on who imported what first, which is precisely the kind of
- * initialization-order difference a parity suite exists to catch. */
+ * Resolved lazily rather than only by protobuf_configure(), because a test can
+ * import this module directly without going through wreath.protobuf. Depending
+ * on that call would mean the same malformed buffer raised ProtobufDecodeError
+ * or a bare ValueError depending on who imported what first. */
 static PyObject *pb_decode_error = NULL;
 
 static PyObject *
@@ -88,7 +86,7 @@ pb_error_type(void)
     if (pb_decode_error == NULL) {
         /* One import per process on an error path, not per value: the result is
          * cached in the static above. */
-        PyObject *module = PyImport_ImportModule("wreath._pure.protobuf");
+        PyObject *module = PyImport_ImportModule("wreath._protobuf_plan");
         if (module == NULL) {
             PyErr_Clear();
             return PyExc_ValueError;
@@ -195,7 +193,7 @@ pb_is_varint_kind(int kind)
     return pb_wire_type_for(kind) == PB_WIRE_VARINT;
 }
 
-/* Inclusive bounds per kind, mirroring _BOUNDS in the pure twin. Encoding a
+/* Inclusive bounds per kind, from the declared field widths. Encoding a
  * value the declared kind cannot hold would silently truncate at the peer. */
 static int
 pb_bounds(int kind, int64_t *lo, uint64_t *hi, int *is_signed)
@@ -409,7 +407,7 @@ pb_is_default(int kind, PyObject *value)
             return -1;
         }
         /* -0.0 is *not* default: its bit pattern differs and round-tripping it
-         * as 0.0 would lose the sign, which the pure twin also refuses to do. */
+         * as 0.0 would lose the sign. */
         return (d == 0.0 && !signbit(d));
     }
     /* Everything reaching here is an integer kind (bool, string, bytes and the

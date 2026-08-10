@@ -49,11 +49,15 @@ So unknown fields are captured verbatim and re-emitted on encode, which means a
 message survives a round trip through an intermediary built against an older
 declaration. `unknown_fields(msg)` returns those bytes if you need to see them.
 
-## Native and pure
+## Where the work happens
 
-`src/wreath/_pure/protobuf.py` is the reference implementation and the parity
-contract; `src/wreath/_native/protobuf.c` is a faster twin held byte-for-byte
-equal by `tests/test_protobuf_parity.py`. `WREATH_PURE=1` selects the reference.
+The codec is `src/wreath/_native/protobuf.c`, held to the protobuf wire
+specification by `tests/test_protobuf_parity.py`.
+
+Only the codec is C. The vocabulary a plan is written in — the `KIND_*` codes,
+the `FLAG_*` bits and `ProtobufDecodeError` — is read by the declaration
+compiler here too, which is Python, so it lives in
+`src/wreath/_protobuf_plan.py` and both read the same integers.
 """
 
 from __future__ import annotations
@@ -65,8 +69,33 @@ import typing
 from typing import Any
 
 from ._native import _core
-from ._pure import protobuf as _ref
-from ._pure.protobuf import ProtobufDecodeError
+
+# The plan vocabulary, not the codec: these are read while *compiling* a
+# declaration, which happens in Python on both arms. See `wreath._protobuf_plan`.
+from ._protobuf_plan import (
+    FLAG_MAP,
+    FLAG_OPTIONAL,
+    FLAG_PACKED,
+    FLAG_REPEATED,
+    KIND_BOOL,
+    KIND_BYTES,
+    KIND_DOUBLE,
+    KIND_ENUM,
+    KIND_FIXED32,
+    KIND_FIXED64,
+    KIND_FLOAT,
+    KIND_INT32,
+    KIND_INT64,
+    KIND_MESSAGE,
+    KIND_SFIXED32,
+    KIND_SFIXED64,
+    KIND_SINT32,
+    KIND_SINT64,
+    KIND_STRING,
+    KIND_UINT32,
+    KIND_UINT64,
+    ProtobufDecodeError,
+)
 
 __all__ = [
     "ProtobufDecodeError",
@@ -87,18 +116,12 @@ class ProtobufDeclarationError(TypeError):
     """
 
 
-# The pure codec stays the reference implementation and the parity contract, so
-# WREATH_PURE=1 selects it exactly as it does for JSON and msgpack. The C side
-# is handed the decode exception once, the way json.c is handed the temporal
-# types, so a refusal raised in C is the same class a caller catches from the
-# pure path.
-if _core is not None and hasattr(_core, "protobuf_encode"):
-    _core.protobuf_configure(ProtobufDecodeError)
-    _encode_values = _core.protobuf_encode
-    _decode_values = _core.protobuf_decode
-else:
-    _encode_values = _ref.encode_values
-    _decode_values = _ref.decode_values
+# The codec is handed the decode exception once, the way json.c is handed the
+# temporal types, so a refusal raised in C is the class declared here and the
+# class a caller catches.
+_core.protobuf_configure(ProtobufDecodeError)
+_encode_values = _core.protobuf_encode
+_decode_values = _core.protobuf_decode
 
 #: Field numbers 19000-19999 are reserved by the specification for the protobuf
 #: implementation itself, and 2^29-1 is the largest expressible number.
@@ -109,21 +132,21 @@ _PLAN = "__wreath_protobuf_plan__"
 _UNKNOWN = "__wreath_protobuf_unknown__"
 
 _KINDS: dict[str, int] = {
-    "int32": _ref.KIND_INT32,
-    "int64": _ref.KIND_INT64,
-    "uint32": _ref.KIND_UINT32,
-    "uint64": _ref.KIND_UINT64,
-    "sint32": _ref.KIND_SINT32,
-    "sint64": _ref.KIND_SINT64,
-    "bool": _ref.KIND_BOOL,
-    "fixed64": _ref.KIND_FIXED64,
-    "sfixed64": _ref.KIND_SFIXED64,
-    "double": _ref.KIND_DOUBLE,
-    "fixed32": _ref.KIND_FIXED32,
-    "sfixed32": _ref.KIND_SFIXED32,
-    "float": _ref.KIND_FLOAT,
-    "string": _ref.KIND_STRING,
-    "bytes": _ref.KIND_BYTES,
+    "int32": KIND_INT32,
+    "int64": KIND_INT64,
+    "uint32": KIND_UINT32,
+    "uint64": KIND_UINT64,
+    "sint32": KIND_SINT32,
+    "sint64": KIND_SINT64,
+    "bool": KIND_BOOL,
+    "fixed64": KIND_FIXED64,
+    "sfixed64": KIND_SFIXED64,
+    "double": KIND_DOUBLE,
+    "fixed32": KIND_FIXED32,
+    "sfixed32": KIND_SFIXED32,
+    "float": KIND_FLOAT,
+    "string": KIND_STRING,
+    "bytes": KIND_BYTES,
 }
 
 #: Which explicit kinds each Python annotation may be narrowed to. Declaring
@@ -131,30 +154,30 @@ _KINDS: dict[str, int] = {
 _COMPATIBLE: dict[type, frozenset[int]] = {
     int: frozenset(
         {
-            _ref.KIND_INT32,
-            _ref.KIND_INT64,
-            _ref.KIND_UINT32,
-            _ref.KIND_UINT64,
-            _ref.KIND_SINT32,
-            _ref.KIND_SINT64,
-            _ref.KIND_FIXED32,
-            _ref.KIND_SFIXED32,
-            _ref.KIND_FIXED64,
-            _ref.KIND_SFIXED64,
+            KIND_INT32,
+            KIND_INT64,
+            KIND_UINT32,
+            KIND_UINT64,
+            KIND_SINT32,
+            KIND_SINT64,
+            KIND_FIXED32,
+            KIND_SFIXED32,
+            KIND_FIXED64,
+            KIND_SFIXED64,
         }
     ),
-    float: frozenset({_ref.KIND_DOUBLE, _ref.KIND_FLOAT}),
-    bool: frozenset({_ref.KIND_BOOL}),
-    str: frozenset({_ref.KIND_STRING}),
-    bytes: frozenset({_ref.KIND_BYTES}),
+    float: frozenset({KIND_DOUBLE, KIND_FLOAT}),
+    bool: frozenset({KIND_BOOL}),
+    str: frozenset({KIND_STRING}),
+    bytes: frozenset({KIND_BYTES}),
 }
 
 _DEFAULT_KIND: dict[type, int] = {
-    int: _ref.KIND_INT64,
-    float: _ref.KIND_DOUBLE,
-    bool: _ref.KIND_BOOL,
-    str: _ref.KIND_STRING,
-    bytes: _ref.KIND_BYTES,
+    int: KIND_INT64,
+    float: KIND_DOUBLE,
+    bool: KIND_BOOL,
+    str: KIND_STRING,
+    bytes: KIND_BYTES,
 }
 
 
@@ -238,23 +261,23 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
     them apart is what lets the plan stay a tuple of ints all the way down.
     """
     inner, optional = _unwrap_optional(annotation)
-    flags = _ref.FLAG_OPTIONAL if optional else 0
+    flags = FLAG_OPTIONAL if optional else 0
 
     origin = typing.get_origin(inner)
     if origin is list:
         (item,) = typing.get_args(inner)
         kind, _sub_flags, subplan, holder = _resolve(item, name, spec)
-        if kind == _ref.KIND_MESSAGE:
-            return kind, flags | _ref.FLAG_REPEATED, subplan, holder
+        if kind == KIND_MESSAGE:
+            return kind, flags | FLAG_REPEATED, subplan, holder
         packed = True if spec.packed is None else spec.packed
-        if packed and kind not in (_ref.KIND_STRING, _ref.KIND_BYTES):
-            flags |= _ref.FLAG_PACKED
-        return kind, flags | _ref.FLAG_REPEATED, None, holder
+        if packed and kind not in (KIND_STRING, KIND_BYTES):
+            flags |= FLAG_PACKED
+        return kind, flags | FLAG_REPEATED, None, holder
     if origin is dict:
         key_type, value_type = typing.get_args(inner)
         key_kind, _kf, _ks, _kh = _resolve(key_type, name, spec)
         value_kind, _vf, value_sub, value_holder = _resolve(value_type, name, spec)
-        if key_kind in (_ref.KIND_DOUBLE, _ref.KIND_FLOAT, _ref.KIND_MESSAGE):
+        if key_kind in (KIND_DOUBLE, KIND_FLOAT, KIND_MESSAGE):
             raise ProtobufDeclarationError(
                 f"field {name!r}: a map key may not be a float or a message"
             )
@@ -262,7 +285,7 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
             (1, key_kind, 0, None),
             (2, value_kind, 0, value_sub),
         )
-        return _ref.KIND_MESSAGE, flags | _ref.FLAG_MAP, subplan, value_holder
+        return KIND_MESSAGE, flags | FLAG_MAP, subplan, value_holder
 
     if isinstance(inner, type) and issubclass(inner, enum.IntEnum):
         if 0 not in {member.value for member in inner}:
@@ -270,13 +293,13 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
                 f"field {name!r}: enum {inner.__name__} has no zero member, and "
                 "proto3 requires one because zero is what an absent field decodes to"
             )
-        return _ref.KIND_ENUM, flags, None, inner
+        return KIND_ENUM, flags, None, inner
     if isinstance(inner, type) and hasattr(inner, _PLAN):
         # A nested message always has explicit presence: there is no zero value
         # that could stand in for absent.
         return (
-            _ref.KIND_MESSAGE,
-            flags | _ref.FLAG_OPTIONAL,
+            KIND_MESSAGE,
+            flags | FLAG_OPTIONAL,
             getattr(inner, _PLAN)[0],
             inner,
         )
@@ -317,21 +340,21 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
 
 
 def _zero(kind: int, flags: int, subplan: Any) -> Any:
-    if flags & _ref.FLAG_MAP:
+    if flags & FLAG_MAP:
         return dataclasses.field(default_factory=dict)
-    if flags & _ref.FLAG_REPEATED:
+    if flags & FLAG_REPEATED:
         return dataclasses.field(default_factory=list)
-    if flags & _ref.FLAG_OPTIONAL:
+    if flags & FLAG_OPTIONAL:
         return None
-    if kind == _ref.KIND_ENUM:
+    if kind == KIND_ENUM:
         return subplan(0)
-    if kind == _ref.KIND_STRING:
+    if kind == KIND_STRING:
         return ""
-    if kind == _ref.KIND_BYTES:
+    if kind == KIND_BYTES:
         return b""
-    if kind == _ref.KIND_BOOL:
+    if kind == KIND_BOOL:
         return False
-    if kind in (_ref.KIND_DOUBLE, _ref.KIND_FLOAT):
+    if kind in (KIND_DOUBLE, KIND_FLOAT):
         return 0.0
     return 0
 
@@ -393,7 +416,7 @@ def message[T](cls: type[T]) -> type[T]:
 
         kind, flags, subplan, holder = _resolve(annotation, name, spec)
         if spec.oneof is not None:
-            if not flags & _ref.FLAG_OPTIONAL:
+            if not flags & FLAG_OPTIONAL:
                 raise ProtobufDeclarationError(
                     f"field {name!r}: a oneof member must be optional "
                     f"(annotate it as `{annotation} | None`), because at most "
@@ -417,18 +440,18 @@ def _to_values(msg: Any) -> list:
     for index, row in enumerate(plan):
         _number, kind, flags, _subplan = row
         value = getattr(msg, names[index])
-        if flags & _ref.FLAG_MAP:
+        if flags & FLAG_MAP:
             holder_plan = row[3]
-            if holder_plan[1][1] == _ref.KIND_MESSAGE:
+            if holder_plan[1][1] == KIND_MESSAGE:
                 value = {k: _pair(v) for k, v in value.items()}
             values.append(value)
-        elif kind == _ref.KIND_MESSAGE:
-            if flags & _ref.FLAG_REPEATED:
+        elif kind == KIND_MESSAGE:
+            if flags & FLAG_REPEATED:
                 values.append([_pair(item) for item in value])
             else:
                 values.append(None if value is None else _pair(value))
-        elif kind == _ref.KIND_ENUM:
-            if flags & _ref.FLAG_REPEATED:
+        elif kind == KIND_ENUM:
+            if flags & FLAG_REPEATED:
                 values.append([int(item) for item in value])
             else:
                 values.append(None if value is None else int(value))
@@ -473,18 +496,18 @@ def _build(cls: type, values: list, unknown: bytes) -> Any:
     for index, row in enumerate(plan):
         _number, kind, flags, _subplan = row
         value = values[index]
-        if flags & _ref.FLAG_MAP:
+        if flags & FLAG_MAP:
             holder_plan = row[3]
-            if holder_plan[1][1] == _ref.KIND_MESSAGE:
+            if holder_plan[1][1] == KIND_MESSAGE:
                 value = {k: _build(holders[index], v[0], v[1]) for k, v in value.items()}
-        elif kind == _ref.KIND_MESSAGE:
-            if flags & _ref.FLAG_REPEATED:
+        elif kind == KIND_MESSAGE:
+            if flags & FLAG_REPEATED:
                 value = [_build(holders[index], v[0], v[1]) for v in value]
             elif value is not None:
                 value = _build(holders[index], value[0], value[1])
-        elif kind == _ref.KIND_ENUM and value is not None:
+        elif kind == KIND_ENUM and value is not None:
             holder = holders[index]
-            if flags & _ref.FLAG_REPEATED:
+            if flags & FLAG_REPEATED:
                 value = [holder(v) for v in value]
             else:
                 # An enum value this build does not know is kept as the int the
