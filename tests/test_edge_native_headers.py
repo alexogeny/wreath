@@ -11,9 +11,8 @@ about *what* the transform must produce traces to
 run against haproxy and nginx while the Python implementation still existed to
 check against. This file asserts the C agrees, one property at a time.
 
-Per `AGENTS.md`, `wreath.edge` is native-only by design and has no pure twin --
-so there is nothing to assert parity *against*, and these are direct assertions
-on behaviour rather than a comparison of two implementations.
+Per `AGENTS.md`, `wreath.edge` has no Python path by design -- so there is
+nothing to compare against here, and these are direct assertions on behaviour.
 """
 
 from __future__ import annotations
