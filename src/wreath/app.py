@@ -47,10 +47,6 @@ from ._flight_schema import PhaseCoverage as _PhaseCoverage
 from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
 from ._native import _core
-from ._pure.authz import build_capability_mask as _pure_build_capability_mask
-from ._pure.authz import (
-    build_compiled_capability_mask as _pure_build_compiled_capability_mask,
-)
 from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
 from ._routing import Router as CompiledRouter
 from .binding import (
@@ -102,10 +98,10 @@ from .state import State
 from .websocket import WebSocket, WebSocketDisconnect
 
 _build_capability_mask = (
-    _pure_build_capability_mask if _core is None else _core.build_capability_mask
+    _core.build_capability_mask
 )
 _build_compiled_capability_mask = (
-    _pure_build_compiled_capability_mask if _core is None else _core.build_compiled_capability_mask
+    _core.build_compiled_capability_mask
 )
 
 # Baseline Response.__call__ used to detect subclasses that override sending;
@@ -2279,7 +2275,7 @@ class Wreath:
         without it a protected route classified once here, discarded that
         answer, then entered the universal dispatcher and classified again while
         walking every absent feature branch. The distinction is measured in
-        `native_architecture_hunt_2026-08-08.json`, not speculative cloning.
+        measured (2026-08-08), not speculative cloning.
         """
         policy = self._http_policy
         fast_policy = policy is not None and not (
