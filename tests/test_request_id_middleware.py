@@ -10,17 +10,13 @@ import pytest
 
 from wreath import Wreath
 from wreath._native import _core
-from wreath._pure.observability import request_id_valid as pure_request_id_valid
 from wreath.policy import HttpPolicy, RequestIdPolicy, request_id
 from wreath.testing import TestClient
 
-_VALIDATORS = [pure_request_id_valid]
-if _core is not None and hasattr(_core, "request_id_valid"):
-    _VALIDATORS.append(_core.request_id_valid)
+validator = _core.request_id_valid
 
 
-@pytest.mark.parametrize("validator", _VALIDATORS)
-def test_validator_accepts_correlation_ids_and_rejects_injection(validator: Any) -> None:
+def test_validator_accepts_correlation_ids_and_rejects_injection() -> None:
     for value, expected in (
         (b"0123456789abcdef", True),
         (b"4bf92f3577b34da6a3ce929d0e0e4736", True),  # W3C trace id
@@ -40,11 +36,24 @@ def test_validator_accepts_correlation_ids_and_rejects_injection(validator: Any)
     assert validator(b"x" * 129, 128) is False
 
 
-def test_native_validator_agrees_with_pure_reference() -> None:
-    if _core is None or not hasattr(_core, "request_id_valid"):
-        pytest.skip("native core unavailable")
-    for value in (b"abc", b"", b"a b", b"-" * 200, b"\xff", b"a.b-c_d", b"A1"):
-        assert _core.request_id_valid(value, 64) == pure_request_id_valid(value, 64), value
+def test_validator_applies_the_same_charset_under_a_shorter_bound() -> None:
+    """The charset and the length bound are separate rejections.
+
+    A 64-byte bound rather than 128, because the length check and the charset
+    check are separate rejections and a validator that conflated them would look
+    correct at a single limit. `b"-" * 200` is the one that separates them: every
+    byte is in the charset, so only the bound can refuse it.
+    """
+    for value, expected in (
+        (b"abc", True),
+        (b"a.b-c_d", True),
+        (b"A1", True),  # upper case is in the charset
+        (b"", False),
+        (b"a b", False),
+        (b"-" * 200, False),  # charset-clean, refused on length alone
+        (b"\xff", False),
+    ):
+        assert validator(value, 64) is expected, value
 
 
 async def test_valid_inbound_id_is_reused_and_echoed() -> None:
@@ -170,10 +179,7 @@ class TestNativeRandomHex:
             with pytest.raises(ValueError):
                 _core.random_hex(size)
 
-    def test_the_pure_fallback_agrees_on_shape(self) -> None:
-        """`WREATH_PURE` and an older `_core` both take `os.urandom(n).hex()`."""
-        native = _core.random_hex(16)
-        pure = os.urandom(16).hex()
-        assert len(native) == len(pure)
-        assert re.fullmatch(r"[0-9a-f]{32}", native)
-        assert re.fullmatch(r"[0-9a-f]{32}", pure)
+    def test_random_hex_renders_lowercase_hex_two_chars_per_byte(self) -> None:
+        """The shape `os.urandom(n).hex()` produces, which is what callers parse."""
+        assert re.fullmatch(r"[0-9a-f]{32}", _core.random_hex(16))
+        assert len(_core.random_hex(16)) == len(os.urandom(16).hex())
