@@ -10,7 +10,6 @@ from uuid import UUID
 
 import pytest
 
-from wreath._pure.env import parse_dotenv as pure_parse_dotenv
 from wreath.config import (
     Env,
     Environment,
@@ -31,7 +30,6 @@ def test_dotenv_parser_is_literal_and_strict() -> None:
         "LITERAL": "$(whoami)",
         "REFERENCE": "${HOME}",
     }
-    assert pure_parse_dotenv(data) == expected
     assert parse_dotenv(data) == expected
     with pytest.raises(ValueError, match="line 1"):
         parse_dotenv(b"export NAME=wreath\n")
@@ -97,7 +95,7 @@ def test_the_template_names_exactly_the_server_variables_that_exist() -> None:
     # The build-time and runtime toggles are read outside `ServerConfig`, so
     # they are named rather than derived -- there is no registry to read them
     # from, and inventing one to satisfy a test would be the tail wagging.
-    outside = {"WREATH_PURE", "WREATH_BUILD_HTTP3", "WREATH_NATIVE_PROFILE"}
+    outside = {"WREATH_BUILD_HTTP3", "WREATH_NATIVE_PROFILE"}
     assert listed - outside == declared
 
 

@@ -133,10 +133,9 @@ should have inherited tomorrow's.
 The HTTP/2 and HTTP/3 window sizes are deliberately code-only: they are tuning
 an operator has no way to choose well from outside.
 
-Three more are read outside `ServerConfig`. `WREATH_PURE` forces the
-pure-Python implementation over the compiled extensions and any non-empty value
-enables it. `WREATH_BUILD_HTTP3` and `WREATH_NATIVE_PROFILE` are read by
-`setup.py` during `pip install`/`uv sync` and must be exactly `1` — the first
+Two more are read outside `ServerConfig`. `WREATH_BUILD_HTTP3` and
+`WREATH_NATIVE_PROFILE` are read by `setup.py` during `pip install`/`uv sync`
+and must be exactly `1` — the first
 builds the optional HTTP/3 extension (it needs the from-source nghttp3/ngtcp2
 toolchain), the second produces a profiling build.
 

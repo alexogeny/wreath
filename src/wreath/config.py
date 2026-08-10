@@ -30,11 +30,8 @@ from uuid import UUID
 
 from ._native import _core
 
-if _core is None or not hasattr(_core, "parse_dotenv"):
-    from ._pure.env import parse_dotenv, read_osenv
-else:
-    parse_dotenv = _core.parse_dotenv
-    read_osenv = _core.read_osenv
+parse_dotenv = _core.parse_dotenv
+read_osenv = _core.read_osenv
 
 
 _MISSING = dataclasses.MISSING
