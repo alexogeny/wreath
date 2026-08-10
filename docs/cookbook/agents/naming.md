@@ -18,7 +18,7 @@ Four verbs. The distinction is **what is being asked**, not what comes back:
 | Verb | Asks | Examples |
 | --- | --- | --- |
 | `stats()` | *how much has happened* — cumulative activity counters | `cache`, `jobs`, `messaging`, `streams`, `reactor`, `_logsink`, `_export`, `_recording_format`, `_mcp.server` |
-| `snapshot()` | *what is there now* — the current contents or shape of something that moves | `queue`, `rooms`, `http_client`, `postgres`, `sync`, `_projector`, `_pure.kv`, `_pure.queue` |
+| `snapshot()` | *what is there now* — the current contents or shape of something that moves | `queue`, `rooms`, `http_client`, `postgres`, `sync`, `_projector`, `kv`, `queue` |
 | `as_dict()` | this value object, as a plain mapping | twenty-odd value types |
 | `to_json()` | this value object, as JSON bytes | `objects.py`'s upload state, and nowhere else |
 
@@ -146,47 +146,38 @@ that cannot say which database its tables belong in.
 
 ## Reaching the accelerator
 
-Two idioms, and they are **not** interchangeable. Pick by whether the twin has
-to stay reachable in a running process.
+`_core` is mandatory -- `wreath._native` refuses at import without it -- so a
+facade binds what it needs and does not test for it:
 
-**Module-scope selection**, the common case (about two dozen sites — `response`,
-`queue`, `kv`, `cache`, `templates`, `protobuf`, `negotiation`, `binding`,
-`_b64`, `orm.compiler`, and the middleware):
-
-```python no-check="a fragment: `...` stands in for the twin's real signature"
-if _core is not None and hasattr(_core, "sse_frame"):
-    _sse_frame = _core.sse_frame
-else:  # pragma: no cover - exercised by the WREATH_PURE parity run
-    def _sse_frame(...): ...
+```python no-check="a fragment: `...` stands in for the real signature"
+_sse_frame = _core.sse_frame
 ```
 
-The arm is chosen once. Callers get the native callable with no extra Python
-frame, which is why `binding` and `rooms` use it on the response path. The twin
-is unreachable in a given process, so it needs the `WREATH_PURE=1` sweep and the
-`pragma` that says so.
+The binding happens once at import, so callers get the compiled callable with no
+extra Python frame and no per-call branch. That matters on the response path,
+where `binding` and `rooms` reach for it.
 
-**Per-call selection**, where both branches must stay live in one process
-(`_auth.jwt`, `_auth.cedar_engine`, `_webpush`):
+**Annotate what you bind.** A compiled function is `Any` to a type checker, so a
+facade that only rebinds tells its callers nothing and they infer `Any` all the
+way down. `wreath._codecs` is the pattern: the signature is written on the
+facade, which is now the only place the C's promise is stated.
 
-```python no-check="a fragment: the dispatch, without the function it sits in"
-_native_parse = getattr(_core, "jose_parse", None) if _core is not None else None
-...
-if _native_parse is not None:
-    ...
+**The optional seven are different.** `_client`, `_postgres`, `_server`,
+`_reactor`, `_edge`, `_flight` and `_http3` may genuinely be absent -- `_flight`
+is not built on Windows at all -- so a facade that needs one asks
+`wreath._native.extension(...)` and refuses **by name at configuration time**
+when the answer is `None`. Never at request time, and never by quietly doing
+something slower:
+
+```python no-check="a fragment: the refusal, without the function it sits in"
+module = _extension("_postgres")
+if module is None:
+    raise RuntimeError("wreath.migrations requires the Wreath-metal PostgreSQL extension")
 ```
 
-This costs a branch per call and buys testability without a subprocess.
-
-The consequence for mutation testing is in `AGENTS.md`: **a mutant killed in one
-execution mode and surviving in another has survived.** A module-scope site's
-pure arm is only reached under `WREATH_PURE=1`, so scoring it from the native
-run alone overstates it — which is exactly what happened to `_auth/jwt.py`,
-by four mutants.
-
-Prefer naming both arms in tests rather than monkeypatching the selection. A
-test that nulls the accelerator and then asserts is partly asserting that its own
-patch ran; `tests/test_b64.py` parametrizes over the two functions by name
-instead, and skips the native parameter when there is no `_core`.
+A `hasattr(_core, "some_symbol")` guard is not one of these idioms. It models a
+`_core` built without part of itself, which is not a state that exists -- the
+extension is one shared object and ships its symbols together.
 
 ## Retry and backoff
 
