@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _doubles import PooledConnection
 
 from wreath import Wreath
 from wreath._native import _core
@@ -268,59 +269,11 @@ def test_a_reconfigure_can_never_hand_a_throttled_caller_a_full_bucket() -> None
 # 30 concurrent acquires against a capacity-3 bucket admitted exactly 3.
 
 
-class _FakeConnection:
-    """One pooled connection. `rows` and `calls` are shared across the pool.
-
-    Distinct objects, shared state: the pool tracks which connection it lent
-    out, and handing the *same* object back for a second slot makes a release
-    raise `connection was not borrowed from this pool`. That only started
-    mattering when lifespan began bootstrapping this store's table -- schema
-    bootstrap pins one connection for the per-component advisory lock and
-    acquires another to run the DDL, so the pool is asked for two at once for
-    the first time here.
-    """
-
-    def __init__(
-        self,
-        rows: list[tuple[float, bool]],
-        calls: list[tuple[str, tuple[object, ...]]],
-    ) -> None:
-        self.calls = calls
-        self.rows = rows
-
-    async def execute(self, sql: str, *args: object) -> str:
-        self.calls.append((sql, args))
-        return "DELETE 0"
-
-    async def fetchrow(self, sql: str, *args: object) -> object:
-        self.calls.append((sql, args))
-        return self.rows.pop(0)
-
-    # Lifespan startup now creates this store's table, because
-    # `RateLimitPolicy` answers `schema_owners` with the store it holds and
-    # `Wreath.schema_components` therefore reaches the claim. It did not used
-    # to, which is why the double had never been asked either of these: the
-    # DDL was emitted by `wreath schema sql` and applied by nothing.
-
-    async def fetch(self, sql: str, *args: object) -> list[object]:
-        """Empty, which is the truthful answer for a database with no wreath
-        schema in it -- `bootstrap` reads the version marker and the catalog
-        through this, and no rows means every component applies from step 1."""
-        self.calls.append((sql, args))
-        return []
-
-    async def fetchval(self, sql: str, *args: object) -> object:
-        """`Database.lock` takes the per-component advisory lock here."""
-        self.calls.append((sql, args))
-        return None
-
-    async def close(self) -> None:
-        return None
 
 
 def _pg_store(
     monkeypatch: pytest.MonkeyPatch, rows: list[tuple[float, bool]]
-) -> tuple[Any, Any, _FakeConnection]:
+) -> tuple[Any, Any, PooledConnection]:
     """A store wired to a fake connection. The caller starts the database.
 
     The returned connection is a view onto the shared `calls` list rather than
@@ -330,17 +283,17 @@ def _pg_store(
     from wreath.postgres import Database, PoolConfig
 
     calls: list[tuple[str, tuple[object, ...]]] = []
-    connection = _FakeConnection(rows, calls)
+    connection = PooledConnection(rows, calls)
 
-    async def connect(dsn: str) -> _FakeConnection:
-        return _FakeConnection(rows, calls)
+    async def connect(dsn: str) -> PooledConnection:
+        return PooledConnection(rows, calls)
 
     monkeypatch.setattr("wreath.postgres.connect", connect)
     database = Database("rl", "postgresql://x/y", pools={"write": PoolConfig(min_size=1)})
     return PostgresRateLimitStore(database), database, connection
 
 
-def _acquires(connection: _FakeConnection) -> list[tuple[str, tuple[object, ...]]]:
+def _acquires(connection: PooledConnection) -> list[tuple[str, tuple[object, ...]]]:
     # Startup prepares statements on the connection; keep only real acquires.
     # Named on the bucket table rather than on `INSERT INTO`, because schema
     # bootstrap writes its version marker with one of those too.

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from _pgfidelity import check_for
+
 from wreath.messaging import Message, MessageBus
 
 
@@ -20,10 +22,12 @@ class FakeConn:
         self._fetchrow = fetchrow
 
     async def execute(self, sql: str, *args: Any) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return self._fetchrow
 
@@ -37,6 +41,7 @@ class FakeConn:
         and whose rows disagree. The traced world is modelled in
         `tests/messaging/test_trace.py`; between them both schema versions run.
         """
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return None
 

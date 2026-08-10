@@ -187,7 +187,7 @@ def test_a_datetime_annotation_maps_the_same_way() -> None:
 
 def test_typescript_renders_a_date_time_as_a_readable_alias() -> None:
     """`any` teaches the client nothing; `string` at least parses."""
-    from wreath._pure.typegen import ts_type
+    from wreath.typegen.typescript_renderer import ts_type
 
     assert ts_type(("string", "date-time", (), ())) == "IsoDateTime"
     assert ts_type(("string", None, (), ())) == "string"

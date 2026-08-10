@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _doubles import PooledConnection
 
 from wreath import Wreath
 from wreath._auth.cedar_engine import CedarPolicies
@@ -239,47 +240,16 @@ def test_the_postgres_store_names_the_database_its_table_belongs_to() -> None:
     assert PostgresQuotaStore(database).schema_database is database
 
 
-class _FakeConnection:
-    """One pooled connection; `rows` and `calls` are shared across the pool.
-
-    The same double `tests/test_ratelimit_middleware.py` uses, and for the same
-    reason: the row-to-decision translation and the SQL shape are decidable
-    without a server, and leaving them to a DSN-gated suite means they are
-    usually decided by nothing at all.
-    """
-
-    def __init__(self, rows: list[Any], calls: list[tuple[str, tuple[Any, ...]]]) -> None:
-        self.calls = calls
-        self.rows = rows
-
-    async def execute(self, sql: str, *args: Any) -> str:
-        self.calls.append((sql, args))
-        return "DELETE 0"
-
-    async def fetchrow(self, sql: str, *args: Any) -> Any:
-        self.calls.append((sql, args))
-        return self.rows.pop(0)
-
-    async def fetch(self, sql: str, *args: Any) -> list[Any]:
-        self.calls.append((sql, args))
-        return []
-
-    async def fetchval(self, sql: str, *args: Any) -> Any:
-        self.calls.append((sql, args))
-        return None
-
-    async def close(self) -> None:
-        return None
 
 
 def _pg_quota(monkeypatch: pytest.MonkeyPatch, rows: list[Any]) -> tuple[Any, Any, Any]:
     from wreath.postgres import Database, PoolConfig
 
     calls: list[tuple[str, tuple[Any, ...]]] = []
-    connection = _FakeConnection(rows, calls)
+    connection = PooledConnection(rows, calls)
 
-    async def connect(dsn: str) -> _FakeConnection:
-        return _FakeConnection(rows, calls)
+    async def connect(dsn: str) -> PooledConnection:
+        return PooledConnection(rows, calls)
 
     monkeypatch.setattr("wreath.postgres.connect", connect)
     database = Database("q", "postgresql://x/y", pools={"write": PoolConfig(min_size=1)})

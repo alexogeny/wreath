@@ -63,7 +63,7 @@ def test_request_body_does_not_join_a_python_chunk_list() -> None:
 
 def test_snapshot_iteration_does_not_copy_the_generation() -> None:
     """An iterator can retain the current dict without first making a tuple."""
-    source = (_SRC / "_pure" / "snapshot.py").read_text()
+    source = (_SRC / "_snapshot.py").read_text()
     start = source.index("    def __iter__(")
     iteration = source[start:source.index("    @property", start)]
     assert "tuple(" not in iteration

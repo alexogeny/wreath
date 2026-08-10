@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._auth.cedar import _request_now
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import (
     CedarAuthorizer,
@@ -22,6 +23,7 @@ from wreath.authorization import (
     EntityUid,
     authorize,
 )
+from wreath.state import State
 
 ALICE = EntityUid("User", "alice")
 BOB = EntityUid("User", "bob")
@@ -39,7 +41,7 @@ def decide(source: str, *, principal=ALICE, action=READ, resource=DOC, context=N
 
 
 def test_a_policy_set_parses_once_and_reports_its_size() -> None:
-    policies = CedarPolicies('permit(principal, action, resource);')
+    policies = CedarPolicies("permit(principal, action, resource);")
     assert len(policies) == 1
 
 
@@ -50,11 +52,11 @@ def test_a_policy_set_parses_once_and_reports_its_size() -> None:
         "   ",
         "permit(principal, action, resource)",  # missing semicolon
         "allow(principal, action, resource);",  # not an effect
-        'permit(principal == User::alice, action, resource);',  # unquoted id
+        "permit(principal == User::alice, action, resource);",  # unquoted id
         "permit(principal, action is Action, resource);",  # is in action scope
         'permit(principal, action, resource) when { ip("1.2.3.4") };',  # extension
         "permit(principal, action, resource) when { principal.x( };",
-        'permit(principal, action, resource) when { {a: 1, a: 2} == context };',
+        "permit(principal, action, resource) when { {a: 1, a: 2} == context };",
         "permit(principal, action, resource) when { 9223372036854775808 > 0 };",
     ],
 )
@@ -94,8 +96,7 @@ def test_scope_equality_permits() -> None:
 
 def test_forbid_overrides_permit() -> None:
     decision = decide(
-        "permit(principal, action, resource);"
-        'forbid(principal == User::"alice", action, resource);'
+        'permit(principal, action, resource);forbid(principal == User::"alice", action, resource);'
     )
     assert not decision.allowed
     assert decision.reason == "explicit forbid"
@@ -125,9 +126,7 @@ def test_principal_is_type_with_and_without_ancestor() -> None:
     assert decide(
         'permit(principal is User in Group::"staff", action, resource);', entities=entities
     ).allowed
-    assert not decide(
-        'permit(principal is User in Group::"staff", action, resource);'
-    ).allowed
+    assert not decide('permit(principal is User in Group::"staff", action, resource);').allowed
 
 
 def test_annotation_names_the_policy_in_diagnostics() -> None:
@@ -156,7 +155,7 @@ def test_entity_attributes_and_has() -> None:
         entities=entities,
     ).allowed
     assert decide(
-        'permit(principal, action, resource) when { resource has owner };', entities=entities
+        "permit(principal, action, resource) when { resource has owner };", entities=entities
     ).allowed
     assert not decide(
         'permit(principal, action, resource) when { resource has "missing" };',
@@ -201,12 +200,8 @@ def test_expression_semantics(expression: str, context: dict, allowed: bool) -> 
 
 
 def test_short_circuit_hides_errors_on_the_untaken_side() -> None:
-    assert decide(
-        "permit(principal, action, resource) when { true || (1 < true) };"
-    ).allowed
-    assert not decide(
-        "permit(principal, action, resource) when { false && (1 < true) };"
-    ).allowed
+    assert decide("permit(principal, action, resource) when { true || (1 < true) };").allowed
+    assert not decide("permit(principal, action, resource) when { false && (1 < true) };").allowed
 
 
 # -- error isolation ----------------------------------------------------------
@@ -267,9 +262,7 @@ def test_uids_arrive_as_objects_or_strings() -> None:
 def test_non_cedar_context_values_are_loud_type_errors() -> None:
     policies = CedarPolicies("permit(principal, action, resource);")
     with pytest.raises(TypeError):
-        policies.is_authorized(
-            principal=ALICE, action=READ, resource=DOC, context={"ratio": 1.5}
-        )
+        policies.is_authorized(principal=ALICE, action=READ, resource=DOC, context={"ratio": 1.5})
 
 
 def test_request_entities_merge_over_static_entities() -> None:
@@ -302,7 +295,7 @@ def test_the_policy_source_is_public() -> None:
 
 
 def test_two_engines_parsed_from_one_text_report_the_same_source() -> None:
-    """The property every worker in a fleet depends on."""
+    """The property every worker in a deployment depends on."""
     source = "permit(principal, action, resource);"
     assert CedarPolicies(source).source == CedarPolicies(source).source
 
@@ -316,7 +309,7 @@ def test_the_source_is_read_only_and_does_not_add_a_dict() -> None:
     """
     policies = CedarPolicies("permit(principal, action, resource);")
     with pytest.raises(AttributeError):
-        policies.source = "permit(principal, action, resource);"  # type: ignore[misc]
+        object.__setattr__(policies, "source", "permit(principal, action, resource);")
     assert not hasattr(policies, "__dict__")
 
 
@@ -372,6 +365,236 @@ async def test_builtin_engine_authorizes_through_the_default_mappers() -> None:
     assert denied[0]["status"] == 403
 
 
+@pytest.mark.asyncio
+async def test_account_attributes_and_request_time_are_first_class_policy_data() -> None:
+    accounts = {
+        "machine": Identity(
+            "machine",
+            type="Account",
+            attributes={
+                "active": True,
+                "kind": "machine",
+                "not_before": 100,
+                "expires_at": 200,
+            },
+        ),
+        "inactive": Identity(
+            "inactive",
+            type="Account",
+            attributes={
+                "active": False,
+                "kind": "machine",
+                "not_before": 100,
+                "expires_at": 200,
+            },
+        ),
+        "future": Identity(
+            "future",
+            type="Account",
+            attributes={
+                "active": True,
+                "kind": "machine",
+                "not_before": 151,
+                "expires_at": 200,
+            },
+        ),
+        "expired": Identity(
+            "expired",
+            type="Account",
+            attributes={
+                "active": True,
+                "kind": "machine",
+                "not_before": 100,
+                "expires_at": 150,
+            },
+        ),
+    }
+
+    async def verify(token: str) -> Identity | None:
+        return accounts.get(token)
+
+    engine = CedarPolicies(
+        'permit(principal is Account, action == Action::"Document::read", resource) '
+        'when { principal.active && principal.kind == "machine" '
+        "&& context.now >= principal.not_before "
+        "&& context.now < principal.expires_at };"
+    )
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(verify), CedarAuthorizer(engine=engine, clock=lambda: 150)
+    )
+
+    @app.get("/documents/{document_id}")
+    @authorize(
+        action="Document::read",
+        resource=lambda request: EntityUid("Document", request.path_params["document_id"]),
+    )
+    async def document(request):
+        return "allowed"
+
+    assert (await invoke(app, "machine"))[0]["status"] == 200
+    assert (await invoke(app, "inactive"))[0]["status"] == 403
+    assert (await invoke(app, "future"))[0]["status"] == 403
+    assert (await invoke(app, "expired"))[0]["status"] == 403
+
+
+@pytest.mark.asyncio
+async def test_request_time_is_lazy_and_shared_by_every_policy_on_the_request() -> None:
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 150.9
+
+    async def verify(token: str) -> Identity | None:
+        return Identity(token)
+
+    untimed = Wreath()
+    untimed.configure_auth(
+        BearerTokenBackend(verify),
+        CedarAuthorizer(engine=CedarPolicies("permit(principal, action, resource);"), clock=clock),
+    )
+
+    @untimed.get("/untimed")
+    @authorize(action="read", resource=EntityUid("Document", "1"))
+    async def without_time(request):
+        return "allowed"
+
+    assert (await invoke(untimed, "account", "/untimed"))[0]["status"] == 200
+    assert calls == 0
+
+    timed = Wreath()
+    timed.configure_auth(
+        BearerTokenBackend(verify),
+        CedarAuthorizer(
+            engine=CedarPolicies(
+                "permit(principal, action, resource) when { context.now == 150 };"
+            ),
+            clock=clock,
+        ),
+    )
+
+    @timed.get("/timed")
+    @authorize(action="read", resource=EntityUid("Document", "1"))
+    @authorize(action="audit", resource=EntityUid("Document", "1"))
+    async def with_time(request):
+        return "allowed"
+
+    assert (await invoke(timed, "account", "/timed"))[0]["status"] == 200
+    assert calls == 1
+
+
+@pytest.mark.parametrize("value", [True, "150", None])
+def test_request_time_refuses_non_numeric_clock_values(value: object) -> None:
+    request = type("Request", (), {"state": State()})()
+
+    with pytest.raises(TypeError, match="Unix seconds"):
+        _request_now(request, lambda: value)
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_request_time_refuses_non_finite_clock_values(value: float) -> None:
+    request = type("Request", (), {"state": State()})()
+
+    with pytest.raises(ValueError, match="finite Unix seconds"):
+        _request_now(request, lambda: value)
+
+
+@pytest.mark.asyncio
+async def test_an_opaque_engine_receives_time_because_it_cannot_declare_its_reads() -> None:
+    class Engine:
+        context: dict[str, object] | None = None
+
+        def is_authorized(self, **ask: Any) -> bool:
+            self.context = dict(ask["context"])
+            return True
+
+    async def verify(token: str) -> Identity | None:
+        return Identity(token)
+
+    engine = Engine()
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(verify), CedarAuthorizer(engine=engine, clock=lambda: 150.9)
+    )
+
+    @app.get("/opaque")
+    @authorize(action="read", resource=EntityUid("Document", "1"))
+    async def opaque(request):
+        return "allowed"
+
+    assert (await invoke(app, "account", "/opaque"))[0]["status"] == 200
+    assert engine.context is not None
+    assert engine.context["now"] == 150
+
+
+@pytest.mark.asyncio
+async def test_a_route_resource_can_carry_attributes_and_hierarchy() -> None:
+    async def verify(token: str) -> Identity | None:
+        return Identity(token, roles=frozenset({"reader"}))
+
+    engine = CedarPolicies(
+        'permit(principal in Role::"reader", action == Action::"Document::read", '
+        'resource in Folder::"archive") when { resource.classification == "internal" };'
+    )
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend(verify), CedarAuthorizer(engine=engine))
+
+    @app.get("/documents/{document_id}")
+    @authorize(
+        action="Document::read",
+        resource=lambda request: CedarEntity(
+            EntityUid("Document", request.path_params["document_id"]),
+            attrs={"classification": "internal"},
+            parents=(EntityUid("Folder", "archive"),),
+        ),
+    )
+    async def document(request):
+        return "allowed"
+
+    assert (await invoke(app, "account"))[0]["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_one_application_resource_provider_can_supply_route_hierarchy_and_time() -> None:
+    async def verify(token: str) -> Identity | None:
+        return Identity(token, type="Account", attributes={"active": True})
+
+    def resource_entities(resource: object, request: object) -> CedarEntity:
+        assert isinstance(resource, EntityUid)
+        return CedarEntity(
+            resource,
+            attrs={"not_before": 100, "expires_at": 200},
+            parents=(EntityUid("Ranch", "highland"),),
+        )
+
+    engine = CedarPolicies(
+        'permit(principal is Account, action == Action::"Document::read", '
+        'resource in Ranch::"highland") when { principal.active '
+        "&& context.now >= resource.not_before && context.now < resource.expires_at };"
+    )
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(verify),
+        CedarAuthorizer(
+            engine=engine,
+            resource_entities=resource_entities,
+            clock=lambda: 150,
+        ),
+    )
+
+    @app.get("/documents/{document_id}")
+    @authorize(
+        action="Document::read",
+        resource=lambda request: EntityUid("Document", request.path_params["document_id"]),
+    )
+    async def document(request):
+        return "allowed"
+
+    assert (await invoke(app, "account"))[0]["status"] == 200
+
+
 # -- pure/native parity -------------------------------------------------------
 
 
@@ -396,6 +619,8 @@ PARITY_SOURCES = [
     "permit(principal, action, resource) when { context.missing == 1 };",
     'permit(principal, action, resource) when { [1, {a: "x"}].contains({a: "x"}) };',
     'permit(principal, action, resource) when { "wreath" like "w*h" };',
+    'permit(principal, action, resource in Folder::"archive") '
+    "when { context.now >= 100 && context.now < 200 };",
     "permit(principal, action, resource) when { 9223372036854775807 + 1 == 0 };",
 ]
 
@@ -405,7 +630,11 @@ def test_pure_and_native_evaluators_agree(source: str) -> None:
     engine = CedarPolicies(
         source,
         entities=(
-            CedarEntity(DOC, attrs={"owner": ALICE}),
+            CedarEntity(
+                DOC,
+                attrs={"owner": ALICE},
+                parents=(EntityUid("Folder", "archive"),),
+            ),
             CedarEntity(ALICE, parents=(EntityUid("Group", "banned"),)),
         ),
     )
@@ -413,7 +642,7 @@ def test_pure_and_native_evaluators_agree(source: str) -> None:
         principal=("User", "alice"),
         action=("Action", "read"),
         resource=("Document", "42"),
-        context={"n": 1, "veto": False},
+        context={"n": 1, "veto": False, "now": 150},
     )
     results = [
         (name, evaluate(engine._policies, *request.values(), engine._store))

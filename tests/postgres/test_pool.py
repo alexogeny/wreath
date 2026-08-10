@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.postgres import Database, InterfaceError, PoolConfig
 
@@ -16,14 +17,17 @@ class FakeConnection:
         self.prepared: list[str] = []
 
     async def execute(self, sql: str, *args: object) -> str:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object]:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return {"connection": self.label, "args": args}
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return args[0] if args else 1
 

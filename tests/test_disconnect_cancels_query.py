@@ -58,6 +58,15 @@ async def database() -> Any:
         "cancel",
         _DSN,
         pools={"read": PoolConfig(min_size=1, max_size=1)},
+        # Several tests here leave a backend deliberately *running* -- that is the
+        # claim they make -- so the lease is never coming back and the default
+        # 10s grace is spent in full, twice, waiting for something this file
+        # arranged not to happen. Measured at 10.01s of teardown per test.
+        #
+        # Shortened rather than removed: the drain path still runs, and nothing
+        # here asserts on how long it waits. The tests' verdicts come from
+        # `pg_stat_activity` on a third connection, never from shutdown timing.
+        shutdown_timeout=0.5,
     )
     await db.start()
     try:

@@ -22,7 +22,7 @@ from wreath.tenancy import (
     verify_isolation,
 )
 
-from ._deployment import ACME, APP_ROLE, CENTRAL, DSN, GLOBEX, app_dsn
+from ._deployment import _WORKER, ACME, APP_ROLE, CENTRAL, DSN, GLOBEX, app_dsn
 
 pytestmark = [
     pytest.mark.database,
@@ -180,7 +180,7 @@ async def test_the_binding_does_not_survive_the_transaction(app_connection) -> N
 # --- the startup refusals ---------------------------------------------------
 
 
-async def test_verify_isolation_refuses_an_inheriting_login_role() -> None:
+async def test_verify_isolation_refuses_an_inheriting_login_role(deployment) -> None:
     """An inheriting role holds every tenant's privileges with no `SET ROLE`,
     which makes the whole boundary ambient and `RESET ROLE` an escape hatch.
 
@@ -216,7 +216,9 @@ async def test_verify_isolation_refuses_a_superuser() -> None:
         await connection.close()
 
 
-async def test_verify_isolation_refuses_a_role_that_owns_a_tenant_schema() -> None:
+async def test_verify_isolation_refuses_a_role_that_owns_a_tenant_schema(
+    deployment,
+) -> None:
     """An owner's privileges are implicit and cannot be revoked from itself, so
     no grant set can compensate. The schemas have to be owned by a migration
     role the request path never connects as."""
@@ -310,13 +312,20 @@ async def test_deprovisioning_refuses_while_the_schema_holds_tables(deployment) 
         await connection.close()
 
 
-async def test_deprovisioning_removes_the_schema_and_the_role_when_forced() -> None:
+async def test_deprovisioning_removes_the_schema_and_the_role_when_forced(
+    deployment,
+) -> None:
     """The green half of the refusal above, on a tenant of its own so it cannot
-    disturb the shared fixture."""
+    disturb the shared fixture.
+
+    Its own tenant, and its own *worker's* tenant: the key is suffixed because
+    the role `provision_tenant` derives from it is cluster-global, so a bare
+    `wt_gone` had all eight workers provisioning and dropping one role.
+    """
     connection = await connect(str(DSN))
     try:
         throwaway = await provision_tenant(
-            connection, key="wt_gone", central=CENTRAL, login_role=APP_ROLE)
+            connection, key=f"wt_gone_{_WORKER}", central=CENTRAL, login_role=APP_ROLE)
         await deprovision_tenant(connection, throwaway, force=True)
         rows = await connection.fetch(
             "SELECT 1 FROM pg_namespace WHERE nspname = $1", throwaway.schema)

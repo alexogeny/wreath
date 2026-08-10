@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Wreath
 from wreath.postgres import Database, Pool, Statement
@@ -53,6 +54,7 @@ class _FakeConnection:
         self.fail = fail
 
     async def fetchval(self, sql: str, *args: object) -> object:
+        check_for(self, sql, args)
         if self.fail:
             raise ConnectionRefusedError("no route to host")
         return 1

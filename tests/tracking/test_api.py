@@ -37,30 +37,54 @@ RESTRICTED = 1
 WINDOW = "since=2026-03-10&days=1"
 
 
-@pytest.fixture
-async def client():
-    """The application on a freshly built and seeded schema."""
+@pytest.fixture(scope="module")
+def seeded_schema():
+    """Build and seed this worker's schema once for the whole file.
+
+    **Every test below only reads** -- the file issues sixteen `.get()`s and no
+    write of any kind -- which is the precondition for sharing and the reason
+    this is safe here rather than generally. A test that wrote would see its
+    neighbours' rows, and the failure would be order-dependent, so if one is
+    added it builds its own schema instead of joining this.
+
+    The seed was previously rebuilt per test: 1.7s of `setup` on each of
+    nineteen tests made this the slowest file in the suite at 87.3s.
+
+    Deliberately synchronous, driving its own loop with `asyncio.run`, following
+    `test_place.py`: the tests are function-scoped and async, so each gets its
+    own event loop, and only the DDL is shared here. The `TestClient` below stays
+    per test, where its loop affinity is correct by construction.
+    """
+    import asyncio
+
     from _tracking import build_schema, drop_schema
-    from tracking.app import build
 
     from wreath.postgres import connect
-    from wreath.testing import TestClient
 
-    connection = await connect(_DSN)
+    async def _apply(step):
+        connection = await connect(_DSN)
+        try:
+            await step(connection)
+        finally:
+            await connection.close()
+
+    asyncio.run(_apply(build_schema))
     try:
-        await build_schema(connection)
+        yield
     finally:
-        await connection.close()
+        asyncio.run(_apply(drop_schema))
+
+
+@pytest.fixture
+async def client(seeded_schema):
+    """The application on the schema `seeded_schema` built."""
+    from tracking.app import build
+
+    from wreath.testing import TestClient
 
     application = build(cross_worker=False)
     async with TestClient(application) as test_client:
         yield test_client
-
-    connection = await connect(_DSN)
-    try:
-        await drop_schema(connection)
-    finally:
-        await connection.close()
 
 
 def acting(client, role: str | None):

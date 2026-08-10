@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import Wreath
 from wreath.http_client import ClientResponse, ConnectError
@@ -725,6 +726,7 @@ class _FakeSession:
             self.transactions.append("commit")
 
     def raw(self, sql: str, *args: object) -> _FakeRaw:
+        check_for(self, sql, args)
         return _FakeRaw(self, sql, args)
 
 

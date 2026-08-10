@@ -19,6 +19,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath.jobs import JobRunner
 from wreath.progress import PROGRESS_CHANNEL, ProgressRegistry
@@ -32,20 +33,24 @@ class FakeConnection:
         self.fetchval_script: list[Any] | None = None
 
     async def execute(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchval(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         if self.fetchval_script:
             return self.fetchval_script.pop(0)
         return self.fetchval_result
 
     async def fetch(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return []
 
     async def fetchrow(self, sql, *args):
+        check_for(self, sql, args)
         self.calls.append((sql, args))
         return None
 
