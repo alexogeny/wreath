@@ -109,6 +109,7 @@ class FakeConnection:
         #: Matched against each statement in order; first hit wins.
         self.responses: list[tuple[str, Any]] = []
         self.fail_on: dict[str, Exception] = {}
+        self.command_tags: list[tuple[str, str]] = []
         #: The prepared-statement cache, so a cast on a placeholder is fine on
         #: the first execution and fatal on the second, exactly as it is against
         #: a server. Without it the fake cannot reproduce the whole class.
@@ -124,6 +125,10 @@ class FakeConnection:
         test lean on something production never gets.
         """
         self.responses.append((fragment, [_row(r) for r in rows]))
+
+    def script_command(self, fragment: str, tag: str) -> None:
+        """Return one real PostgreSQL-shaped command tag for matching SQL."""
+        self.command_tags.append((fragment, tag))
 
     def describe(
         self,
@@ -204,6 +209,9 @@ class FakeConnection:
 
     async def execute(self, sql: str, *args: Any) -> str:
         self._record(sql, args)
+        for fragment, tag in self.command_tags:
+            if fragment in sql:
+                return tag
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:

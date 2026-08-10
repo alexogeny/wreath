@@ -43,12 +43,14 @@ from .constraints import (
     narrow,
     rule,
 )
+from .dto import model_dataclass
 from .errors import (
     DeclarationError,
     DetachedInstanceError,
     ExtensionNotInstalledError,
     MappingError,
     MultipleResultsError,
+    NoResultError,
     ORMError,
     RegistryError,
     SchemaMismatchError,
@@ -60,7 +62,7 @@ from .errors import (
 from .expressions import and_, not_, or_
 from .fields import MISSING, Mapped, column
 from .model import Model
-from .query import Select
+from .query import Select, where_fields
 from .registry import Registry
 from .relations import relationship
 from .schema import CENTRAL_SCHEMA, TENANT_SCHEMA, SchemaMode, SchemaRef
@@ -103,6 +105,7 @@ __all__ = [
     "MappingError",
     "Model",
     "MultipleResultsError",
+    "NoResultError",
     "ORMError",
     "OneOf",
     "Pattern",
@@ -132,6 +135,7 @@ __all__ = [
     "Facet",
     "facet",
     "index",
+    "model_dataclass",
     "narrow",
     "not_",
     "or_",
@@ -141,4 +145,5 @@ __all__ = [
     "is_null",
     "one_of",
     "unique",
+    "where_fields",
 ]

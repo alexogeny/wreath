@@ -796,6 +796,103 @@ def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], 
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
+def compile_update_where(
+    registry: Any, select: Select, values: dict[str, Any]
+) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
+    """Compile one explicitly bounded set-based update.
+
+    This is deliberately a Wreath query, not a compatibility manager. Only an
+    unadorned, predicate-bearing ``Select`` is accepted: ordering, paging,
+    projection and eager loading have no coherent meaning for a set-based
+    write. Relationship predicates are refused because PostgreSQL needs a
+    different ``UPDATE ... FROM`` plan; callers with that shape should select
+    keys first or write the statement with ``Session.raw``.
+    """
+    spec = registry.spec_for(select.model)
+    _check_bulk_select(select, "update_where")
+    if not values:
+        raise ORMError("update_where() needs at least one column value")
+    unknown = values.keys() - spec.by_name.keys()
+    if unknown:
+        raise ORMError(
+            f"{spec.model_type.__name__} has no column(s) {', '.join(sorted(unknown))}"
+        )
+    columns = tuple(item for item in spec.columns if item.python_name in values)
+    for column in columns:
+        if column.primary_key:
+            raise ORMError(
+                f"update_where() cannot change primary key "
+                f"{spec.model_type.__name__}.{column.python_name}"
+            )
+        if column.generated_sql is not None:
+            raise ORMError(
+                f"update_where() cannot assign generated column "
+                f"{spec.model_type.__name__}.{column.python_name}"
+            )
+
+    clauses: list[str] = []
+    joins = _plan_filter_joins(registry, spec, select, clauses)
+    if clauses:
+        raise ORMError(
+            "update_where() does not accept relationship predicates; select the "
+            "matching primary keys first or use explicit SQL"
+        )
+    builder = SqlBuilder()
+    builder.text(f"UPDATE {qualified(spec)} AS {quote('t0')} SET ")
+    assignments: list[str] = []
+    for column in columns:
+        value = column.column.validate(values[column.python_name])
+        placeholder = builder.bind(column.pg_type.to_wire(value), column.oid)
+        assignments.append(f"{quote(column.database_name)} = {placeholder}")
+    builder.text(", ".join(assignments))
+    builder.text(" WHERE ")
+    render_predicate(
+        conjoin(select.predicates), builder, "t0", joins, registry=registry
+    )
+    return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
+def compile_delete_where(
+    registry: Any, select: Select
+) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
+    """Compile one explicitly bounded set-based delete."""
+    spec = registry.spec_for(select.model)
+    _check_bulk_select(select, "delete_where")
+    clauses: list[str] = []
+    joins = _plan_filter_joins(registry, spec, select, clauses)
+    if clauses:
+        raise ORMError(
+            "delete_where() does not accept relationship predicates; select the "
+            "matching primary keys first or use explicit SQL"
+        )
+    builder = SqlBuilder()
+    builder.text(f"DELETE FROM {qualified(spec)} AS {quote('t0')} WHERE ")
+    render_predicate(
+        conjoin(select.predicates), builder, "t0", joins, registry=registry
+    )
+    return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
+def _check_bulk_select(select: Select, operation: str) -> None:
+    if not select.predicates:
+        raise ORMError(
+            f"{operation}() requires an explicit where() predicate; "
+            "predicate-free bulk writes are refused"
+        )
+    if (
+        select.projection
+        or select.includes
+        or select.orderings
+        or select.limit_ is not None
+        or select.offset_ is not None
+        or select.for_update_
+    ):
+        raise ORMError(
+            f"{operation}() accepts only Model.select().where(...); projection, "
+            "eager loading, ordering, paging and row locks are read semantics"
+        )
+
+
 def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
     requested = _projection(spec, select)
     projected = requested

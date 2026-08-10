@@ -12,6 +12,8 @@ from wreath.orm.errors import (
     DetachedInstanceError,
     MappingError,
     MultipleResultsError,
+    NoResultError,
+    ORMError,
     SessionClosedError,
     SessionError,
     UnloadedRelationshipError,
@@ -19,7 +21,7 @@ from wreath.orm.errors import (
 from wreath.orm.model import DETACHED, PERSISTENT
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
-from wreath.orm.types import Int64, Text, Timestamp
+from wreath.orm.types import Int64, Text, Timestamp, TsVector
 
 from .conftest import FakeDatabase, Membership, Post, User, post_row, user_row
 
@@ -156,6 +158,16 @@ async def test_get_returns_none_when_nothing_matches(
     database: FakeDatabase, session: Session
 ) -> None:
     assert await session.get(User, 404) is None
+
+
+async def test_require_names_the_missing_primary_key(session: Session) -> None:
+    with pytest.raises(NoResultError, match=r"User.*404.*does not exist"):
+        await session.require(User, 404)
+
+
+async def test_require_one_rejects_an_empty_query(session: Session) -> None:
+    with pytest.raises(NoResultError, match=r"matched no rows for User"):
+        await session.require_one(User.select().where(User.email == "gone@example.test"))
 
 
 async def test_get_requires_a_full_composite_key(session: Session) -> None:
@@ -511,6 +523,161 @@ async def test_for_update_requires_an_explicit_transaction(session: Session) -> 
 
 
 # -- writes --------------------------------------------------------------------
+
+
+async def test_create_uses_the_model_constructor_and_flush_path(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("INSERT", [[17, None]])
+    user = await session.create(User, email="new@example.test", name="New")
+    assert user.id == 17
+    assert any(statement.startswith("INSERT") for statement in database.connection.statements)
+
+
+async def test_update_where_is_predicate_bounded_and_returns_affected_rows(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script_command("UPDATE", "UPDATE 2")
+    count = await session.update_where(
+        User.select().where(User.email.ilike("%@example.test")), name="Moved"
+    )
+    assert count == 2
+    sql, args = next(
+        (sql, args) for sql, args in database.connection.calls if sql.startswith("UPDATE")
+    )
+    assert sql == (
+        'UPDATE "public"."users" AS "t0" SET "name" = $1 '
+        'WHERE "t0"."email" ILIKE $2'
+    )
+    assert args == ("Moved", "%@example.test")
+
+
+async def test_delete_where_refuses_a_predicate_free_query(session: Session) -> None:
+    with pytest.raises(ORMError, match="requires an explicit where"):
+        await session.delete_where(User.select())
+
+
+async def test_bulk_write_detaches_loaded_objects(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("users", [user_row(1)])
+    database.connection.script("posts", [post_row(2, 1)])
+    user = await session.require(User, 1)
+    post = await session.require(Post, 2)
+    database.connection.script_command("DELETE", "DELETE 1")
+    assert await session.delete_where(User.select().where(User.id == 1)) == 1
+    assert "detached" in repr(user)
+    assert post._orm_state == PERSISTENT
+    assert post._orm_owner is session
+
+
+async def test_bulk_write_keeps_loaded_objects_when_its_commit_fails(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("users", [user_row(1)])
+    user = await session.require(User, 1)
+    database.connection.script_command("DELETE", "DELETE 1")
+    database.connection.fail_on["COMMIT"] = RuntimeError("commit lost")
+    with pytest.raises(RuntimeError, match="commit lost"):
+        await session.delete_where(User.select().where(User.id == 1))
+    assert user._orm_state == PERSISTENT
+    assert user._orm_owner is session
+
+
+async def test_bulk_write_refuses_read_only_query_shape(session: Session) -> None:
+    with pytest.raises(ORMError, match="read semantics"):
+        await session.update_where(
+            User.select().where(User.id == 1).limit(1), name="Changed"
+        )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        User.select(User.id).where(User.id == 1),
+        User.select().where(User.id == 1).include(User.posts.selectin()),
+        User.select().where(User.id == 1).order_by(User.id),
+        User.select().where(User.id == 1).offset(1),
+        User.select().where(User.id == 1).for_update(),
+    ],
+)
+async def test_bulk_write_refuses_each_read_only_query_feature(
+    session: Session, query
+) -> None:
+    with pytest.raises(ORMError, match="read semantics"):
+        await session.delete_where(query)
+
+
+async def test_bulk_write_refuses_invalid_assignments(session: Session) -> None:
+    query = User.select().where(User.id == 1)
+    with pytest.raises(ORMError, match="at least one"):
+        await session.update_where(query)
+    with pytest.raises(ORMError, match="no column"):
+        await session.update_where(query, missing="value")
+    with pytest.raises(ORMError, match="primary key"):
+        await session.update_where(query, id=2)
+
+
+async def test_bulk_update_refuses_generated_columns(database: FakeDatabase) -> None:
+    class Document(Model, table="bulk_documents"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        title: Mapped[str] = column(Text)
+        search: Mapped[str] = column(TsVector(sources=("title",)))
+
+    registry = Registry(database, [Document], validate_schema="off")
+    session = Session(registry, "write")
+    with pytest.raises(ORMError, match="generated column"):
+        await session.update_where(
+            Document.select().where(Document.id == 1), search="ignored"
+        )
+
+
+async def test_bulk_write_refuses_relationship_predicates(session: Session) -> None:
+    predicate = Post.author.name == "Ada"
+    with pytest.raises(ORMError, match="relationship predicates"):
+        await session.update_where(Post.select().where(predicate), title="Moved")
+    with pytest.raises(ORMError, match="relationship predicates"):
+        await session.delete_where(Post.select().where(predicate))
+
+
+async def test_bulk_update_refuses_cross_field_rules(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    monkeypatch.setattr(User, "__wreath_compiled_rules__", (object(),))
+    with pytest.raises(SessionError, match="cross-field rules"):
+        await session.update_where(User.select().where(User.id == 1), name="Moved")
+
+
+async def test_bulk_writes_refuse_audited_models(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    monkeypatch.setattr(User, "__wreath_facets__", {"audit": object()})
+    query = User.select().where(User.id == 1)
+    with pytest.raises(SessionError, match="audited"):
+        await session.update_where(query, name="Moved")
+    with pytest.raises(SessionError, match="audited"):
+        await session.delete_where(query)
+
+
+async def test_bulk_writes_check_session_lifecycle(session: Session) -> None:
+    await session.close()
+    query = User.select().where(User.id == 1)
+    with pytest.raises(SessionClosedError):
+        await session.update_where(query, name="Moved")
+    with pytest.raises(SessionClosedError):
+        await session.delete_where(query)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [None, "OK", "DELETE 1", "UPDATE", "UPDATE ", "UPDATE ١", "UPDATE 1.0"],
+)
+async def test_bulk_update_refuses_untruthful_command_tags(
+    database: FakeDatabase, session: Session, status
+) -> None:
+    database.connection.script_command("UPDATE", status)
+    with pytest.raises(SessionError, match="expected a UPDATE <row-count>"):
+        await session.update_where(User.select().where(User.id == 1), name="Moved")
 
 
 async def test_insert_uses_returning_for_unloaded_columns(
