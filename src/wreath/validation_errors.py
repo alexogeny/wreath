@@ -17,7 +17,7 @@ The default output is unchanged from what Wreath has always produced, so
 installing nothing keeps today's behaviour byte for byte.
 
 An error carries a machine-readable `type` (`"missing"`, `"int"`,
-`"too_complex"`, ...) produced by both the pure validator and
+`"too_complex"`, ...) produced by both the Python validator and
 `_native/validate.c`. That is the catalogue key -- translate on `type`, never
 on the English `msg`, which is a developer-facing default and may change.
 
