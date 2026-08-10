@@ -36,8 +36,7 @@ between threads.
 
 The native table is open-addressed with a one-byte tag per slot, scanned 32
 lanes at a time; `_native/simd.h` documents the encoding and `_native/kv.c` the
-rebuild policy. `WREATH_PURE=1` selects an `OrderedDict` twin with identical
-behaviour and the same counters.
+rebuild policy.
 """
 
 from __future__ import annotations
@@ -47,10 +46,7 @@ from typing import Any
 
 from ._native import _core
 
-if _core is not None and hasattr(_core, "KV"):
-    KV: Any = _core.KV
-else:  # pragma: no cover - exercised by the WREATH_PURE parity run
-    from ._pure.kv import KV
+KV: Any = _core.KV
 
 
 @dataclass(frozen=True, slots=True)
