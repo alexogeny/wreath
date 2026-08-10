@@ -18,5 +18,4 @@ non-goals, by design rather than oversight:
   heuristics with valid exceptions, and a build-failing false positive is what
   gets a linter switched off. Teams wanting strict Level-A run `wreath audit
   --strict`, which fails on warnings too.
-- A byte-identical WREATH_PURE `jose` twin is deferred per the C-first directive.
 """
