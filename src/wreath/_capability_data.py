@@ -244,8 +244,8 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'observability',
-        'capability': "Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, and replay",
-        'modules': ('wreath.doctor', 'wreath.inspector', 'wreath.logging', 'wreath.metrics', 'wreath.recording', 'wreath.replay', 'wreath.telemetry'),
+        'capability': "Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, replay, and interactive transport simulation",
+        'modules': ('wreath.doctor', 'wreath.inspector', 'wreath.simulation', 'wreath.logging', 'wreath.metrics', 'wreath.recording', 'wreath.replay', 'wreath.telemetry'),
         'guides': ('docs/guides/observability.md', 'docs/guides/logging.md'),
         'replaces': ('structlog', 'opentelemetry-sdk', 'prometheus-client', 'statsd'),
     },
