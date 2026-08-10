@@ -9,11 +9,11 @@ Related material:
 - `docs/agents/manifest.json`
 - `docs/plans/native-outbound-http-client.md`
 - `docs/plans/background-tasking.md`
-- `docs/plans/future/03-supervised-services.md`
-- `docs/plans/future/05-operational-observability.md`
-- `docs/plans/future/06-security-extensions.md`
-- `docs/plans/future/07-durable-postgres-jobs.md`
-- `docs/plans/future/09-reliable-command-delivery.md`
+- `wreath.services`
+- `wreath.telemetry` / `wreath.logging`
+- `wreath.auth` / `wreath.authorization`
+- `wreath.jobs`
+- `wreath.webhooks`
 
 ## Goal
 
@@ -319,7 +319,7 @@ Retries use bounded exponential backoff with jitter and clamp `Retry-After`. Des
 
 ## Supervision and shutdown
 
-Durable dispatchers use `docs/plans/future/03-supervised-services.md`:
+Durable dispatchers use `wreath.services`:
 
 - no raw untracked `asyncio.create_task()`;
 - readiness reflects critical dispatcher/client state;
@@ -449,8 +449,8 @@ benchmarks/bench_webhooks.py
 benchmarks/README.md
 docs/guides/webhooks.md
 docs/reference/webhooks.md
-docs/plans/future/06-security-extensions.md
-docs/plans/future/09-reliable-command-delivery.md
+`wreath.auth` / `wreath.authorization`
+`wreath.webhooks`
 docs/agents/manifest.json
 repo-map.md
 ```
