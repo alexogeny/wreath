@@ -186,24 +186,20 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--read-high-water-messages", type=int, default=defaults.read_high_water_messages
     )
+    parser.add_argument("--response-high-water", type=int, default=defaults.response_high_water)
+    parser.add_argument("--response-low-water", type=int, default=defaults.response_low_water)
     parser.add_argument(
-        "--response-high-water", type=int, default=defaults.response_high_water
-    )
-    parser.add_argument(
-        "--response-low-water", type=int, default=defaults.response_low_water
-    )
-    parser.add_argument(
-        "--response-high-water-segments", type=int,
+        "--response-high-water-segments",
+        type=int,
         default=defaults.response_high_water_segments,
     )
     parser.add_argument(
-        "--response-low-water-segments", type=int,
+        "--response-low-water-segments",
+        type=int,
         default=defaults.response_low_water_segments,
     )
     parser.add_argument("--max-ws-fragments", type=int, default=defaults.max_ws_fragments)
-    parser.add_argument(
-        "--lifespan", choices=("auto", "on", "off"), default=defaults.lifespan
-    )
+    parser.add_argument("--lifespan", choices=("auto", "on", "off"), default=defaults.lifespan)
     parser.add_argument(
         "--protocol",
         action="append",
@@ -214,23 +210,19 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-concurrent-streams", type=int, default=defaults.max_concurrent_streams
     )
-    parser.add_argument(
-        "--initial-stream-window", type=int, default=defaults.initial_stream_window
-    )
+    parser.add_argument("--initial-stream-window", type=int, default=defaults.initial_stream_window)
     parser.add_argument(
         "--initial-connection-window", type=int, default=defaults.initial_connection_window
     )
-    parser.add_argument(
-        "--max-header-list-bytes", type=int, default=defaults.max_header_list_bytes
-    )
+    parser.add_argument("--max-header-list-bytes", type=int, default=defaults.max_header_list_bytes)
     parser.add_argument("--hpack-table-bytes", type=int, default=defaults.hpack_table_bytes)
     parser.add_argument("--qpack-table-bytes", type=int, default=defaults.qpack_table_bytes)
-    parser.add_argument(
-        "--qpack-blocked-streams", type=int, default=defaults.qpack_blocked_streams
-    )
+    parser.add_argument("--qpack-blocked-streams", type=int, default=defaults.qpack_blocked_streams)
     parser.add_argument("--loop", choices=("asyncio", "uvloop", "metal"), default="asyncio")
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="metal worker processes sharing an SO_REUSEPORT listener",
     )
     parser.add_argument("--tls-cert", metavar="PATH")
@@ -255,25 +247,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_server_arguments(dev_parser)
     dev_parser.add_argument("--reload-dir", action="append", default=[])
-    dev_parser.add_argument(
-        "--reload-include", action="append", dest="reload_includes", default=[]
-    )
-    dev_parser.add_argument(
-        "--reload-exclude", action="append", dest="reload_excludes", default=[]
-    )
+    dev_parser.add_argument("--reload-include", action="append", dest="reload_includes", default=[])
+    dev_parser.add_argument("--reload-exclude", action="append", dest="reload_excludes", default=[])
     dev_parser.add_argument("--reload-delay", type=float, default=0.25)
     dev_parser.add_argument("--reload-debounce", type=float, default=0.10)
     typegen_parser = commands.add_parser(
         "typegen", help="generate consumer type contracts from typed routes"
     )
     typegen_parser.add_argument("target", help="application target as module:attribute")
-    typegen_parser.add_argument("--target", dest="typegen_target", default="typescript",
-                                choices=("typescript", "python"), metavar="TARGET",
-                                help="output target: typescript or python (default: typescript)")
-    typegen_parser.add_argument("--class-name", dest="typegen_class_name",
-                                default="GeneratedServiceClient", metavar="NAME",
-                                help="python target: name of the generated "
-                                     "ServiceClient subclass")
+    typegen_parser.add_argument(
+        "--target",
+        dest="typegen_target",
+        default="typescript",
+        choices=("typescript", "python"),
+        metavar="TARGET",
+        help="output target: typescript or python (default: typescript)",
+    )
+    typegen_parser.add_argument(
+        "--class-name",
+        dest="typegen_class_name",
+        default="GeneratedServiceClient",
+        metavar="NAME",
+        help="python target: name of the generated ServiceClient subclass",
+    )
     typegen_parser.add_argument("--output", required=True, metavar="PATH")
     typegen_parser.add_argument("--react-query", action="store_true")
     typegen_parser.add_argument("--base-url-env", metavar="NAME", default=None)
@@ -281,18 +277,18 @@ def build_parser() -> argparse.ArgumentParser:
     typegen_parser.add_argument("--title", default="Wreath")
     typegen_parser.add_argument("--api-version", default="0.1.0")
     strictness = typegen_parser.add_mutually_exclusive_group()
-    strictness.add_argument("--strict", dest="allow_unknown", action="store_false",
-                            default=False)
+    strictness.add_argument("--strict", dest="allow_unknown", action="store_false", default=False)
     strictness.add_argument("--allow-unknown", dest="allow_unknown", action="store_true")
     typegen_parser.add_argument("--pure", action="store_true")
-    typegen_parser.add_argument("--factory", action="store_true",
-                                help="invoke the target as a zero-argument application factory")
+    typegen_parser.add_argument(
+        "--factory",
+        action="store_true",
+        help="invoke the target as a zero-argument application factory",
+    )
     migrations_parser = commands.add_parser(
         "migrations", help="inspect and run Wreath-metal PostgreSQL migrations"
     )
-    migration_actions = migrations_parser.add_subparsers(
-        dest="migration_action", required=True
-    )
+    migration_actions = migrations_parser.add_subparsers(dest="migration_action", required=True)
     migration_detect = migration_actions.add_parser(
         "detect", help="compare one compiled registry with its live schema"
     )
@@ -319,6 +315,22 @@ def build_parser() -> argparse.ArgumentParser:
     generation_parent = migration_generate.add_mutually_exclusive_group()
     generation_parent.add_argument("--initial", action="store_true")
     generation_parent.add_argument("--parent", metavar="64_HEX")
+    migration_baseline = migration_actions.add_parser(
+        "baseline",
+        help="review and adopt a matching live schema without replaying old migrations",
+    )
+    migration_baseline.add_argument("target", help="application target as module:attribute")
+    migration_baseline.add_argument("--database", default="main")
+    migration_baseline.add_argument("--factory", action="store_true")
+    migration_baseline.add_argument("--output", required=True, metavar="DIRECTORY")
+    migration_baseline.add_argument("--migration-id", required=True, metavar="32_HEX")
+    migration_baseline.add_argument(
+        "--adopt",
+        action="store_true",
+        help="record the reviewed root in Wreath history after re-verifying it",
+    )
+    migration_baseline.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
+    migration_baseline.add_argument("--json", action="store_true")
     migration_show = migration_actions.add_parser(
         "show", help="verify and display one immutable migration artifact"
     )
@@ -352,7 +364,8 @@ def build_parser() -> argparse.ArgumentParser:
     migration_down.add_argument("--factory", action="store_true")
     migration_down.add_argument("--allow-destructive", action="store_true")
     migration_down.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="downgrade even when live ORM code still maps a dropped/retyped object",
     )
     migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
@@ -374,13 +387,16 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         _sub = docs_actions.add_parser(_action, help=_help)
         _sub.add_argument(
-            "config", nargs="?", default="wreath_docs.py",
+            "config",
+            nargs="?",
+            default="wreath_docs.py",
             help="the Python config module exposing `site = Site(...)`",
         )
         if _action == "serve":
             _sub.add_argument("--port", type=int, default=8000, help="preview port")
             _sub.add_argument(
-                "--no-reload", action="store_true",
+                "--no-reload",
+                action="store_true",
                 help="do not watch the source tree and rebuild on change",
             )
 
@@ -389,37 +405,97 @@ def build_parser() -> argparse.ArgumentParser:
     )
     port_parser.add_argument("source", nargs="+", help="one or more app roots")
     port_parser.add_argument(
-        "--report-only", action="store_true", default=True,
+        "--report-only",
+        action="store_true",
+        default=True,
         help="static analysis + report (default when neither --output nor --in-place is given)",
     )
-    port_parser.add_argument("--json", action="store_true", dest="as_json",
-                             help="emit the machine-readable report JSON")
     port_parser.add_argument(
-        "--by-rule", action="store_true",
-        help="cluster the findings needing a decision by rule, heaviest first, "
-             "instead of listing them one per line in file order",
+        "--json", action="store_true", dest="as_json", help="emit the machine-readable report JSON"
     )
     port_parser.add_argument(
-        "--rule", action="append", metavar="ID",
+        "--inventory",
+        action="store_true",
+        help="inventory routes, security, integrations, and dependencies per project",
+    )
+    port_parser.add_argument(
+        "--target-python",
+        default="3.14",
+        metavar="VERSION",
+        help="Python version checked against every project and lock declaration (default: 3.14)",
+    )
+    port_parser.add_argument(
+        "--migration-strategy",
+        choices=("preserve", "baseline"),
+        default="preserve",
+        help=(
+            "preserve migration history, or report already-applied history as "
+            "retired by a reviewed baseline"
+        ),
+    )
+    inventory = port_parser.add_mutually_exclusive_group()
+    inventory.add_argument(
+        "--write-inventory",
+        metavar="PATH",
+        help="write the canonical migration inventory JSON atomically",
+    )
+    inventory.add_argument(
+        "--check-inventory",
+        metavar="PATH",
+        help="fail when the canonical inventory JSON differs from PATH",
+    )
+    port_parser.add_argument(
+        "--write-cedar",
+        metavar="PATH",
+        help="write a compiled, fail-closed Cedar policy/decorator module for inventory guards",
+    )
+    port_parser.add_argument(
+        "--cedar-semantics",
+        metavar="PATH",
+        help=(
+            "JSON policy semantics for --write-cedar: default/action/condition "
+            "expressions and authentication-only dependency factories"
+        ),
+    )
+    port_parser.add_argument(
+        "--by-rule",
+        action="store_true",
+        help="cluster the findings needing a decision by rule, heaviest first, "
+        "instead of listing them one per line in file order",
+    )
+    port_parser.add_argument(
+        "--rule",
+        action="append",
+        metavar="ID",
         help="show only this rule's sites (repeatable, e.g. --rule orm.query.filter)",
     )
     port_parser.add_argument(
-        "--context", type=int, default=0, metavar="N",
+        "--context",
+        type=int,
+        default=0,
+        metavar="N",
         help="show N source lines either side of each site (implies the site view)",
     )
     port_emit = port_parser.add_mutually_exclusive_group()
-    port_emit.add_argument("--in-place", action="store_true",
-                           help="rewrite files in place "
-                                "(Phase 1 declarative emit; requires --force)")
-    port_emit.add_argument("--output", metavar="DIR",
-                           help="write ported code to a sister tree (Phase 1 declarative emit)")
-    port_parser.add_argument("--force", action="store_true",
-                             help="allow --in-place and overwrite hand-edited outputs")
+    port_emit.add_argument(
+        "--in-place",
+        action="store_true",
+        help="rewrite files in place (Phase 1 declarative emit; requires --force)",
+    )
+    port_emit.add_argument(
+        "--output",
+        metavar="DIR",
+        help="write ported code to a sister tree (Phase 1 declarative emit)",
+    )
     port_parser.add_argument(
-        "--opinionated", action="store_true",
+        "--force", action="store_true", help="allow --in-place and overwrite hand-edited outputs"
+    )
+    port_parser.add_argument(
+        "--opinionated",
+        action="store_true",
         help="make the changes that reach past one file, instead of leaving a note: "
-             "give a function that runs queries the session parameter it needs "
-             "(its callers then have to pass one)",
+        "give a function that runs queries the session parameter it needs "
+        "(its callers then have to pass one)",
     )
     mutant_parser = commands.add_parser(
         "mutant",
@@ -476,8 +552,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "off", "sample", "changed", "full"),
         default="auto",
         help="after the ordinary run, measure its green tests' mutation confidence: "
-             "a stable sample, "
-             "controls changed from a ref, or a complete sweep (default: auto sample)",
+        "a stable sample, "
+        "controls changed from a ref, or a complete sweep (default: auto sample)",
     )
     test_parser.add_argument(
         "--mutant-samples",
@@ -485,15 +561,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_MUTANT_SAMPLES,
         metavar="N",
         help=f"number of whole-corpus controls in --mutant sample "
-             f"(default: {_DEFAULT_MUTANT_SAMPLES}; 192 is the deep sweep)",
+        f"(default: {_DEFAULT_MUTANT_SAMPLES}; 192 is the deep sweep)",
     )
     test_parser.add_argument(
         "--mutant-workers",
         default="auto",
         metavar="N|auto",
         help="mutant children to run concurrently after preparation overlaps "
-             "the ordinary suite (default: auto, capped at 3 live and reclaiming "
-             "up to 6 worker slots after the suite seals)",
+        "the ordinary suite (default: auto, capped at 3 live and reclaiming "
+        "up to 6 worker slots after the suite seals)",
     )
     test_parser.add_argument(
         "--mutant-path",
@@ -557,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=50.0,
         metavar="SECONDS",
         help="post-suite execution ceiling for auto/sample mutants; live probes "
-             "stop at the suite seal and do not spend it (default: 50)",
+        "stop at the suite seal and do not spend it (default: 50)",
     )
     test_parser.add_argument(
         "--mutant-changed",
@@ -583,22 +659,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--factory", action="store_true", help="treat the target as an application factory"
     )
     audit_static.add_argument(
-        "--static", action="append", metavar="DIR", default=[],
+        "--static",
+        action="append",
+        metavar="DIR",
+        default=[],
         help="also audit *.html under DIR (repeatable)",
     )
     audit_static.add_argument("--title", default="Wreath", help="docs title used when rendering")
+    audit_static.add_argument("--version", default="0.1.0", help="docs version used when rendering")
     audit_static.add_argument(
-        "--version", default="0.1.0", help="docs version used when rendering"
-    )
-    audit_static.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="emit the machine-readable report JSON",
     )
     audit_static.add_argument(
         "--strict", action="store_true", help="exit non-zero on warnings as well as errors"
     )
     audit_static.add_argument(
-        "--fix", action="store_true",
+        "--fix",
+        action="store_true",
         help="apply the safe auto-fix subset to static HTML (and suggest patches for the docs)",
     )
     audit_runtime = audit_actions.add_parser(
@@ -606,7 +686,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_runtime.add_argument("url", nargs="?", help="base URL of the running app")
     audit_runtime.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="emit the machine-readable report JSON",
     )
     audit_runtime.add_argument(
@@ -616,15 +698,21 @@ def build_parser() -> argparse.ArgumentParser:
         "code", help="audit application source for security defect patterns"
     )
     audit_code.add_argument(
-        "paths", nargs="*", default=["."], metavar="PATH",
+        "paths",
+        nargs="*",
+        default=["."],
+        metavar="PATH",
         help="files or directories to scan (default: the working directory)",
     )
     audit_code.add_argument(
-        "--tests", action="store_true",
+        "--tests",
+        action="store_true",
         help="include test directories, which legitimately trip several rules",
     )
     audit_code.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="emit the machine-readable report JSON",
     )
     audit_code.add_argument(
@@ -633,13 +721,22 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )
+    inspect_parser.add_argument("socket", help="path to the Inspector's Unix-domain socket")
     inspect_parser.add_argument(
-        "socket", help="path to the Inspector's Unix-domain socket"
-    )
-    inspect_parser.add_argument(
-        "topic", nargs="?", default="summary",
-        choices=("summary", "active", "routes", "explain-route", "explain-plan",
-                 "metadata", "timeline", "failures", "distributions"),
+        "topic",
+        nargs="?",
+        default="summary",
+        choices=(
+            "summary",
+            "active",
+            "routes",
+            "explain-route",
+            "explain-plan",
+            "metadata",
+            "timeline",
+            "failures",
+            "distributions",
+        ),
         help="what to show (default: summary = workers + pressure)",
     )
     inspect_parser.add_argument("--route-id", type=int, default=None)
@@ -647,13 +744,16 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--path", default=None)
     inspect_parser.add_argument("--plan-id", type=int, default=None)
     inspect_parser.add_argument(
-        "--table", default=None,
+        "--table",
+        default=None,
         help="metadata table name for the metadata topic",
     )
     inspect_parser.add_argument("--offset", type=int, default=0)
     inspect_parser.add_argument("--limit", type=int, default=50)
     inspect_parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print versioned JSON instead of tables",
     )
     _add_new_parser(commands)
@@ -686,30 +786,48 @@ def _add_new_parser(commands: Any) -> None:
     )
     parser.add_argument("name", help="the project and package name (an importable one)")
     parser.add_argument(
-        "--directory", default=".", metavar="PATH",
+        "--directory",
+        default=".",
+        metavar="PATH",
         help="where to create it (default: the working directory)",
     )
     parser.add_argument(
-        "--frontend", choices=("none", "react"), default="none",
+        "--frontend",
+        choices=("none", "react"),
+        default="none",
         help="also write a React app wired to `wreath typegen` (default: none)",
     )
     parser.add_argument(
-        "--database", choices=("none", "postgres"), default="none",
+        "--profile",
+        choices=("service", "modular-monolith"),
+        default="service",
+        help="project layout: a small service or bounded-context modular monolith "
+        "(default: service)",
+    )
+    parser.add_argument(
+        "--database",
+        choices=("none", "postgres"),
+        default="none",
         help="also declare an ORM model and register a database (default: none)",
     )
     parser.add_argument(
-        "--tenancy", action="store_true",
+        "--tenancy",
+        action="store_true",
         help="isolate tenants by PostgreSQL role: a directory, the resolving "
-             "middleware, and tenant-bound sessions (needs --database postgres)",
+        "middleware, and tenant-bound sessions (needs --database postgres)",
     )
     parser.add_argument(
-        "--forge", choices=("none", *_FORGES), default="none",
+        "--forge",
+        choices=("none", *_FORGES),
+        default="none",
         help="also write CI for the host this will live on: lint, tests and "
-             "preflight (default: none). `codeberg` and `forgejo` are the same "
-             "file",
+        "preflight (default: none). `codeberg` and `forgejo` are the same "
+        "file",
     )
     parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print the written paths as JSON instead of a report",
     )
 
@@ -724,6 +842,7 @@ def execute_new(namespace: argparse.Namespace) -> int:
         name=namespace.name,
         directory=Path(namespace.directory),
         frontend=namespace.frontend,
+        profile=namespace.profile,
         database=namespace.database,
         tenancy=namespace.tenancy,
         forge=namespace.forge,
@@ -733,16 +852,24 @@ def execute_new(namespace: argparse.Namespace) -> int:
     except ScaffoldError as error:
         raise CliError(str(error), exit_code=2) from error
     if namespace.as_json:
-        print(_json.dumps({
-            "version": 1, "project": options.name,
-            "directory": str(options.target), "files": written,
-        }))
+        print(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "project": options.name,
+                    "directory": str(options.target),
+                    "files": written,
+                }
+            )
+        )
         return 0
     print(f"wrote {len(written)} file(s) to {options.target}\n")
     for relative in written:
         print(f"  {relative}")
-    print(f"\nnext:\n  cd {options.target}\n  cp .env.example .env\n  pytest"
-          f"\n  wreath dev {options.name}.app:app")
+    print(
+        f"\nnext:\n  cd {options.target}\n  cp .env.example .env\n  pytest"
+        f"\n  wreath dev {options.name}.app:app"
+    )
     return 0
 
 
@@ -767,20 +894,29 @@ def _add_ci_parser(commands: Any) -> None:
     actions = parser.add_subparsers(dest="ci_action", required=True)
     init = actions.add_parser("init", help="write the CI files for one or more forges")
     init.add_argument(
-        "--forge", action="append", required=True, choices=_FORGES, metavar="FORGE",
+        "--forge",
+        action="append",
+        required=True,
+        choices=_FORGES,
+        metavar="FORGE",
         help=f"which forge to write for, repeatable; one of: {', '.join(_FORGES)}",
     )
     init.add_argument(
-        "--directory", default=".", metavar="PATH",
+        "--directory",
+        default=".",
+        metavar="PATH",
         help="the project root (default: the working directory)",
     )
     init.add_argument(
-        "--name", default=None,
+        "--name",
+        default=None,
         help="the importable package name, used to spell the preflight target "
-             "(default: read from pyproject.toml)",
+        "(default: read from pyproject.toml)",
     )
     init.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print the written paths as JSON instead of a report",
     )
 
@@ -852,10 +988,16 @@ def execute_ci(namespace: argparse.Namespace) -> int:
         path.write_text(content, encoding="utf-8")
     written = sorted(files)
     if namespace.as_json:
-        print(_json.dumps({
-            "version": 1, "project": ci.project,
-            "directory": str(directory), "files": written,
-        }))
+        print(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "project": ci.project,
+                    "directory": str(directory),
+                    "files": written,
+                }
+            )
+        )
         return 0
     print(f"wrote {len(written)} file(s) to {directory}\n")
     for relative in written:
@@ -883,11 +1025,15 @@ def _add_capabilities_parser(commands: Any) -> None:
         ),
     )
     parser.add_argument(
-        "term", nargs="?", default=None,
+        "term",
+        nargs="?",
+        default=None,
         help="the package, module, subsystem or word to look up",
     )
     parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print JSON instead of a report",
     )
 
@@ -907,18 +1053,20 @@ def _add_flight_parser(commands: Any) -> None:
     read = actions.add_parser(
         "read",
         help="decode a recorder file: a WFRR ring, or a WFR1 recording and the "
-             "job attempts inside it",
+        "job attempts inside it",
     )
     read.add_argument("path", help="a WFRR ring file or a WFR1 recording")
     read.add_argument(
-        "--kind", default=None,
+        "--kind",
+        default=None,
         choices=("completion", "correlation", "phase", "log"),
         help="show only records of one kind (ring files only)",
     )
-    read.add_argument("--limit", type=int, default=50,
-                     help="records to print (0 = all)")
+    read.add_argument("--limit", type=int, default=50, help="records to print (0 = all)")
     read.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print JSON instead of a human summary",
     )
 
@@ -929,15 +1077,17 @@ def _add_flight_parser(commands: Any) -> None:
     reproduce.add_argument("path", help="the ring file the crash left behind")
     reproduce.add_argument("recording", help="a WTR1 transport recording of the request")
     reproduce.add_argument("target", help="the application, as module:attribute")
-    reproduce.add_argument("--factory", default=None,
-                           help="callable that builds the application")
+    reproduce.add_argument("--factory", default=None, help="callable that builds the application")
     reproduce.add_argument(
-        "--request-id", type=int, default=None,
-        help="which request from the ring to check against (default: the one "
-             "that was in flight)",
+        "--request-id",
+        type=int,
+        default=None,
+        help="which request from the ring to check against (default: the one that was in flight)",
     )
     reproduce.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print JSON instead of a human summary",
     )
 
@@ -962,11 +1112,15 @@ def _add_schema_parser(commands: Any) -> None:
     emit.add_argument("target", help="application target as module:attribute")
     emit.add_argument("--factory", action="store_true")
     emit.add_argument(
-        "--component", default=None,
+        "--component",
+        default=None,
         help="one component by name (default: every registered one)",
     )
     emit.add_argument(
-        "--from-version", type=int, default=0, dest="from_version",
+        "--from-version",
+        type=int,
+        default=0,
+        dest="from_version",
         help="emit only the steps a database at this version still needs",
     )
 
@@ -990,21 +1144,19 @@ def _add_passes_parser(commands: Any) -> None:
         "passes", help="report on chunked passes (backfills, rollups, purges)"
     )
     actions = passes_parser.add_subparsers(dest="passes_action", required=True)
-    status = actions.add_parser(
-        "status", help="show every pass's phase, position, and pacing"
-    )
+    status = actions.add_parser("status", help="show every pass's phase, position, and pacing")
     status.add_argument("target", help="application target as module:attribute")
     status.add_argument("--factory", action="store_true")
     status.add_argument(
-        "--database", default=None,
+        "--database",
+        default=None,
         help="read one database's ledger (default: every one a job runner uses)",
     )
-    status.add_argument(
-        "--schema", default=None, help="ledger schema (default: the job runner's)"
-    )
+    status.add_argument("--schema", default=None, help="ledger schema (default: the job runner's)")
     status.add_argument("--name", default=None, help="one pass by name")
     status.add_argument(
-        "--holes", action="store_true",
+        "--holes",
+        action="store_true",
         help="list every dead-lettered chunk, with the statement that reproduces it",
     )
     status.add_argument("--json", action="store_true", dest="as_json")
@@ -1030,28 +1182,28 @@ def _add_jobs_parser(commands: Any) -> None:
     is the whole point of the column: the request finished hours ago and is
     otherwise unrecoverable from the failure.
     """
-    jobs_parser = commands.add_parser(
-        "jobs", help="report on the durable job queue"
-    )
+    jobs_parser = commands.add_parser("jobs", help="report on the durable job queue")
     actions = jobs_parser.add_subparsers(dest="jobs_action", required=True)
-    listing = actions.add_parser(
-        "list", help="show queue rows, dead-lettered ones by default"
-    )
+    listing = actions.add_parser("list", help="show queue rows, dead-lettered ones by default")
     listing.add_argument("target", help="application target as module:attribute")
     listing.add_argument("--factory", action="store_true")
     listing.add_argument(
-        "--database", default=None,
+        "--database",
+        default=None,
         help="read one database's queue (default: every one a job runner uses)",
     )
+    listing.add_argument("--schema", default=None, help="queue schema (default: the job runner's)")
     listing.add_argument(
-        "--schema", default=None, help="queue schema (default: the job runner's)"
-    )
-    listing.add_argument(
-        "--state", action="append", default=None, dest="states",
+        "--state",
+        action="append",
+        default=None,
+        dest="states",
         help="a state to include; repeatable (default: dead)",
     )
     listing.add_argument(
-        "--all", action="store_true", dest="every_state",
+        "--all",
+        action="store_true",
+        dest="every_state",
         help="every state, not just the dead letters",
     )
     listing.add_argument("--queue", default=None, help="one queue by name")
@@ -1106,8 +1258,11 @@ async def _read_jobs(
             try:
                 rows.extend(
                     await read_jobs(
-                        connection, schema=schema, states=states,
-                        queue=queue, limit=limit,
+                        connection,
+                        schema=schema,
+                        states=states,
+                        queue=queue,
+                        limit=limit,
                     )
                 )
             finally:
@@ -1163,11 +1318,13 @@ def _add_mcp_parser(commands: Any) -> None:
     )
     stdio.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
     stdio.add_argument(
-        "--factory", action="store_true",
+        "--factory",
+        action="store_true",
         help="invoke the target as a zero-argument application factory",
     )
     stdio.add_argument(
-        "--path", default="/mcp",
+        "--path",
+        default="/mcp",
         help="the MCP endpoint's path on that application (default: /mcp)",
     )
 
@@ -1196,23 +1353,28 @@ def _add_doctor_parser(commands: Any) -> None:
         "n-plus-one",
         help="find requests that queried one model over and over",
     )
+    n_plus_one.add_argument("socket", help="path to the Inspector's Unix-domain socket")
     n_plus_one.add_argument(
-        "socket", help="path to the Inspector's Unix-domain socket"
-    )
-    n_plus_one.add_argument(
-        "--threshold", type=int, default=10,
+        "--threshold",
+        type=int,
+        default=10,
         help="queries of one model within one request before it counts (default: 10)",
     )
     n_plus_one.add_argument(
-        "--limit", type=int, default=256,
+        "--limit",
+        type=int,
+        default=256,
         help="how many recent traces to scan (default: 256)",
     )
     n_plus_one.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print versioned JSON instead of a report",
     )
     n_plus_one.add_argument(
-        "--strict", action="store_true",
+        "--strict",
+        action="store_true",
         help="exit non-zero when anything is found, for a CI gate",
     )
 
@@ -1230,19 +1392,43 @@ def _add_doctor_parser(commands: Any) -> None:
     pre.add_argument("target", help="application target as module:attribute")
     pre.add_argument("--factory", action="store_true")
     pre.add_argument(
-        "--settings", action="append", default=[], metavar="SPEC",
+        "--settings",
+        action="append",
+        default=[],
+        metavar="SPEC",
         help="a settings dataclass whose environment contract to check, as "
-             "module:Class or module:Class=PREFIX (repeatable)",
+        "module:Class or module:Class=PREFIX (repeatable)",
     )
     pre.add_argument(
-        "--env", action="append", default=[], metavar="PATH",
+        "--env",
+        action="append",
+        default=[],
+        metavar="PATH",
         help="a dotenv file supplying keys (repeatable)",
     )
     pre.add_argument(
-        "--environ", action="store_true",
+        "--environ",
+        action="store_true",
         help="treat this process's environment as a supplier too",
     )
     pre.add_argument("--json", action="store_true", dest="as_json")
+
+    routes = actions.add_parser(
+        "routes",
+        help="emit a deterministic route, wire-type and security manifest",
+    )
+    routes.add_argument("target", help="application target as module:attribute")
+    routes.add_argument("--factory", action="store_true")
+    routes.add_argument(
+        "--write",
+        metavar="PATH",
+        help="write the canonical JSON manifest to PATH instead of stdout",
+    )
+    routes.add_argument(
+        "--check",
+        metavar="PATH",
+        help="exit non-zero when PATH differs from the current manifest",
+    )
 
     trace = actions.add_parser(
         "trace",
@@ -1250,31 +1436,39 @@ def _add_doctor_parser(commands: Any) -> None:
     )
     trace.add_argument("trace_id", help="the 32-hex W3C trace id, or a whole traceparent")
     trace.add_argument(
-        "target", nargs="?", default=None,
+        "target",
+        nargs="?",
+        default=None,
         help="application target as module:attribute, for the durable half",
     )
     trace.add_argument("--factory", action="store_true")
     trace.add_argument(
-        "--database", default=None,
+        "--database",
+        default=None,
         help="read one database (default: every one a job runner uses)",
     )
+    trace.add_argument("--schema", default=None, help="wreath's schema (default: the job runner's)")
     trace.add_argument(
-        "--schema", default=None, help="wreath's schema (default: the job runner's)"
-    )
-    trace.add_argument(
-        "--workflow-schema", default="wreath_system", dest="workflow_schema",
+        "--workflow-schema",
+        default="wreath_system",
+        dest="workflow_schema",
         help="where workflow instances live (default: wreath_system)",
     )
     trace.add_argument(
-        "--workflow-table", default="workflow_steps", dest="workflow_table",
+        "--workflow-table",
+        default="workflow_steps",
+        dest="workflow_table",
         help="the workflow step table's name (default: workflow_steps)",
     )
     trace.add_argument(
-        "--socket", default=None,
+        "--socket",
+        default=None,
         help="an Inspector socket, to find the recorded request as well",
     )
     trace.add_argument(
-        "--limit", type=int, default=256,
+        "--limit",
+        type=int,
+        default=256,
         help="how many recent traces to scan on that socket (default: 256)",
     )
     trace.add_argument("--json", action="store_true", dest="as_json")
@@ -1288,11 +1482,14 @@ def _add_replay_parser(commands: Any) -> None:
         "replay", help="replay a recording through the owned protocol/endpoint pipeline"
     )
     replay_parser.add_argument(
-        "--factory", action="store_true",
+        "--factory",
+        action="store_true",
         help="the target is a zero-argument callable returning the application",
     )
     replay_parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print versioned JSON instead of a human summary",
     )
     actions = replay_parser.add_subparsers(dest="replay_action", required=True)
@@ -1303,11 +1500,15 @@ def _add_replay_parser(commands: Any) -> None:
     transport.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
     transport.add_argument("recording", metavar="RECORDING", help="path to a .wtr1 recording")
     transport.add_argument(
-        "--inject", metavar="SCHEDULE", default=None,
+        "--inject",
+        metavar="SCHEDULE",
+        default=None,
         help="apply a .wfs1 fault schedule before the bytes reach the parser",
     )
     transport.add_argument(
-        "--record-faults", metavar="PATH", default=None,
+        "--record-faults",
+        metavar="PATH",
+        default=None,
         help="write the realized fault schedule that this run applied",
     )
     transport.add_argument("--pure", action="store_true", help="use the pure protocol driver")
@@ -1321,11 +1522,16 @@ def _add_replay_parser(commands: Any) -> None:
     plan.add_argument("--query", default="", help="raw query string")
     plan.add_argument("--body", default="", help="request body (utf-8)")
     plan.add_argument(
-        "--header", action="append", default=[], metavar="NAME:VALUE",
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME:VALUE",
         help="a request header (repeatable)",
     )
     plan.add_argument(
-        "--mode", choices=("invoke", "replace", "skip"), default="invoke",
+        "--mode",
+        choices=("invoke", "replace", "skip"),
+        default="invoke",
         help="handler boundary: run it, use --replace-body, or resolve only",
     )
     plan.add_argument("--replace-body", default=None, help="REPLACE mode: recorded return string")
@@ -1335,20 +1541,25 @@ def _add_replay_parser(commands: Any) -> None:
         help="write a runnable pytest that re-drives a recorded request or job attempt",
     )
     to_test.add_argument(
-        "target", metavar="MODULE[:ATTRIBUTE]",
-        help="the application for a .wtr1 request, or the JobRunner for a "
-             ".wfr1 job attempt",
+        "target",
+        metavar="MODULE[:ATTRIBUTE]",
+        help="the application for a .wtr1 request, or the JobRunner for a .wfr1 job attempt",
     )
     to_test.add_argument(
-        "recording", metavar="RECORDING",
+        "recording",
+        metavar="RECORDING",
         help="a .wtr1 transport recording or a .wfr1 job-attempt recording",
     )
     to_test.add_argument(
-        "--output", "-o", metavar="PATH", default=None,
+        "--output",
+        "-o",
+        metavar="PATH",
+        default=None,
         help="write the test here instead of to stdout",
     )
     to_test.add_argument(
-        "--name", default=None,
+        "--name",
+        default=None,
         help="the generated test function's name (derived from the request otherwise)",
     )
 
@@ -1360,43 +1571,97 @@ def _add_capture_parser(commands: Any) -> None:
     )
     capture_parser.add_argument("socket", help="path to the Inspector's Unix socket")
     capture_parser.add_argument(
-        "--token", default=None,
+        "--token",
+        default=None,
         help="capability token (or the WREATH_CAPTURE_TOKEN environment variable)",
     )
     capture_parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="print JSON instead of a human summary",
     )
     actions = capture_parser.add_subparsers(dest="capture_action", required=True)
 
     arm = actions.add_parser("arm", help="install a bounded, expiring capture arm")
-    arm.add_argument("--allow-header", action="append", dest="allow_headers", default=[],
-                     metavar="NAME", help="header captured verbatim (repeatable)")
-    arm.add_argument("--hash-header", action="append", dest="hash_headers", default=[],
-                     metavar="NAME", help="header captured as a keyed hash (repeatable)")
-    arm.add_argument("--mask-header", action="append", dest="mask_headers", default=[],
-                     metavar="NAME", help="header captured as length only (repeatable)")
-    arm.add_argument("--allow-query", action="append", dest="allow_query", default=[],
-                     metavar="NAME", help="query parameter captured verbatim (repeatable)")
-    arm.add_argument("--hash-query", action="append", dest="hash_query", default=[],
-                     metavar="NAME", help="query parameter captured as a keyed hash (repeatable)")
-    arm.add_argument("--mask-query", action="append", dest="mask_query", default=[],
-                     metavar="NAME", help="query parameter captured as length only (repeatable)")
-    arm.add_argument("--body", default=None,
-                     choices=("none", "metadata", "hashed", "structured"),
-                     help="request/response body capture mode")
-    arm.add_argument("--dependency", default=None,
-                     choices=("none", "metadata", "hashed", "structured"),
-                     help="dependency (DB params/rows, outbound bodies) capture mode")
+    arm.add_argument(
+        "--allow-header",
+        action="append",
+        dest="allow_headers",
+        default=[],
+        metavar="NAME",
+        help="header captured verbatim (repeatable)",
+    )
+    arm.add_argument(
+        "--hash-header",
+        action="append",
+        dest="hash_headers",
+        default=[],
+        metavar="NAME",
+        help="header captured as a keyed hash (repeatable)",
+    )
+    arm.add_argument(
+        "--mask-header",
+        action="append",
+        dest="mask_headers",
+        default=[],
+        metavar="NAME",
+        help="header captured as length only (repeatable)",
+    )
+    arm.add_argument(
+        "--allow-query",
+        action="append",
+        dest="allow_query",
+        default=[],
+        metavar="NAME",
+        help="query parameter captured verbatim (repeatable)",
+    )
+    arm.add_argument(
+        "--hash-query",
+        action="append",
+        dest="hash_query",
+        default=[],
+        metavar="NAME",
+        help="query parameter captured as a keyed hash (repeatable)",
+    )
+    arm.add_argument(
+        "--mask-query",
+        action="append",
+        dest="mask_query",
+        default=[],
+        metavar="NAME",
+        help="query parameter captured as length only (repeatable)",
+    )
+    arm.add_argument(
+        "--body",
+        default=None,
+        choices=("none", "metadata", "hashed", "structured"),
+        help="request/response body capture mode",
+    )
+    arm.add_argument(
+        "--dependency",
+        default=None,
+        choices=("none", "metadata", "hashed", "structured"),
+        help="dependency (DB params/rows, outbound bodies) capture mode",
+    )
     arm.add_argument("--max-body-bytes", type=int, default=0)
     arm.add_argument("--max-fields", type=int, default=0)
     arm.add_argument("--max-depth", type=int, default=0)
     arm.add_argument("--slabs", type=int, default=0, help="capture budget: slab count")
     arm.add_argument("--slab-bytes", type=int, default=64 * 1024)
-    arm.add_argument("--expiry", type=float, required=True, metavar="SECONDS",
-                     help="how long the arm stays live (required; no forever arms)")
-    arm.add_argument("--max-matches", type=int, default=0,
-                     help="stop after this many matches (0 = only expiry bounds it)")
+    arm.add_argument(
+        "--expiry",
+        type=float,
+        required=True,
+        metavar="SECONDS",
+        help="how long the arm stays live (required; no forever arms)",
+    )
+    arm.add_argument(
+        "--max-matches",
+        type=int,
+        default=0,
+        help="stop after this many matches (0 = only expiry bounds it)",
+    )
 
     actions.add_parser("status", help="list the active capture arms and the ceiling")
 
@@ -1595,8 +1860,7 @@ def _startup_line(
     scheme = "https" if tls else "http"
     return (
         # `_version()` is argparse's version string and already says "wreath".
-        f"\N{HERB} {_version()} serving {target} "
-        f"on {scheme}://{address}  ({', '.join(details)})"
+        f"\N{HERB} {_version()} serving {target} on {scheme}://{address}  ({', '.join(details)})"
     )
 
 
@@ -1677,9 +1941,7 @@ def _spawn_metal_worker(
         os._exit(exit_code)
 
 
-def _wait_for_worker_generation(
-    workers: dict[int, tuple[int, int]], timeout: float
-) -> bool:
+def _wait_for_worker_generation(workers: dict[int, tuple[int, int]], timeout: float) -> bool:
     import select
     import time
 
@@ -1775,9 +2037,7 @@ def _run_metal_worker_group(
     draining: dict[int, float] = {}
     try:
         current = {
-            worker_id: _spawn_metal_worker(
-                app, config, tls=tls, worker_id=worker_id
-            )
+            worker_id: _spawn_metal_worker(app, config, tls=tls, worker_id=worker_id)
             for worker_id in range(workers)
         }
         if not _wait_for_worker_generation(current, startup_timeout):
@@ -1810,9 +2070,7 @@ def _run_metal_worker_group(
             if state["restart"]:
                 state["restart"] = False
                 replacement = {
-                    worker_id: _spawn_metal_worker(
-                        app, config, tls=tls, worker_id=worker_id
-                    )
+                    worker_id: _spawn_metal_worker(app, config, tls=tls, worker_id=worker_id)
                     for worker_id in range(workers)
                 }
                 if _wait_for_worker_generation(replacement, startup_timeout):
@@ -1838,9 +2096,7 @@ def _run_metal_worker_group(
                     exited = pid
                 if not exited or state["stop"]:
                     continue
-                replacement = _spawn_metal_worker(
-                    app, config, tls=tls, worker_id=worker_id
-                )
+                replacement = _spawn_metal_worker(app, config, tls=tls, worker_id=worker_id)
                 candidate = {worker_id: replacement}
                 if _wait_for_worker_generation(candidate, startup_timeout):
                     current[worker_id] = replacement
@@ -2060,9 +2316,7 @@ def _pass_ledgers(application: Any, namespace: argparse.Namespace) -> list[tuple
     return seen
 
 
-async def _read_pass_ledgers(
-    targets: list[tuple[Any, str]], *, name: str | None
-) -> list[Any]:
+async def _read_pass_ledgers(targets: list[tuple[Any, str]], *, name: str | None) -> list[Any]:
     from .passes import read_status
 
     rows: list[Any] = []
@@ -2075,9 +2329,7 @@ async def _read_pass_ledgers(
     return rows
 
 
-async def _read_pass_holes(
-    targets: list[tuple[Any, str]], *, name: str | None
-) -> list[Any]:
+async def _read_pass_holes(targets: list[tuple[Any, str]], *, name: str | None) -> list[Any]:
     from .passes import read_holes
 
     holes: list[Any] = []
@@ -2142,10 +2394,7 @@ def _print_passes(rows: list[Any]) -> None:
             # the id is noise on every line; on a failed one it is the single
             # thing that connects a chunk that broke on day three to whatever
             # started the walk.
-            print(
-                f"{'':<28} trace: {row.trace_id}  "
-                f"(wreath doctor trace {row.trace_id})"
-            )
+            print(f"{'':<28} trace: {row.trace_id}  (wreath doctor trace {row.trace_id})")
         if row.progress.eta_absent:
             print(f"{'':<28} no ETA: {row.progress.eta_absent}")
         if row.holes_open:
@@ -2241,13 +2490,9 @@ def execute_inspect(namespace: argparse.Namespace) -> int:
                     raise CliError("explain-plan needs --plan-id", exit_code=2)
                 return await client.explain_plan(namespace.plan_id)
             if topic == "timeline":
-                return await client.timeline(
-                    offset=namespace.offset, limit=namespace.limit
-                )
+                return await client.timeline(offset=namespace.offset, limit=namespace.limit)
             if topic == "failures":
-                return await client.recent_failures(
-                    offset=namespace.offset, limit=namespace.limit
-                )
+                return await client.recent_failures(offset=namespace.offset, limit=namespace.limit)
             if topic == "distributions":
                 return await client.route_distributions()
             if namespace.table is None:
@@ -2287,22 +2532,31 @@ def execute_capabilities(namespace: argparse.Namespace) -> int:
     if term is None:
         rows = index()
         if namespace.as_json:
-            print(_json.dumps({"version": 1, "term": None,
-                               "matches": [_capability_json(row) for row in rows]}))
+            print(
+                _json.dumps(
+                    {"version": 1, "term": None, "matches": [_capability_json(row) for row in rows]}
+                )
+            )
             return 0
         for row in rows:
             print(f"{row.name:<16} {', '.join(row.modules) or 'built in'}")
-        print(f"\n{len(rows)} capabilities. Pass one of these names, a package you "
-              "would otherwise install, or a word, for the detail.")
+        print(
+            f"\n{len(rows)} capabilities. Pass one of these names, a package you "
+            "would otherwise install, or a word, for the detail."
+        )
         return 0
 
     matches = lookup(term)
     if namespace.as_json:
-        print(_json.dumps({
-            "version": 1,
-            "term": term,
-            "matches": [_capability_json(match.capability, match) for match in matches],
-        }))
+        print(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "term": term,
+                    "matches": [_capability_json(match.capability, match) for match in matches],
+                }
+            )
+        )
         return 0 if matches else 1
     if not matches:
         print(
@@ -2339,8 +2593,9 @@ def _render_capability(match: Any) -> str:
 
     capability = match.capability
     lines = [f"{capability.name}  ({match.reason} {match.matched!r})"]
-    lines.extend(textwrap.wrap(capability.sentence, width=76,
-                               initial_indent="  ", subsequent_indent="  "))
+    lines.extend(
+        textwrap.wrap(capability.sentence, width=76, initial_indent="  ", subsequent_indent="  ")
+    )
     lines.append(f"  modules  {', '.join(capability.modules) or 'built in'}")
     if capability.guides:
         lines.append(f"  guides   {', '.join(capability.guides)}")
@@ -2353,7 +2608,36 @@ def execute_doctor(namespace: argparse.Namespace) -> int:
         return execute_doctor_trace(namespace)
     if action == "preflight":
         return execute_doctor_preflight(namespace)
+    if action == "routes":
+        return execute_doctor_routes(namespace)
     return execute_doctor_n_plus_one(namespace)
+
+
+def execute_doctor_routes(namespace: argparse.Namespace) -> int:
+    """Write or compare the deterministic application route manifest."""
+    from .doctor import render_route_manifest, route_manifest
+
+    app = load_application(namespace.target, factory=namespace.factory)
+    rendered = render_route_manifest(route_manifest(app, application=namespace.target))
+    if namespace.check:
+        path = Path(namespace.check)
+        try:
+            expected = path.read_text(encoding="utf-8")
+        except FileNotFoundError as error:
+            raise CliError(f"route manifest does not exist: {path}", exit_code=1) from error
+        if expected != rendered:
+            print(
+                f"route manifest differs: {path}; regenerate with "
+                f"`wreath doctor routes {namespace.target} --write {path}`",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    if namespace.write:
+        Path(namespace.write).write_text(rendered, encoding="utf-8")
+    else:
+        print(rendered, end="")
+    return 0
 
 
 def execute_doctor_preflight(namespace: argparse.Namespace) -> int:
@@ -2433,7 +2717,8 @@ def execute_doctor_trace(namespace: argparse.Namespace) -> int:
             )
         lookup = asyncio.run(
             _read_traced_work(
-                targets, trace_id,
+                targets,
+                trace_id,
                 workflow_schema=namespace.workflow_schema,
                 workflow_table=namespace.workflow_table,
             )
@@ -2447,11 +2732,10 @@ def execute_doctor_trace(namespace: argparse.Namespace) -> int:
             "the database. Pass --socket to search it"
         )
     else:
+
         async def query() -> tuple[Any, ...]:
             async with InspectorClient(namespace.socket) as client:
-                return await find_requests_with_trace(
-                    client, trace_id, limit=namespace.limit
-                )
+                return await find_requests_with_trace(client, trace_id, limit=namespace.limit)
 
         try:
             requests = asyncio.run(query())
@@ -2498,8 +2782,11 @@ async def _read_traced_work(
             connection = await database.acquire("write")
             try:
                 found = await find_work_with_trace(
-                    connection, trace_id, schema=schema,
-                    workflow_schema=workflow_schema, workflow_table=workflow_table,
+                    connection,
+                    trace_id,
+                    schema=schema,
+                    workflow_schema=workflow_schema,
+                    workflow_table=workflow_table,
                 )
             finally:
                 await database.release("write", connection)
@@ -2567,24 +2854,28 @@ def execute_doctor_n_plus_one(namespace: argparse.Namespace) -> int:
         return 1
 
     if namespace.as_json:
-        print(_json.dumps({
-            "version": 1,
-            "check": "n-plus-one",
-            "threshold": namespace.threshold,
-            "findings": [
+        print(
+            _json.dumps(
                 {
-                    "route": f.route,
-                    "request_id": f.request_id,
-                    "queries": f.queries,
-                    "summary": f.explain(),
-                    "repetitions": [
-                        {"model": r.model, "count": r.count, "total_us": r.total_us}
-                        for r in f.repetitions
+                    "version": 1,
+                    "check": "n-plus-one",
+                    "threshold": namespace.threshold,
+                    "findings": [
+                        {
+                            "route": f.route,
+                            "request_id": f.request_id,
+                            "queries": f.queries,
+                            "summary": f.explain(),
+                            "repetitions": [
+                                {"model": r.model, "count": r.count, "total_us": r.total_us}
+                                for r in f.repetitions
+                            ],
+                        }
+                        for f in findings
                     ],
                 }
-                for f in findings
-            ],
-        }))
+            )
+        )
     else:
         _print_n_plus_one(findings, namespace.threshold)
     return 1 if findings and namespace.strict else 0
@@ -2625,8 +2916,7 @@ def _print_n_plus_one(findings: list, threshold: int) -> None:
             for repetition in finding.repetitions:
                 millis = repetition.total_us / 1000
                 print(
-                    f"      {repetition.model:<24} {repetition.count:>5} queries "
-                    f"{millis:>8.1f}ms"
+                    f"      {repetition.model:<24} {repetition.count:>5} queries {millis:>8.1f}ms"
                 )
             if finding.request_id:
                 print(f"      replay it: wreath replay --request {finding.request_id}")
@@ -2756,8 +3046,10 @@ def _print_inspect(topic: str, body: dict) -> None:
             print(f"  losses: {losses if losses else 'none'}")
         return
     if topic == "active":
-        print(f"{body['total']} active request(s)"
-              + (" [truncated page]" if body.get("truncated") else ""))
+        print(
+            f"{body['total']} active request(s)"
+            + (" [truncated page]" if body.get("truncated") else "")
+        )
         for row in body["requests"]:
             print(
                 f"  #{row['request_id']}  {row['protocol']:9s} "
@@ -2765,8 +3057,10 @@ def _print_inspect(topic: str, body: dict) -> None:
             )
         return
     if topic in ("routes", "metadata"):
-        print(f"{body['table']}: {body['total']} row(s)"
-              + (" [truncated page]" if body.get("truncated") else ""))
+        print(
+            f"{body['table']}: {body['total']} row(s)"
+            + (" [truncated page]" if body.get("truncated") else "")
+        )
         for row in body["rows"]:
             if "method" in row:
                 print(f"  {row['id']:4d}  {row['method']:7s} {row['path']}")
@@ -2793,9 +3087,7 @@ def _print_inspect(topic: str, body: dict) -> None:
         print(f"route distributions ({body['assembled']} assembled)")
         for row in body["routes"]:
             where = (
-                f"{row['method']} {row['path']}"
-                if row.get("path")
-                else f"route {row['route_id']}"
+                f"{row['method']} {row['path']}" if row.get("path") else f"route {row['route_id']}"
             )
             avg = row["duration_us_sum"] // row["count"] if row["count"] else 0
             print(
@@ -2851,15 +3143,20 @@ def _execute_flight_replay(namespace: argparse.Namespace) -> int:
         raise CliError(str(error), exit_code=2) from error
 
     if namespace.as_json:
-        print(_json.dumps({
-            "schema_version": 1,
-            "request_id": outcome.request_id,
-            "reproduced": outcome.reproduced,
-            "diverged_at": outcome.diverged_at,
-            "expected_sites": list(outcome.expected),
-            "observed_sites": list(outcome.observed),
-            "terminal": outcome.result.terminal,
-        }, indent=2))
+        print(
+            _json.dumps(
+                {
+                    "schema_version": 1,
+                    "request_id": outcome.request_id,
+                    "reproduced": outcome.reproduced,
+                    "diverged_at": outcome.diverged_at,
+                    "expected_sites": list(outcome.expected),
+                    "observed_sites": list(outcome.observed),
+                    "terminal": outcome.result.terminal,
+                },
+                indent=2,
+            )
+        )
         return 0 if outcome.reproduced else 1
 
     print(f"request {outcome.request_id} was in flight when the process died")
@@ -2868,8 +3165,10 @@ def _execute_flight_replay(namespace: argparse.Namespace) -> int:
     if outcome.reproduced:
         print("  the replay retraced the whole recorded path")
         if len(outcome.observed) > len(outcome.expected):
-            print("  and went further, which is expected: the file stops where "
-                  "the process stopped, not where the request would have")
+            print(
+                "  and went further, which is expected: the file stops where "
+                "the process stopped, not where the request would have"
+            )
     else:
         print(f"  they diverge at site {outcome.diverged_at}")
         print(f"    crash file: {list(outcome.expected)}")
@@ -2878,9 +3177,11 @@ def _execute_flight_replay(namespace: argparse.Namespace) -> int:
             # Only here. A divergence further in is a real behaviour change and
             # saying "wrong build?" at it would send someone chasing the
             # environment instead of reading their own diff.
-            print("  diverging at the very first site usually means this is not "
-                  "the build that crashed -- a site id is import order, not an "
-                  "identity, so two builds share none of them")
+            print(
+                "  diverging at the very first site usually means this is not "
+                "the build that crashed -- a site id is import order, not an "
+                "identity, so two builds share none of them"
+            )
     print(f"  the replayed connection ended {outcome.result.terminal}")
     return 0 if outcome.reproduced else 1
 
@@ -2968,33 +3269,42 @@ def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
         return 0
 
     print(f"recording {namespace.path}")
-    print(f"  WFR1 container: {len(decoded.slabs)} capture slab(s), "
-          f"{len(decoded.events)} event cell(s), {len(decoded.attempts)} attempt(s)")
+    print(
+        f"  WFR1 container: {len(decoded.slabs)} capture slab(s), "
+        f"{len(decoded.events)} event cell(s), {len(decoded.attempts)} attempt(s)"
+    )
     if not decoded.clean:
         # Said before the contents, for the reason the ring reader prints its
         # losses first: a torn file read as a complete one loses exactly the
         # records nearest the failure.
-        print("  no footer -- the process died mid-write, so what is missing "
-              "cannot be counted")
+        print("  no footer -- the process died mid-write, so what is missing cannot be counted")
     print()
     for record in decoded.attempts:
-        print(f"  {record.task} job {record.job_id} on queue {record.queue!r}: "
-              f"attempt {record.attempt} of {record.max_attempts} -> {record.outcome}")
+        print(
+            f"  {record.task} job {record.job_id} on queue {record.queue!r}: "
+            f"attempt {record.attempt} of {record.max_attempts} -> {record.outcome}"
+        )
         if record.error_type:
             print(f"      raised {record.error_type}: {record.error_message}")
-        kept = "none allowed by name" if not record.arguments else (
-            f"{len(record.arguments)} captured"
+        kept = (
+            "none allowed by name"
+            if not record.arguments
+            else (f"{len(record.arguments)} captured")
         )
-        print(f"      fence {record.fence}, tenant {record.tenant!r}, "
-              f"{record.argument_count} argument(s), {kept}")
+        print(
+            f"      fence {record.fence}, tenant {record.tenant!r}, "
+            f"{record.argument_count} argument(s), {kept}"
+        )
         for name, captured in record.arguments:
             print(f"      arg {name} = {captured}")
         if record.trace_context:
             print(f"      enqueued under trace context {record.trace_context}")
         for event in record.boundaries:
             failed = f" -> {event.error_type}" if event.error_type else ""
-            print(f"      boundary seam {event.seam} target {event.target!r} "
-                  f"at {event.coordinate}{failed}")
+            print(
+                f"      boundary seam {event.seam} target {event.target!r} "
+                f"at {event.coordinate}{failed}"
+            )
     return 0
 
 
@@ -3044,14 +3354,10 @@ def execute_flight(namespace: argparse.Namespace) -> int:
         "phase": EventKind.PHASE,
         "log": EventKind.LOG,
     }
-    records = (
-        ring.records if namespace.kind is None else ring.of_kind(kinds[namespace.kind])
-    )
+    records = ring.records if namespace.kind is None else ring.of_kind(kinds[namespace.kind])
     shown = records if namespace.limit == 0 else records[: namespace.limit]
     losses = {
-        reason.name.lower(): header.loss(reason)
-        for reason in LossReason
-        if header.loss(reason)
+        reason.name.lower(): header.loss(reason) for reason in LossReason if header.loss(reason)
     }
 
     if namespace.as_json:
@@ -3086,13 +3392,16 @@ def execute_flight(namespace: argparse.Namespace) -> int:
 
     print(f"ring file {namespace.path}")
     print(f"  written by pid {header.pid}, worker {header.worker_id}")
-    print(f"  ring of {header.ring_records} records; head {header.head}, "
-          f"tail {header.tail}")
-    print(f"  {ring.live} recovered, {ring.drained} already drained "
-          f"(look for those in the recording's EVNT stream)")
+    print(f"  ring of {header.ring_records} records; head {header.head}, tail {header.tail}")
+    print(
+        f"  {ring.live} recovered, {ring.drained} already drained "
+        f"(look for those in the recording's EVNT stream)"
+    )
     if ring.undecodable:
-        print(f"  {ring.undecodable} slot(s) did not decode -- a cell half-written "
-              "as the process died")
+        print(
+            f"  {ring.undecodable} slot(s) did not decode -- a cell half-written "
+            "as the process died"
+        )
     if ring.cursors_inconsistent:
         print("  the head/tail pair was torn mid-update; the window was clamped")
     if losses:
@@ -3100,14 +3409,15 @@ def execute_flight(namespace: argparse.Namespace) -> int:
         for name, count in losses.items():
             print(f"    {name:24s} {count}")
         if ring.ring_full_drops:
-            print("    ^ a full ring refuses rather than overwrites, so the "
-                  "records nearest the crash may be the missing ones")
+            print(
+                "    ^ a full ring refuses rather than overwrites, so the "
+                "records nearest the crash may be the missing ones"
+            )
     else:
         print("  the worker dropped nothing")
     print()
     for record in shown:
-        print(f"  {record.sequence:>8}  {EventKind(record.kind).name:<12} "
-              f"{record.decode()}")
+        print(f"  {record.sequence:>8}  {EventKind(record.kind).name:<12} {record.decode()}")
     if len(records) > len(shown):
         print(f"  ... {len(records) - len(shown)} more (--limit 0 for all)")
     return 0
@@ -3140,15 +3450,19 @@ def _execute_to_test(namespace: argparse.Namespace) -> int:
                 "registered on, spelled module:attribute"
             ) from error
         generate = rp.generate_attempt_test(
-            runner, rp.open_attempt_recording(namespace.recording),
+            runner,
+            rp.open_attempt_recording(namespace.recording),
             target=namespace.target,
-            name=namespace.name, origin=namespace.recording,
+            name=namespace.name,
+            origin=namespace.recording,
         )
     else:
         generate = rp.generate_test(
             load_application(namespace.target, factory=namespace.factory),
-            rp.open_recording(namespace.recording), target=namespace.target,
-            name=namespace.name, origin=namespace.recording,
+            rp.open_recording(namespace.recording),
+            target=namespace.target,
+            name=namespace.name,
+            origin=namespace.recording,
         )
     source = asyncio.run(generate)
     if namespace.output:
@@ -3192,41 +3506,67 @@ def execute_replay(namespace: argparse.Namespace) -> int:
         if namespace.record_faults:
             _write_bytes(namespace.record_faults, (schedule or rp.FaultSchedule()).to_bytes())
         if namespace.as_json:
-            print(_json.dumps({
-                "version": 1, "kind": "transport",
-                "terminal": result.terminal, "write_count": result.write_count,
-                "segments_fed": result.segments_fed,
-                "status_line": result.response.split(b"\r\n", 1)[0].decode("latin-1", "replace"),
-                "response_bytes": len(result.response),
-            }))
+            print(
+                _json.dumps(
+                    {
+                        "version": 1,
+                        "kind": "transport",
+                        "terminal": result.terminal,
+                        "write_count": result.write_count,
+                        "segments_fed": result.segments_fed,
+                        "status_line": result.response.split(b"\r\n", 1)[0].decode(
+                            "latin-1", "replace"
+                        ),
+                        "response_bytes": len(result.response),
+                    }
+                )
+            )
         else:
             status = result.response.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-            print(f"terminal={result.terminal} writes={result.write_count} "
-                  f"segments_fed={result.segments_fed}")
+            print(
+                f"terminal={result.terminal} writes={result.write_count} "
+                f"segments_fed={result.segments_fed}"
+            )
             print(status or "(no response bytes)")
         return 0
 
     headers = tuple(_split_header(h) for h in namespace.header)
     canonical = rp.CanonicalRequest(
-        method=namespace.method, path=namespace.path,
-        headers=headers, query_string=namespace.query.encode("utf-8"),
+        method=namespace.method,
+        path=namespace.path,
+        headers=headers,
+        query_string=namespace.query.encode("utf-8"),
         body=namespace.body.encode("utf-8"),
     )
     mode = rp.PlanMode(namespace.mode)
-    result = asyncio.run(rp.replay_endpoint_plan(
-        app, canonical, mode=mode,
-        recorded_return=namespace.replace_body if mode is rp.PlanMode.REPLACE else None,
-    ))
+    result = asyncio.run(
+        rp.replay_endpoint_plan(
+            app,
+            canonical,
+            mode=mode,
+            recorded_return=namespace.replace_body if mode is rp.PlanMode.REPLACE else None,
+        )
+    )
     if namespace.as_json:
-        print(_json.dumps({
-            "version": 1, "kind": "plan", "mode": result.mode,
-            "status": result.status, "body_bytes": len(result.body),
-            "best_effort": result.best_effort, "deterministic": result.deterministic,
-            "note": result.note,
-        }))
+        print(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "kind": "plan",
+                    "mode": result.mode,
+                    "status": result.status,
+                    "body_bytes": len(result.body),
+                    "best_effort": result.best_effort,
+                    "deterministic": result.deterministic,
+                    "note": result.note,
+                }
+            )
+        )
     else:
-        print(f"mode={result.mode} status={result.status} "
-              f"deterministic={result.deterministic} best_effort={result.best_effort}")
+        print(
+            f"mode={result.mode} status={result.status} "
+            f"deterministic={result.deterministic} best_effort={result.best_effort}"
+        )
         if result.note:
             print(result.note)
         if result.body:
