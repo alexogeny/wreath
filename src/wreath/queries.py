@@ -779,7 +779,7 @@ def _check_named(
     is skipped without a word -- and a silently skipped query is exactly the
     migration bug nobody attributes to the fusion that hid it.
 
-    Refusing it here (ADR 0019) makes the gap structurally impossible rather
+    Refusing it here (refuse rather than half-wire) makes the gap structurally impossible rather
     than documented, and it is the direction that stays open: a later release
     may accept an inline search once the scanner sees one, where a later release
     could not start rejecting a spelling applications had shipped.
