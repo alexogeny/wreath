@@ -12,7 +12,7 @@ failures are isolated to a counter.
 
 Everything here is pure Python and reads only through the recorder's public
 `drain` / `loss` / `histogram` accessors, so it works identically over the
-native `Recorder` and the pure oracle. The OTLP mapping (Stage 4b) and the
+native `Recorder` and the reference recorder. The OTLP mapping (Stage 4b) and the
 server lifespan wiring (Stage 4c) build on the export hook and snapshot API
 exposed here; nothing in this file imports an exporter SDK.
 
