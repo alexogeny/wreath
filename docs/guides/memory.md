@@ -140,13 +140,15 @@ override `__new__` and must never call `super().__init__` — a rule that lived
 only in a comment, and one the table next door did not share. Each of those is
 a thing a reader would have had to intern twice.
 
-## Both are accelerated, and neither has to be
+## Both are C, and both are checked against the policy they claim
 
-Both ship a C implementation and a pure-Python twin with identical behaviour,
-selected automatically; `WREATH_PURE=1` forces the twin. The parity suite drives
-the same operation sequences at both and compares after each step, which is how
-a counter that disagreed on nine of thirty randomised trials was found while
-every operation result matched.
+`KV` is an LRU table with an optional deadline per entry; `Queue` is a bounded
+ring. Those are specifications, not implementation details, so the suite drives
+randomised operation sequences at each and compares against the policy written
+out in Python beside the test. That is how a counter that disagreed on nine of
+thirty randomised trials was found while every operation result matched — and
+the counters get a second, policy-independent check: every key that entered has
+been evicted, expired, removed, or is still resident, and nothing else.
 
 The native table is a SwissTable — one byte of metadata per slot, scanned
 thirty-two lanes at a time, with the scan itself living in `_native/simd.h`
