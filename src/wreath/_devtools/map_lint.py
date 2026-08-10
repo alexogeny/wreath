@@ -73,10 +73,11 @@ Findings:
   edit fails exactly where a missed regeneration does, and `--fix` regenerates.
 * `MAP009` -- a map cites a path `.gitignore` excludes. This is the one that
   hides best: the file is on disk, every other check resolves it, and the map is
-  wrong only for someone who clones the repository. `.gitignore` excluded
-  `docs/decisions/` while the manifest cited twenty ADRs from it, so a fresh
-  checkout had none of them, and `MAP002` -- which asks only whether the path
-  exists -- passed on every developer machine. Existence is not availability.
+  wrong only for someone who clones the repository. It was found when
+  `.gitignore` excluded a whole documentation directory the manifest cited
+  twenty paths from, so a fresh checkout had none of them and `MAP002` -- which
+  asks only whether the path exists -- passed on every developer machine.
+  Existence is not availability.
 
 Run it with `uv run wreath-map-lint`; `0` means clean.
 """
@@ -114,7 +115,7 @@ MANIFEST_KEYS = frozenset(
 
 #: Keys a subsystem entry may define, and the ones it must.
 SUBSYSTEM_KEYS = frozenset({"name", "guides", "reference", "sources", "tests", "policy",
-                            "decisions", "capability", "replaces"})
+                            "capability", "replaces"})
 SUBSYSTEM_REQUIRED = ("name", "guides", "sources", "tests")
 
 #: A distribution name as PEP 503 spells it: letters, digits, and `-._` between
@@ -123,7 +124,7 @@ SUBSYSTEM_REQUIRED = ("name", "guides", "sources", "tests")
 _DISTRIBUTION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 #: Fields holding lists of repository paths.
-PATH_FIELDS = ("guides", "reference", "sources", "tests", "decisions")
+PATH_FIELDS = ("guides", "reference", "sources", "tests")
 
 #: Directories under `src/wreath` that are implementation, not a public surface.
 PRIVATE_PREFIX = "_"
@@ -659,10 +660,7 @@ BUDGETED = {
 BUDGET_SOURCES = {"kv", "queue", "cache", "store", "_logsink", "_otlp"}
 
 #: The primitives' own modules, which build them for a living.
-BUDGET_EXEMPT = {
-    "src/wreath/kv.py", "src/wreath/queue.py",
-    "src/wreath/_pure/kv.py", "src/wreath/_pure/queue.py",
-}
+BUDGET_EXEMPT = {"src/wreath/kv.py", "src/wreath/queue.py"}
 
 
 def _budget_sites(root: Path) -> list[tuple[str, int, str]]:

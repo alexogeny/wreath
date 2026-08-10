@@ -1399,13 +1399,13 @@ def _response_coerce_text(n: int):
     return time.perf_counter() - start
 
 
-# --- probes: pure-Python consumer subsystems (web/orm facade) -------------
+# --- probes: the Python consumer subsystems (web/orm facade) ---------------
 #
-# The probes above pin the native tier (_core / reactor / server). These pin
-# the pure-Python request-facing helpers an app actually calls per request:
-# pagination query-shaping, AWS SigV4 signing, and retry backoff. Each scales a
-# request- or config-controlled dimension, so a regression to superlinear here
-# is a latency (or, for pagination, a mild DoS) cliff a native lint cannot see.
+# The probes above pin the C tier (_core / reactor / server). These pin the
+# Python request-facing helpers an app actually calls per request: pagination
+# query-shaping, AWS SigV4 signing, and retry backoff. Each scales a request- or
+# config-controlled dimension, so a regression to superlinear here is a latency
+# (or, for pagination, a mild DoS) cliff a native lint cannot see.
 
 
 _PAG_MODEL: Any = None
@@ -1800,8 +1800,7 @@ def _cedar_set_literal_eval(n: int):
     carrying an allowlist or a tenant list paid that per request -- measured
     before the fix at 4x per doubling, 2.4ms for 800 members.
 
-    This exercises the shipped native evaluator; `_pure/cedar.py` carries the
-    same algorithm and the differential tests hold their outputs identical."""
+    This exercises the shipped evaluator."""
     from wreath.authorization import CedarEntity, CedarPolicies, EntityUid
 
     members = ", ".join(f'"m{index}"' for index in range(n))
@@ -1907,65 +1906,13 @@ def _orm_write_plan_cache(n: int):
     return elapsed, {"compiles": compiles}
 
 
-# --- probes: the pure twins ------------------------------------------------
-#
-# Every router probe above drives the native table. Under the parity contract
-# the pure twin is the *reference*, not a fallback -- it is what runs under
-# `WREATH_PURE=1` and on any build without the extension -- so a pure twin that
-# is quadratic where the native one is O(1) is a defect in its own right, and
-# one nothing in this tree was measuring: before these, no probe in any group
-# drove a single pure implementation.
+# --- probes: the driver's Python half --------------------------------------
 
-@probe("pure-bitset-router-static-scale", expect=0.0,
-       sizes=(200, 400, 800, 1600),
-       axis="unrelated static route count",
-       assumption="pure static route activation is O(1) in total route count",
-       stage="routing", group="pure")
-def _pure_bitset_router_static_scale(n: int):
-    """The pure twin of `bitset-router-static-scale`: O(1) in route count.
-
-    The native table resolves a distinct static path through a dict -- one hash
-    lookup, flat in table size. The pure twin must do the same, or `WREATH_PURE=1`
-    is a differently-shaped application rather than a slower one."""
-    from wreath._pure.dtbitset import BitsetRouteTable
-
-    table = BitsetRouteTable()
-    for i in range(n):
-        table.add(f"/route{i}", "GET", object())
-    path = f"/route{n // 2}"
-    start = time.perf_counter()
-    for _ in range(_MATCH_LOOPS):
-        table.match("GET", path)
-    return time.perf_counter() - start
-
-
-@probe("pure-bitset-router-same-group-scale", expect=1.0,
-       sizes=(64, 128, 256, 512),
-       axis="same-shape parameter route group size",
-       assumption="pure parameter matching is at worst linear in group size",
-       stage="routing", group="pure")
-def _pure_bitset_router_same_group_scale(n: int):
-    """The pure twin of `bitset-router-same-group-scale`.
-
-    Every route here shares one (method, segment-count) group and carries a
-    parameter -- the arrangement the bitset design exists to keep linear, and
-    precisely where the decision tree grew super-linearly and lost. A pure twin
-    that folded parameters the way the tree did would reintroduce the defeated
-    design silently, on the path taken whenever the extension is absent."""
-    from wreath._pure.dtbitset import BitsetRouteTable
-
-    table = BitsetRouteTable()
-    for i in range(n):
-        table.add(f"/g{i}/{{id}}", "GET", object())
-    path = f"/g{n // 2}/42"
-    start = time.perf_counter()
-    for _ in range(_MATCH_LOOPS):
-        table.match("GET", path)
-    return time.perf_counter() - start
-
-
-def _pure_cancel_harness(k: int, order: str):
+def _cancel_harness(k: int, order: str):
     """Queue k operations on a real Connection and cancel them in `order`.
+
+    `_cancel_operation` is one of the methods `_native._postgres.Connection`
+    *inherits* from `wreath._pgdriver`, so this times the shipped driver.
 
     Only `_cancel_operation` is timed. The connection is built field-by-field
     rather than connected, because the method under test touches five attributes
@@ -1974,7 +1921,7 @@ def _pure_cancel_harness(k: int, order: str):
     import asyncio
     import collections
 
-    from wreath._pure.postgres import Connection, Operation
+    from wreath._pgdriver import Connection, Operation
 
     async def run() -> tuple[float, dict[str, int]]:
         loop = asyncio.get_running_loop()
@@ -2005,33 +1952,37 @@ def _pure_cancel_harness(k: int, order: str):
     return asyncio.run(run())
 
 
+
+
+
+
 @probe(
-    "pure-pipeline-cancel-back-to-front", expect=1.0, tolerance=0.6,
+    "pipeline-cancel-back-to-front", expect=1.0, tolerance=0.6,
     sizes=(500, 1000, 2000, 4000),
     axis="queued operations cancelled newest-first",
     assumption="tombstoning a queued operation is O(1), independent of position",
-    stage="database", group="pure",
+    stage="database", group="web",
 )
-def _pure_pipeline_cancel_back_to_front(k: int):
+def _pipeline_cancel_back_to_front(k: int):
     """Cancelling k queued operations newest-first remains O(k).
 
     Cancellation marks the operation and decrements `_waiting_live`; `_flush`
     drops the tombstone when it reaches the head. No cancellation searches the
     deque, so the adversarial newest-first unwind has the same linear total as
     the oldest-first control."""
-    return _pure_cancel_harness(k, "back")
+    return _cancel_harness(k, "back")
 
 
 @probe(
-    "pure-pipeline-cancel-front-to-back", expect=1.0,
+    "pipeline-cancel-front-to-back", expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="queued operations cancelled oldest-first",
     assumption="cancelling the head of the queue is O(1) per operation",
-    stage="database", group="pure",
+    stage="database", group="web",
 )
-def _pure_pipeline_cancel_front_to_back(k: int):
+def _pipeline_cancel_front_to_back(k: int):
     """The order control for the newest-first cancellation probe."""
-    return _pure_cancel_harness(k, "front")
+    return _cancel_harness(k, "front")
 
 
 def _todo_document(todo: Todo | None) -> dict[str, Any] | None:

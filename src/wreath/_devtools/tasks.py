@@ -501,7 +501,7 @@ def _pytest_command() -> list[str]:
     13,297-test tree, `wreath test --grid never --mutant off --slowest 0` took
     26.404s +/- 0.138 against `pytest -q -n 6` at 29.055s +/- 2.069: 1.10x, and
     a fifteenfold tighter spread, which for a gate matters as much as the mean.
-    Raw commands and samples in `benchmarks/results/test_runner_2026-08-02.json`.
+    Measured 2026-08-02; re-run `wreath test` against `pytest -n` to reproduce.
 
     The worker curve now lives in one place -- `_test_runner._MAX_AUTO_WORKERS`
     -- instead of being restated here with a different number. The history

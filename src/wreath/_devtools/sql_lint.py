@@ -25,10 +25,25 @@ Findings:
   column, with the same result and no syntax to hint at it.
 
 The encodable set is **derived from the driver**, not restated here: this module
-reads `wreath/_pure/postgres.py` and extracts the type constants its codec
-functions actually dispatch on. Adding a codec therefore relaxes this lint by
-itself, which is the only arrangement that cannot drift into refusing something
-the driver has since learned to send.
+reads `wreath/_native/postgres/codec.c` and extracts the type constants its
+codec functions actually dispatch on. Adding a codec therefore relaxes this lint
+by itself, which is the only arrangement that cannot drift into refusing
+something the driver has since learned to send.
+
+Two arrangements were available and only one of them stays a derivation. The
+driver could **export** its set at runtime -- a tuple on
+`wreath._native._postgres` -- and the lint could import it, which is sturdier to
+read but is not sourced from the dispatch: C has no way to enumerate the labels
+of a `switch`, so that tuple would be a hand-written list beside the switch, and
+adding a codec would mean editing both. That is the arrangement the paragraph
+above exists to refuse, moved one file over. So the lint reads the C: it
+brace-matches the four codec entry points, blanks their comments and string
+literals so no `{` inside `"{1:1.5}/5"` can end a function early, and takes the
+`PG_*` constants the `switch (oid)` in each dispatches on. The switch *is* the
+registry, so reading it is the only thing that cannot fall out of step with it.
+Where the shape it depends on is gone -- a codec function renamed, a switch over
+some subject other than `oid` -- it refuses loudly by name rather than deriving
+a smaller set and quietly refusing valid SQL.
 
 The catalog column types are PostgreSQL's, not wreath's -- `pg_namespace.nspname`
 has been `name` for decades and will not change under us. They are listed here
@@ -48,11 +63,29 @@ from pathlib import Path
 
 from .native_lint import repo_root, report_findings
 
-DRIVER = "src/wreath/_pure/postgres.py"
+DRIVER = "src/wreath/_native/postgres/codec.c"
 
-#: Codec dispatch lives in these three functions; every branch names the type
-#: constants the driver can encode or decode.
-_CODEC_FUNCTIONS = frozenset({"_encode_text", "_encode_binary", "_decode_value"})
+#: Codec dispatch lives in these four functions; every branch names the type
+#: constants the driver can encode or decode. `..._binary_into` writes straight
+#: into the send buffer and falls through to `..._binary_value` for everything
+#: it does not handle itself, so it can only ever narrow -- it is read anyway,
+#: because "the functions that dispatch on an OID" is the rule, and a rule with
+#: an exception in it is the thing that drifts.
+_CODEC_FUNCTIONS = (
+    "wreath_pg_encode_text_value",
+    "wreath_pg_encode_binary_value",
+    "wreath_pg_encode_binary_into",
+    "wreath_pg_decode_value",
+)
+
+#: `#define PG_TIMESTAMPTZ 1184`. Only the name is used -- the constants are
+#: named for their types -- but matching the OID too is what tells an OID
+#: constant apart from the rest of the `PG_`-prefixed macros in the file.
+_OID_DEFINE = re.compile(r"^#define[ \t]+(PG_[A-Z0-9_]+)[ \t]+(\d+)[ \t]*$", re.MULTILINE)
+
+_SWITCH_SUBJECT = re.compile(r"\bswitch\s*\(\s*(\w+)\s*\)")
+_OID_CASE = re.compile(r"\bcase\s+(PG_\w+)\s*:")
+_OID_COMPARISON = re.compile(r"\boid\s*==\s*(PG_\w+)")
 
 #: PostgreSQL catalog columns whose declared type no driver of this shape can
 #: encode. Only columns wreath's own SQL touches are listed -- a lint that
@@ -146,42 +179,104 @@ class Finding:
         return f"{self.where}: {self.code} {self.message}"
 
 
+def _code_only(source: str) -> str:
+    """`source` with the inside of every comment and literal blanked out.
+
+    Brace matching a C function has to not see the `{` in `"{1:1.5}/5"` or in a
+    comment quoting one, and a `case PG_TEXT:` written inside either is prose
+    rather than dispatch. Blanking rather than deleting keeps every offset where
+    it was, so line numbers still mean what they did.
+    """
+    out = list(source)
+
+    def blank(start: int, stop: int) -> None:
+        for index in range(start, min(stop, len(source))):
+            if source[index] != "\n":
+                out[index] = " "
+
+    index, end = 0, len(source)
+    while index < end:
+        character = source[index]
+        if character == "/" and source[index + 1 : index + 2] in ("/", "*"):
+            line_comment = source[index + 1] == "/"
+            closed = source.find("\n" if line_comment else "*/", index + 2)
+            stop = end if closed < 0 else closed + (0 if line_comment else 2)
+            blank(index, stop)
+            index = stop
+        elif character in "\"'":
+            cursor = index + 1
+            while cursor < end and source[cursor] != character:
+                cursor += 2 if source[cursor] == "\\" else 1
+            blank(index, cursor + 1)
+            index = cursor + 1
+        else:
+            index += 1
+    return "".join(out)
+
+
+def _function_body(source: str, name: str) -> str:
+    """The braced body of C function `name`, definition only.
+
+    A definition starts in column one here; every *call* of these four is
+    indented, so anchoring at the line start distinguishes them without needing
+    to know a return type.
+    """
+    signature = re.search(rf"^{re.escape(name)}\s*\(", source, re.MULTILINE)
+    if signature is None:
+        raise SystemExit(
+            f"sql-lint: {DRIVER} no longer defines {name}(), so the encodable type set "
+            "would be derived from less than the driver dispatches on"
+        )
+    start = source.index("{", signature.end())
+    depth = 0
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise SystemExit(f"sql-lint: {name}() in {DRIVER} has an unbalanced body")
+
+
 def encodable_types(root: Path) -> frozenset[str]:
     """Every PostgreSQL type name the driver's codecs dispatch on.
 
     Read out of the driver rather than listed here. The constants are named for
-    their types (`_TIMESTAMPTZ` is `timestamptz`), so the mapping needs no table
-    -- and a codec added tomorrow is picked up without editing this file.
+    their types (`PG_TIMESTAMPTZ` is `timestamptz`), so the mapping needs no
+    table -- and a codec added tomorrow is picked up without editing this file.
     """
-    tree = ast.parse((root / DRIVER).read_text(encoding="utf-8"))
-    constants = {
-        target.id
-        for node in tree.body
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, int)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
+    source = _code_only((root / DRIVER).read_text(encoding="utf-8"))
+    constants = {name for name, _ in _OID_DEFINE.findall(source)}
     named: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name not in _CODEC_FUNCTIONS:
-            continue
-        for compare in ast.walk(node):
-            if not isinstance(compare, ast.Compare):
-                continue
-            if not (isinstance(compare.left, ast.Name) and compare.left.id == "oid"):
-                continue
-            for comparator in compare.comparators:
-                candidates = (
-                    comparator.elts
-                    if isinstance(comparator, (ast.Set, ast.Tuple, ast.List))
-                    else [comparator]
-                )
-                named.update(
-                    element.id for element in candidates
-                    if isinstance(element, ast.Name) and element.id in constants
-                )
-    return frozenset(name.lstrip("_").lower() for name in named)
+    for function in _CODEC_FUNCTIONS:
+        body = _function_body(source, function)
+        # Every one of these dispatches with a single `switch (oid)`. A `case`
+        # label under any other subject would name a type the driver does not
+        # actually encode -- so rather than guess which switch a label belongs
+        # to, refuse and say what changed.
+        foreign = {match.group(1) for match in _SWITCH_SUBJECT.finditer(body)} - {"oid"}
+        if foreign:
+            raise SystemExit(
+                f"sql-lint: {function}() in {DRIVER} now switches on "
+                f"{', '.join(sorted(foreign))} as well as the OID, so a `case PG_...` in "
+                "it no longer means the driver can encode that type; teach this lint "
+                "which switch to read"
+            )
+        named |= set(_OID_CASE.findall(body)) | set(_OID_COMPARISON.findall(body))
+    undeclared = named - constants
+    if undeclared:
+        raise SystemExit(
+            f"sql-lint: {DRIVER} dispatches on {', '.join(sorted(undeclared))}, which no "
+            "`#define PG_<TYPE> <oid>` in that file declares, so the type name cannot be "
+            "read off the constant"
+        )
+    if not named:
+        raise SystemExit(
+            f"sql-lint: no codec dispatch was found in {DRIVER}, which would leave every "
+            "cast looking encodable and this lint reporting a vacuous zero"
+        )
+    return frozenset(name.removeprefix("PG_").lower() for name in named)
 
 
 def _sql_literals(source: str) -> list[tuple[int, str]]:
