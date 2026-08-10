@@ -1,12 +1,11 @@
 /* Strict XML parsing and exclusive canonicalization for wreath.xml.
  *
- * The profile, the refusal reasons, the refusal *messages* and the byte
- * offsets here are held byte for byte to the pure-Python twin in
- * wreath/_pure/xml.py by tests/test_xml_parity.py, over a corpus that includes
- * every exploit in tests/test_xml_refusals.py. Two implementations of one
- * parser is the shape that produces a signature-wrapping bug -- a verifier
- * running one and a consumer running the other -- so any divergence here is a
- * defect even when this side is the more permissive of the two.
+ * The profile, the refusal reasons, the refusal *messages* and the byte offsets
+ * here are pinned by tests/test_xml_parse.py, test_xml_refusals.py,
+ * test_xml_c14n.py and test_xml_wrapping.py, over a corpus that includes every
+ * exploit. **There is one parser and there must stay one:** two implementations
+ * of one parser is the shape that produces a signature-wrapping bug -- a
+ * verifier running one and a consumer running the other.
  *
  * The tree is built directly as Python objects rather than into a private C
  * representation and converted after: the shapes are small (a SAML assertion
@@ -39,7 +38,7 @@ typedef struct {
 } XmlParser;
 
 /* The wreath.xml.XMLRefusal class, handed over by xml_configure so this module
- * raises the same type the pure twin does rather than inventing a second one. */
+ * raises the type `wreath._xml_model` declares rather than inventing one. */
 static PyObject *xml_refusal_type = NULL;
 
 
@@ -82,7 +81,7 @@ xml_is_space(uint8_t byte)
 
 
 /* XML 1.0 fifth edition NameStartChar. Spelled out rather than approximated so
- * the pure twin can implement exactly these ranges. */
+ * a reader can check these ranges against the spec. */
 static int
 xml_is_name_start(uint32_t cp)
 {

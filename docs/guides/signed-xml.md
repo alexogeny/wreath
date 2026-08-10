@@ -140,11 +140,13 @@ child.span                        # (17, 34) -- the bytes it was parsed from
 doc.subtree_bytes(child)          # b'<c a="1">body</c>'
 ```
 
-## Two implementations, held to each other
+## One parser, and that is the point
 
-A C parser runs in an ordinary build and a pure-Python twin runs under
-`WREATH_PURE=1`. Two implementations of one parser would normally be a liability
-here — a verifier on one and a consumer on the other is the same disagreement in
-a new place — so they are driven over the whole corpus, every exploit included,
-and must agree on the tree, the byte spans, the canonical bytes, and the reason
-for every refusal. `wreath.xml.BACKEND` names the one in force.
+There is a single parser, in `_native/xml.c`. A second one would be a liability
+exactly here: a verifier reading one and a consumer reading the other is how a
+signature-wrapping bug gets in, and the refusals *are* the feature. So the
+corpus — every exploit included — is asserted against that parser directly, on
+the tree, the byte spans, the canonical bytes, and the reason *and message* for
+every refusal.
+
+A build without `xml.c` refuses by name at import rather than degrading.

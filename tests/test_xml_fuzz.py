@@ -1,7 +1,9 @@
 """Deterministic fuzzing of the XML parser.
 
-A C parser on a security boundary has two obligations under arbitrary input:
-never crash the interpreter, and never disagree with its pure twin. Both are
+A C parser on a security boundary has to answer arbitrary input without
+crashing the interpreter, and its canonical output has to be stable under
+re-canonicalization -- a signature covers the canonical form, so verification
+must not depend on how many round trips a document has been through. Both are
 checked here over a seeded corpus, so a failure reproduces from the seed printed
 in the assertion rather than from a saved artifact.
 
@@ -15,7 +17,6 @@ import random
 import pytest
 
 from wreath import xml as facade
-from wreath._pure import xml as pure
 from wreath.xml import Limits, XMLRefusal
 
 pytestmark = pytest.mark.fuzz
@@ -91,25 +92,6 @@ def test_arbitrary_input_either_parses_or_is_refused(seed: int) -> None:
             pytest.fail(f"seed={seed} payload={payload!r} raised {unexpected!r}")
 
 
-@pytest.mark.parametrize("seed", [11, 12, 13, 14, 15, 16])
-def test_both_backends_agree_on_arbitrary_input(seed: int) -> None:
-    """The parity contract, under input nobody designed."""
-    limits = Limits()
-    for payload in _corpus(seed, 300):
-        c_refusal = python_refusal = None
-        c_tree = python_tree = None
-        try:
-            c_tree = facade._parse_native(payload, limits).canonicalize()
-        except XMLRefusal as refusal:
-            c_refusal = refusal.reason
-        try:
-            python_tree = pure.parse_document(payload, limits).canonicalize()
-        except XMLRefusal as refusal:
-            python_refusal = refusal.reason
-        assert c_refusal == python_refusal, f"seed={seed} payload={payload!r}"
-        assert c_tree == python_tree, f"seed={seed} payload={payload!r}"
-
-
 @pytest.mark.parametrize("seed", [21, 22, 23])
 def test_canonicalizing_a_parsed_document_is_idempotent(seed: int) -> None:
     """Canonical output must itself parse to the same canonical bytes.
@@ -154,5 +136,3 @@ def test_deeply_nested_input_is_refused_rather_than_recursing() -> None:
     with pytest.raises(XMLRefusal) as caught:
         facade._parse_native(payload, limits)
     assert caught.value.reason in {"depth", "size"}
-    with pytest.raises(XMLRefusal):
-        pure.parse_document(payload, limits)

@@ -36,9 +36,10 @@ family of confusion attacks.
 **Unbounded depth, size, element and attribute counts.** An unauthenticated
 boundary reads whatever it is given.
 
-Everything it accepts, it accepts the same way twice: the C parser and the
-pure-Python twin are held byte for byte to each other over the whole corpus,
-including every exploit, by `tests/test_xml_parity.py`.
+Everything it accepts, it accepts the same way every time: `tests/test_xml_parse.py`,
+`test_xml_refusals.py`, `test_xml_c14n.py` and `test_xml_wrapping.py` hold the
+parser to the whole corpus, including every exploit, and `test_xml_fuzz.py`
+drives it with input nobody designed.
 
 ## Byte provenance is the point
 
@@ -72,10 +73,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._native import _core as _core_module
-from ._native import extension as _extension
-from ._pure import xml as _reference
-from ._pure.xml import (
+from ._native import _core
+
+# The tree, the bounds and the refusal are one definition, shared with the C
+# parser rather than restated by it. See `wreath._xml_model`.
+from ._xml_model import (
     ID_ATTRIBUTES,
     MAX_DEPTH_CEILING,
     XML_NAMESPACE,
@@ -90,7 +92,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = [
-    "BACKEND",
     "ID_ATTRIBUTES",
     "MAX_DEPTH_CEILING",
     "XMLNS_NAMESPACE",
@@ -103,36 +104,9 @@ __all__ = [
     "parse",
 ]
 
-# `WREATH_PURE=1` is not re-read here: `wreath._native` is the one place that
-# gate lives, and it hands back `_core is None` in that mode. The `hasattr` is
-# the *other* question -- a build compiled without `xml.c`.
-_native: Any = (
-    _core_module if _core_module is not None and hasattr(_core_module, "xml_parse") else None
-)
-
-#: Which implementation this process resolved to. Read by the parity suite,
-#: which would otherwise compare the pure twin against itself and pass while
-#: proving nothing.
-BACKEND = "native" if _native is not None else "pure"
-
-
-def _require_native(symbol: str) -> Any:
-    """The compiled module, or `RuntimeError` if this build has no C parser.
-
-    `ignore_pure` is what makes `WREATH_PURE=1` irrelevant here: the parity
-    suite has to reach the C parser in the very mode that hides it, or it would
-    compare the pure twin against itself and pass while proving nothing. A build
-    compiled without `xml.c` still fails, which is the case the error message is
-    about.
-    """
-    module = _extension("_core", ignore_pure=True)
-    if module is None or not hasattr(module, symbol):
-        raise RuntimeError("the C XML parser is not available in this build")
-    return module
-
-
-if _native is not None:  # pragma: no branch - both arms are covered by the suite
-    _core_module.xml_configure(XMLRefusal)
+# The refusal type, handed to the parser once so a caller catches the class
+# declared in `wreath._xml_model` rather than one C invented.
+_core.xml_configure(XMLRefusal)
 
 
 def _limit_tuple(limits: Limits) -> tuple[int, int, int, int, int]:
@@ -149,8 +123,8 @@ def _build(node: tuple[Any, ...], inherited: tuple[tuple[str, str], ...]) -> Ele
     """Turn one C-built node tuple into an `Element`.
 
     The C side returns plain tuples rather than constructing Python objects,
-    so the dataclass definition -- and therefore the shape both backends
-    produce -- lives in exactly one place.
+    so the dataclass definition -- and therefore the shape a caller reads --
+    lives in exactly one place.
     """
     tag, attrib, text, tail, span, nsdecl, qualified, prefix, local, children = node
     scope = dict(inherited)
@@ -177,17 +151,14 @@ def _build(node: tuple[Any, ...], inherited: tuple[tuple[str, str], ...]) -> Ele
 
 
 def _parse_native(data: bytes, limits: Limits | None = None) -> Document:
-    """Parse through the C backend regardless of what `BACKEND` resolved to.
+    """Parse `data` under `limits`, or raise `XMLRefusal`.
 
-    Only the parity and fuzz suites call this; ordinary callers want
-    `parse`, which honours `WREATH_PURE`.
+    `parse` is the public spelling; this is what it calls.
     """
-    core = _require_native("xml_parse")
-    core.xml_configure(XMLRefusal)
     if not isinstance(data, bytes | bytearray | memoryview):
         raise TypeError("XML input must be bytes")
     payload = bytes(data)
-    root = core.xml_parse(payload, *_limit_tuple(limits or Limits()))
+    root = _core.xml_parse(payload, *_limit_tuple(limits or Limits()))
     return Document(
         root=_build(root, ()), source=payload, canonicalizer=_canonicalize_native
     )
@@ -201,16 +172,10 @@ def _canonicalize_native(
     inclusive_prefixes: Sequence[str] = (),
     limits: Limits | None = None,
 ) -> bytes:
-    """Canonicalize through the C backend regardless of `BACKEND`.
-
-    The counterpart of `_parse_native`, and the canonicalizer a document it
-    built carries: a natively parsed document that canonicalized through the
-    pure twin would let the parity suite compare that twin against itself.
-    """
-    core = _require_native("xml_c14n")
+    """The counterpart of `_parse_native`, and the canonicalizer it attaches."""
     if not 0 <= start < end <= len(data):
         raise ValueError("span does not address the source")
-    return core.xml_c14n(
+    return _core.xml_c14n(
         bytes(data),
         start,
         end,
@@ -226,8 +191,6 @@ def parse(data: bytes, limits: Limits | None = None) -> Document:
     `limits` defaults to `Limits`, whose bounds suit a SAML assertion
     or an S3 response. There is no unbounded setting.
     """
-    if _native is None:
-        return _reference.parse_document(data, limits)
     return _parse_native(data, limits)
 
 
@@ -245,8 +208,4 @@ def canonicalize_span(
     underneath it, exposed for a caller that has bytes and a span from
     somewhere else.
     """
-    if _native is None:
-        return _reference.canonicalize_span(
-            data, start, end, inherited, inclusive_prefixes, limits
-        )
     return _canonicalize_native(data, start, end, inherited, inclusive_prefixes, limits)
