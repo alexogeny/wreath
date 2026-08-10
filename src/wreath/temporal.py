@@ -32,9 +32,8 @@ every template. English ships today; `_LOCALES` is where the next
 language goes, and the docstring there marks exactly where CLDR plural rules
 slot in.
 
-Everything is pure Python over stdlib `datetime`/`zoneinfo`. There is no
-native twin yet; see the note on `format_iso` for what would have to be
-measured before writing one.
+Everything is Python over stdlib `datetime`/`zoneinfo`. None of it is in C;
+see the note on `format_iso` for what would have to be measured first.
 """
 
 from __future__ import annotations
@@ -1210,13 +1209,13 @@ def format_iso(value: Any) -> str:
     One function so every surface renders a temporal value identically — the
     JSON encoder, a template, and a log line cannot disagree.
 
-    **On a native twin:** this and `Instant.parse` are the two operations
-    on the response path, so they are where C would pay if anywhere. Before
-    writing it, measure: encode a realistic response body containing timestamps
-    with `wreath-decomp`, ablate the formatting, and compare against the A/A
-    noise floor. `datetime.isoformat` is already C, so the cost being measured
-    is the dispatch around it, and that may well be below the floor — which
-    would mean a native twin is not justified. Do not write it on intuition.
+    **Before moving this to C:** this and `Instant.parse` are the two
+    operations on the response path, so they are where C would pay if anywhere.
+    Measure first — encode a realistic response body containing timestamps with
+    `wreath-decomp`, ablate the formatting, and compare against the A/A noise
+    floor. `datetime.isoformat` is already C, so the cost being measured is the
+    dispatch around it, and that may well be below the floor. Do not write it on
+    intuition.
     """
     if isinstance(value, datetime.datetime):
         return value.isoformat()
