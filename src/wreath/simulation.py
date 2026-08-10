@@ -62,10 +62,9 @@ class TransportSimulator:
     only bytes written since the preceding receive.  No wall-clock sleep or
     real resource is involved.
 
-    A supplied `recorder` is passed directly to the protocol constructor.
-    Native HTTP/1, HTTP/2, and WebSocket sessions therefore emit their normal
-    Flight cells from C.  The pure HTTP/1 twin accepts and ignores that uniform
-    constructor argument, exactly as it does under the server factory.
+    A supplied `recorder` is passed directly to the protocol constructor, so
+    HTTP/1, HTTP/2 and WebSocket sessions emit their normal Flight cells from
+    C.
     """
 
     __slots__ = (
