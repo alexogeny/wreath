@@ -30,6 +30,7 @@ import pytest
 from _pgfidelity import (
     FakeRecord,
     PreparedStatements,
+    check_arity,
     check_bindable,
     check_single_statement,
     driver_row_value,
@@ -94,6 +95,7 @@ def _double(sql: str, args: tuple[Any, ...], runs: int) -> list[str]:
         try:
             check_single_statement(sql)
             check_bindable(args)
+            check_arity(sql, args)
             prepared.check(sql, args)
             outcomes.append(_OK)
         except BaseException as error:  # noqa: BLE001 - classification is the point
@@ -126,6 +128,18 @@ CASES: list[tuple[str, str, tuple[Any, ...]]] = [
     ("ANY with a list", "SELECT 1 WHERE 1 = ANY($1)", ([1, 2],)),
     ("ANY with a tuple", "SELECT 1 WHERE 1 = ANY($1)", ((1, 2),)),
     ("multi-statement", "SELECT 1; SELECT 2", ()),
+    # Parameter arity. Every one of these was *measured* here before the rule
+    # was written, and two plausible guesses died in the process: a repeated
+    # `$1` is accepted, and so is a placeholder inside a string literal.
+    ("two placeholders, one arg", "SELECT $1::text, $2::text", ("a",)),
+    ("one placeholder, two args", "SELECT $1::text", ("a", "b")),
+    ("no placeholder, one arg", "SELECT 1", ("a",)),
+    ("parameter zero", "SELECT $0::text", ("a",)),
+    # Fails on the unreferenced $2, not on the arity -- which is why the
+    # unreferenced check has to run first.
+    ("placeholder gap", "SELECT $1::text, $3::text", ("a", "b")),
+    ("repeated placeholder", "SELECT $1::text, $1::text", ("a",)),
+    ("placeholder inside a literal", "SELECT '$1'::text", ()),
 ]
 
 
