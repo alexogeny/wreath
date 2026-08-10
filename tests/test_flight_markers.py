@@ -6,6 +6,7 @@ each seam then records its phase with the dependency's metadata-image ID."""
 from __future__ import annotations
 
 import pytest
+from _pgfidelity import check_for
 
 from wreath import _flight_markers as fm
 from wreath.http_client import ClientResponse, HTTPClient
@@ -26,6 +27,7 @@ class _RecordedCaptures(list):
 
 class _StubConnection:
     async def fetch(self, sql: str, *args: object) -> list:
+        check_for(self, sql, args)
         return [("row",)]
 
     async def map(self, method: str, sql: str, argument_sets, *, max_in_flight: int = 32):

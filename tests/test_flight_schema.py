@@ -227,7 +227,7 @@ def test_container_rejects_corruption_and_truncation() -> None:
 def test_metadata_image_rejects_trailing_bytes() -> None:
     image = _image([_route(1, "GET", "/a")])
     with pytest.raises(codec.SchemaError):
-        codec.decode_metadata_image(image.canonical_bytes() + b"junk")
+        fs.decode_metadata_image(image.canonical_bytes() + b"junk")
 
 
 def test_metadata_image_rejects_something_that_is_not_one() -> None:
@@ -241,11 +241,11 @@ def test_metadata_image_rejects_something_that_is_not_one() -> None:
     """
     image = _image([_route(1, "GET", "/a")]).canonical_bytes()
     with pytest.raises(codec.SchemaError, match="missing its marker"):
-        codec.decode_metadata_image(b"NOTMETA" + image[7:])
+        fs.decode_metadata_image(b"NOTMETA" + image[7:])
     with pytest.raises(codec.SchemaError, match="missing its marker"):
-        codec.decode_metadata_image(b"")
+        fs.decode_metadata_image(b"")
     # ... and the real thing still decodes, so the check is not a blanket refusal.
-    assert codec.decode_metadata_image(image).routes[0].path == "/a"
+    assert fs.decode_metadata_image(image).routes[0].path == "/a"
 
 
 # --- config validation ------------------------------------------------------
