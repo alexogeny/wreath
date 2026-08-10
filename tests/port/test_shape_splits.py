@@ -45,6 +45,44 @@ def _one(tmp_path, source: str, prefix: str):
 _SETTINGS_HEAD = "from pydantic_settings import BaseSettings, SettingsConfigDict\n"
 
 
+def test_kw_only_model_is_translated_when_tree_has_no_positional_construction(
+    tmp_path,
+) -> None:
+    source = (
+        "from pydantic import BaseModel\n"
+        "class Llama(BaseModel):\n"
+        "    nickname: str | None = None\n"
+        "    name: str\n"
+        "value = Llama(name='Ada')\n"
+    )
+
+    finding = _one(tmp_path, source, "pydantic.model_kw_only")
+
+    assert finding.rule_id == "pydantic.model_kw_only_exact"
+    assert finding.tag == port.TRANSLATED
+
+
+def test_kw_only_model_stays_reviewable_when_another_module_calls_it_positionally(
+    tmp_path,
+) -> None:
+    (tmp_path / "models.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Llama(BaseModel):\n"
+        "    nickname: str | None = None\n"
+        "    name: str\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "use.py").write_text("value = Llama(None, 'Ada')\n", encoding="utf-8")
+
+    finding = next(
+        item for item in port.analyze(tmp_path).findings
+        if item.rule_id.startswith("pydantic.model_kw_only")
+    )
+
+    assert finding.rule_id == "pydantic.model_kw_only"
+    assert finding.tag == port.NEEDS_REVIEW
+
+
 def test_a_scalar_settings_class_is_translated(tmp_path) -> None:
     """`str`/`int`/`float`/`bool` with a literal default is the whole decision.
 
@@ -61,6 +99,23 @@ def test_a_scalar_settings_class_is_translated(tmp_path) -> None:
     finding = _one(tmp_path, source, "settings.class")
     assert finding.rule_id == "settings.class_env"
     assert finding.tag == port.TRANSLATED
+
+
+def test_a_plain_graphql_output_points_at_the_native_dataclass_surface(
+    tmp_path,
+) -> None:
+    source = (
+        "import strawberry\n"
+        "@strawberry.type\n"
+        "class TrekSummary:\n"
+        "    label: str\n"
+        "    count: int\n"
+    )
+
+    finding = _one(tmp_path, source, "graphql.type")
+
+    assert finding.rule_id == "graphql.type_dataclass"
+    assert "GraphQL(dataclasses=" in finding.message
 
 
 def test_the_translated_settings_message_names_the_required_variables(tmp_path) -> None:
@@ -298,6 +353,28 @@ def test_a_name_crossing_the_yield_is_named_in_the_message(tmp_path) -> None:
     assert "task" in finding.message and "app.state" in finding.message
 
 
+def test_a_child_task_awaited_by_its_creator_is_not_a_background_service(
+    tmp_path,
+) -> None:
+    source = (
+        "import asyncio\n"
+        "async def handler():\n"
+        "    task = asyncio.create_task(fetch_one())\n"
+        "    other = await fetch_two()\n"
+        "    return await task, other\n"
+    )
+    finding = _one(tmp_path, source, "bg.asyncio")
+    assert finding.rule_id == "bg.asyncio_joined"
+    assert finding.tag == port.TRANSLATED
+
+
+def test_an_unjoined_task_still_requires_supervision(tmp_path) -> None:
+    source = "import asyncio\nasync def start():\n    asyncio.create_task(worker())\n"
+    finding = _one(tmp_path, source, "bg.asyncio")
+    assert finding.rule_id == "bg.asyncio_loop"
+    assert finding.tag == port.NEEDS_REVIEW
+
+
 def test_a_lifespan_yielding_state_needs_review(tmp_path) -> None:
     source = _LIFESPAN_HEAD + (
         "@asynccontextmanager\n"
@@ -470,6 +547,63 @@ def test_a_type_with_no_matching_model_says_so(tmp_path) -> None:
     ))
     assert finding.rule_id == "graphql.type"
     assert "Alpaca" in finding.message
+
+
+# --- ORM dataclass projections -----------------------------------------------
+
+
+def test_a_literal_get_pydantic_projection_is_translated(tmp_path) -> None:
+    source = (
+        "from ormar import Model\n"
+        "class Llama(Model):\n"
+        "    pass\n"
+        "LlamaName = Llama.get_pydantic(include={'name'})\n"
+    )
+
+    finding = next(
+        item for item in _analyze(tmp_path, source)
+        if item.rule_id.startswith("pydantic.get_pydantic")
+    )
+
+    assert finding.rule_id == "pydantic.get_pydantic_exact"
+    assert finding.tag == port.TRANSLATED
+
+
+def test_a_dynamic_or_nested_get_pydantic_projection_stays_unsupported(tmp_path) -> None:
+    source = (
+        "fields = names()\n"
+        "Dynamic = Llama.get_pydantic(include=fields)\n"
+        "OptionalLlama = make_optional(Llama.get_pydantic(exclude={'id'}))\n"
+    )
+
+    findings = [
+        item for item in _analyze(tmp_path, source)
+        if item.rule_id.startswith("pydantic.get_pydantic")
+    ]
+
+    assert [item.rule_id for item in findings] == [
+        "pydantic.get_pydantic",
+        "pydantic.get_pydantic",
+    ]
+    assert all(item.tag == port.UNSUPPORTED for item in findings)
+
+
+def test_literal_get_pydantic_projection_is_emitted_as_a_named_dataclass(tmp_path) -> None:
+    source = (
+        "from ormar import Model\n"
+        "class Llama(Model):\n"
+        "    pass\n"
+        "class LlamaCreate(Llama.get_pydantic(include={'name'})):\n"
+        "    reason: str\n"
+    )
+
+    emitted = port.emit_module(source)
+
+    assert "from dataclasses import dataclass" in emitted
+    assert "model_dataclass" in emitted.splitlines()[4]
+    assert "@dataclass(kw_only=True)" in emitted
+    assert "model_dataclass(Llama, include={'name'}, name='_LlamaCreateFields')" in emitted
+    assert "get_pydantic" not in emitted
 
 
 # --- the emitter's own output has to compile -------------------------------------

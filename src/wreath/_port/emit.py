@@ -12,6 +12,7 @@ construct Phase 1 does not yet rewrite, e.g. ORM models — nothing is silently 
 Every emitted file is re-`ast.parse`d as a round-trip guard: a structurally broken
 emit is a tool bug and raises rather than being written.
 """
+
 from __future__ import annotations
 
 import ast
@@ -33,7 +34,9 @@ from .analyzer import (
     _is_false,
     _is_true,
     _iter_py,
+    _plain_graphql_dataclass,
     _relative_to,
+    _resolved_column_path,
     _returns_in,
     _skip_detail,
     _skip_reason,
@@ -45,7 +48,9 @@ from .analyzer import (
     module_findings,
     module_pk_types,
     parent_map,
+    plain_filter_mappings,
     pydantic_field_rule,
+    pydantic_projection_rule,
     query_rule,
     settings_class_rule,
     settings_required,
@@ -85,34 +90,40 @@ _FASTAPI_RENAMED = {"FastAPI": "Wreath", "APIRouter": "Router"}
 
 # cachetools store -> the wreath cache. Wreath has one bounded cache; what
 # changes between the four is the eviction order, not the interface.
-_CACHE_RENAME = {"TTLCache": "BoundedCache", "LRUCache": "BoundedCache",
-                 "LFUCache": "BoundedCache", "FIFOCache": "BoundedCache",
-                 "Cache": "BoundedCache"}
+_CACHE_RENAME = {
+    "TTLCache": "BoundedCache",
+    "LRUCache": "BoundedCache",
+    "LFUCache": "BoundedCache",
+    "FIFOCache": "BoundedCache",
+    "Cache": "BoundedCache",
+}
 
 
 # Names whose import the emitter deletes only when nothing still refers to them.
 # Spelled as full origins because the same class arrives by several routes:
 # `from fastapi import HTTPException` and `from fastapi.exceptions import
 # HTTPException` are one class, and both have to keep the import alive.
-_RETAINED_ORIGINS = frozenset({
-    "fastapi.HTTPException",
-    "fastapi.exceptions.HTTPException",
-    "starlette.exceptions.HTTPException",
-    "pydantic.BaseModel",
-    "pydantic.Field",
-    # `status` and `jsonable_encoder` both usually disappear entirely — every
-    # `status.HTTP_*` becomes its number and `jsonable_encoder(x)` becomes `x`.
-    # The import goes with them, unless one use is left that did not.
-    "fastapi.status",
-    "starlette.status",
-    "fastapi.encoders.jsonable_encoder",
-    # Same story for the two libraries wreath replaced outright: every call
-    # becomes a wreath one, and the import goes unless something is left over
-    # (`arrow.Arrow(...)`, a `@cachetools.cached` decorator).
-    "arrow",
-    "cachetools",
-    *(f"cachetools.{name}" for name in _CACHE_RENAME),
-})
+_RETAINED_ORIGINS = frozenset(
+    {
+        "fastapi.HTTPException",
+        "fastapi.exceptions.HTTPException",
+        "starlette.exceptions.HTTPException",
+        "pydantic.BaseModel",
+        "pydantic.Field",
+        # `status` and `jsonable_encoder` both usually disappear entirely — every
+        # `status.HTTP_*` becomes its number and `jsonable_encoder(x)` becomes `x`.
+        # The import goes with them, unless one use is left that did not.
+        "fastapi.status",
+        "starlette.status",
+        "fastapi.encoders.jsonable_encoder",
+        # Same story for the two libraries wreath replaced outright: every call
+        # becomes a wreath one, and the import goes unless something is left over
+        # (`arrow.Arrow(...)`, a `@cachetools.cached` decorator).
+        "arrow",
+        "cachetools",
+        *(f"cachetools.{name}" for name in _CACHE_RENAME),
+    }
+)
 #: Where a retained name has to keep coming from, when its module was rewritten.
 _RETAINED_MODULE = {
     "status": ("fastapi", "starlette"),
@@ -123,20 +134,34 @@ _RETAINED_MODULE = {
 # `wreath.binding` and first-class HTTP controls in `wreath.policy`;
 # everything else (Wreath, Router, Depends, Request) is top-level `wreath`.
 _WREATH_MODULE = {
-    "Query": "wreath.binding", "Path": "wreath.binding", "Header": "wreath.binding",
-    "Cookie": "wreath.binding", "Form": "wreath.binding", "File": "wreath.binding",
-    "HttpPolicy": "wreath.policy", "CorsPolicy": "wreath.policy",
+    "Query": "wreath.binding",
+    "Path": "wreath.binding",
+    "Header": "wreath.binding",
+    "Cookie": "wreath.binding",
+    "Form": "wreath.binding",
+    "File": "wreath.binding",
+    "HttpPolicy": "wreath.policy",
+    "CorsPolicy": "wreath.policy",
     "TrustedHostPolicy": "wreath.policy",
-    "WebSocket": "wreath.websocket", "WebSocketDisconnect": "wreath.websocket",
+    "WebSocket": "wreath.websocket",
+    "WebSocketDisconnect": "wreath.websocket",
     # `wreath` re-exports JSONResponse and Response; the rest live in wreath.response.
-    "TextResponse": "wreath.response", "HTMLResponse": "wreath.response",
-    "RedirectResponse": "wreath.response", "StreamingResponse": "wreath.response",
-    "FileResponse": "wreath.response", "SSEResponse": "wreath.response",
-    "TestClient": "wreath.testing", "BoundedCache": "wreath.cache",
-    "BadRequest": "wreath.exceptions", "Unauthorized": "wreath.exceptions",
-    "Forbidden": "wreath.exceptions", "NotFound": "wreath.exceptions",
-    "MethodNotAllowed": "wreath.exceptions", "Conflict": "wreath.exceptions",
-    "UnprocessableEntity": "wreath.exceptions", "TooManyRequests": "wreath.exceptions",
+    "TextResponse": "wreath.response",
+    "HTMLResponse": "wreath.response",
+    "RedirectResponse": "wreath.response",
+    "StreamingResponse": "wreath.response",
+    "FileResponse": "wreath.response",
+    "SSEResponse": "wreath.response",
+    "TestClient": "wreath.testing",
+    "BoundedCache": "wreath.cache",
+    "BadRequest": "wreath.exceptions",
+    "Unauthorized": "wreath.exceptions",
+    "Forbidden": "wreath.exceptions",
+    "NotFound": "wreath.exceptions",
+    "MethodNotAllowed": "wreath.exceptions",
+    "Conflict": "wreath.exceptions",
+    "UnprocessableEntity": "wreath.exceptions",
+    "TooManyRequests": "wreath.exceptions",
     # The base class every wreath status exception derives from, and a 500 on
     # its own. It is what a surviving `except HTTPException` / `exception_handler
     # (HTTPException)` / `HTTPException(status_code=500, ...)` becomes.
@@ -144,17 +169,37 @@ _WREATH_MODULE = {
     "PayloadTooLarge": "wreath.exceptions",
     "RequestHeaderFieldsTooLarge": "wreath.exceptions",
     # ORM (Phase 2): declarative API from wreath.orm, PgTypes from wreath.orm.types.
-    "Model": "wreath.orm", "Mapped": "wreath.orm", "column": "wreath.orm",
-    "relationship": "wreath.orm", "Ge": "wreath.orm", "Le": "wreath.orm",
-    "Gt": "wreath.orm", "Lt": "wreath.orm", "Length": "wreath.orm",
-    "AllOf": "wreath.orm", "unique": "wreath.orm", "index": "wreath.orm",
-    "Session": "wreath.orm", "FromORM": "wreath.orm",
-    "Numeric": "wreath.orm.types", "Bytea": "wreath.orm.types",
-    "Uuid": "wreath.orm.types", "Varchar": "wreath.orm.types", "Text": "wreath.orm.types",
-    "Int64": "wreath.orm.types", "Int32": "wreath.orm.types", "Int16": "wreath.orm.types",
-    "Bool": "wreath.orm.types", "Float64": "wreath.orm.types", "Date": "wreath.orm.types",
-    "Timestamp": "wreath.orm.types", "TimestampTz": "wreath.orm.types",
-    "Json": "wreath.orm.types", "Jsonb": "wreath.orm.types", "Array": "wreath.orm.types",
+    "Model": "wreath.orm",
+    "Mapped": "wreath.orm",
+    "column": "wreath.orm",
+    "relationship": "wreath.orm",
+    "Ge": "wreath.orm",
+    "Le": "wreath.orm",
+    "Gt": "wreath.orm",
+    "Lt": "wreath.orm",
+    "Length": "wreath.orm",
+    "AllOf": "wreath.orm",
+    "unique": "wreath.orm",
+    "index": "wreath.orm",
+    "Session": "wreath.orm",
+    "FromORM": "wreath.orm",
+    "model_dataclass": "wreath.orm",
+    "Numeric": "wreath.orm.types",
+    "Bytea": "wreath.orm.types",
+    "Uuid": "wreath.orm.types",
+    "Varchar": "wreath.orm.types",
+    "Text": "wreath.orm.types",
+    "Int64": "wreath.orm.types",
+    "Int32": "wreath.orm.types",
+    "Int16": "wreath.orm.types",
+    "Bool": "wreath.orm.types",
+    "Float64": "wreath.orm.types",
+    "Date": "wreath.orm.types",
+    "Timestamp": "wreath.orm.types",
+    "TimestampTz": "wreath.orm.types",
+    "Json": "wreath.orm.types",
+    "Jsonb": "wreath.orm.types",
+    "Array": "wreath.orm.types",
     "TextArray": "wreath.orm.types",
 }
 
@@ -169,6 +214,7 @@ def _grouped_imports(names):
         for mod, group in sorted(by_mod.items())
     ]
 
+
 # The status -> wreath exception class table lives in `analyzer` and is imported
 # here, for the reason `query_rule` and `status_code_rule` are shared: the report
 # decides `exc.http_literal` from exactly the table the emitter rewrites with, so
@@ -182,22 +228,38 @@ _MARKERS = frozenset({"Query", "Path", "Header", "Cookie", "Form", "File"})
 # Marker keywords that only wrote prose into the generated API documentation.
 # Wreath has no slot for them and nothing behaves differently without them, so
 # they go quietly: 70 of the 72 notes this used to write said "description".
-_MARKER_DOC_KWARGS = frozenset({
-    "description", "title", "example", "examples", "openapi_examples",
-    "deprecated", "include_in_schema", "json_schema_extra",
-})
+_MARKER_DOC_KWARGS = frozenset(
+    {
+        "description",
+        "title",
+        "example",
+        "examples",
+        "openapi_examples",
+        "deprecated",
+        "include_in_schema",
+        "json_schema_extra",
+    }
+)
 
 # ormar column type -> wreath PgType name (wreath.orm.types). DateTime is resolved by its
 # timezone= kwarg; ARRAY (ormar_postgres_extensions) is handled by element type. Types with
 # no wreath equivalent (Time, Enum, ...) are intentionally absent -> annotated.
 _ORMAR_TYPE = {
-    "UUID": "Uuid", "String": "Varchar", "Text": "Text", "Integer": "Int64",
-    "BigInteger": "Int64", "SmallInteger": "Int16", "Boolean": "Bool",
-    "Float": "Float64", "Date": "Date", "JSON": "Jsonb",
+    "UUID": "Uuid",
+    "String": "Varchar",
+    "Text": "Text",
+    "Integer": "Int64",
+    "BigInteger": "Int64",
+    "SmallInteger": "Int16",
+    "Boolean": "Bool",
+    "Float": "Float64",
+    "Date": "Date",
+    "JSON": "Jsonb",
     # Both of these have shipped in `wreath.orm.types` the whole time and were
     # simply missing from this table, so a money column and a blob column each
     # came out as "map by hand" over a type that already existed.
-    "Decimal": "Numeric", "LargeBinary": "Bytea",
+    "Decimal": "Numeric",
+    "LargeBinary": "Bytea",
 }
 
 # ormar column keywords that describe the column for a schema generator. Wreath
@@ -207,15 +269,26 @@ _ORMAR_TYPE = {
 #
 # `name=` is deliberately NOT here: on an ormar column it renames the *database*
 # column, which is the opposite of documentation.
-_ORMAR_DOC_KWARGS = frozenset({
-    "description", "title", "comment", "example", "examples",
-    "overwrite_pydantic_type", "represent_as_base_field_type",
-})
+_ORMAR_DOC_KWARGS = frozenset(
+    {
+        "description",
+        "title",
+        "comment",
+        "example",
+        "examples",
+        "overwrite_pydantic_type",
+        "represent_as_base_field_type",
+    }
+)
 _SA_ELEM_TYPE = {"String": "Text", "Text": "Text", "Integer": "Int64", "Boolean": "Bool"}
 # wreath PgType name -> the Python annotation for a FK column of that PK type.
 _PG_PYANN = {
-    "Uuid": "uuid.UUID", "Int64": "int", "Int32": "int", "Int16": "int",
-    "Varchar": "str", "Text": "str",
+    "Uuid": "uuid.UUID",
+    "Int64": "int",
+    "Int32": "int",
+    "Int16": "int",
+    "Varchar": "str",
+    "Text": "str",
 }
 
 # The two `status_code=` verdicts whose target names a response class the emitter
@@ -228,12 +301,28 @@ _STATUS_WRAPPER = {
 }
 
 # rule_ids Phase 1 fully rewrites (or that map 1:1 needing no edit) → no annotation.
-_REWRITTEN = frozenset({
-    "route.app", "route.router", "route.method", "route.include_static",
-    "param.query", "param.path", "param.header", "param.cookie", "param.form", "param.file",
-    "pydantic.model", "pydantic.field", "pydantic.config_forbid",
-    "exc.http_literal", "exc.handler", "mw.cors", "mw.trustedhost", "depends.use",
-})
+_REWRITTEN = frozenset(
+    {
+        "route.app",
+        "route.router",
+        "route.method",
+        "route.include_static",
+        "param.query",
+        "param.path",
+        "param.header",
+        "param.cookie",
+        "param.form",
+        "param.file",
+        "pydantic.model",
+        "pydantic.field",
+        "pydantic.config_forbid",
+        "exc.http_literal",
+        "exc.handler",
+        "mw.cors",
+        "mw.trustedhost",
+        "depends.use",
+    }
+)
 
 _HEADER_PREFIX = "# wreath-port:"
 
@@ -245,10 +334,14 @@ _SESSION_PARAM = "session"
 # the two JSON-encoder variants collapse onto the one `JSONResponse`, because
 # wreath's codec is native and there is nothing to choose between.
 _RESPONSE_RENAME = {
-    "JSONResponse": "JSONResponse", "ORJSONResponse": "JSONResponse",
-    "UJSONResponse": "JSONResponse", "HTMLResponse": "HTMLResponse",
-    "PlainTextResponse": "TextResponse", "RedirectResponse": "RedirectResponse",
-    "StreamingResponse": "StreamingResponse", "FileResponse": "FileResponse",
+    "JSONResponse": "JSONResponse",
+    "ORJSONResponse": "JSONResponse",
+    "UJSONResponse": "JSONResponse",
+    "HTMLResponse": "HTMLResponse",
+    "PlainTextResponse": "TextResponse",
+    "RedirectResponse": "RedirectResponse",
+    "StreamingResponse": "StreamingResponse",
+    "FileResponse": "FileResponse",
     "Response": "Response",
 }
 # Module prefixes whose members are renamed by `_RESPONSE_RENAME`.
@@ -257,19 +350,29 @@ _RESPONSE_MODULES = ("fastapi.responses", "starlette.responses")
 # fastapi's `content=` becomes. All of them accept it by keyword, so this is a
 # rename in place and never a reordering.
 _RESPONSE_BODY_ARG = {
-    "JSONResponse": "data", "HTMLResponse": "body", "TextResponse": "body",
-    "StreamingResponse": "body", "Response": "body",
-    "RedirectResponse": "url", "FileResponse": "path",
+    "JSONResponse": "data",
+    "HTMLResponse": "body",
+    "TextResponse": "body",
+    "StreamingResponse": "body",
+    "Response": "body",
+    "RedirectResponse": "url",
+    "FileResponse": "path",
 }
 
 # Whole-module import swaps: `from <old> import <name>` becomes
 # `from <new module for that name> import <new name>`, and every call site keeps
 # working because the name is the same or is rewritten with it.
 _TESTCLIENT_MODULES = ("fastapi.testclient", "starlette.testclient")
+_TEST_REQUEST_METHODS = frozenset(
+    {"request", "get", "post", "put", "patch", "delete", "head", "options"}
+)
 # arrow constructor -> the `wreath.temporal` function that replaces it.
 _ARROW_RENAME = {
-    "utcnow": "now", "now": "now", "get": "parse",
-    "fromtimestamp": "from_wall_clock", "fromdatetime": "parse",
+    "utcnow": "now",
+    "now": "now",
+    "get": "parse",
+    "fromtimestamp": "from_wall_clock",
+    "fromdatetime": "parse",
 }
 
 #: Every framework name that becomes a wreath name, by where it came from. One
@@ -279,8 +382,11 @@ _ARROW_RENAME = {
 _RENAMED_ORIGINS: dict[str, str] = {
     "fastapi.FastAPI": "Wreath",
     "fastapi.APIRouter": "Router",
-    **{f"{module}.{old}": new
-       for module in _RESPONSE_MODULES for old, new in _RESPONSE_RENAME.items()},
+    **{
+        f"{module}.{old}": new
+        for module in _RESPONSE_MODULES
+        for old, new in _RESPONSE_RENAME.items()
+    },
     **{f"{module}.TestClient": "TestClient" for module in _TESTCLIENT_MODULES},
 }
 
@@ -289,16 +395,30 @@ _RENAMED_ORIGINS: dict[str, str] = {
 #: therefore writes out rather than describing. Everything else — a write, a
 #: projection, a relation traversal, `get()`'s changed miss behaviour — keeps
 #: its note, because a person still has to decide something.
-_QUERY_TRANSLATED = frozenset({
-    "orm.query.filter_exact", "orm.query.get_or_none_exact", "orm.query.all",
-    "orm.query.count", "orm.query.exists", "orm.query.order_exact",
-    "orm.query.eager_exact",
-})
+_QUERY_TRANSLATED = frozenset(
+    {
+        "orm.query.filter_exact",
+        "orm.query.get_or_none_exact",
+        "orm.query.get_exact",
+        "orm.query.create_exact",
+        "orm.query.all",
+        "orm.query.page_exact",
+        "orm.query.count",
+        "orm.query.exists",
+        "orm.query.order_exact",
+        "orm.query.eager_exact",
+    }
+)
 
 #: How each chain verb contributes to the wreath query, and what runs it.
 #: `None` means the verb only builds; a string names the `session` method.
 _QUERY_RUNNER = {
-    "all": "fetch", "get_or_none": "fetch_one", "count": "count", "exists": "exists",
+    "all": "fetch",
+    "get_or_none": "fetch_one",
+    "get": "require_one",
+    "create": "create",
+    "count": "count",
+    "exists": "exists",
 }
 
 
@@ -313,13 +433,21 @@ class _QueryPlan:
         self.limit: str | None = None
         self.offset: str | None = None
         self.runner: str | None = None
+        self.write_values: list[str] = []
+        self.primary_key: str | None = None
 
     def step(self, emitter: _Emitter, verb: str, call: ast.Call | None) -> bool:
         """Fold one verb into the plan; `False` if it is not one we can write."""
         if self.runner is not None:
-            return False                      # nothing chains after the run
-        if verb in ("filter", "all", "get_or_none", "count", "exists"):
-            for keyword in (call.keywords if call else ()):
+            return False  # nothing chains after the run
+        if verb in ("filter", "all", "get_or_none", "get", "count", "exists"):
+            if verb == "get" and call is not None and len(call.keywords) == 1:
+                keyword = call.keywords[0]
+                if keyword.arg in ("id", "pk"):
+                    self.primary_key = emitter._seg(keyword.value)
+                    self.runner = "require"
+                    return not call.args
+            for keyword in call.keywords if call else ():
                 predicate = emitter._predicate(self.model, keyword)
                 if predicate is None:
                     return False
@@ -328,8 +456,19 @@ class _QueryPlan:
                 return False
             self.runner = _QUERY_RUNNER.get(verb)
             return True
+        if verb == "create":
+            if call is None or call.args:
+                return False
+            self.write_values = [
+                f"{keyword.arg}={emitter._seg(keyword.value)}"
+                if keyword.arg is not None
+                else f"**{emitter._seg(keyword.value)}"
+                for keyword in call.keywords
+            ]
+            self.runner = "create"
+            return True
         if verb == "order_by":
-            for argument in (call.args if call else ()):
+            for argument in call.args if call else ():
                 name = argument.value if isinstance(argument, ast.Constant) else None
                 if not isinstance(name, str) or not name.strip("-"):
                     return False
@@ -337,7 +476,7 @@ class _QueryPlan:
                 self.orders.append(f"{column}.desc()" if name.startswith("-") else column)
             return bool(self.orders)
         if verb in ("select_related", "prefetch_related"):
-            for argument in (call.args if call else ()):
+            for argument in call.args if call else ():
                 name = argument.value if isinstance(argument, ast.Constant) else None
                 if not isinstance(name, str) or "__" in name:
                     return False
@@ -348,9 +487,30 @@ class _QueryPlan:
                 return False
             setattr(self, verb, emitter._seg(call.args[0]))
             return True
+        if verb == "delete":
+            if call is None or call.args or call.keywords:
+                return False
+            self.runner = "delete_where"
+            return True
+        if verb == "update":
+            if call is None or call.args or not call.keywords:
+                return False
+            self.write_values = [
+                f"{keyword.arg}={emitter._seg(keyword.value)}"
+                if keyword.arg is not None
+                else f"**{emitter._seg(keyword.value)}"
+                for keyword in call.keywords
+            ]
+            self.runner = "update_where"
+            return True
         return False
 
     def render(self, session: str | None) -> str:
+        if self.runner == "create":
+            suffix = f", {', '.join(self.write_values)}" if self.write_values else ""
+            return f"await {session}.create({self.model}{suffix})"
+        if self.runner == "require" and self.primary_key is not None:
+            return f"await {session}.require({self.model}, {self.primary_key})"
         query = f"{self.model}.select()"
         if self.wheres:
             query += f".where({', '.join(self.wheres)})"
@@ -367,6 +527,9 @@ class _QueryPlan:
         if self.runner == "exists":
             # Wreath has no `exists()`; the count is the same round trip.
             return f"await {session}.count({query}) > 0"
+        if self.runner == "update_where":
+            values = ", ".join(self.write_values)
+            return f"await {session}.update_where({query}, {values})"
         return f"await {session}.{self.runner}({query})"
 
 
@@ -432,7 +595,7 @@ class _Buffer:
     def line_indent(self, line: int) -> str:
         start = self._starts[line - 1]
         end = self.b.find(b"\n", start)
-        raw = self.b[start:(end if end != -1 else len(self.b))]
+        raw = self.b[start : (end if end != -1 else len(self.b))]
         return raw[: len(raw) - len(raw.lstrip(b" \t"))].decode("utf-8")
 
     def start_of_line(self, line: int) -> int:
@@ -470,26 +633,32 @@ class _Buffer:
 # --------------------------------------------------------------------------- walker
 class _Emitter(ast.NodeVisitor):
     def __init__(
-        self, source: str, imports: _Imports, pk_types: dict[str, str] | None = None,
-        *, opinionated: bool = False,
+        self,
+        source: str,
+        imports: _Imports,
+        pk_types: dict[str, str] | None = None,
+        *,
+        opinionated: bool = False,
     ) -> None:
         self.buf = _Buffer(source)
         self.src = source
         self.imports = imports
         self.opinionated = opinionated
         self.session_functions: frozenset[str] = frozenset()
-        self.pk_types = pk_types or {}       # ORM model name -> PK PgType (FK inference)
-        self.needs: set[str] = set()          # extra `from wreath import` names
+        self.pk_types = pk_types or {}  # ORM model name -> PK PgType (FK inference)
+        self.orm_columns: dict[str, set[str]] = {}
+        self.orm_relations: dict[str, dict[str, str]] = {}
+        self.needs: set[str] = set()  # extra `from wreath import` names
         self._from_fastapi_wreath: set[str] = set()  # names already on the rewritten fastapi import
-        self.needs_annotated = False          # `from typing import Annotated`
-        self.needs_dataclass = False          # `from dataclasses import dataclass`
+        self.needs_annotated = False  # `from typing import Annotated`
+        self.needs_dataclass = False  # `from dataclasses import dataclass`
         # `field` is imported separately from the decorator, because it is only
         # needed for a mutable default and it is an ordinary English word: three
         # real modules use `field` as a loop variable, and importing it there
         # shadowed their own name.
-        self.needs_field = False              # `field` (a default_factory)
-        self.needs_uuid = False               # plain `import uuid` (a Uuid FK annotation)
-        self.needs_temporal = False           # `from wreath import temporal`
+        self.needs_field = False  # `field` (a default_factory)
+        self.needs_uuid = False  # plain `import uuid` (a Uuid FK annotation)
+        self.needs_temporal = False  # `from wreath import temporal`
         # Names the import rewrite must NOT drop, because a reference to them
         # survived the visit. A codemod that deletes an import whose name is
         # still used produces a module that imports nothing and runs nowhere:
@@ -510,7 +679,7 @@ class _Emitter(ast.NodeVisitor):
         # import. Marked at each rewrite site, read by `visit_Name`.
         self._rewritten: set[int] = set()
         self.annotated_lines: set[tuple[int, str]] = set()  # (line, rule_id) dedupe
-        self._dep_targets: set[str] = set()   # function names referenced by Depends(<name>)
+        self._dep_targets: set[str] = set()  # function names referenced by Depends(<name>)
         self._claimed_objects: set[int] = set()  # `.objects` billed by its verb
         # Same parent map the analyzer builds, for the same reason: the verdict
         # a query gets depends on its arguments and on the verbs chained after
@@ -519,6 +688,7 @@ class _Emitter(ast.NodeVisitor):
         # Names handed to an application as `lifespan=`; filled by `visit_Module`,
         # since the `FastAPI(lifespan=...)` call sits below the `def` it names.
         self._lifespan_names: frozenset[str] = frozenset()
+        self._test_clients: frozenset[str] = frozenset()
 
     def visit_Module(self, node: ast.Module) -> None:
         self._parents = parent_map(node)
@@ -599,10 +769,7 @@ class _Emitter(ast.NodeVisitor):
                 isinstance(node, ast.ImportFrom)
                 and (module := node.module) is not None
                 and module.startswith(("fastapi.middleware", "starlette.middleware"))
-                and any(
-                    a.name in {"CORSMiddleware", "TrustedHostMiddleware"}
-                    for a in node.names
-                )
+                and any(a.name in {"CORSMiddleware", "TrustedHostMiddleware"} for a in node.names)
             ):
                 imported = {a.name for a in node.names}
                 drop = imported & {"CORSMiddleware", "TrustedHostMiddleware"}
@@ -621,22 +788,33 @@ class _Emitter(ast.NodeVisitor):
                 self._swap_import(node, {"TestClient": "TestClient"})
             elif isinstance(node, ast.ImportFrom) and node.module == "cachetools":
                 self._drop_replaced(node, set(_CACHE_RENAME))
-            elif isinstance(node, ast.Import) and all(
-                (a.asname or a.name) not in self._retain
-                for a in node.names
-            ) and all(a.name in ("arrow",) for a in node.names):
+            elif (
+                isinstance(node, ast.Import)
+                and all((a.asname or a.name) not in self._retain for a in node.names)
+                and all(a.name in ("arrow",) for a in node.names)
+            ):
                 self.buf.replace(node, "")
-            elif (isinstance(node, ast.ImportFrom) and node.module == "fastapi.encoders"
-                  and "jsonable_encoder" not in self._retain):
-                self.buf.replace(
-                    node, self._keep_leftover(node, {"jsonable_encoder"}, node.module)
-                )
+            elif (
+                isinstance(node, ast.Import)
+                and all((a.asname or a.name) not in self._retain for a in node.names)
+                and all(a.name == "strawberry" for a in node.names)
+            ):
+                self.buf.replace(node, "")
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "fastapi.encoders"
+                and "jsonable_encoder" not in self._retain
+            ):
+                self.buf.replace(node, self._keep_leftover(node, {"jsonable_encoder"}, node.module))
         self._last_import_line = last_import_line
 
     def _drop_replaced(self, node: ast.ImportFrom, names: set[str]) -> None:
         """Drop the imported names whose every call site was rewritten."""
-        gone = {a.name for a in node.names
-                if a.name in names and (a.asname or a.name) not in self._retain}
+        gone = {
+            a.name
+            for a in node.names
+            if a.name in names and (a.asname or a.name) not in self._retain
+        }
         if gone:
             self.buf.replace(node, self._keep_leftover(node, gone, node.module or ""))
 
@@ -674,7 +852,7 @@ class _Emitter(ast.NodeVisitor):
             if alias.name in _FASTAPI_TO_WREATH:
                 wreath_names.append(_FASTAPI_TO_WREATH[alias.name])
             elif alias.name == "status" and (alias.asname or alias.name) not in self._retain:
-                continue                      # every HTTP_* became its number
+                continue  # every HTTP_* became its number
             else:
                 keep.append(alias)
         self._from_fastapi_wreath.update(wreath_names)
@@ -728,8 +906,8 @@ class _Emitter(ast.NodeVisitor):
         if self.needs_temporal and "temporal" not in self.imports.names:
             lines.append("from wreath import temporal")
         wanted = [
-            name for name, needed in (("dataclass", self.needs_dataclass),
-                                      ("field", self.needs_field))
+            name
+            for name, needed in (("dataclass", self.needs_dataclass), ("field", self.needs_field))
             if needed and name not in self.imports.names
         ]
         if wanted:
@@ -766,9 +944,30 @@ class _Emitter(ast.NodeVisitor):
     # -- classes (Pydantic DTOs / ORM / custom middleware) -----------------------
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for dec in node.decorator_list:
-            if self.imports.origin(dec).split(".")[-1] == "as_form":
+            decorated = dec.func if isinstance(dec, ast.Call) else dec
+            origin = self.imports.origin(decorated)
+            if origin.split(".")[-1] == "as_form":
                 # translated: whole-model Annotated[Model, Form()] replaces it
                 self._delete_decorator(dec)
+            elif origin == "strawberry.type" and _plain_graphql_dataclass(
+                self.imports, node
+            ):
+                self._delete_decorator(dec)
+                self.needs_dataclass = True
+                indent = self.buf.line_indent(node.lineno)
+                self.buf.insert_before_line(node.lineno, f"{indent}@dataclass(kw_only=True)")
+        projection_base = any(
+            isinstance(base, ast.Call)
+            and isinstance(base.func, ast.Attribute)
+            and base.func.attr == "get_pydantic"
+            and pydantic_projection_rule(base.func, self._parents)
+            == "pydantic.get_pydantic_exact"
+            for base in node.bases
+        )
+        if projection_base:
+            self.needs_dataclass = True
+            indent = self.buf.line_indent(node.lineno)
+            self.buf.insert_before_line(node.lineno, f"{indent}@dataclass(kw_only=True)")
         kind = _base_kind(self.imports, node)
         if kind == "pydantic":
             self._rewrite_pydantic_class(node)
@@ -779,19 +978,24 @@ class _Emitter(ast.NodeVisitor):
             # the `scalar` shape the translated verdict requires.
             rule_id = settings_class_rule(self.imports, node)
             self._annotate(
-                node.lineno, rule_id,
+                node.lineno,
+                rule_id,
                 settings_required(node) if rule_id == "settings.class_env" else "",
             )
         elif kind == "ormar":
             self._rewrite_ormar_class(node)
         elif kind == "sqlmodel":
-            self._note(node.lineno, "orm.model",
-                           "this is a SQLModel class and only ormar models are rewritten "
-                           "automatically. The shape is the same: Mapped[...] annotations "
-                           "with column(...) for each field")
+            self._note(
+                node.lineno,
+                "orm.model",
+                "this is a SQLModel class and only ormar models are rewritten "
+                "automatically. The shape is the same: Mapped[...] annotations "
+                "with column(...) for each field",
+            )
         elif any(self.imports.origin(b).endswith("BaseHTTPMiddleware") for b in node.bases):
-            self._annotate(node.lineno, "mw.custom",
-                           "subclass — rework onto wreath's fused middleware base")
+            self._annotate(
+                node.lineno, "mw.custom", "subclass — rework onto wreath's fused middleware base"
+            )
         self.generic_visit(node)
 
     def _rewrite_pydantic_class(self, node: ast.ClassDef) -> None:
@@ -805,18 +1009,18 @@ class _Emitter(ast.NodeVisitor):
         offenders = dataclass_needs_kw_only(self.imports, node)
         header = "@dataclass(kw_only=True)" if offenders else "@dataclass"
         self.buf.insert_before_line(node.lineno, f"{indent}{header}")
-        if offenders:
-            self._annotate(node.lineno, "pydantic.model_kw_only",
-                           "required after a defaulted field: " + ", ".join(offenders))
         # Strip the BaseModel base. Only the clean sole-base case is auto-rewritten.
         base_origins = [self.imports.origin(b) for b in node.bases]
         if base_origins == ["pydantic.BaseModel"]:
             self._strip_all_bases(node)  # `class X(BaseModel):` -> `class X:`
         elif "pydantic.BaseModel" in base_origins:
-            self._note(node.lineno, "pydantic.model",
-                           "this class has another base as well as BaseModel, so BaseModel "
-                           "was left in place. Remove it once you have checked the other "
-                           "base does not rely on pydantic")
+            self._note(
+                node.lineno,
+                "pydantic.model",
+                "this class has another base as well as BaseModel, so BaseModel "
+                "was left in place. Remove it once you have checked the other "
+                "base does not rely on pydantic",
+            )
         for stmt in node.body:
             self._rewrite_pydantic_field(stmt)
 
@@ -866,9 +1070,10 @@ class _Emitter(ast.NodeVisitor):
                 self._annotate(stmt.lineno, rule_id)
                 return
             default = stmt.value
-            if isinstance(default, ast.Call) and self.imports.origin(
-                default.func
-            ).split(".")[-1] == "Field":
+            if (
+                isinstance(default, ast.Call)
+                and self.imports.origin(default.func).split(".")[-1] == "Field"
+            ):
                 self._rewrite_field_marker(stmt, default)
                 return
             # mutable literal defaults -> field(default_factory=...)
@@ -923,9 +1128,7 @@ class _Emitter(ast.NodeVisitor):
                 default = positional
         if default is None:
             # Required: drop " = Field(...)" and leave a bare annotation.
-            self.buf._edits.append(
-                (self.buf.end_of(stmt.annotation), self.buf.end_of(call), b"")
-            )
+            self.buf._edits.append((self.buf.end_of(stmt.annotation), self.buf.end_of(call), b""))
             return
         mutable = _mutable_factory(default)
         if mutable:
@@ -954,20 +1157,28 @@ class _Emitter(ast.NodeVisitor):
             e = self.buf.end_of(last)
             self.buf._edits.append((e, e, f', table="{table}"'.encode()))
         else:
-            self._note(node.lineno, "orm.model",
-                           "add `table=\"<name>\"` to the class header; the table name "
-                           "was not written here as plain text")
+            self._note(
+                node.lineno,
+                "orm.model",
+                'add `table="<name>"` to the class header; the table name '
+                "was not written here as plain text",
+            )
         if config_stmt is not None:
             self._rewrite_ormar_config(node, config_stmt)
         if mixins:
-            self._note(node.lineno, "orm.model",
-                           "this model inherits columns from a mixin. Move the mixin's "
-                           "columns over too, or the ported model will be missing them")
+            self._note(
+                node.lineno,
+                "orm.model",
+                "this model inherits columns from a mixin. Move the mixin's "
+                "columns over too, or the ported model will be missing them",
+            )
         # Paired rather than filtered: `AnnAssign.value` is Optional, and a list
         # of statements throws away the narrowing every reader below relies on.
         columns: list[tuple[ast.AnnAssign, ast.Call]] = [
-            (stmt, stmt.value) for stmt in node.body
-            if stmt is not config_stmt and isinstance(stmt, ast.AnnAssign)
+            (stmt, stmt.value)
+            for stmt in node.body
+            if stmt is not config_stmt
+            and isinstance(stmt, ast.AnnAssign)
             and isinstance(stmt.value, ast.Call)
         ]
         # The nullability reminder used to go on every model, whether or not the
@@ -976,14 +1187,16 @@ class _Emitter(ast.NodeVisitor):
         # answer really did change, because ormar defaults a column to nullable
         # and wreath defaults it to NOT NULL.
         unstated = [
-            stmt.target.id for stmt, call in columns
+            stmt.target.id
+            for stmt, call in columns
             if isinstance(stmt.target, ast.Name)
             and not any(kw.arg in ("nullable", "primary_key") for kw in call.keywords)
             and self.imports.origin(call.func).split(".")[-1] != "ForeignKey"
         ]
         if unstated:
             self._note(
-                node.lineno, "orm.column",
+                node.lineno,
+                "orm.column",
                 "check whether these columns should allow NULL. ormar let a column be "
                 "empty unless told otherwise; wreath requires a value unless told "
                 "otherwise, so the ones that said nothing have just changed meaning: "
@@ -995,7 +1208,7 @@ class _Emitter(ast.NodeVisitor):
     def _rewrite_ormar_config(self, node: ast.ClassDef, config_stmt: ast.Assign) -> None:
         """Delete `ormar_config = …`, but not the constraints hanging off it.
 
-        `constraints=[ormar.UniqueColumns("name", "depot")]` is a real UNIQUE
+        `constraints=[ormar.UniqueColumns("name", "ranch")]` is a real UNIQUE
         index in the database, and the whole statement used to be deleted with
         no note at all — the port came out looking complete and quietly dropped
         31 constraints. Each one becomes a wreath declaration of the same shape.
@@ -1006,7 +1219,8 @@ class _Emitter(ast.NodeVisitor):
         for entry in _config_constraints(config_stmt.value):
             kind = self.imports.origin(entry.func).split(".")[-1]
             columns = [
-                arg for arg in entry.args
+                arg
+                for arg in entry.args
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
             ]
             if kind not in ("UniqueColumns", "IndexColumns") or len(columns) != len(entry.args):
@@ -1020,10 +1234,14 @@ class _Emitter(ast.NodeVisitor):
         # the indentation already in the source and the rest supply their own.
         self.buf.replace(config_stmt, f"\n{indent}".join(lines))
         if unread:
-            self._note(config_stmt.lineno, "orm.model",
-                           "this table declared constraints that were not carried over ("
-                           + "; ".join(unread) + "). They exist in the database today, so "
-                           "add the matching `unique(...)` or `index(...)` to the model")
+            self._note(
+                config_stmt.lineno,
+                "orm.model",
+                "this table declared constraints that were not carried over ("
+                + "; ".join(unread)
+                + "). They exist in the database today, so "
+                "add the matching `unique(...)` or `index(...)` to the model",
+            )
 
     def _rewrite_ormar_column(self, stmt: ast.AnnAssign, call: ast.Call) -> None:
         tail = self.imports.origin(call.func).split(".")[-1]
@@ -1033,9 +1251,12 @@ class _Emitter(ast.NodeVisitor):
             return
         pgtype = self._ormar_pgtype(tail, call)
         if pgtype is None:
-            self._note(stmt.lineno, "orm.column",
-                           f"wreath has no column type matching ormar.{tail}; pick the "
-                           "closest one in wreath.orm.types and check the values still fit")
+            self._note(
+                stmt.lineno,
+                "orm.column",
+                f"wreath has no column type matching ormar.{tail}; pick the "
+                "closest one in wreath.orm.types and check the values still fit",
+            )
             return
         self.needs.update({"Mapped", "column"})
         kwargs = self._ormar_kwargs(stmt, call)
@@ -1063,15 +1284,13 @@ class _Emitter(ast.NodeVisitor):
             self.needs_uuid = self.needs_uuid or pyann.startswith("uuid.")
             self.needs.update({"Mapped", "column", "relationship", pg})
             index = ", index=True" if idx else ""
-            col = (f"{name}_id: Mapped[{pyann}] = "
-                   f"column({pg}, references={target}.id{index})")
+            col = f"{name}_id: Mapped[{pyann}] = column({pg}, references={target}.id{index})"
             self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
         else:  # needs-review: referenced PK not resolvable in this module -> Uuid default + flag
             self.needs.update({"Mapped", "column", "relationship", "Uuid"})
             index = ", index=True" if idx else ""
             self.needs_uuid = True
-            col = (f"{name}_id: Mapped[uuid.UUID] = "
-                   f"column(Uuid, references={target}.id{index})")
+            col = f"{name}_id: Mapped[uuid.UUID] = column(Uuid, references={target}.id{index})"
             self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
             self._annotate(stmt.lineno, "orm.fk")
 
@@ -1085,9 +1304,11 @@ class _Emitter(ast.NodeVisitor):
             self.needs.update({"Array", elem})
             return f"Array({elem})"
         if tail == "DateTime":
-            name = "TimestampTz" if any(
-                kw.arg == "timezone" and _is_true(kw.value) for kw in call.keywords
-            ) else "Timestamp"
+            name = (
+                "TimestampTz"
+                if any(kw.arg == "timezone" and _is_true(kw.value) for kw in call.keywords)
+                else "Timestamp"
+            )
             self.needs.add(name)
             return name
         name = _ORMAR_TYPE.get(tail)
@@ -1110,8 +1331,14 @@ class _Emitter(ast.NodeVisitor):
         checks: list[str] = []
         minimum = maximum = min_length = max_length = None
         for kw in call.keywords:
-            if kw.arg in ("primary_key", "nullable", "unique", "index", "server_default",
-                          "default"):
+            if kw.arg in (
+                "primary_key",
+                "nullable",
+                "unique",
+                "index",
+                "server_default",
+                "default",
+            ):
                 out.append(f"{kw.arg}={self._seg(kw.value)}")
             elif kw.arg == "default_factory":
                 out.append(f"default={self._seg(kw.value)}")
@@ -1133,7 +1360,8 @@ class _Emitter(ast.NodeVisitor):
                 # postgres type. Same values, different storage — which matters
                 # only if this port points at a database that already exists.
                 self._note(
-                    stmt.lineno, "orm.column",
+                    stmt.lineno,
+                    "orm.column",
                     "ormar stored this UUID as text, and wreath stores it as postgres's "
                     "own uuid type. Starting from an empty database there is nothing to "
                     "do. Pointing at an existing one, this column has to be converted "
@@ -1165,8 +1393,10 @@ class _Emitter(ast.NodeVisitor):
             out.append(f"check=AllOf(({', '.join(checks)}))")
         if dropped:
             self._note(
-                stmt.lineno, "orm.column",
-                "this column set " + ", ".join(f"{name}=" for name in dropped)
+                stmt.lineno,
+                "orm.column",
+                "this column set "
+                + ", ".join(f"{name}=" for name in dropped)
                 + ", which wreath's column() has no setting for. Decide what each one "
                 "should become before relying on this model",
             )
@@ -1174,10 +1404,17 @@ class _Emitter(ast.NodeVisitor):
 
     # -- functions (routes) ------------------------------------------------------
     def visit_FunctionDef(self, node) -> None:
+        outer_test_clients = self._test_clients
+        rewritten_test_clients = self._rewrite_test_client_function(node)
+        if rewritten_test_clients:
+            self._test_clients |= rewritten_test_clients
         route_dec = None
         for dec in node.decorator_list:
-            attr = dec.func.attr if (isinstance(dec, ast.Call)
-                                     and isinstance(dec.func, ast.Attribute)) else None
+            attr = (
+                dec.func.attr
+                if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute))
+                else None
+            )
             if attr in HTTP_METHODS:
                 route_dec = dec
                 self._rewrite_route_options(dec, node)
@@ -1187,13 +1424,16 @@ class _Emitter(ast.NodeVisitor):
         if route_dec is not None:
             session = self._route_session_name(node)
             self._ensure_request_param(
-                node, self._route_needs_keyword_only(node) or session == _SESSION_PARAM, session,
+                node,
+                self._route_needs_keyword_only(node) or session == _SESSION_PARAM,
+                session,
             )
             self._split_markers(node)
             self._rewrite_as_form_params(node)
             outer, self._session = self._session, session
             self.generic_visit(node)
             self._session = outer
+            self._test_clients = outer_test_clients
             return
         if node.name in self._dep_targets:
             self._ensure_request_param(node)  # Phase 3: dependency callable gains `request`
@@ -1210,20 +1450,63 @@ class _Emitter(ast.NodeVisitor):
         # someone else depends on without being asked.
         outer_session, outer_wanted = self._session, self._session_wanted
         self._session, self._session_wanted = None, False
-        if self.opinionated and isinstance(node, ast.AsyncFunctionDef) \
-                and node.name in self.session_functions and self._can_take_session(node):
+        if (
+            self.opinionated
+            and isinstance(node, ast.AsyncFunctionDef)
+            and node.name in self.session_functions
+            and self._can_take_session(node)
+        ):
             self._session = _SESSION_PARAM
             self._add_session_param(node)
-            self._note(node.lineno, "orm.query.session_added",
-                       f"this function now takes a `{_SESSION_PARAM}`, because it runs "
-                       "queries or calls something that does. Calls to it inside this tree "
-                       "were updated to pass one. Check anything outside it")
+            self._note(
+                node.lineno,
+                "orm.query.session_added",
+                f"this function now takes a `{_SESSION_PARAM}`, because it runs "
+                "queries or calls something that does. Calls to it inside this tree "
+                "were updated to pass one. Check anything outside it",
+            )
         self.generic_visit(node)
         if self._session_wanted:
             self._annotate(node.lineno, "orm.query.needs_session")
         self._session, self._session_wanted = outer_session, outer_wanted
+        self._test_clients = outer_test_clients
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+    def _rewrite_test_client_function(self, node) -> frozenset[str]:
+        """Make one local FastAPI TestClient an async lifespan context.
+
+        The exact shape is deliberately narrow: one direct assignment in a
+        function. Module globals, yielded fixtures and factory-returned clients
+        have ownership outside this body, so the porter leaves those for a
+        person instead of guessing where their lifespan ends.
+        """
+        if not self.opinionated:
+            return frozenset()
+        assignments: list[tuple[ast.Assign, ast.Name, ast.Call]] = []
+        for statement in node.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Call)
+                and self.imports.origin(statement.value.func)
+                in {f"{module}.TestClient" for module in _TESTCLIENT_MODULES}
+            ):
+                assignments.append((statement, statement.targets[0], statement.value))
+        if len(assignments) != 1:
+            return frozenset()
+        statement, target, call = assignments[0]
+        if isinstance(node, ast.FunctionDef):
+            self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"async "))
+        self.buf.replace(statement, f"async with {self._seg(call)} as {target.id}:")
+        if node.end_lineno is None or statement.end_lineno is None:
+            return frozenset()
+        for line in range(statement.end_lineno + 1, node.end_lineno + 1):
+            offset = self.buf.start_of_line(line)
+            self.buf._edits.append((offset, offset, b"    "))
+        self._resolve(call.lineno, "test.client_local")
+        return frozenset((target.id,))
 
     def _route_session_name(self, node) -> str | None:
         """The name a session will be reachable under inside this handler.
@@ -1234,7 +1517,7 @@ class _Emitter(ast.NodeVisitor):
 
         "Already takes a session" is decided by resolving the annotation, not by
         looking for the word. `session: Session` is just as likely to be a
-        pydantic model of a charging session as a database handle, and reading it
+        pydantic model of an incoming payload as a database handle, and reading it
         the wrong way produced a handler with the parameter declared twice.
         """
         parameters = list(node.args.args) + list(node.args.kwonlyargs)
@@ -1242,9 +1525,9 @@ class _Emitter(ast.NodeVisitor):
             if arg.annotation is not None and self._is_orm_session(arg.annotation):
                 return arg.arg
         if any(arg.arg == _SESSION_PARAM for arg in parameters):
-            return None                       # the name is taken by something else
+            return None  # the name is taken by something else
         if not (self._name_is_free("Session") and self._name_is_free("FromORM")):
-            return None                       # so is the type's name
+            return None  # so is the type's name
         if node.name in self.session_functions or self._runs_a_query(node):
             return _SESSION_PARAM
         if self.opinionated and self._calls_a_session_function(node):
@@ -1256,8 +1539,10 @@ class _Emitter(ast.NodeVisitor):
         for inner in ast.walk(node):
             if not isinstance(inner, ast.Call):
                 continue
-            name = inner.func.attr if isinstance(inner.func, ast.Attribute) else getattr(
-                inner.func, "id", None
+            name = (
+                inner.func.attr
+                if isinstance(inner.func, ast.Attribute)
+                else getattr(inner.func, "id", None)
             )
             if name in self.session_functions:
                 return True
@@ -1277,12 +1562,11 @@ class _Emitter(ast.NodeVisitor):
         expression.
         """
         close = self.buf.end_of(node) - 1
-        if self.buf.b[close:close + 1] != b")":
-            return                            # not a plain call span; leave it alone
+        if self.buf.b[close : close + 1] != b")":
+            return  # not a plain call span; leave it alone
         # `sum(x for x in xs)` may write its generator bare only while it is the
         # sole argument. Adding a second one means adding its brackets too.
-        if len(node.args) == 1 and isinstance(node.args[0], ast.GeneratorExp) \
-                and not node.keywords:
+        if len(node.args) == 1 and isinstance(node.args[0], ast.GeneratorExp) and not node.keywords:
             start, end = self.buf.start_of(node.args[0]), self.buf.end_of(node.args[0])
             self.buf._edits.append((start, start, b"("))
             self.buf._edits.append((end, end, b")"))
@@ -1322,7 +1606,7 @@ class _Emitter(ast.NodeVisitor):
 
     def _is_orm_session(self, annotation: ast.expr) -> bool:
         """Whether this annotation is wreath's `Session`, however it is wrapped."""
-        if isinstance(annotation, ast.Subscript):     # Annotated[Session, FromORM()]
+        if isinstance(annotation, ast.Subscript):  # Annotated[Session, FromORM()]
             inner = annotation.slice
             annotation = inner.elts[0] if isinstance(inner, ast.Tuple) and inner.elts else inner
         return self.imports.origin(annotation).startswith("wreath.orm")
@@ -1339,14 +1623,23 @@ class _Emitter(ast.NodeVisitor):
     def _runs_a_query(self, node) -> bool:
         """Whether this body has a `Model.objects.…` chain that *runs*."""
         for inner in ast.walk(node):
-            if not (isinstance(inner, ast.Attribute)
-                    and isinstance(inner.value, ast.Attribute)
-                    and inner.value.attr == "objects"):
+            if not (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Attribute)
+                and inner.value.attr == "objects"
+            ):
                 continue
             call = self._parents.get(id(inner))
             rule_id = query_rule(
-                inner.attr, call if isinstance(call, ast.Call) else None,
+                inner.attr,
+                call if isinstance(call, ast.Call) else None,
                 chain_tail(inner, self._parents),
+                model=self._seg(inner.value.value),
+                relations=self.orm_relations,
+                columns=self.orm_columns,
+                plain_mappings=plain_filter_mappings(
+                    call if isinstance(call, ast.Call) else None, self._parents
+                ),
             )
             if rule_id not in _QUERY_TRANSLATED:
                 continue
@@ -1407,10 +1700,13 @@ class _Emitter(ast.NodeVisitor):
                 end = self.buf.end_of(existing)
                 self.buf._edits.append((end, end, f", {star}{extra}".rstrip(" ,").encode()))
             else:
-                self._note(node.lineno, "route.method",
-                               "move `request` to the front, then add "
-                               "`session: Annotated[Session, FromORM()]` after it so the "
-                               "queries in this handler have a session to run through")
+                self._note(
+                    node.lineno,
+                    "route.method",
+                    "move `request` to the front, then add "
+                    "`session: Annotated[Session, FromORM()]` after it so the "
+                    "queries in this handler have a session to run through",
+                )
             return
         self.needs.add("Request")
         if positional:
@@ -1425,9 +1721,11 @@ class _Emitter(ast.NodeVisitor):
         # characters every time.
         open_paren = self.buf.b.find(b"(", self.buf.start_of_line(node.lineno))
         if open_paren == -1:
-            self._note(node.lineno, "route.method",
-                           "add a `request: Request` parameter -- every wreath handler "
-                           "takes one first")
+            self._note(
+                node.lineno,
+                "route.method",
+                "add a `request: Request` parameter -- every wreath handler takes one first",
+            )
             return
         if args.kwonlyargs or args.vararg or args.kwarg:
             self.buf._edits.append(
@@ -1435,15 +1733,15 @@ class _Emitter(ast.NodeVisitor):
             )
             return
         close_paren = self.buf.b.find(b")", open_paren)
-        if close_paren == -1 or self.buf.b[open_paren + 1:close_paren].strip():
-            self._note(node.lineno, "route.method",
-                           "add a `request: Request` parameter -- every wreath handler "
-                           "takes one first")
+        if close_paren == -1 or self.buf.b[open_paren + 1 : close_paren].strip():
+            self._note(
+                node.lineno,
+                "route.method",
+                "add a `request: Request` parameter -- every wreath handler takes one first",
+            )
             return
         tail = f", {star}{extra}".rstrip(" ,") if extra else ""
-        self.buf._edits.append(
-            (open_paren + 1, close_paren, f"request: Request{tail}".encode())
-        )
+        self.buf._edits.append((open_paren + 1, close_paren, f"request: Request{tail}".encode()))
 
     def _route_needs_keyword_only(self, node) -> bool:
         """Whether porting this signature leaves a required parameter after a defaulted one.
@@ -1457,8 +1755,11 @@ class _Emitter(ast.NodeVisitor):
         """
         args = node.args
         defaults = dict(
-            zip([a.arg for a in args.args[len(args.args) - len(args.defaults):]],
-                args.defaults, strict=True)
+            zip(
+                [a.arg for a in args.args[len(args.args) - len(args.defaults) :]],
+                args.defaults,
+                strict=True,
+            )
         )
         defaulted = False
         for arg in args.args:
@@ -1479,6 +1780,7 @@ class _Emitter(ast.NodeVisitor):
 
     def _delete_decorator(self, dec) -> None:
         """Remove a whole `@decorator` line (assumes it sits on its own line)."""
+        self._rewritten.update(id(item) for item in ast.walk(dec))
         start = self.buf._starts[dec.lineno - 1]
         nxt = self.buf.b.find(b"\n", start)
         end = (nxt + 1) if nxt != -1 else len(self.buf.b)
@@ -1493,17 +1795,25 @@ class _Emitter(ast.NodeVisitor):
         # Both pairings are equal-length by construction: the tail of `args.args`
         # is sliced to `len(args.defaults)`, and the AST keeps `kw_defaults` the
         # same length as `kwonlyargs`, padding with None.
-        defaulted = list(zip(args.args[len(args.args) - len(args.defaults):], args.defaults,
-                             strict=True))
-        defaulted += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True)
-                      if d is not None]
+        defaulted = list(
+            zip(args.args[len(args.args) - len(args.defaults) :], args.defaults, strict=True)
+        )
+        defaulted += [
+            (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d is not None
+        ]
         for arg, default in defaulted:
-            if not (isinstance(default, ast.Call) and default.args
-                    and self.imports.origin(default.func).split(".")[-1] == "Depends"):
+            if not (
+                isinstance(default, ast.Call)
+                and default.args
+                and self.imports.origin(default.func).split(".")[-1] == "Depends"
+            ):
                 continue
             dep = default.args[0]
-            if (isinstance(dep, ast.Attribute) and dep.attr == "as_form"
-                    and arg.annotation is not None):
+            if (
+                isinstance(dep, ast.Attribute)
+                and dep.attr == "as_form"
+                and arg.annotation is not None
+            ):
                 self.needs_annotated = True
                 self.needs.add("Form")  # -> wreath.binding via _WREATH_MODULE
                 new = f"{arg.arg}: Annotated[{self._seg(arg.annotation)}, Form()]"
@@ -1546,22 +1856,19 @@ class _Emitter(ast.NodeVisitor):
             # translated: drop the kwarg (the return annotation is the schema source)
             drop.add("response_model")
         if any(kw.arg == "include_in_schema" and _is_false(kw.value) for kw in dec.keywords):
-            if self.opinionated:
-                drop.add("include_in_schema")  # wreath has no per-route switch
-                self._resolve(dec.lineno, "route.include_in_schema")
-            else:
-                self._annotate(dec.lineno, "route.include_in_schema")
+            self._resolve(dec.lineno, "route.include_in_schema")
         if drop:
             parts = [self._seg(a) for a in dec.args]
             parts += [
                 (f"{kw.arg}={self._seg(kw.value)}" if kw.arg else f"**{self._seg(kw.value)}")
-                for kw in dec.keywords if kw.arg not in drop
+                for kw in dec.keywords
+                if kw.arg not in drop
             ]
             self.buf.replace(dec, f"{self._seg(dec.func)}({', '.join(parts)})")
 
     def _split_markers(self, node) -> None:
         args = node.args
-        defaulted = args.args[len(args.args) - len(args.defaults):]
+        defaulted = args.args[len(args.args) - len(args.defaults) :]
         for arg, default in zip(defaulted, args.defaults, strict=True):
             if not isinstance(default, ast.Call):
                 continue
@@ -1582,7 +1889,7 @@ class _Emitter(ast.NodeVisitor):
         kept, dropped = [], []
         for kw in call.keywords:
             if kw.arg == "default" or kw.arg in _MARKER_DOC_KWARGS:
-                continue                      # already read, or documentation only
+                continue  # already read, or documentation only
             if kw.arg in _KW_RENAME:
                 kept.append(f"{_KW_RENAME[kw.arg]}={self._seg(kw.value)}")
             elif kw.arg in _KW_KEEP:
@@ -1599,8 +1906,11 @@ class _Emitter(ast.NodeVisitor):
         e = self.buf.end_of(call)
         self.buf._edits.append((s, e, new.encode("utf-8")))
         if dropped:
-            self._annotate(arg.lineno, "param.query_strconstraint",
-                           "dropped from the marker: " + ", ".join(f"{n}=" for n in dropped))
+            self._annotate(
+                arg.lineno,
+                "param.query_strconstraint",
+                "dropped from the marker: " + ", ".join(f"{n}=" for n in dropped),
+            )
 
     # -- calls (FastAPI/APIRouter name, HTTPException, CORS, queries, infra) ------
     def visit_Call(self, node: ast.Call) -> None:
@@ -1612,9 +1922,20 @@ class _Emitter(ast.NodeVisitor):
         # `-> FastAPI` return, an `isinstance` check — and not only the call
         # that constructs the application.
         called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        if (self.opinionated and called in self.session_functions
-                and self._session is not None
-                and not any(kw.arg == _SESSION_PARAM for kw in node.keywords)):
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in self._test_clients
+            and func.attr in _TEST_REQUEST_METHODS
+            and not isinstance(self._parents.get(id(node)), ast.Await)
+        ):
+            self.buf._edits.append((self.buf.start_of(node), self.buf.start_of(node), b"await "))
+        if (
+            self.opinionated
+            and called in self.session_functions
+            and self._session is not None
+            and not any(kw.arg == _SESSION_PARAM for kw in node.keywords)
+        ):
             # The callee gained a session parameter, so this call has to pass
             # one. Doing the signature and leaving the call is the half-port
             # that fails on its first request; `--opinionated` means both ends.
@@ -1639,6 +1960,13 @@ class _Emitter(ast.NodeVisitor):
             self._replace_all_of(func, f"temporal.{_ARROW_RENAME[tail]}")
         elif origin.startswith("cachetools.") and tail in _CACHE_RENAME:
             self._rewrite_cache_call(node, func)
+        elif (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get_pydantic"
+            and pydantic_projection_rule(func, self._parents)
+            == "pydantic.get_pydantic_exact"
+        ):
+            self._rewrite_model_dataclass(node, func)
         elif isinstance(func, ast.Attribute) and func.attr == "add_middleware":
             self._rewrite_add_middleware(node)
         # Everything else a call can be — a Celery `.delay()`, an `asyncio`
@@ -1648,6 +1976,31 @@ class _Emitter(ast.NodeVisitor):
         # ended up reporting *every* boto3 call as "keep the library" while the
         # report had already learned to route S3 at `wreath.objects`.
         self.generic_visit(node)
+
+    def _rewrite_model_dataclass(self, node: ast.Call, func: ast.Attribute) -> None:
+        """Replace a statically named ormar projection with Wreath's dataclass."""
+        outer = self._parents.get(id(node))
+        if isinstance(outer, ast.ClassDef):
+            projected_name = f"_{outer.name}Fields"
+        elif (
+            isinstance(outer, ast.Assign)
+            and len(outer.targets) == 1
+            and isinstance(outer.targets[0], ast.Name)
+        ):
+            projected_name = outer.targets[0].id
+        elif isinstance(outer, ast.AnnAssign) and isinstance(outer.target, ast.Name):
+            projected_name = outer.target.id
+        else:
+            projected_name = None
+        arguments = [self._seg(func.value)]
+        arguments.extend(
+            f"{keyword.arg}={self._seg(keyword.value)}" for keyword in node.keywords
+        )
+        if projected_name is not None:
+            arguments.append(f"name={projected_name!r}")
+        self.needs.add("model_dataclass")
+        self._rewritten.add(id(func))
+        self._replace_all_of(node, f"model_dataclass({', '.join(arguments)})")
 
     def visit_Name(self, node: ast.Name) -> None:
         """Rename or retain one bare reference to a framework name.
@@ -1674,8 +2027,11 @@ class _Emitter(ast.NodeVisitor):
             # as fastapistatus` is legal, and retaining "status" would have kept
             # an import nothing referred to while dropping the one that mattered.
             self._retain.add(node.id if isinstance(node, ast.Name) else origin.split(".")[-1])
-        elif (status := status_int(self.imports, node if isinstance(node, ast.expr) else None)) \
-                is not None and isinstance(node, ast.Attribute):
+        elif origin.startswith("strawberry") and isinstance(node, ast.Name):
+            self._retain.add(node.id)
+        elif (
+            status := status_int(self.imports, node if isinstance(node, ast.expr) else None)
+        ) is not None and isinstance(node, ast.Attribute):
             # `status.HTTP_404_NOT_FOUND` is an integer with a long name, and
             # wreath has no such module, and the number is what the reader
             # already has in mind anyway.
@@ -1702,6 +2058,9 @@ class _Emitter(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         value = node.value
         self._track_reference(node, self.imports.origin(node))
+        if node.attr == "status_code" and self._test_clients:
+            end = self.buf.end_of(node)
+            self.buf._edits.append((end - len("status_code"), end, b"status"))
         # Mirrors the analyzer: the verb after `.objects` names the rewrite, and
         # the `.objects` underneath it is claimed so one chain gets one note.
         if isinstance(value, ast.Attribute) and value.attr == "objects":
@@ -1711,6 +2070,12 @@ class _Emitter(ast.NodeVisitor):
                 node.attr,
                 call if isinstance(call, ast.Call) else None,
                 chain_tail(node, self._parents),
+                model=self._seg(value.value),
+                relations=self.orm_relations,
+                columns=self.orm_columns,
+                plain_mappings=plain_filter_mappings(
+                    call if isinstance(call, ast.Call) else None, self._parents
+                ),
             )
             if not self._rewrite_query(node, rule_id):
                 self._annotate(value.lineno, rule_id)
@@ -1755,7 +2120,7 @@ class _Emitter(ast.NodeVisitor):
             return False
         objects = head.value
         if not isinstance(objects, ast.Attribute):
-            return False                      # not `<Model>.objects.<verb>`
+            return False  # not `<Model>.objects.<verb>`
         model = self._seg(objects.value)
         if not model:
             return False
@@ -1771,7 +2136,7 @@ class _Emitter(ast.NodeVisitor):
         awaited = self._parents.get(id(target))
         text = plan.render(self._session)
         if plan.runner is not None and isinstance(awaited, ast.Await):
-            target = awaited                  # our text carries its own `await`
+            target = awaited  # our text carries its own `await`
         elif plan.runner is not None:
             text = f"({text})" if isinstance(awaited, ast.Attribute) else text
         self._replace_all_of(target, text)
@@ -1780,10 +2145,17 @@ class _Emitter(ast.NodeVisitor):
     def _predicate(self, model: str, keyword: ast.keyword) -> str | None:
         """One `filter(**kw)` keyword as a wreath predicate expression."""
         if keyword.arg is None:
+            if isinstance(keyword.value, ast.Name):
+                self.needs.add("where_fields")
+                return f"*where_fields({model}, {keyword.value.id})"
             return None
         column, suffix = split_lookup(keyword.arg)
         if "__" in column:
-            return None                       # a relation traversal; not resolved here
+            if not _resolved_column_path(
+                model, column, self.orm_relations, self.orm_columns
+            ):
+                return None
+            column = ".".join(column.split("__"))
         value = self._seg(keyword.value)
         if suffix == "isnull":
             method = _NULL_METHOD.get(
@@ -1865,15 +2237,18 @@ class _Emitter(ast.NodeVisitor):
                 (start, start + len(keyword.arg or ""), rename[keyword.arg].encode())
             )
         unmapped = sorted(
-            keyword.arg for keyword in node.keywords
+            keyword.arg
+            for keyword in node.keywords
             if keyword.arg not in rename and keyword.arg not in ("background", "status")
         )
         if unmapped:
             self._note(
-                node.lineno, "resp.class",
-                f"{wreath_name} has no " + ", ".join(f"{name}=" for name in unmapped)
+                node.lineno,
+                "resp.class",
+                f"{wreath_name} has no "
+                + ", ".join(f"{name}=" for name in unmapped)
                 + ". Headers go in as a list of lowercase byte pairs, "
-                "`[(b\"x-total\", b\"12\")]`, and the content type comes from the "
+                '`[(b"x-total", b"12")]`, and the content type comes from the '
                 "response class itself -- so move these across or drop them",
             )
 
@@ -1917,8 +2292,12 @@ def _mutable_factory(value: ast.AST | None) -> str | None:
         return "dict"
     if isinstance(value, ast.Set):
         return "set"
-    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
-            and value.func.id in ("list", "dict", "set") and not value.args):
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in ("list", "dict", "set")
+        and not value.args
+    ):
         return value.func.id
     return None
 
@@ -1932,17 +2311,17 @@ def _ends_argument_list(source: bytes, close: int) -> bool:
     """
     index = close - 1
     while index >= 0:
-        byte = source[index:index + 1]
+        byte = source[index : index + 1]
         if byte in b" \t\r\n":
             index -= 1
             continue
-        if byte == b"\n":                     # pragma: no cover - covered above
+        if byte == b"\n":  # pragma: no cover - covered above
             index -= 1
             continue
         line_start = source.rfind(b"\n", 0, index) + 1
         hash_at = source.find(b"#", line_start, index + 1)
         if hash_at != -1 and source.find(b"\n", hash_at, index + 1) == -1:
-            index = hash_at - 1               # step over a trailing comment
+            index = hash_at - 1  # step over a trailing comment
             continue
         return byte in b",("
     return True
@@ -2006,8 +2385,7 @@ def _read_source(source) -> str:
     return source
 
 
-def emit_module(source, context: TreeContext | None = None, *,
-                opinionated: bool = False) -> str:
+def emit_module(source, context: TreeContext | None = None, *, opinionated: bool = False) -> str:
     """Port one module. `source` may be a Path/path-string (read) or source text.
 
     Returns the ported source (with a provenance header), preserving every function
@@ -2033,6 +2411,8 @@ def emit_module(source, context: TreeContext | None = None, *,
     context = context or TreeContext()
     resolved = {**context.pk_types, **module_pk_types(tree, imports)}
     emitter = _Emitter(text, imports, resolved, opinionated=opinionated)
+    emitter.orm_columns = context.orm_columns
+    emitter.orm_relations = context.orm_relations
     emitter.session_functions = context.session_functions
     emitter.collect_dep_targets(tree)
     emitter.visit(tree)

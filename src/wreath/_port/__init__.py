@@ -5,10 +5,18 @@ native `_core`, so the analyzer runs standalone (design 07's "never import the
 target" constraint applies to the tool itself too — it must analyze source without
 importing wreath's own heavy runtime).
 """
+
 from __future__ import annotations
 
 from .analyzer import TreeContext, analyze, analyze_all
 from .emit import PortResult, emit_module, port_tree
+from .inventory import (
+    MigrationInventory,
+    PolicyCandidate,
+    ProjectReport,
+    RouteContract,
+    inventory_projects,
+)
 from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED, Finding, Report, SkippedFile
 
 __all__ = [
@@ -24,4 +32,9 @@ __all__ = [
     "TRANSLATED",
     "NEEDS_REVIEW",
     "UNSUPPORTED",
+    "MigrationInventory",
+    "PolicyCandidate",
+    "ProjectReport",
+    "RouteContract",
+    "inventory_projects",
 ]

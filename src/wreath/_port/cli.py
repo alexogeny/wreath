@@ -32,11 +32,14 @@ Emit mode (`--output`/`--in-place`) reads the same way: sources that could
 not be read are work remaining (`1`), a tree with nothing to emit at all is
 `2`, and everything written is `0`.
 """
+
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Set as AbstractSet
 from pathlib import Path
+from typing import TypedDict
 
 from .analyzer import analyze_all
 from .emit import port_tree
@@ -107,8 +110,7 @@ def render_by_rule(report: Report) -> str:
 def render_sites(report: Report, rules: AbstractSet[str], context: int) -> str:
     """Every site for the named rules, with source context. Empty set means all."""
     selected = [
-        f for f in report.findings
-        if f.tag != TRANSLATED and (not rules or f.rule_id in rules)
+        f for f in report.findings if f.tag != TRANSLATED and (not rules or f.rule_id in rules)
     ]
     lines = ["# wreath port — finding sites", ""]
     if rules:
@@ -134,6 +136,60 @@ def render_sites(report: Report, rules: AbstractSet[str], context: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+class _CedarOptions(TypedDict):
+    required_condition: str | None
+    default_condition: str | None
+    action_conditions: dict[str, str]
+    condition_map: dict[str, str]
+    authentication_factories: list[str]
+
+
+def _cedar_options(path: str | None) -> _CedarOptions | None:
+    """Read the deliberately small, data-only port policy profile."""
+    if path is None:
+        return None
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("Cedar semantics must be a JSON object")
+    allowed = {
+        "required_condition",
+        "default_condition",
+        "action_conditions",
+        "conditions",
+        "authentication_factories",
+    }
+    unknown = sorted(set(document) - allowed)
+    if unknown:
+        raise ValueError(f"unknown Cedar semantics key(s): {', '.join(unknown)}")
+    scalars: dict[str, str | None] = {}
+    for key in ("required_condition", "default_condition"):
+        value = document.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Cedar semantics {key} must be a string or null")
+        scalars[key] = value
+    mappings: dict[str, dict[str, str]] = {}
+    for source, target in (
+        ("action_conditions", "action_conditions"),
+        ("conditions", "condition_map"),
+    ):
+        value = document.get(source, {})
+        if not isinstance(value, dict) or not all(
+            isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+        ):
+            raise ValueError(f"Cedar semantics {source} must map strings to strings")
+        mappings[target] = value
+    factories = document.get("authentication_factories", [])
+    if not isinstance(factories, list) or not all(isinstance(item, str) for item in factories):
+        raise ValueError("Cedar semantics authentication_factories must be a list of strings")
+    return _CedarOptions(
+        required_condition=scalars["required_condition"],
+        default_condition=scalars["default_condition"],
+        action_conditions=mappings["action_conditions"],
+        condition_map=mappings["condition_map"],
+        authentication_factories=factories,
+    )
+
+
 def execute(namespace) -> int:
     roots = [Path(s) for s in namespace.source]
     missing = [str(r) for r in roots if not r.exists()]
@@ -144,6 +200,63 @@ def execute(namespace) -> int:
     output = getattr(namespace, "output", None)
     force = bool(getattr(namespace, "force", False))
     opinionated = bool(getattr(namespace, "opinionated", False))
+    semantics_path = getattr(namespace, "cedar_semantics", None)
+    if semantics_path and not getattr(namespace, "inventory", False):
+        raise ValueError("--cedar-semantics requires --inventory and --write-cedar")
+
+    if getattr(namespace, "inventory", False):
+        if in_place or output:
+            raise ValueError("--inventory is a report and cannot be combined with emit mode")
+        from .inventory import inventory_projects
+
+        inventory = inventory_projects(
+            roots,
+            target_python=getattr(namespace, "target_python", "3.14"),
+            migration_strategy=getattr(namespace, "migration_strategy", "preserve"),
+        )
+        rendered = inventory.to_json()
+        write_path = getattr(namespace, "write_inventory", None)
+        check_path = getattr(namespace, "check_inventory", None)
+        if write_path:
+            target = Path(write_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+            temporary.write_text(rendered, encoding="utf-8")
+            temporary.replace(target)
+        elif check_path:
+            target = Path(check_path)
+            if not target.is_file() or target.read_text(encoding="utf-8") != rendered:
+                print(f"migration inventory differs: {target}")
+                return EXIT_WORK_REMAINS
+        cedar_path = getattr(namespace, "write_cedar", None)
+        if semantics_path and not cedar_path:
+            raise ValueError("--cedar-semantics requires --write-cedar")
+        if cedar_path:
+            target = Path(cedar_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+            options = _cedar_options(semantics_path)
+            generated = (
+                inventory.cedar_module() if options is None else inventory.cedar_module(**options)
+            )
+            temporary.write_text(generated, encoding="utf-8")
+            temporary.replace(target)
+        if getattr(namespace, "as_json", False):
+            print(rendered, end="")
+        elif not write_path and not check_path and not cedar_path:
+            print(inventory.to_markdown(), end="")
+        counts = inventory.counts()
+        blocked = any(
+            project.dependencies["target_status"] in {"project-blocked", "lock-blocked"}
+            for project in inventory.projects
+        )
+        skipped = any(project.report.skipped for project in inventory.projects)
+        analyzed = sum(project.report.files_analyzed for project in inventory.projects)
+        if not analyzed:
+            return EXIT_NOT_RUN
+        if counts["unsupported"] or blocked or skipped:
+            return EXIT_WORK_REMAINS
+        return EXIT_OK
 
     # Emit mode (Phase 1): --output <dir> or --in-place. Otherwise report-only.
     if in_place or output:
@@ -151,11 +264,16 @@ def execute(namespace) -> int:
         touched = 0
         failed = []
         for root in roots:
-            result = port_tree(root, output, in_place=in_place, force=force,
-                               opinionated=opinionated)
+            result = port_tree(
+                root, output, in_place=in_place, force=force, opinionated=opinionated
+            )
             total += len(result.written_files) + len(result.regenerated)
-            touched += (len(result.written_files) + len(result.regenerated)
-                        + len(result.skipped) + len(result.failed))
+            touched += (
+                len(result.written_files)
+                + len(result.regenerated)
+                + len(result.skipped)
+                + len(result.failed)
+            )
             failed.extend(result.failed)
             for path in result.written_files:
                 print(f"wrote      {path}")

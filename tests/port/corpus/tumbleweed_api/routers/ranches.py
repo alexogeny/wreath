@@ -1,4 +1,4 @@
-"""Ranches router — the multi-tenant workspace surface."""
+"""Ranches router — the multi-tenant ranch surface."""
 from fastapi import APIRouter, Depends, Request
 
 from ..dependencies import current_wrangler

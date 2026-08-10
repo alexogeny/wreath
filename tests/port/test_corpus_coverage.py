@@ -55,14 +55,17 @@ def test_category_coverage_floors(corpus_app_roots):
 def test_overall_coverage_is_honest(corpus_app_roots):
     report = port.analyze_all(corpus_app_roots)
     # Design 07 §5 expected ~45-60%; reading constructs by *shape* rather than by
-    # name has since taken it to ~0.78, which leaves little room under this
-    # ceiling. That is deliberate. The ceiling is not a target to reach but a
+    # name first took it to ~0.78. Exact primary-key reads, statically proven
+    # field mappings, and local TestClient lifetimes now take it to ~0.83; each
+    # has an emitted first-class Wreath contract rather than a verdict-only
+    # relabel, which is why crossing the former 0.80 ceiling is honest. The
+    # ceiling is deliberate: it is not a target to reach but a
     # tripwire: passing it should mean someone re-reads what `TRANSLATED` was
     # allowed to cover and writes down why the new number is honest, because the
     # cheapest way to raise this figure has always been to loosen the word. The
-    # remaining 22% is queries needing a join decision, bespoke auth and
+    # remaining ~17% is queries needing a join decision, bespoke auth and
     # validator bodies, and libraries that are correctly kept — none of which a
     # static analyzer should claim.
     overall = report.coverage_overall()
     assert overall is not None, "an empty denominator is n/a, never a perfect score"
-    assert 0.40 <= overall <= 0.80
+    assert 0.40 <= overall <= 0.85

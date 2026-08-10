@@ -106,6 +106,112 @@ def test_a_handler_that_already_owns_a_wreath_session_reuses_it(tmp_path):
     assert "orm.query.needs_session" not in source
 
 
+def test_required_create_and_bounded_writes_use_session_contracts(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "queries.py").write_text(
+        "async def work(llama_id, name):\n"
+        "    row = await Llama.objects.get(id=llama_id)\n"
+        "    made = await Llama.objects.create(name=name)\n"
+        "    changed = await Llama.objects.filter(id=llama_id).update(name=name)\n"
+        "    removed = await Llama.objects.filter(id=llama_id).delete()\n"
+        "    return row, made, changed, removed\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["queries.py"]
+
+    assert "await session.require(Llama, llama_id)" in source
+    assert "await session.create(Llama, name=name)" in source
+    assert (
+        "await session.update_where(Llama.select().where(Llama.id == llama_id), name=name)"
+        in source
+    )
+    assert "await session.delete_where(Llama.select().where(Llama.id == llama_id))" in source
+
+
+def test_a_local_test_client_becomes_one_async_lifespan(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "test_llamas.py").write_text(
+        "from fastapi.testclient import TestClient\n\n"
+        "def test_list():\n"
+        "    client = TestClient(app)\n"
+        "    response = client.get('/llamas')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["test_llamas.py"]
+
+    assert "async def test_list():" in source
+    assert "async with TestClient(app) as client:" in source
+    assert "response = await client.get('/llamas')" in source
+    assert "response.status == 200" in source
+
+
+def test_a_resolved_relationship_filter_uses_the_wreath_path(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "models.py").write_text(
+        "import ormar\n"
+        "class Ranch(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "    slug: str = ormar.String(max_length=40)\n"
+        "class Llama(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "    ranch: Ranch = ormar.ForeignKey(Ranch)\n",
+        encoding="utf-8",
+    )
+    (root / "queries.py").write_text(
+        "async def by_ranch():\n"
+        "    return await Llama.objects.filter(ranch__slug='north').all()\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["queries.py"]
+
+    assert "Llama.ranch.slug == 'north'" in source
+
+
+def test_a_plain_runtime_mapping_uses_where_fields_not_a_manager(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "queries.py").write_text(
+        "async def search(name):\n"
+        "    terms = {}\n"
+        "    if name:\n"
+        "        terms['name'] = name\n"
+        "    return await Llama.objects.filter(**terms).all()\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["queries.py"]
+
+    assert "*where_fields(Llama, terms)" in source
+    assert "from wreath.orm import" in source and "where_fields" in source
+
+
+def test_a_plain_graphql_output_loses_the_strawberry_runtime_model(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "schema.py").write_text(
+        "import strawberry\n"
+        "@strawberry.type\n"
+        "class TrekSummary:\n"
+        "    label: str\n"
+        "    count: int\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["schema.py"]
+
+    assert "@dataclass(kw_only=True)" in source
+    assert "@strawberry.type" not in source
+    assert "import strawberry" not in source
+    assert "graphql.type_dataclass" in source
+
+
 def test_every_ported_file_imports_what_it_uses(app_tree, tmp_path):
     """The Session annotation is worth nothing without the import beside it."""
     ported = _port(app_tree, tmp_path / "out", opinionated=True)

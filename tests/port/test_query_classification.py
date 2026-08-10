@@ -57,14 +57,14 @@ def _query_rules(tmp_path, source: str) -> list[str]:
     [
         ("Llama.objects.filter(paddock_id=7)", "orm.query.filter_exact"),
         ("Llama.objects.get_or_none(id=7)", "orm.query.get_or_none_exact"),
-        ("Llama.objects.get(id=7)", "orm.query.get"),
-        ("Llama.objects.create(name='Bea')", "orm.query.create"),
+        ("Llama.objects.get(id=7)", "orm.query.get_exact"),
+        ("Llama.objects.create(name='Bea')", "orm.query.create_exact"),
         ("Llama.objects.all()", "orm.query.all"),
         # Argument-shaped, the same way `filter` is above: a named relation is
         # one `.include(...)`, while `select_all()` means *every* relation and
         # wreath has no such switch.
         ("Llama.objects.select_related('treks')", "orm.query.eager_exact"),
-        ("Llama.objects.select_all()", "orm.query.eager"),
+        ("Llama.objects.select_all()", "orm.query.select_all"),
         ("Llama.objects.prefetch_related('treks')", "orm.query.eager_exact"),
         ("Llama.objects.values(['name'])", "orm.query.values"),
         ("Llama.objects.bulk_create([])", "orm.query.bulk"),
@@ -129,19 +129,14 @@ def test_the_get_or_none_message_names_fetch_one(tmp_path) -> None:
     assert "fetch_one" in finding.message
 
 
-def test_the_create_message_names_add_and_flush(tmp_path) -> None:
+def test_the_create_message_names_the_session_contract(tmp_path) -> None:
     (finding,) = _analyze(tmp_path, "x = await Llama.objects.create(name='Bea')\n")
-    assert "session.add" in finding.message and "flush" in finding.message
+    assert "session.create" in finding.message
 
 
-def test_the_get_message_warns_that_the_miss_contract_differs(tmp_path) -> None:
-    """ormar's `get` raises NoMatch; wreath's `fetch_one` returns None.
-
-    Porting the call without porting the miss branch is a silent behaviour
-    change, which is exactly the class of bug this tool exists to surface.
-    """
+def test_the_get_message_names_the_required_row_contract(tmp_path) -> None:
     (finding,) = _analyze(tmp_path, "x = await Llama.objects.get(id=1)\n")
-    assert "NoMatch" in finding.message
+    assert "session.require" in finding.message
 
 
 # --- the standing invariant -------------------------------------------------------
@@ -180,6 +175,9 @@ def test_the_emitter_never_rewrites_a_query(tmp_path) -> None:
         "Llama.objects.filter(paddock_id=7)",              # plain equality
         "Llama.objects.filter(grade__gte=3)",              # operator lookup
         "Llama.objects.filter(id__in=[1, 2])",             # membership
+        "Llama.objects.filter(email__iexact='ADA@EXAMPLE.TEST')",
+        "Llama.objects.filter(tags__jsonb_has_any=['a'])",
+        "Llama.objects.filter(a=1).all(tags__jsonb_has_any=['b'])",
         "Llama.objects.filter(a=1, b=2)",                  # several, all plain
         "Llama.objects.filter(retired=False).all()",       # mechanical terminal
         "Llama.objects.filter(retired=False).count()",
@@ -188,6 +186,8 @@ def test_the_emitter_never_rewrites_a_query(tmp_path) -> None:
         "Llama.objects.filter(a=1).limit(10).offset(20).all()",
         "Llama.objects.filter(a=1).order_by('name').all()",
         "Llama.objects.filter(a=1).order_by('-created_at').all()",
+        "Llama.objects.filter(a=1).delete()",
+        "Llama.objects.filter(a=1).update(name='Bea')",
     ],
 )
 def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
@@ -202,15 +202,11 @@ def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
     [
         ("Llama.objects.filter(retired__isnull=flag)", "which null test is not readable"),
         ("Llama.objects.filter(ranch__slug='x')", "relation target is cross-module"),
-        ("Llama.objects.filter(tags__jsonb_has_any=['a'])", "container operator"),
         ("Llama.objects.filter(Q(a=1))", "positional Q object"),
         ("Llama.objects.filter(**criteria)", "keys are a runtime value"),
         ("Llama.objects.filter(a=1).first()", "wreath needs an explicit order"),
-        ("Llama.objects.filter(a=1).delete()", "bulk delete has no query form"),
         ("Llama.objects.filter(a=1).values(['b'])", "rows come back as models"),
-        ("Llama.objects.filter(a=1).update(b=2)", "a write, not a read"),
         ("Llama.objects.filter(a=1).order_by(column)", "runtime column name"),
-        ("Llama.objects.filter(a=1).all(tags__jsonb_has_any=['b'])", "lookup in the tail"),
     ],
 )
 def test_a_query_needing_a_decision_is_not_translated(tmp_path, call, why) -> None:
@@ -282,7 +278,7 @@ def test_an_ordered_read_by_a_runtime_column_is_not_translated(tmp_path) -> None
     [
         ("Llama.objects.select_related('treks')", "orm.query.eager_exact"),
         ("Llama.objects.select_related('treks', 'ranch')", "orm.query.eager_exact"),
-        ("Llama.objects.select_all()", "orm.query.eager"),          # every relation
+        ("Llama.objects.select_all()", "orm.query.select_all"),     # every relation
         ("Llama.objects.select_related('ranch__owner')", "orm.query.eager"),  # nested
         ("Llama.objects.select_related(name)", "orm.query.eager"),  # runtime name
     ],
@@ -294,3 +290,57 @@ def test_an_eager_load_is_split_by_what_it_names(tmp_path, call, expected) -> No
     relations the caller actually reads — which is a decision, not a rewrite.
     """
     assert _query_rules(tmp_path, f"x = {call}\n") == [expected]
+
+
+def test_a_tree_resolved_relationship_filter_is_translated(tmp_path) -> None:
+    (tmp_path / "models.py").write_text(
+        "import ormar\n"
+        "class Ranch(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "    slug: str = ormar.String(max_length=40)\n"
+        "class Llama(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "    ranch: Ranch = ormar.ForeignKey(Ranch)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "queries.py").write_text(
+        "x = Llama.objects.filter(ranch__slug='north').all()\n",
+        encoding="utf-8",
+    )
+
+    findings = port.analyze(tmp_path).findings
+    query = next(item for item in findings if item.construct == "orm_query")
+
+    assert query.rule_id == "orm.query.filter_exact"
+    assert query.tag == port.TRANSLATED
+
+
+def test_a_locally_built_plain_filter_mapping_is_translated(tmp_path) -> None:
+    source = (
+        "async def search(name):\n"
+        "    terms = {}\n"
+        "    if name:\n"
+        "        terms['name'] = name\n"
+        "    return await Llama.objects.filter(**terms).all()\n"
+    )
+
+    query = next(
+        item for item in _analyze(tmp_path, source) if item.construct == "orm_query"
+    )
+
+    assert query.rule_id == "orm.query.filter_exact"
+    assert query.tag == port.TRANSLATED
+
+
+def test_a_dynamic_filter_mapping_key_stays_reviewable(tmp_path) -> None:
+    source = (
+        "async def search(key, value):\n"
+        "    terms = {key: value}\n"
+        "    return await Llama.objects.filter(**terms).all()\n"
+    )
+
+    query = next(
+        item for item in _analyze(tmp_path, source) if item.construct == "orm_query"
+    )
+
+    assert query.rule_id == "orm.query.filter"
