@@ -9,7 +9,7 @@ Related material:
 
 - `AGENTS.md` (measurement rules; the cProfile prohibition this audit obeys)
 - `docs/decisions/0006-optional-extensions-and-tiers.md` (what "metal" is)
-- `docs/plans/future/16-native-event-loop.md` (fixed files, SEND_ZC, spin: planned, unbuilt)
+- `wreath.reactor` (fixed files, SEND_ZC, spin: planned, unbuilt)
 - `docs/agents/request-boundary-baseline.json`
 - `src/wreath/reactor.py`, `src/wreath/_native/reactor_poller.c`,
   `src/wreath/_native/reactor_transport.c`, `src/wreath/_native/reactor_ring.c`
@@ -264,7 +264,7 @@ Socket fds are never registered, so every RECV and SEND SQE pays kernel
 accept writing into a direct-descriptor slot, removes that and would also remove
 the Python `socket` object from the accept path entirely -- which subsumes
 tier-1 item 3 and the remaining 2.29us of it. `reactor_internal.h` already lists
-`fixed_files` as an ablation axis; `docs/plans/future/16-native-event-loop.md`
+`fixed_files` as an ablation axis; `wreath.reactor`
 lists it as planned and unbuilt.
 
 Blocker to design first: the registered file table is fixed-size and slot

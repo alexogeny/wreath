@@ -2,7 +2,7 @@
 
 Three gaps the canonical example hit while being built, each of which forced it
 into a workaround it had to document as forced rather than chosen. Two are
-members of the family `docs/decisions/0019-refuse-rather-than-half-wire.md`
+members of the family the refuse-rather-than-half-wire rule in `AGENTS.md`
 names -- a declaration accepted at registration that then fails per request as a
 status blaming the caller -- and the third is a missing spelling rather than a
 wrong one.
