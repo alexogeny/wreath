@@ -64,6 +64,29 @@ Once configured, a handler can ask whether the request is authenticated and who
 it belongs to, and the `authenticated` decorator will turn away anyone who
 isn't.
 
+### Make public an explicit decision
+
+For a large application, construct it in strict mode and mark anonymous routes:
+
+```python
+from wreath import Wreath
+from wreath.auth import public
+
+app = Wreath(require_access_declarations=True)
+
+@app.get("/health")
+@public()
+async def health(request) -> dict[str, bool]:
+    return {"ok": True}
+```
+
+`@public()` changes no request behavior. It is a declaration for compilation,
+review, and the route manifest. In strict mode, a route with no `@public()`,
+`@identify()`, `@authenticated()`, role, permission, policy, or second-factor
+requirement refuses at startup and names the route. A public declaration cannot
+be combined with a guard, including one inherited from a router; that conflict
+also refuses at startup.
+
 ### A backend that reads the session must be behind global middleware
 
 `SessionIdentityBackend` reads `request.state.session` while it authenticates.
@@ -125,6 +148,36 @@ async def document(request) -> dict:
     ...
 ```
 
+For a permission surface large enough that spelling mistakes are realistic,
+make its action vocabulary a `StrEnum` and configure it once:
+
+```python
+from enum import StrEnum
+from wreath.authorization import AuthorizationVocabulary
+
+class Actions(StrEnum):
+    READ_DOCUMENT = "Document::read"
+    DELETE_DOCUMENT = "Document::delete"
+
+app.configure_auth(
+    BearerTokenBackend(verify),
+    CedarAuthorizer(engine=engine),
+    vocabulary=AuthorizationVocabulary(Actions),
+)
+
+@app.get("/documents/{id}")
+@authorize(action=Actions.READ_DOCUMENT, resource=document_resource)
+async def document(request) -> dict:
+    ...
+```
+
+The decorator stores the enum's string value, so Cedar and generated clients
+keep the same wire vocabulary. The type checker catches a misspelled member;
+route compilation catches a string action absent from the configured
+vocabulary. `wreath doctor routes` reports declared, unknown, and currently
+unused actions, which turns coverage into a reviewable artifact rather than a
+second hand-maintained list.
+
 The default mappers model the common case: the authenticated identity becomes
 the principal, its roles become `Role::"..."` parents (so `principal in
 Role::"editor"` works with no further wiring), and the request method and path
@@ -134,10 +187,87 @@ destructive. `@second_factor(max_age=...)` says the same thing on a route
 without writing a policy; see [Second factors](second-factors.md). Forbid
 overrides permit, the default is deny, and a
 policy that errors is skipped and reported in the decision's diagnostics —
-never silently satisfied. The engine covers the Cedar core; extension types
-(`ip`, `decimal`, `datetime`) and schema validation are not implemented yet
-and fail loudly at parse time. A different evaluator can be swapped in through
-the same `CedarEngine` protocol the built-in engine satisfies.
+never silently satisfied. The engine covers the Cedar core. Cedar extension
+constructor syntax (`ip`, `decimal`, `datetime`) and schema validation are not
+implemented and fail loudly at parse time; Wreath time policy uses the core i64
+model described below, so both native and pure evaluators execute it. A
+different evaluator can be swapped in through the same `CedarEngine` protocol
+the built-in engine satisfies.
+
+### Accounts, time, and hierarchy are policy data
+
+Provisioned account attributes are not token claims and are not special
+principal classes. Put authorization data on `Identity.attributes`; the default
+Cedar mapper exposes it on the principal entity:
+
+```python
+identity = Identity(
+    id="camera-17",
+    type="Account",
+    attributes={
+        "active": True,
+        "kind": "machine",
+        "not_before": 1_786_000_000,
+        "expires_at": 1_789_000_000,
+    },
+)
+```
+
+`context.now` is Unix seconds, resolved once per request and only when the
+compiled policy reads it. Parsing, timezone conversion, and storage still use
+[`wreath.temporal`](../reference/temporal.md); the policy boundary deliberately
+uses an i64 so the same comparison executes in the native and pure Cedar
+evaluators:
+
+```cedar
+permit(principal is Account, action == Action::"Capture::upload", resource)
+when {
+    principal.active &&
+    principal.kind == "machine" &&
+    context.now >= principal.not_before &&
+    context.now < principal.expires_at
+};
+```
+
+There is no machine-account bypass in that example. It is an ordinary account
+whose provisioned attributes satisfy one policy.
+
+Resources may carry their own attributes and Cedar parents. Return a
+`CedarEntity` from the route's resource declaration for a self-contained
+resource, or configure one application-level `resource_entities` resolver when
+ownership comes from a store:
+
+```python
+def resource_entities(uid, request):
+    record = request.state.resource_index[uid.id]
+    return CedarEntity(
+        uid,
+        attrs={"scope": EntityUid("Ranch", record.ranch)},
+        parents=(EntityUid("Ranch", record.ranch),),
+    )
+
+authorizer = CedarAuthorizer(
+    engine=policies,
+    resource_entities=resource_entities,
+)
+```
+
+The hierarchy is Cedar's ordinary transitive `in` relation, compiled once and
+evaluated in C when the native extension is present:
+
+```cedar
+permit(principal, action == Action::"Capture::read", resource)
+when {
+    principal.active &&
+    principal in resource.scope &&
+    (!(resource has not_before) || context.now >= resource.not_before) &&
+    (!(resource has expires_at) || context.now < resource.expires_at)
+};
+```
+
+This is application-level composition, not route dependency injection. Routes
+declare only action and resource identity; account provisioning, resource
+hierarchy, and time remain inputs to one Cedar decision.
 
 ### Feature flags in a policy
 
@@ -209,14 +339,14 @@ from wreath.authorization import CedarAuthorizer, Regions
 from wreath.geospatial import BoundingBox, Coordinate
 
 regions = Regions(
-    depot=(Coordinate(lat=-23.68, lon=133.88), 5_000),   # centre and metres
+    ranch_gate=(Coordinate(lat=-23.68, lon=133.88), 5_000),  # centre and metres
     reserve=BoundingBox(-26.0, -24.0, 132.0, 135.0),
 )
 
 CedarAuthorizer(
     engine=engine,
     regions=regions,
-    location=lambda request: request.state.get("device_fix"),
+    location=lambda request: request.state.get("caller_location"),
 )
 ```
 

@@ -18,13 +18,15 @@ can insist on a *recent* one. Every one of them can be overridden individually.
 from __future__ import annotations
 
 import inspect
+import math
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol, cast
 
 from .._native import _core
 from .._pure.authz import normalize_authorization_decision as _pure_normalize_decision
+from .._reqcache import resolve_once
 from ..request import Request
 from .cedar_engine import CedarEntity, EntityUid
 from .facts import EMPTY, SetFact
@@ -54,7 +56,43 @@ def _default_entities(request: Request) -> object:
         return ()
     uid = EntityUid(identity.type, identity.id)
     parents = tuple(EntityUid("Role", role) for role in sorted(identity.roles))
-    return (CedarEntity(uid, parents=parents),)
+    return (CedarEntity(uid, attrs=identity.attributes, parents=parents),)
+
+
+def _with_entities(entities: object, additions: object) -> object:
+    """Add resolved Cedar entities, with the newest definition winning by uid."""
+    if additions is None:
+        return entities
+    if isinstance(additions, CedarEntity):
+        added = (additions,)
+    elif isinstance(additions, Iterable) and not isinstance(additions, str | Mapping):
+        added = tuple(additions)
+    else:
+        raise TypeError(
+            "resource_entities must return a CedarEntity or an iterable of them; "
+            f"got {type(additions).__name__}"
+        )
+    checked: list[CedarEntity] = []
+    for item in added:
+        if not isinstance(item, CedarEntity):
+            raise TypeError("resource_entities must contain only CedarEntity instances")
+        checked.append(item)
+    if entities is None:
+        return added
+    if isinstance(entities, CedarEntity):
+        held = (entities,)
+    elif isinstance(entities, Iterable) and not isinstance(entities, str | Mapping):
+        held = tuple(entities)
+    else:
+        raise TypeError(
+            "resolved Cedar resource entities require entities to be None, a CedarEntity, "
+            f"or an iterable of CedarEntity instances; got {type(entities).__name__}"
+        )
+    replaced = {item.uid for item in checked}
+    return (
+        *tuple(item for item in held if getattr(item, "uid", None) not in replaced),
+        *checked,
+    )
 
 
 #: Where one request's resolved flag set lives for the rest of that request.
@@ -64,6 +102,9 @@ _FLAGS_SLOT = "_cedar_fact_flags"
 
 #: The same, for the geofence region set.
 _REGIONS_SLOT = "_cedar_fact_regions"
+
+#: One authorization request observes one instant across every policy decision.
+_NOW_SLOT = "_cedar_context_now"
 
 #: The answer for an application with no provider. Shared rather than rebuilt,
 #: and *always supplied* -- see `request_flags` for why absence is not an option.
@@ -235,9 +276,7 @@ def _validate_org_roles(referenced: frozenset[str] | None, provider: Any) -> Non
         )
         return
     known = {str(name).lower() for name in enumerate_names()}
-    unknown = sorted(
-        name for name in referenced if name.rsplit(":", 1)[-1].lower() not in known
-    )
+    unknown = sorted(name for name in referenced if name.rsplit(":", 1)[-1].lower() not in known)
     if unknown:
         raise ValueError(
             "cedar policies reference organization roles the provider does not "
@@ -261,9 +300,7 @@ def _resolve_organizations(
     request: Request, provider: Any, vocabulary: frozenset[str] | None
 ) -> frozenset[str]:
     """The organisations this caller belongs to, bounded by any claimed limit."""
-    resolved = frozenset(
-        member.organization for member in provider.for_request(request)
-    )
+    resolved = frozenset(member.organization for member in provider.for_request(request))
     return _limits_of(request).bound("organizations", resolved)
 
 
@@ -357,6 +394,23 @@ def _default_context(request: Request) -> Mapping[str, object]:
     return context
 
 
+def _request_now(request: Any, clock: Callable[[], object]) -> int:
+    """The clock's Unix-second value, resolved once for this request."""
+
+    def resolve() -> int:
+        value = clock()
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise TypeError(
+                "a Cedar authorization clock must return Unix seconds as an int or float; "
+                f"got {type(value).__name__}"
+            )
+        if not math.isfinite(value):
+            raise ValueError("a Cedar authorization clock must return finite Unix seconds")
+        return int(value)
+
+    return resolve_once(request, _NOW_SLOT, resolve)
+
+
 class CedarEngine(Protocol):
     """The policy evaluator `CedarAuthorizer` delegates to.
 
@@ -439,6 +493,7 @@ class CedarAuthorizer:
     __slots__ = (
         "_action",
         "_context",
+        "_clock",
         "_delegation_visible",
         "_engine",
         "_entities",
@@ -449,7 +504,9 @@ class CedarAuthorizer:
         "_principal",
         "_region_names",
         "_regions",
+        "_reads_now",
         "_resource",
+        "_resource_entities",
     )
 
     def __init__(
@@ -459,6 +516,7 @@ class CedarAuthorizer:
         principal: Callable[[Identity], object] = _default_principal,
         action: Callable[[str, Request], object] = _default_action,
         resource: Callable[[object, Request], object] = _default_resource,
+        resource_entities: Callable[[object, Request], object] | None = None,
         entities: Callable[[Request], object] = _default_entities,
         context: Callable[[Request], Mapping[str, object]] = _default_context,
         flags: Any = None,
@@ -467,13 +525,16 @@ class CedarAuthorizer:
         organizations: Any = None,
         entitlements: Any = None,
         quota: Any = None,
+        clock: Callable[[], object] = time.time,
     ) -> None:
         self._engine = engine
         self._principal = principal
         self._action = action
         self._resource = resource
+        self._resource_entities = resource_entities
         self._entities = entities
         self._context = context
+        self._clock = clock
         self._flags = flags
         self._regions = regions
         self._location = location
@@ -486,9 +547,7 @@ class CedarAuthorizer:
                 "flags",
                 engine=engine,
                 provider=flags,
-                resolve=lambda request, vocabulary: _resolve_flags(
-                    request, flags, vocabulary
-                ),
+                resolve=lambda request, vocabulary: _resolve_flags(request, flags, vocabulary),
                 noun="feature flags",
                 singular="flag",
             ),
@@ -541,9 +600,7 @@ class CedarAuthorizer:
                 "quota",
                 engine=engine,
                 provider=quota,
-                resolve=lambda request, vocabulary: _resolve_quota(
-                    request, quota, vocabulary
-                ),
+                resolve=lambda request, vocabulary: _resolve_quota(request, quota, vocabulary),
                 noun="quota states",
                 singular="quota state",
                 # The one refusal-shaped fact. A policy reads it to *forbid*, so
@@ -563,9 +620,8 @@ class CedarAuthorizer:
         # none can, the second evaluation below is provably identical to the
         # first and is skipped; a request with no delegation never makes it.
         reads = getattr(engine, "reads_context", None)
-        self._delegation_visible = bool(
-            callable(reads) and (reads("delegated") or reads("actor"))
-        )
+        self._delegation_visible = bool(callable(reads) and (reads("delegated") or reads("actor")))
+        self._reads_now = None if not callable(reads) else bool(reads("now"))
         _validate_org_roles(self._facts[3].vocabulary, organizations)
 
     # --- policy identity, delegated from the engine -------------------------
@@ -700,18 +756,31 @@ class CedarAuthorizer:
             if narrowing.expired(time.time()):
                 return AuthorizationDecision(False, "delegation expired")
             if not narrowing.permits(requirement.action):
-                return AuthorizationDecision(
-                    False, "delegation scope does not cover this action"
-                )
+                return AuthorizationDecision(False, "delegation scope does not cover this action")
         raw_resource = requirement.resource
         if callable(raw_resource):
             resolver = cast(Callable[[Request], object], raw_resource)
             raw_resource = await _resolve(resolver(request))
+        resource_entity = raw_resource if isinstance(raw_resource, CedarEntity) else None
+        if resource_entity is not None:
+            raw_resource = resource_entity.uid
         principal = await _resolve(self._principal(identity))
         action = await _resolve(self._action(requirement.action, request))
         resource = await _resolve(self._resource(raw_resource, request))
         entities = await _resolve(self._entities(request))
+        entities = _with_entities(entities, resource_entity)
+        if self._resource_entities is not None:
+            additions = await _resolve(self._resource_entities(resource, request))
+            entities = _with_entities(entities, additions)
         context = dict(await _resolve(self._context(request)))
+        # Time is a scalar fact rather than a Cedar dialect extension: Unix
+        # seconds compare with the engine's ordinary i64 operators, while
+        # Wreath's temporal types own parsing and timezone correctness at the
+        # boundary. Built-in policies that do not read it pay no clock call;
+        # an outside engine that cannot expose `reads_context` gets the complete
+        # context rather than a guessed short one.
+        if self._reads_now is not False:
+            context["now"] = _request_now(request, self._clock)
         # The authorizer owns this key, and supplies it whether or not a
         # provider was configured. An *absent* `flags` is not a neutral
         # default: `forbid(...) unless { context.flags.contains("bypass") }`
@@ -743,9 +812,7 @@ class CedarAuthorizer:
 
         # Pass one: the delegating principal's own authority, evaluated exactly
         # as if they had made this request themselves.
-        decision = await self._evaluate(
-            principal, action, resource, context, entities
-        )
+        decision = await self._evaluate(principal, action, resource, context, entities)
         if narrowing is None or not decision.allowed:
             return decision
         if not self._delegation_visible:
@@ -764,14 +831,10 @@ class CedarAuthorizer:
         delegated_context["delegated"] = True
         delegated_context["actor"] = narrowing.actor
         delegated_context["delegation_depth"] = narrowing.depth
-        delegated = await self._evaluate(
-            principal, action, resource, delegated_context, entities
-        )
+        delegated = await self._evaluate(principal, action, resource, delegated_context, entities)
         if delegated.allowed:
             return delegated
-        return AuthorizationDecision(
-            False, delegated.reason or "denied to the delegated actor"
-        )
+        return AuthorizationDecision(False, delegated.reason or "denied to the delegated actor")
 
     async def _evaluate(
         self,
@@ -792,9 +855,7 @@ class CedarAuthorizer:
             )
         )
         normalize = (
-            _pure_normalize_decision
-            if _core is None
-            else _core.normalize_authorization_decision
+            _pure_normalize_decision if _core is None else _core.normalize_authorization_decision
         )
         return cast(AuthorizationDecision, normalize(result, AuthorizationDecision))
 

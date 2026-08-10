@@ -5,8 +5,8 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.auth import BearerTokenBackend, Identity, authenticated
-from wreath.authorization import roles
+from wreath.auth import BearerTokenBackend, Identity, authenticated, public
+from wreath.authorization import AuthorizationVocabulary, authorize, roles
 from wreath.policy import HttpPolicy
 from wreath.request import Request
 
@@ -51,6 +51,86 @@ async def test_public_route_does_not_invoke_authentication_backend() -> None:
 
     assert sent[0]["status"] == 200
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_strict_access_declarations_refuse_an_undeclared_route() -> None:
+    app = Wreath(require_access_declarations=True)
+
+    @app.get("/forgotten")
+    async def forgotten(request: Any) -> str:
+        return "open"
+
+    with pytest.raises(RuntimeError, match=r"GET /forgotten.*@public"):
+        await invoke(app, "/forgotten")
+
+
+@pytest.mark.asyncio
+async def test_public_is_an_explicit_declaration_without_backend_work() -> None:
+    app = Wreath(require_access_declarations=True)
+
+    @app.get("/health")
+    @public()
+    async def health(request: Any) -> str:
+        return "ok"
+
+    sent = await invoke(app, "/health")
+    assert sent[0]["status"] == 200
+
+
+def test_public_cannot_be_stacked_with_a_guard() -> None:
+    with pytest.raises(ValueError, match=r"public.*authentication"):
+
+        @public()
+        @authenticated()
+        async def contradictory(request: Any) -> str:
+            return "never"
+
+
+def test_a_typed_vocabulary_catches_an_unknown_route_action_at_compile() -> None:
+    from enum import StrEnum
+
+    class Actions(StrEnum):
+        READ = "Document::read"
+
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend({}), vocabulary=AuthorizationVocabulary(Actions)
+    )
+
+    @app.get("/documents")
+    @authorize(action="Document::delete", resource="Document::all")
+    async def documents(request: Any) -> list[Any]:
+        return []
+
+    with pytest.raises(RuntimeError, match="Document::delete"):
+        app._compile_routes()
+
+
+def test_a_strenum_action_is_the_route_s_wire_vocabulary() -> None:
+    from enum import StrEnum
+
+    from wreath._auth.requirements import requirement_for
+
+    class Actions(StrEnum):
+        READ = "Document::read"
+
+    @authorize(action=Actions.READ, resource="Document::all")
+    async def documents(request: Any) -> list[Any]:
+        return []
+
+    assert requirement_for(documents).policies[0].action == "Document::read"
+
+
+def test_strict_access_declarations_cover_websockets() -> None:
+    app = Wreath(require_access_declarations=True)
+
+    @app.websocket("/events")
+    async def events(websocket: Any) -> None:
+        await websocket.accept()
+
+    with pytest.raises(RuntimeError, match="WEBSOCKET /events"):
+        app._compile_routes()
 
 
 @pytest.mark.asyncio

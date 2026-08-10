@@ -160,6 +160,13 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
         if callable(reader):
             for resource_type, actions in reader().items():
                 found.setdefault(resource_type, set()).update(actions)
+    for _path, endpoint in getattr(app, "_ws_routes", ()):
+        requirement = requirement_for(endpoint)
+        for policy in requirement.policies:
+            resource_type, separator, _verb = policy.action.partition(_SEPARATOR)
+            found.setdefault(resource_type if separator else "", set()).add(
+                policy.action
+            )
     return {name: tuple(sorted(actions)) for name, actions in sorted(found.items())}
 
 

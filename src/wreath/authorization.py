@@ -33,7 +33,7 @@ from ._auth.principal import (
     on_plan,
     with_entitlements,
 )
-from ._auth.requirements import AuthRequirement
+from ._auth.requirements import AuthorizationVocabulary, AuthRequirement
 from ._livedoc import LiveDocument
 
 __all__ = [
@@ -42,6 +42,7 @@ __all__ = [
     "AuthRequirement",
     "AuthorizationDecision",
     "AuthorizationProvider",
+    "AuthorizationVocabulary",
     "CedarAuthorizer",
     "CedarEngine",
     "CedarEntity",
