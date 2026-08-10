@@ -61,6 +61,8 @@ __all__ = [
     "find_requests_with_trace",
     "find_work_with_trace",
     "preflight",
+    "route_manifest",
+    "render_route_manifest",
     "render_preflight",
 ]
 
@@ -1007,3 +1009,234 @@ def preflight_as_dict(report: Preflight) -> dict[str, Any]:
         ],
         "unchecked": list(report.unchecked),
     }
+
+
+# --- route and security manifest --------------------------------------------
+
+
+def _qualified(value: Any) -> str:
+    """A stable Python name, never a repr carrying a process-local address."""
+    target = getattr(value, "__func__", value)
+    module = getattr(target, "__module__", type(value).__module__)
+    qualname = getattr(target, "__qualname__", type(value).__qualname__)
+    return f"{module}.{qualname}"
+
+
+def _type_ref(ref: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"kind": ref.kind}
+    if ref.name is not None:
+        payload["name"] = ref.name
+    if ref.arguments:
+        payload["arguments"] = [_type_ref(argument) for argument in ref.arguments]
+    if ref.literals:
+        payload["literals"] = list(ref.literals)
+    return payload
+
+
+def _resource(value: Any) -> dict[str, Any]:
+    if callable(value):
+        return {"kind": "resolver", "name": _qualified(value)}
+    try:
+        from ._auth.cedar_engine import EntityUid
+
+        if isinstance(value, EntityUid):
+            return {"kind": "entity", "value": str(value)}
+    except ImportError:
+        pass
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return {"kind": "constant", "value": value}
+    return {"kind": "constant", "type": _qualified(type(value))}
+
+
+def _access(requirement: Any) -> str:
+    if requirement.public:
+        return "public"
+    if requirement.identify:
+        return "identified-public"
+    if requirement.policies:
+        return "authorized"
+    if requirement.access_level == 2:
+        return "administrator"
+    if requirement.access_level == 1:
+        return "authenticated"
+    return "implicit-public"
+
+
+def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
+    """Return a deterministic, JSON-compatible route and security contract.
+
+    The manifest is deliberately source-shaped rather than runtime-shaped: it
+    names original handlers, dependency factories, middleware, wire types, and
+    the effective merged access requirement. No object repr enters the result,
+    so two builds of unchanged source compare byte-for-byte through
+    `render_route_manifest`.
+    """
+    from ._auth.permissions import declared_actions
+    from ._auth.requirements import merge_requirements, requirement_for
+    from .typegen.inspect import build_api_model, resolve_operation_ids
+    from .typegen.model import TypegenError
+
+    compile_routes = getattr(app, "_compile_routes", None)
+    if callable(compile_routes):
+        compile_routes()
+    image = getattr(app, "_application_image", None)
+    routes = list(image.routes()) if image is not None else []
+    operation_ids, diagnostics = resolve_operation_ids(routes)
+    if diagnostics:
+        raise TypegenError(diagnostics)
+    api = build_api_model(app, allow_unknown=True)
+    operations = {
+        (operation.method, operation.path): operation for operation in api.operations
+    }
+    app_middleware = tuple(
+        item[2]
+        for item in sorted(
+            getattr(app, "_middleware", ()), key=lambda item: (item[0], item[1])
+        )
+    )
+    global_middleware = tuple(
+        item[2]
+        for item in sorted(
+            getattr(app, "_global_middleware", ()), key=lambda item: (item[0], item[1])
+        )
+    )
+    entries: list[dict[str, Any]] = []
+    for index, route in enumerate(routes):
+        requirement = merge_requirements(
+            route.requirement, requirement_for(route.endpoint)
+        )
+        security = {
+            "access": _access(requirement),
+            "declared": requirement.declares_access,
+            "roles": [
+                {"mode": check.mode, "values": sorted(check.values)}
+                for check in requirement.role_checks
+            ],
+            "permissions": [
+                {"mode": check.mode, "values": sorted(check.values)}
+                for check in requirement.permission_checks
+            ],
+            "policies": [
+                {"action": policy.action, "resource": _resource(policy.resource)}
+                for policy in requirement.policies
+            ],
+            "second_factor_max_age": requirement.second_factor,
+        }
+        for method in sorted(route.methods):
+            operation = operations.get((method, route.path))
+            request = None
+            response = None
+            if operation is not None:
+                request = {
+                    "parameters": [
+                        {
+                            "name": parameter.wire_name,
+                            "python_name": parameter.python_name,
+                            "location": parameter.location,
+                            "required": parameter.required,
+                            "type": _type_ref(parameter.type),
+                        }
+                        for parameter in operation.parameters
+                    ],
+                    "body": (
+                        _type_ref(operation.request_body)
+                        if operation.request_body is not None
+                        else None
+                    ),
+                    "body_media_type": operation.request_body_media_type,
+                }
+                response = _type_ref(operation.response_body)
+            entries.append(
+                {
+                    "method": method,
+                    "path": route.path,
+                    "operation_id": operation_ids[(index, method)],
+                    "name": route.name,
+                    "handler": _qualified(route.endpoint),
+                    "tags": list(route.tags),
+                    "request": request,
+                    "response": response,
+                    "dependencies": [
+                        {
+                            "factory": _qualified(dependency.fn),
+                            "scope": dependency.scope,
+                            "cached": dependency.use_cache,
+                        }
+                        for dependency in route.dependencies
+                    ],
+                    "middleware": {
+                        "global": [_qualified(item) for item in global_middleware],
+                        "application": [_qualified(item) for item in app_middleware],
+                        "route": [_qualified(item) for item in route.middleware],
+                    },
+                    "security": security,
+                }
+            )
+    from .typegen.inspect import derive_operation_id
+
+    for path, handler in getattr(app, "_ws_routes", ()):
+        requirement = requirement_for(handler)
+        entries.append(
+            {
+                "method": "WEBSOCKET",
+                "path": path,
+                "operation_id": derive_operation_id("WEBSOCKET", path),
+                "name": None,
+                "handler": _qualified(handler),
+                "tags": [],
+                "request": None,
+                "response": None,
+                "dependencies": [],
+                "middleware": {
+                    "global": [_qualified(item) for item in global_middleware],
+                    "application": [],
+                    "route": [],
+                },
+                "security": {
+                    "access": _access(requirement),
+                    "declared": requirement.declares_access,
+                    "roles": [
+                        {"mode": check.mode, "values": sorted(check.values)}
+                        for check in requirement.role_checks
+                    ],
+                    "permissions": [
+                        {"mode": check.mode, "values": sorted(check.values)}
+                        for check in requirement.permission_checks
+                    ],
+                    "policies": [
+                        {
+                            "action": policy.action,
+                            "resource": _resource(policy.resource),
+                        }
+                        for policy in requirement.policies
+                    ],
+                    "second_factor_max_age": requirement.second_factor,
+                },
+            }
+        )
+    entries.sort(key=lambda entry: (entry["path"], entry["method"]))
+    declared = {
+        action for actions in declared_actions(app).values() for action in actions
+    }
+    vocabulary = getattr(app, "_authorization_vocabulary", None)
+    return {
+        "version": 1,
+        "application": application or "application",
+        "strict_access_declarations": bool(
+            getattr(app, "_require_access_declarations", False)
+        ),
+        "authorization": {
+            "declared": sorted(declared),
+            "vocabulary": list(vocabulary.actions) if vocabulary is not None else None,
+            "unknown": list(vocabulary.unknown(declared)) if vocabulary is not None else [],
+            "unused": list(vocabulary.unused(declared)) if vocabulary is not None else [],
+        },
+        "routes": entries,
+    }
+
+
+def render_route_manifest(manifest: dict[str, Any]) -> str:
+    """Canonical JSON for version control and CI diffs."""
+    import json
+
+    return json.dumps(manifest, indent=2, sort_keys=True) + "\n"

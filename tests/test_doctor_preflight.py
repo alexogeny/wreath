@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
 import pytest
@@ -18,7 +19,13 @@ import pytest
 from wreath._cli import main
 from wreath.app import Wreath
 from wreath.config import Env
-from wreath.doctor import Preflight, preflight, render_preflight
+from wreath.doctor import (
+    Preflight,
+    preflight,
+    render_preflight,
+    render_route_manifest,
+    route_manifest,
+)
 from wreath.http_client import DestinationPolicy
 from wreath.request import Request
 
@@ -183,3 +190,83 @@ def test_the_json_form_separates_blocking_from_advisory(
     assert all(
         {"source", "severity", "subject", "detail"} <= set(row) for row in payload["findings"]
     )
+
+
+def test_the_route_manifest_is_stable_and_names_the_access_decision() -> None:
+    from wreath.auth import public
+
+    app = Wreath(require_access_declarations=True)
+
+    @app.get("/health", operation_id="health")
+    @public()
+    async def health(request: Request) -> dict[str, bool]:
+        return {"ok": True}
+
+    manifest = route_manifest(app, application="tests:manifest")
+    (route,) = manifest["routes"]
+    assert route["operation_id"] == "health"
+    assert route["security"]["access"] == "public"
+    assert route["security"]["declared"] is True
+    assert route["response"] == {
+        "kind": "record",
+        "arguments": [{"kind": "boolean"}],
+    }
+    assert render_route_manifest(manifest) == render_route_manifest(
+        route_manifest(app, application="tests:manifest")
+    )
+
+
+def test_doctor_routes_writes_and_checks_a_versioned_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "routes.json"
+    assert main([
+        "doctor", "routes", "tests.preflight_app:app", "--write", str(path),
+    ]) == 0
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["routes"]
+    assert main([
+        "doctor", "routes", "tests.preflight_app:app", "--check", str(path),
+    ]) == 0
+
+    path.write_text("{}\n", encoding="utf-8")
+    assert main([
+        "doctor", "routes", "tests.preflight_app:app", "--check", str(path),
+    ]) == 1
+    assert "differs" in capsys.readouterr().err
+
+
+def test_the_manifest_and_vocabulary_cover_five_hundred_routes() -> None:
+    """The large-project contract: no hand-maintained second action list."""
+    from enum import StrEnum
+
+    from wreath.auth import BearerTokenBackend
+    from wreath.authorization import AuthorizationVocabulary, authorize
+
+    actions_type = StrEnum(
+        "Actions", {f"READ_{index}": f"Resource::{index}" for index in range(500)}
+    )
+    actions = list(actions_type)
+    app = Wreath(require_access_declarations=True)
+    app.configure_auth(
+        BearerTokenBackend({}), vocabulary=AuthorizationVocabulary(actions_type)
+    )
+
+    def endpoint_for(index: int):
+        @authorize(action=actions[index], resource=f'Resource::"{index}"')
+        async def endpoint(request: Request) -> dict[str, int]:
+            return {"index": index}
+
+        return endpoint
+
+    for index in range(500):
+        app.get(f"/resources/{index}", operation_id=f"readResource{index}")(
+            endpoint_for(index)
+        )
+
+    manifest = route_manifest(app, application="tests:large")
+    assert len(manifest["routes"]) == 500
+    assert len(manifest["authorization"]["declared"]) == 500
+    assert manifest["authorization"]["unknown"] == []
+    assert manifest["authorization"]["unused"] == []

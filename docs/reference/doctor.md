@@ -1,6 +1,11 @@
 # `wreath.doctor`
 
-Diagnosing defects a green test suite cannot see. Two checks live here.
+Diagnosing defects a green test suite cannot see and contracts a diff can.
+
+**The route/security contract.** `route_manifest` returns deterministic,
+JSON-compatible route metadata and `render_route_manifest` emits its canonical
+form. `wreath doctor routes <target>` prints it, `--write PATH` records it, and
+`--check PATH` makes contract drift a CI failure.
 
 **The N+1 query.** [`NPlusOneGuard`](../guides/n-plus-one.md) fails a development
 request at the query that crossed the line, and `diagnose_n_plus_one` reads the
