@@ -1,14 +1,8 @@
 """`wreath.queue` behaviour: bounds, counted loss, draining, and awaiting.
 
-Both arms are driven, for the reason `test_kv.py` gives: the facade selects one
-per process, so a suite that only tested the selection leaves the other
-unexercised on every machine.
-
-The awaiting half is written once in `wreath.queue` and runs on top of either
-ring, so the async cases below are about the facade rather than about an arm --
-but they are run against both, because the fast path (an item already there,
-resolved without suspending) is implemented separately in each and is exactly
-where the two could silently disagree.
+The awaiting half is written once in `wreath.queue` and sits on top of the
+ring, so the async cases below are about the facade; the ring underneath is
+what the bounds and counted-loss cases drive.
 """
 
 from __future__ import annotations
@@ -18,10 +12,7 @@ import threading
 
 import pytest
 
-from wreath._pure.queue import PriorityQueue as PureHeap
-from wreath._pure.queue import Queue as PureRing
 from wreath.queue import (
-    Awaiting,
     PriorityQueue,
     Queue,
     QueueEmpty,
@@ -29,28 +20,11 @@ from wreath.queue import (
     RoundRobin,
 )
 
+ARMS = [Queue]
+ARM_IDS = ["queue"]
 
-class PureQueue(Awaiting, PureRing):  # type: ignore[misc]
-    """The facade's awaiting half over the pure ring, whichever arm was selected."""
-
-    __slots__ = ("_loop", "_waiters")
-
-
-class PurePriorityQueue(Awaiting, PureHeap):  # type: ignore[misc]
-    """The same, over the pure heap."""
-
-    __slots__ = ("_loop", "_waiters")
-
-
-ARMS = [PureQueue] if PureRing in Queue.__mro__ else [PureQueue, Queue]
-ARM_IDS = ["pure", "native"][: len(ARMS)]
-
-HEAPS = (
-    [PurePriorityQueue]
-    if PureHeap in PriorityQueue.__mro__
-    else [PurePriorityQueue, PriorityQueue]
-)
-HEAP_IDS = ["pure", "native"][: len(HEAPS)]
+HEAPS = [PriorityQueue]
+HEAP_IDS = ["priority-queue"]
 
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)

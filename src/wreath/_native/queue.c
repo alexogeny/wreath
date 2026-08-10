@@ -138,11 +138,12 @@ typedef struct {
 
 static PyObject *s_wake = NULL;      /* "_wake": an item arrived */
 static PyObject *s_blocked = NULL;   /* "_blocked": build a waiting awaitable */
-static PyObject *queue_empty = NULL; /* wreath._pure.queue.QueueEmpty */
-static PyObject *queue_full = NULL;  /* wreath._pure.queue.QueueFull */
+static PyObject *queue_empty = NULL; /* wreath._queue_protocol.QueueEmpty */
+static PyObject *queue_full = NULL;  /* wreath._queue_protocol.QueueFull */
 
-/* The two exception classes are **defined in the pure twin and imported here**,
- * rather than minted with PyErr_NewException on each side.
+/* The two exception classes are **defined in Python and imported here**, rather
+ * than minted with PyErr_NewException on each side. There is one of each, and
+ * both this ring and `wreath.queue`'s `RoundRobin` raise it.
  *
  * Two classes named QueueEmpty is not a cosmetic difference: `wreath.queue`
  * re-exports one of them, and `except QueueEmpty` around a ring that raises the
@@ -163,7 +164,7 @@ queue_exceptions_ready(void)
     if (queue_empty != NULL && queue_full != NULL) {
         return 0;
     }
-    module = PyImport_ImportModule("wreath._pure.queue");
+    module = PyImport_ImportModule("wreath._queue_protocol");
     if (module == NULL) {
         return -1;
     }
