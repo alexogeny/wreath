@@ -1413,7 +1413,7 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
             }
             /* Present but unreachable: fall through to the parameter group. A
              * static route this caller cannot reach must not shadow a
-             * parameter route it can -- ADR 0015 prunes ineligible branches
+             * parameter route it can -- pruning ineligible branches
              * rather than exposing them. */
         }
         if (PyErr_Occurred()) return NULL;
