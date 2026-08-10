@@ -98,7 +98,6 @@ def _cedar_json_entities() -> list[dict]:
 
 def _wreath_arms() -> dict[str, Callable[[], int]]:
     from wreath._native import _core
-    from wreath._pure import cedar as pure_cedar
 
     compiled = CedarPolicies(POLICY_SOURCE, entities=ENTITIES)
     policies = compiled._policies
@@ -121,13 +120,8 @@ def _wreath_arms() -> dict[str, Callable[[], int]]:
             allowed += result[0]
         return allowed
 
-    arms: dict[str, Callable[[], int]] = {
-        "wreath-pure": lambda: run_with(pure_cedar.cedar_is_authorized),
-    }
-    native = getattr(_core, "cedar_is_authorized", None) if _core is not None else None
-    if native is not None:
-        arms["wreath-metal"] = lambda: run_with(native)
-    return arms
+    evaluate = _core.cedar_is_authorized
+    return {"wreath-metal": lambda: run_with(evaluate)}
 
 
 def _wreath_stateless() -> Callable[[], int]:
@@ -250,8 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         "fairness": (
             "Every arm authorizes the same two requests against the same Cedar source and "
             "entities, and decisions are verified to agree before timing. The evaluate table "
-            "is Wreath-only (engine vs pure twin) because cedarpy exposes no precompiled "
-            "handle; the parse_and_evaluate table gives both arms their full per-call cost, "
+            "is Wreath-only because cedarpy exposes no precompiled handle; the "
+            "parse_and_evaluate table gives both arms their full per-call cost, "
             "including policy parsing. In-process latency only — no I/O and no policy-store "
             "fetch is measured, and a deployed Wreath application pays the evaluate cost, "
             "not the stateless one, because CedarPolicies compiles at startup."

@@ -1,9 +1,13 @@
-"""Microbenchmark: native vs pure template rendering.
+"""Microbenchmark: walking a template tape against running a compiled program.
+
+`template_render` executes the tape directly; `template_render_compiled` lowers
+it to a native program first and then runs that. Both are C and both produce the
+same bytes, so this measures what the lowering buys.
 
 Compiles one tape per template shape and times the render call (the unit the
-request path invokes) for pure and native, interleaved, with an A/A control
-fixing the noise floor. Reports per-shape microseconds and speedup — the
-evidence that gates keeping the native template engine.
+request path invokes) for each arm, interleaved, with an A/A control fixing the
+noise floor. Reports per-shape microseconds and speedup — the evidence that
+gates keeping the compile step.
 
     python -m benchmarks.bench_templates --output benchmark-results-templates/latest.json
 """
@@ -19,12 +23,7 @@ import time
 from typing import Any
 
 from wreath._native import _core
-from wreath._pure.templates import (
-    Markup,
-    TemplateRenderError,
-    compile_tape,
-    render_tape,
-)
+from wreath._template_tape import Markup, TemplateRenderError, compile_tape
 
 _TABLE = (
     "<table>{% for r in rows %}<tr><td>{{ r.id }}</td>"
@@ -63,38 +62,44 @@ def run(shape: str, rounds: int, iterations: int, warmup: int) -> dict[str, Any]
     tape = compile_tape(source)
     max_output = 16 * 1024 * 1024
     template_render = _core.template_render
-    # Byte parity is the precondition for a meaningful comparison.
-    assert render_tape(tape, context) == template_render(tape, context, max_output)
+    template_render_compiled = _core.template_render_compiled
+    program = _core.template_compile(tape)
+    # Identical bytes are the precondition for a meaningful comparison: the two
+    # arms are the same tape executed two ways, and if they diverged the faster
+    # one would be measuring a different job.
+    assert template_render(tape, context, max_output) == template_render_compiled(
+        program, context, max_output
+    )
 
-    def pure(n: int) -> None:
-        for _ in range(n):
-            render_tape(tape, context, max_output)
-
-    def native(n: int) -> None:
+    def walked(n: int) -> None:
         for _ in range(n):
             template_render(tape, context, max_output)
 
-    pure(warmup)
-    native(warmup)
-    pure_samples: list[float] = []
-    native_samples: list[float] = []
+    def compiled(n: int) -> None:
+        for _ in range(n):
+            template_render_compiled(program, context, max_output)
+
+    walked(warmup)
+    compiled(warmup)
+    walked_samples: list[float] = []
+    compiled_samples: list[float] = []
     aa_samples: list[float] = []
     for _ in range(rounds):
-        pure_samples.append(_time(pure, iterations))
-        native_samples.append(_time(native, iterations))
-        aa_samples.append(_time(native, iterations))  # A/A twin of native
-    pure_median = statistics.median(pure_samples)
-    native_median = statistics.median(native_samples)
-    floor = abs(native_median - statistics.median(aa_samples))
+        walked_samples.append(_time(walked, iterations))
+        compiled_samples.append(_time(compiled, iterations))
+        aa_samples.append(_time(compiled, iterations))  # A/A against `compiled`
+    walked_median = statistics.median(walked_samples)
+    compiled_median = statistics.median(compiled_samples)
+    floor = abs(compiled_median - statistics.median(aa_samples))
     return {
         "shape": shape,
-        "pure_us": round(pure_median, 4),
-        "native_us": round(native_median, 4),
-        "speedup": round(pure_median / native_median, 3) if native_median else None,
+        "walked_us": round(walked_median, 4),
+        "compiled_us": round(compiled_median, 4),
+        "speedup": round(walked_median / compiled_median, 3) if compiled_median else None,
         "noise_floor_us": round(floor, 4),
-        "resolved": abs(pure_median - native_median) > 2 * floor,
-        "pure_samples": [round(s, 4) for s in pure_samples],
-        "native_samples": [round(s, 4) for s in native_samples],
+        "resolved": abs(walked_median - compiled_median) > 2 * floor,
+        "walked_samples": [round(s, 4) for s in walked_samples],
+        "compiled_samples": [round(s, 4) for s in compiled_samples],
     }
 
 
@@ -106,14 +111,12 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=2000)
     parser.add_argument("--output")
     args = parser.parse_args()
-    if _core is None or not hasattr(_core, "template_render"):
-        raise SystemExit("native template engine not built; nothing to compare")
     _core.template_configure(Markup, TemplateRenderError)
     results = [run(shape, args.rounds, args.iterations, args.warmup) for shape in args.shape]
     for entry in results:
         print(
-            f"{entry['shape']:15} pure={entry['pure_us']:8.3f}us "
-            f"native={entry['native_us']:8.3f}us "
+            f"{entry['shape']:15} walked={entry['walked_us']:8.3f}us "
+            f"compiled={entry['compiled_us']:8.3f}us "
             f"speedup={entry['speedup']:.2f}x "
             f"({'resolved' if entry['resolved'] else 'BELOW NOISE'})"
         )

@@ -73,7 +73,7 @@ def main() -> int:
 
     native = getattr(_core, "sse_frame", None)
     if native is None:
-        print("note: _core.sse_frame is absent; measuring the pure encoder only\n")
+        print("note: _core.sse_frame is absent; measuring the Python encoder only\n")
 
     scenarios = []
     for label, event in _cases().items():

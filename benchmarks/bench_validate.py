@@ -1,7 +1,7 @@
 """Microbenchmark: native vs pure request-body validation.
 
 Compiles one plan per body shape and times the complete validate call (the unit
-the binder invokes per request) for pure and native, interleaved, with an A/A
+the binder invokes per request) for the Python and C validators, interleaved, with an A/A
 control fixing the noise floor. Reports per-body microseconds and speedup.
 
     python -m benchmarks.bench_validate --output benchmark-results-validate/latest.json

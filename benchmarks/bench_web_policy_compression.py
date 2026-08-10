@@ -15,8 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from wreath import _compression as pure_compression
-from wreath._pure import webpolicy as pure_policy
+from wreath import _compression as stdlib_compression
 
 try:
     native_core = importlib.import_module("wreath._native._core")
@@ -64,9 +63,7 @@ def run(warmup: int, trials: int) -> dict[str, Any]:
     random_16k = os.urandom(16 * 1024)
     cases: dict[str, Any] = {}
 
-    policy_backends = {"pure": pure_policy}
-    if native_core is not None and hasattr(native_core, "select_content_encoding"):
-        policy_backends["native"] = native_core
+    policy_backends = {"native": native_core}
     for name, backend in policy_backends.items():
         cases[f"accept-encoding-selection:{name}"] = _measure(
             lambda b=backend: b.select_content_encoding(b"br;q=1, gzip;q=0.8, *;q=0.1"),
@@ -100,7 +97,7 @@ def run(warmup: int, trials: int) -> dict[str, Any]:
             cases[f"append-missing-headers:{header_count}:{name}"] = record
 
     compressors: dict[str, Callable[[bytes, int], bytes]] = {
-        "pure": pure_compression.gzip_compress,
+        "stdlib-zlib": stdlib_compression.gzip_compress,
         "stdlib": lambda data, level: gzip.compress(data, compresslevel=level, mtime=0),
     }
     if native_compression is not None:

@@ -38,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 
 from _routing_impls import IMPLS, build
 
-#: Rendered in this order; native first, pure twins after.
-ORDER = ("c-dt", "c-trie", "c-bitset", "py-dt", "py-trie", "py-bitset")
+#: Rendered in this order.
+ORDER = ("c-dt", "c-trie", "c-bitset")
 
 
 def _small_api() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

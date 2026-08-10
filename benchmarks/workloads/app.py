@@ -15,7 +15,7 @@ Shapes:
 7. Snapshot-cache read              GET  /config/{key}
 
 The database-backed shapes are registered only when a database is supplied, so
-the app also runs (and is verifiable) for the pure in-process shapes alone.
+the app also runs (and is verifiable) for the in-process shapes alone.
 """
 
 from __future__ import annotations

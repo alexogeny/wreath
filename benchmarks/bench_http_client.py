@@ -14,11 +14,20 @@ from time import perf_counter_ns
 from typing import Any
 
 from wreath._client_codec import parse_response_head as selected_parse_response_head
+from wreath._client_codec import response_framing
 from wreath._client_codec import serialize_request as selected_serialize_request
-from wreath._pure.http_client import parse_response_head as pure_parse_response_head
-from wreath._pure.http_client import response_framing
-from wreath._pure.http_client import serialize_request as pure_serialize_request
+from wreath._native import _core
 from wreath.http_client import DestinationPolicy, HTTPClient
+
+# The two tiers, both C. `_client` is the dedicated outbound extension and wins
+# when built; `_core`'s inbound parser covers the same grammar and is the
+# fallback. `_client_codec` picks the first, and this measures what that pick
+# is worth by driving `_core` directly as the other arm.
+core_parse_response_head = _core.http_parse_response
+
+
+def core_serialize_request(method, target, host, *, headers=(), body=b""):
+    return _core.http_serialize_request(method, target, host, tuple(headers), body)
 
 _RESPONSE = (
     b"HTTP/1.1 200 OK\r\n"
@@ -90,13 +99,13 @@ async def run(iterations: int, trials: int, loopback_iterations: int) -> dict[st
         "headers": ((b"content-type", b"application/json"),),
         "body": b"{}",
     }
-    pure_request = lambda: pure_serialize_request(  # noqa: E731
+    core_request = lambda: core_serialize_request(  # noqa: E731
         *request_args, **request_kwargs
     )
     selected_request = lambda: selected_serialize_request(  # noqa: E731
         *request_args, **request_kwargs
     )
-    pure = lambda: pure_parse_response_head(_RESPONSE)  # noqa: E731
+    core = lambda: core_parse_response_head(_RESPONSE)  # noqa: E731
     selected = lambda: selected_parse_response_head(_RESPONSE)  # noqa: E731
     framing_headers = [
         (b"content-type", b"application/json"),
@@ -110,12 +119,12 @@ async def run(iterations: int, trials: int, loopback_iterations: int) -> dict[st
         await _loopback(loopback_iterations)
         for _ in range(trials)
     ]
-    pure_result = pure_parse_response_head(_RESPONSE)
-    selected_result = selected_parse_response_head(_RESPONSE)
-    if pure_result != selected_result:
-        raise RuntimeError("pure/native response parser mismatch")
-    if pure_request() != selected_request():
-        raise RuntimeError("pure/native request serializer mismatch")
+    # Identical answers are the precondition: two tiers producing different
+    # bytes would make the faster one a measurement of a different job.
+    if core_parse_response_head(_RESPONSE) != selected_parse_response_head(_RESPONSE):
+        raise RuntimeError("the two response parsers disagree")
+    if core_request() != selected_request():
+        raise RuntimeError("the two request serializers disagree")
     return {
         "metadata": {
             "python": sys.version,
@@ -127,15 +136,15 @@ async def run(iterations: int, trials: int, loopback_iterations: int) -> dict[st
             "selected_parser": selected_parse_response_head.__module__,
         },
         "results": {
-            "serialize_request_pure": _summary(
-                _measure(pure_request, iterations, trials)
+            "serialize_request_core": _summary(
+                _measure(core_request, iterations, trials)
             ),
             "serialize_request_selected": _summary(
                 _measure(selected_request, iterations, trials)
             ),
-            "parse_response_pure": _summary(_measure(pure, iterations, trials)),
+            "parse_response_core": _summary(_measure(core, iterations, trials)),
             "parse_response_selected": _summary(_measure(selected, iterations, trials)),
-            "response_framing_pure": _summary(
+            "response_framing_selected": _summary(
                 _measure(framing, iterations, trials)
             ),
             "managed_keepalive_loopback": _summary(loopback_samples),
