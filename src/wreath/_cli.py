@@ -279,7 +279,6 @@ def build_parser() -> argparse.ArgumentParser:
     strictness = typegen_parser.add_mutually_exclusive_group()
     strictness.add_argument("--strict", dest="allow_unknown", action="store_false", default=False)
     strictness.add_argument("--allow-unknown", dest="allow_unknown", action="store_true")
-    typegen_parser.add_argument("--pure", action="store_true")
     typegen_parser.add_argument(
         "--factory",
         action="store_true",
@@ -1511,7 +1510,6 @@ def _add_replay_parser(commands: Any) -> None:
         default=None,
         help="write the realized fault schedule that this run applied",
     )
-    transport.add_argument("--pure", action="store_true", help="use the pure protocol driver")
 
     plan = actions.add_parser(
         "plan", help="replay a canonical request through routing/binding/serialization"
@@ -1824,15 +1822,14 @@ def _loop_factory(name: LoopName) -> Callable[[], Any] | None:
 
 
 def _protocol_tier() -> str:
-    """Whether this process will serve requests from C or from Python.
+    """The tier the startup line reports.
 
-    Reads the same selector the server itself uses rather than re-deriving it,
-    so the startup line cannot claim `native` for a process that silently fell
-    back to the pure reference because no extension was built.
+    Always `native` now: `_select_protocol` refuses rather than falling back, so
+    a process that gets this far is serving from C. Kept as a function because
+    the banner reads it and because the metal tier is a third answer this may
+    have to give.
     """
-    from .server import _select_protocol
-
-    return "pure" if _select_protocol().__module__.startswith("wreath._pure") else "native"
+    return "native"
 
 
 def _listening_address(server: Any) -> str:
@@ -2177,7 +2174,6 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
         base_url_env=namespace.base_url_env,
         check=namespace.check,
         allow_unknown=namespace.allow_unknown,
-        pure=namespace.pure,
         factory=namespace.factory,
         title=namespace.title,
         version=namespace.api_version,
@@ -3498,8 +3494,6 @@ def execute_replay(namespace: argparse.Namespace) -> int:
         if namespace.inject:
             schedule = rp.FaultSchedule.from_bytes(_read_bytes(namespace.inject))
         protocol_cls = None
-        if namespace.pure:
-            from ._pure.server import Http1Protocol as protocol_cls
         result = asyncio.run(
             rp.replay_transport(app, recording, protocol_cls=protocol_cls, faults=schedule)
         )
