@@ -37,8 +37,8 @@ down the arms costs four calls to discover there is nothing to vectorise, and
 short runs are the common case wherever the interesting bytes are dense.
 
 **There is no cached feature flag.** A `static int have_avx2` would be
-process-global mutable state, which [ADR 0007](https://github.com/alexogeny/wreath/blob/main/docs/decisions/0007-native-code-owns-no-process-global-state.md)
-forbids — a write shared by every thread on the free-threaded build, for a
+process-global mutable state, which [`AGENTS.md`](https://github.com/alexogeny/wreath/blob/main/AGENTS.md)
+forbids in C — a write shared by every thread on the free-threaded build, for a
 value that never changes. `__builtin_cpu_supports` needs no cache: it is a load
 and a bit test against a table libgcc fills before `main`, far below the cost of
 the loop it guards.

@@ -53,7 +53,7 @@ else, and they are the real argument rather than the operational tidiness:
   query returned, so pagination stops being expressible.
 
 **And Wreath needs no `pgvector` Python package.** The wire codec is ours, in
-`_pure/postgres.py` and `_native/postgres/codec.c`, alongside every other type.
+`_pgdriver.py` and `_native/postgres/codec.c`, alongside every other type.
 What *is* required is the server extension — see below.
 
 ## Before anything else: the extension
@@ -536,7 +536,7 @@ database either — the pitch is that you do not need one.
 
 **Wreath implements the client half of pgvector, not the server half.** The wire
 codec is ours -- `wreath` needs no `pgvector` Python package, and the framing lives
-in `_pure/postgres.py` and `_native/postgres/codec.c` like every other type. But
+in `_pgdriver.py` and `_native/postgres/codec.c` like every other type. But
 the `vector`, `halfvec` and `sparsevec` *types*, the
 `<->`/`<=>`/`<#>`/`<+>`/`<~>`/`<%>` operators, and the HNSW
 and IVFFlat access methods are PostgreSQL extension code running inside the
