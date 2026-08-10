@@ -43,8 +43,8 @@ power-analysis attack on a double-and-add implementation actually reads. What
 they cannot remove is CPython's own arithmetic: `int.__mul__` and `int.__mod__`
 run schoolbook algorithms whose timing depends on operand magnitude, and a
 255-bit product that happens to have a short normalised form is cheaper than one
-that does not. **A pure-Python implementation is therefore not constant-time in
-the strict sense and this module does not claim to be.** It claims that the
+that does not. **A Python implementation is therefore not constant-time in the
+strict sense and this module does not claim to be.** It claims that the
 scalar does not steer control flow or memory indexing, which is the part that is
 achievable here, and it is a strict improvement on what the three callers
 shipped. Anyone who needs a hardened signer wants a hardware token or a library
