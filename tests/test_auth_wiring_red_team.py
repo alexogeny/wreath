@@ -3,7 +3,7 @@
 Every test here was written as an *attack*, watched fail in a scratchpad shadow
 of the tree before the fix, and sits beside a control that passes in **both**
 trees -- so a suite that has simply broken everywhere cannot be mistaken for one
-that caught something (docs/decisions/0024, docs/decisions/0023).
+that caught something (a check that has nothing to check, proved in a scratchpad).
 
 Three defects, all the same shape and none of them the same code:
 
@@ -274,8 +274,8 @@ class _KeyedSessionStore:
 class _LegacySessionStore(_KeyedSessionStore):
     """The pre-existing shape: `delete_for` takes a subject and nothing else.
 
-    A double is never more capable than the real thing (docs/decisions/0020),
-    and this one is deliberately *less*: it is the store somebody already wrote
+    A double is never more capable than the real thing, and this one is
+    deliberately *less*: it is the store somebody already wrote
     against the published signature, and the control below pins that the default
     wiring never hands it an argument it cannot take.
     """
@@ -502,7 +502,8 @@ async def test_a_real_postgres_deletes_by_the_bound_session_key() -> None:
 
     `data -> $2` is ambiguous between the text and the integer operator until
     something resolves it, and parameter type inference is precisely what a
-    double models badly (docs/decisions/0020). This is also the assertion that
+    double models badly -- a double is never more capable than the real thing.
+    This is also the assertion that
     the *rows* go: a fake that returns "DELETE 2" proves the parsing and nothing
     about the predicate.
     """

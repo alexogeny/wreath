@@ -71,7 +71,7 @@ def test_a_middleware_subclass_is_reported_where_it_is_defined(tmp_path) -> None
         "    async def dispatch(self, request, call_next):\n"
         "        return await call_next(request)\n"
     )
-    (finding,) = _by_rule(_analyze(tmp_path, source), "mw.custom")
+    (finding,) = _by_rule(_analyze(tmp_path, source), "mw.state")
     assert finding.tag == port.NEEDS_REVIEW
     assert finding.line == 3
 

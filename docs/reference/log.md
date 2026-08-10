@@ -11,9 +11,10 @@ reader that remembers the highest one it saw skips every row a slower
 transaction commits behind it.
 
 So the shape is written once here, and the cursor is a transaction id first and
-a sequence number second. The decision record
-`0027-a-log-cursor-is-a-transaction-id` has the proof, and the two
-plausible-looking answers it rules out.
+a sequence number second. Two plausible-looking answers are ruled out by it: a
+`bigserial` high-water mark, which the paragraph above shows skips rows; and a
+commit timestamp, which is not monotonic across a clock adjustment and is not
+unique under concurrency.
 
 **Appends batch, because write amplification is the objection this design gets.**
 `append` is one statement, and a producer whose rows are small and frequent —

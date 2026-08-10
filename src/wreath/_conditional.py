@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Final
 
 #: Statuses whose responses carry no body, whatever the handler returned.
-#: RFC 9110 §15.3.5 (204) and §15.4.5 (304). The native and pure response paths
+#: RFC 9110 §15.3.5 (204) and §15.4.5 (304). The one-shot and streaming response paths
 #: both consult this, as does the porting analyzer's rule for a handler that
 #: returns one anyway.
 STATUS_WITHOUT_BODY: Final[frozenset[int]] = frozenset({204, 304})

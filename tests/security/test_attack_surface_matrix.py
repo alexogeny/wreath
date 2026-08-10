@@ -37,10 +37,6 @@ _ROOT = Path(__file__).parents[2]
 def test_standalone_proof_of_concept_is_a_collected_regression(script: Path) -> None:
     """A PoC must reach its explicit safe outcome, not merely exit non-zero."""
     environment = os.environ.copy()
-    # These scripts intentionally exercise Wreath's native network server.  A
-    # parent pure-mode sweep must not silently replace the implementation the
-    # standalone reproducer says it drives.
-    environment.pop("WREATH_PURE", None)
     completed = subprocess.run(
         [sys.executable, str(script)],
         cwd=_ROOT,

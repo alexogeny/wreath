@@ -1,6 +1,6 @@
 /* wreath._native._http3: optional HTTP/3 (QUIC) datagram endpoint.
  *
- * Built only when WREATH_BUILD_HTTP3=1 with ngtcp2/nghttp3 available (ADR 0011).
+ * Built only when WREATH_BUILD_HTTP3=1 with ngtcp2/nghttp3 available (HTTP/3 is opt-in at build time).
  * This module exposes a datagram endpoint type used solely by wreath.server. The
  * endpoint implementation lands in a later checkpoint; for now the module
  * initializes and registers its types via wreath_http3_ready().

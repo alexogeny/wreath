@@ -1,7 +1,7 @@
 """Stage 1 Native Flight Recorder core: ring, active table, completion, losses.
 
 Drives the native ``_flight.Recorder`` directly (no server yet) and checks it
-against the pure oracle in ``wreath._pure.flight``. The extension is optional;
+against the reference recorder in ``wreath._flight_reference``. The extension is optional;
 tests skip cleanly if it was not built.
 """
 
@@ -12,7 +12,7 @@ import random
 import pytest
 
 from wreath import _flight_schema as fs
-from wreath._pure.flight import PureRecorder
+from wreath._flight_reference import ReferenceRecorder
 
 _flight = pytest.importorskip("wreath._native._flight")
 
@@ -145,7 +145,7 @@ def test_histogram_records_log2_buckets() -> None:
     assert sum(hist) == 2
 
 
-# --- differential against the pure oracle -----------------------------------
+# --- differential against the reference recorder -----------------------------------
 
 
 def _run_sequence(rec, seed: int) -> tuple[bytes, tuple]:
@@ -180,7 +180,7 @@ def _run_sequence(rec, seed: int) -> tuple[bytes, tuple]:
 
 def test_native_matches_pure_oracle() -> None:
     native = _flight.Recorder(_flight.MODE_PULSE, ring_records=256, active_requests=64)
-    pure = PureRecorder(fs.Mode.PULSE, ring_records=256, active_requests=64)
+    pure = ReferenceRecorder(fs.Mode.PULSE, ring_records=256, active_requests=64)
     native_cells, native_snap = _run_sequence(native, seed=1234)
     pure_cells, pure_snap = _run_sequence(pure, seed=1234)
     assert native_cells == pure_cells
@@ -190,7 +190,7 @@ def test_native_matches_pure_oracle() -> None:
 def test_native_matches_pure_oracle_under_ring_pressure() -> None:
     # A tiny ring so most completions drop: loss accounting must agree exactly.
     native = _flight.Recorder(_flight.MODE_PULSE, ring_records=8, active_requests=64)
-    pure = PureRecorder(fs.Mode.PULSE, ring_records=8, active_requests=64)
+    pure = ReferenceRecorder(fs.Mode.PULSE, ring_records=8, active_requests=64)
     n_cells, n_snap = _run_sequence(native, seed=99)
     p_cells, p_snap = _run_sequence(pure, seed=99)
     assert n_cells == p_cells
@@ -256,7 +256,7 @@ def test_invalid_sample_rate_is_rejected() -> None:
     with pytest.raises(ValueError):
         _flight.Recorder(_flight.MODE_DETAILED, detailed_sample_rate=1.5)
     with pytest.raises(ValueError):
-        PureRecorder(fs.Mode.DETAILED, detailed_sample_rate=-0.1)
+        ReferenceRecorder(fs.Mode.DETAILED, detailed_sample_rate=-0.1)
 
 
 def _run_detailed_sequence(rec, seed: int) -> bytes:
@@ -269,12 +269,12 @@ def _run_detailed_sequence(rec, seed: int) -> bytes:
 
 def test_native_matches_pure_oracle_detailed_arming() -> None:
     # The armed flag rides the completion cell, so drained cells must be
-    # byte-identical between the native worker and the pure oracle.
+    # byte-identical between the native worker and the reference recorder.
     native = _flight.Recorder(
         _flight.MODE_DETAILED, ring_records=1024, active_requests=64,
         detailed_sample_rate=0.5,
     )
-    pure = PureRecorder(
+    pure = ReferenceRecorder(
         fs.Mode.DETAILED, ring_records=1024, active_requests=64,
         detailed_sample_rate=0.5,
     )
@@ -431,7 +431,7 @@ def test_native_matches_pure_oracle_with_phases_under_pressure() -> None:
         _flight.MODE_DETAILED, ring_records=64, active_requests=64,
         detailed_sample_rate=0.5, phase_slots=8,
     )
-    pure = PureRecorder(
+    pure = ReferenceRecorder(
         fs.Mode.DETAILED, ring_records=64, active_requests=64,
         detailed_sample_rate=0.5, phase_slots=8,
     )
@@ -508,7 +508,7 @@ def test_promotion_matches_pure_oracle() -> None:
         _flight.MODE_DETAILED, ring_records=512, detailed_sample_rate=0.3,
         detailed_slow_us=1500,
     )
-    pure = PureRecorder(
+    pure = ReferenceRecorder(
         fs.Mode.DETAILED, ring_records=512, detailed_sample_rate=0.3,
         detailed_slow_us=1500,
     )
@@ -525,12 +525,12 @@ def test_invalid_slow_threshold_config_is_rejected() -> None:
 
 def test_phase_pool_pressure_gauges_track_reserve_and_release() -> None:
     # Slice 3b: occupancy and high-water for the phase-scratch pool, mirrored by
-    # the pure oracle. High water is sticky; occupancy falls as requests finish.
+    # the reference recorder. High water is sticky; occupancy falls as requests finish.
     rec = _flight.Recorder(
         _flight.MODE_DETAILED, ring_records=64, active_requests=8,
         detailed_sample_rate=1.0, phase_slots=4,
     )
-    pure = PureRecorder(
+    pure = ReferenceRecorder(
         fs.Mode.DETAILED, ring_records=64, active_requests=8,
         detailed_sample_rate=1.0, phase_slots=4,
     )
@@ -553,7 +553,7 @@ def test_phase_pool_gauges_saturate_at_capacity_on_exhaustion() -> None:
         _flight.MODE_DETAILED, ring_records=64, active_requests=8,
         detailed_sample_rate=1.0, phase_slots=2,
     )
-    pure = PureRecorder(
+    pure = ReferenceRecorder(
         fs.Mode.DETAILED, ring_records=64, active_requests=8,
         detailed_sample_rate=1.0, phase_slots=2,
     )
@@ -571,7 +571,7 @@ def test_phase_pool_gauges_saturate_at_capacity_on_exhaustion() -> None:
 def test_phase_pool_gauges_are_zero_for_pulse() -> None:
     # Pulse reserves no pool: every gauge stays 0 no matter the traffic.
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
-    pure = PureRecorder(fs.Mode.PULSE, ring_records=64, active_requests=8)
+    pure = ReferenceRecorder(fs.Mode.PULSE, ring_records=64, active_requests=8)
     for r in (rec, pure):
         req = r.begin(start_ns=0)
         req.finish(now_ns=1000, status=200)

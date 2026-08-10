@@ -11,7 +11,7 @@ failure landed on the first request carrying a body, as a 500 the caller could
 not place. Both are declaration errors, so both belong at compile time with a
 message naming the three facts a reader needs — the callable, the parameter, and
 the name that would not resolve. See
-`docs/decisions/0019-refuse-rather-than-half-wire.md`.
+the refuse-rather-than-half-wire rule in `AGENTS.md`.
 """
 
 from __future__ import annotations

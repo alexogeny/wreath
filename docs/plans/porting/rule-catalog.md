@@ -46,7 +46,7 @@ Tags:
 | `class X(BaseModel)` (plain fields) | `@dataclass` | 1:1 |
 | `= []` default | `field(default_factory=list)` | 1:1 |
 | `model_config = ConfigDict(extra="forbid")` | drop (always-on) | 1:1 |
-| `Field(ge=, le=)` on a DTO | no column to hang it on → annotate | lossy |
+| `Field(ge=, le=)` on a DTO | `Annotated[T, wreath.binding.Field(ge=, le=)]` | 1:1 |
 | `@field_validator` / `@model_validator` | `narrow(...)` / `@rule(...)` | lossy (always annotate) |
 | `.model_dump()` in a body | `dataclasses.asdict` | lossy |
 | `Model.get_pydantic(include=...)` | hand-written DTO | unsupported |

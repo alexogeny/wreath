@@ -153,7 +153,7 @@ class WireList(list):
     or `numeric[]`, and `[]` names no element type at all. A pgvector value is a
     list too, and it *does* know its type -- so it carries the answer.
 
-    A `list` subclass rather than a wrapper, so both codec twins keep taking the
+    A `list` subclass rather than a wrapper, so both codecs keep taking the
     sequence they already take: `PySequence_Fast` and `struct.pack` are unchanged
     by this, and nothing in the encode path has to unwrap anything.
     """
@@ -325,7 +325,7 @@ def _unbind_extension_oids() -> None:
     and never again; calling this in a running process would leave a type
     unresolvable-looking while connections are still decoding rows with the OID
     it just forgot. It exists because a test process legitimately holds both a
-    made-up OID (for the pure codec suites, which need no server) and a real one
+    made-up OID (for the codec suites, which need no server) and a real one
     read from a live catalog, and `bind_extension_oid` is right to refuse those
     at the same time.
 
@@ -338,7 +338,7 @@ def _unbind_extension_oids() -> None:
 
 
 #: The codec kind each extension type name is framed by. Adding a type means
-#: adding a kind here and a branch in both codec twins -- never a silent
+#: adding a kind here and a branch in both codecs -- never a silent
 #: fall-through to "bytes".
 _EXTENSION_KINDS: dict[str, int] = {
     "vector": EXT_KIND_VECTOR,
@@ -878,7 +878,7 @@ def _geography_from_wire(value: Any) -> Coordinate:
     `bytes.fromhex` here rather than the strict `binascii.unhexlify` the
     *encoder* uses: PostgreSQL is the writer on this side, so leniency admits
     nothing wreath has to reason about, while on the way out a lenient reading
-    would have let the two codec twins accept different input.
+    would have let the two codecs accept different input.
     """
     if isinstance(value, Coordinate):
         return value

@@ -4,7 +4,7 @@ The array codec (codec.c, P4) is a pure encode/decode function reachable through
 the native backend's ``_encode_binary(value, oid)`` / ``_decode_value(oid, fmt,
 bytes)`` -- the same entry points ``tests/postgres/test_codecs.py`` uses for
 scalars. This pins the framing (element recursion, has_null flag, empty ndims=0)
-without a live PostgreSQL. The pure-Python array twin is deferred, so this is
+without a live PostgreSQL. `_pgdriver` has no array codec, so this is
 native-only.
 """
 

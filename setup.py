@@ -1,8 +1,12 @@
-"""Build configuration for the optional wreath._native C accelerator.
+"""Build configuration for the wreath._native C extensions.
 
-The extension is optional at runtime: every native function has a pure-Python
-twin in wreath._pure, selected automatically when the compiled module is absent
-or WREATH_PURE=1 is set. Building requires only a C compiler and CPython headers.
+`_core` is required: routing, HTTP parsing, the JSON and msgpack codecs, header
+handling, validation and Cedar evaluation are C, and `wreath._native` refuses at
+import without it. A default build needs only a C compiler and CPython headers.
+
+The rest are optional and each facade refuses by name when asked for something
+this build has not got -- `_reactor` needs io_uring (Linux), `_flight` needs
+mmap (POSIX), and `_http3` is opt-in behind WREATH_BUILD_HTTP3=1.
 """
 
 from __future__ import annotations
@@ -101,8 +105,8 @@ if pgo_mode and sys.platform != "win32":
     # only ones declaring *both* compile and link arguments. Instrumenting an
     # extension whose Extension() passes no `extra_link_args` produces objects
     # referencing `__gcov_*` with no gcov runtime linked in: the build succeeds,
-    # the `.so` fails to import, and `_core` comes back as None -- which reads
-    # as `WREATH_PURE=1` and silently turns every benchmark into a no-op.
+    # the `.so` fails to import, and `wreath._native` refuses at import -- so
+    # the benchmark run dies at startup rather than silently measuring nothing.
     hot_compile_args += pgo_args
     hot_link_args += pgo_link
 

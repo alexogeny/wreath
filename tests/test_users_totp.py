@@ -211,7 +211,7 @@ class _Interleaved:
     `InMemorySecondFactorStore` awaits nothing, so two verifications against it
     can never interleave and a race cannot be staged against it at all -- a test
     that "raced" it would be examining an ordering that cannot occur, which is
-    the shape docs/decisions/0024 is about. A store backed by anything at all
+    the shape AGENTS.md's has-nothing-to-check rule is about. A store backed by anything at all
     suspends while it reads, and that suspension is exactly where the two
     requests meet: both read the same unspent counter, then both go on to write.
 
@@ -886,7 +886,7 @@ class _FakeSession:
     PostgreSQL then admits one racer out of two is a question no fake can
     answer, and it is asked of a real server in the `database`-marked test at
     the end of this file -- a double that decided races itself would be exactly
-    the more-capable-than-the-real-thing fake of docs/decisions/0020.
+    the more-capable-than-the-real-thing fake AGENTS.md warns about.
     """
 
     def __init__(self, model: Any = None) -> None:
@@ -1018,7 +1018,7 @@ async def test_orm_store_satisfies_the_protocol() -> None:
 # on both -- and it is only a defect against a store where the read and the
 # write are separated by real I/O. `InMemorySecondFactorStore` never suspends,
 # so the same test against it is the check-with-nothing-to-check of
-# docs/decisions/0024 unless the suspension is put back deliberately, which is
+# a check with nothing to check unless the suspension is put back deliberately, which is
 # what `_Interleaved` above does.
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
@@ -1342,7 +1342,7 @@ async def test_a_login_that_cannot_check_an_enrolled_factor_is_refused() -> None
     Wired this way the user enrols a factor, sees it listed, and is then signed
     in by the password alone -- every signal saying protected, nothing being so.
     Refusing locks out a misconfigured deployment, which is the trade
-    docs/decisions/0019 makes: a door that names its own misconfiguration beats
+    the refuse-rather-than-half-wire rule makes: a door that names its own misconfiguration beats
     one that opens quietly.
     """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()

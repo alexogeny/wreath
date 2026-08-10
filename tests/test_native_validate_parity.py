@@ -1,7 +1,7 @@
 """Pure/native parity for the body validator.
 
 The native `run_validation` executes a plan compiled by `wreath.binding`; it must
-produce byte-identical results and error lists to the pure `validate`, which
+produce byte-identical results and error lists to the Python `validate`, which
 stays the reference. Recursive dataclasses fall back to pure.
 """
 
@@ -190,8 +190,15 @@ def test_recursive_body_still_validates_via_pure() -> None:
     assert result == Node(value=1, children=[Node(value=2)])
 
 
-def test_body_validator_selects_pure_when_forced(monkeypatch: pytest.MonkeyPatch) -> None:
-    # With the native core absent (WREATH_PURE), the pure validator is used.
+def test_body_validator_falls_back_to_the_python_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path an annotation the flat plan cannot express takes.
+
+    Forced by nulling `_core` rather than by finding such an annotation, because
+    the set of unflattenable shapes is small and moves; what is pinned is that
+    the fallback produces the same object when it runs.
+    """
     import wreath.binding as binding
 
     monkeypatch.setattr(binding, "_core", None)

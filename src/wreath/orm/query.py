@@ -48,7 +48,7 @@ class Select:
         #: Whether every ordering is a bare column, which is the shape the
         #: native plan-cache keyer and bind collector understand. An ordering by
         #: a *distance* carries a bound value and an operator, and both have to
-        #: reach the key -- so those queries take the pure path deliberately
+        #: reach the key -- so those queries take the Python path deliberately
         #: rather than by catching an AttributeError out of C.
         self.plain_orderings = all(
             isinstance(item.expression, ColumnExpr) for item in orderings

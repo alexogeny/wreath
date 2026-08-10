@@ -1,6 +1,6 @@
 """No native parser may mutate interpreter-global state.
 
-The parity tests in `test_native_parity.py` compare what the native and pure
+The anchored tests in `test_native_parity.py` compare what the C and the stdlib
 implementations *return*. That is a true assertion with a real subject, and it
 still could not see the defect this file exists for: `multipart.c` copied each
 part-header name into a `PyBytes` and lowercased it in place, and for a

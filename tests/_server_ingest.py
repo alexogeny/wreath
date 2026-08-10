@@ -3,7 +3,7 @@
 Feeds bytes through the asyncio.BufferedProtocol zero-copy path
 (``get_buffer()``/``buffer_updated()``) when the protocol supports it — the
 production socket path for the native server — and falls back to
-``data_received()`` otherwise (the pure protocol, or explicit compatibility
+``data_received()`` otherwise (the Python protocol, or explicit compatibility
 testing via ``force_data_received=True``).
 """
 

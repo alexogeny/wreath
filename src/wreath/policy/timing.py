@@ -24,10 +24,7 @@ from .._native import _core
 from .._webpolicy import replace_server_timing
 from ..request import Request
 
-if _core is not None and hasattr(_core, "format_server_timing"):
-    _format_server_timing: Any = _core.format_server_timing
-else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
-    from .._pure.observability import format_server_timing as _format_server_timing
+_format_server_timing: Any = _core.format_server_timing
 
 _METRIC_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _STATE_START = "_wreath_timing_start"

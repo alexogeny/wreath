@@ -265,10 +265,9 @@ per-*core* figure is 7%, because roughly a third of a proxy's core is kernel
 softirq that appears in no process's accounting.
 
 **Neither path has a Python twin, and that is deliberate** — the one exception
-in the tree to the native/pure rule in `AGENTS.md`. A fallback here is a footgun
+in the tree to the accelerator rules in `AGENTS.md`. A fallback here is a footgun
 rather than a safety net: it degrades silently, by roughly six times, in the
 component whose whole purpose is to be faster than the thing it replaces, and
 nothing at runtime announces which path a request took. Correctness is checked
-against haproxy and nginx directly, since a twin can be wrong in both halves and
-agree with itself. `WREATH_PURE=1` does not disable it: that variable selects a
-pure twin where one exists, and here none does.
+against haproxy and nginx directly, since an implementation compared against
+another of ours can be wrong in both halves and agree with itself.

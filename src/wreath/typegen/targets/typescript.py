@@ -590,10 +590,9 @@ def render_typescript(
     *,
     react_query: bool = False,
     base_url_env: str | None = None,
-    pure: bool = False,
 ) -> dict[str, str]:
     """Return `{filename: contents}` for the TypeScript target."""
-    render_models, render_client, backend = select_renderers(pure=pure)
+    render_models, render_client, backend = select_renderers()
     files: dict[str, str] = {}
     files["models.ts"] = render_models(_declarations(api), 0).decode("utf-8")
     client_payload = (tuple(_referenced_names(api)), _operation_tuples(api))

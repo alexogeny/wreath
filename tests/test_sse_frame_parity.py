@@ -1,9 +1,8 @@
-"""The native SSE framer is byte-for-byte the pure framer.
+"""SSE framing, against the `text/event-stream` grammar.
 
-`_sse_frame_fields` in `src/wreath/response.py` stays the reference
-implementation and the parity contract; `src/wreath/_native/sse.c` is a faster
-twin that walks the payload once instead of copying it through two `replace()`
-calls and a `split()`.
+`_sse_frame_fields` in `src/wreath/response.py` is the readable statement of the
+framing; `src/wreath/_native/sse.c` is what runs, walking the payload once
+instead of copying it through two `replace()` calls and a `split()`.
 
 Line-ending normalisation is where the two can most easily diverge, so CR, LF,
 CRLF, lone trailing breaks, and empty segments are all pinned here -- a

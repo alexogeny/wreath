@@ -1,33 +1,27 @@
 {
- "metadata": {
-  "policies": 6,
-  "trials": 9,
-  "scenario": "six-policy set, two authorizations (one allow, one deny) per call"
- },
- "results": [
-  {
-   "engine": "Wreath (pure)",
-   "phase": "evaluate",
-   "ns_per_call": 9453,
-   "calls_per_second": 105788
+  "metadata": {
+    "policies": 6,
+    "trials": 9,
+    "scenario": "six-policy set, two authorizations (one allow, one deny) per call"
   },
-  {
-   "engine": "Wreath (metal)",
-   "phase": "evaluate",
-   "ns_per_call": 1221,
-   "calls_per_second": 819329
-  },
-  {
-   "engine": "Wreath (ASGI)",
-   "phase": "parse_and_evaluate",
-   "ns_per_call": 168876,
-   "calls_per_second": 5922
-  },
-  {
-   "engine": "cedarpy",
-   "phase": "parse_and_evaluate",
-   "ns_per_call": 369366,
-   "calls_per_second": 2707
-  }
- ]
+  "results": [
+    {
+      "engine": "Wreath (metal)",
+      "phase": "evaluate",
+      "ns_per_call": 1221,
+      "calls_per_second": 819329
+    },
+    {
+      "engine": "Wreath (ASGI)",
+      "phase": "parse_and_evaluate",
+      "ns_per_call": 168876,
+      "calls_per_second": 5922
+    },
+    {
+      "engine": "cedarpy",
+      "phase": "parse_and_evaluate",
+      "ns_per_call": 369366,
+      "calls_per_second": 2707
+    }
+  ]
 }

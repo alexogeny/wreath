@@ -1,9 +1,8 @@
 /* Cedar program evaluation for the native core.
  *
- * Twin of wreath/_pure/cedar.py: both walk the compiled tuple program that
- * wreath/_auth/cedar_engine.py produces at startup, and the differential
- * tests in tests/test_cedar_engine.py hold their outputs — including
- * diagnostic strings — byte-for-byte identical.
+ * Walks the compiled tuple program that wreath/_auth/cedar_engine.py produces
+ * at startup. tests/test_cedar_engine.py pins the decision, the reason and the
+ * diagnostic strings against Cedar's specified semantics, case by case.
  *
  * Value model: PyBool, PyLong (i64), PyUnicode, a (type, id) unicode 2-tuple
  * for an entity uid, a duplicate-free PyList for a set, and a PyDict for a
@@ -178,7 +177,7 @@ cedar_set_contains(cedar_ctx *ctx, PyObject *set_list, PyObject *value, int dept
  * The tag keeps kinds apart because `cedar_eq` does: `True` and `1` are not
  * equal in Cedar's model, but Python compares them equal and hashes them alike,
  * so an untagged key would silently merge them. Mirrors `_dedupe_key` in
- * `_pure/cedar.py` and `_auth/cedar_engine.py`. */
+ * `_auth/cedar_engine.py`. */
 static int
 cedar_dedupe_key(PyObject *value, PyObject **key)
 {
@@ -688,7 +687,7 @@ cedar_eval(cedar_ctx *ctx, PyObject *node, int depth)
          * every authorization, so a policy holding a few hundred entries (an
          * allowlist, a tenant list) paid that per request. Only records and
          * nested sets, which cannot be hashed, still compare structurally --
-         * and only against each other. `_pure/cedar.py` does the same. */
+         * and only against each other. */
         PyObject *items = PyTuple_GET_ITEM(node, 1);
         PyObject *result = PyList_New(0);
         PyObject *seen = PySet_New(NULL);

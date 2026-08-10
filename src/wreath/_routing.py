@@ -13,9 +13,9 @@ folding is what makes the tree grow super-linearly with the parameter fraction;
 the bitset stays linear. See `docs/plans/bitset-routing.md` for the
 measurements.
 
-All three run in C when the extension is available, with pure-Python twins
-otherwise, and all are behaviourally identical — the tests assert parity across
-every combination.
+All three are C, and all three answer identically — the tests route one corpus
+through each and compare, so an input they disagree on is a defect in whichever
+one is odd.
 """
 
 from __future__ import annotations
@@ -47,22 +47,11 @@ CompiledHandler = Callable[["Request"], Awaitable[Any] | Any]
 
 RoutingMode = Literal["decision", "trie", "bitset"]
 
-if _core is not None:
-    _TABLES: dict[str, Any] = {
-        "decision": _core.DecisionRouteTable,
-        "trie": _core.RouteTable,
-        "bitset": _core.BitsetRouteTable,
-    }
-else:
-    from ._pure.dtbitset import BitsetRouteTable
-    from ._pure.dtrouter import DecisionRouteTable
-    from ._pure.router import RouteTable
-
-    _TABLES = {
-        "decision": DecisionRouteTable,
-        "trie": RouteTable,
-        "bitset": BitsetRouteTable,
-    }
+_TABLES: dict[str, Any] = {
+    "decision": _core.DecisionRouteTable,
+    "trie": _core.RouteTable,
+    "bitset": _core.BitsetRouteTable,
+}
 
 #: Backends carrying the full classify/resolve protocol; "trie" matches only.
 _CLASSIFYING = frozenset({"decision", "bitset"})
@@ -75,7 +64,7 @@ def check_placeholders(path: str) -> None:
     braces. A final `{key:path}` placeholder is the one supported converter and
     greedily captures the remaining path. Reject partial braces, empty names,
     unknown converters, and non-final greedy placeholders at registration so
-    native and pure routing cannot interpret a malformed declaration differently.
+    the three routing backends cannot interpret a malformed declaration differently.
 
     Raises:
         ValueError: A placeholder is malformed or uses an unsupported converter.

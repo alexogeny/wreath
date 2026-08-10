@@ -74,8 +74,8 @@ The first guarantee is narrow: Wreath's native server can emit a compact complet
 
 - `src/wreath/telemetry.py`, `inspector.py`, `recording.py`, and `replay.py` are intentional empty scaffolds. `docs/reference/roadmap.md` reserves exactly these imports.
 - `src/wreath/_native/observability.c` already supplies strict request-ID validation and `Server-Timing` formatting through `_core`. `middleware/request_id.py` and `middleware/timing.py` define current correlation and monotonic timing behavior. Reuse their semantics, but do not route NFR through middleware.
-- `docs/plans/future/05-operational-observability.md` already calls for bounded labels, strict W3C propagation, optional exporters, worker-local native counters/histograms, a fixed ring, and explicit loss accounting.
-- `docs/plans/future/14-control-system-testing.md` proposes virtual clocks and scripted peers. Replay should consume those concepts rather than create another fault/time vocabulary.
+- `wreath.telemetry` / `wreath.logging` already calls for bounded labels, strict W3C propagation, optional exporters, worker-local native counters/histograms, a fixed ring, and explicit loss accounting.
+- `wreath.replay` / `wreath.simulation` proposes virtual clocks and scripted peers. Replay should consume those concepts rather than create another fault/time vocabulary.
 - `docs/cookbook/agents/documenting-a-module.md` defines the guide/reference/nav/`llms.txt` work needed when each scaffold becomes public.
 
 ### Application, routing, and endpoint compilation

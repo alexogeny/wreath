@@ -1,7 +1,6 @@
 """Fake-transport WebSocket tests for the Wreath servers.
 
-Parameterized over the pure and native protocol implementations, comparing
-only wire bytes, ASGI messages, and closure behavior.
+Comparing only wire bytes, ASGI messages, and closure behavior.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import pytest
 from _server_ingest import feed
 
 from wreath import Wreath
-from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath._websocket import build_frame, parse_frame
 from wreath.server import ServerConfig
 from wreath.websocket import WebSocket
@@ -25,14 +23,13 @@ try:
 except ImportError:
     _NativeHttpProtocol = None
 
-IMPLS = [pytest.param(PureHttpProtocol, id="pure")]
-IMPLS.append(
+IMPLS = [
     pytest.param(
         _NativeHttpProtocol,
-        id="native",
+        id="http1",
         marks=pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built"),
     )
-)
+]
 
 impl = pytest.mark.parametrize("protocol_cls", IMPLS)
 
@@ -948,25 +945,6 @@ async def test_the_fragment_count_resets_between_messages(protocol_cls: type) ->
     await _settle()
     await asyncio.wait_for(done.wait(), timeout=10)
     assert [item["text"] for item in received] == ["xyz", "xyz"]
-
-
-@impl
-@pytest.mark.asyncio
-async def test_a_rejected_fragmented_message_releases_its_accumulator(
-    protocol_cls: type,
-) -> None:
-    protocol, transport = await start(
-        protocol_cls, echo_app, [upgrade()], ServerConfig(max_ws_fragments=4)
-    )
-    transport.buffer.clear()
-    feed(protocol, build_frame(2, b"a" * 4096, False, MASK))
-    for _ in range(8):
-        feed(protocol, build_frame(0, b"", False, MASK))
-    await _settle()
-    if hasattr(protocol, "_ws_frag_parts"):  # pure
-        assert protocol._ws_frag_parts == []
-        assert protocol._ws_frag_size == 0
-        assert protocol._ws_frag_opcode is None
 
 
 # --- close-code validation, and the default path_params -------------------------------

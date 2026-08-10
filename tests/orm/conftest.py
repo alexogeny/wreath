@@ -14,7 +14,7 @@ matters more than it looks: thirteen introspection tests once passed against a
 fake scripted with `str` and `int` rows, modelling a driver with catalog codecs
 that does not exist, and `validate_schema="error"` -- the framework default --
 had never once completed lifespan startup against a real PostgreSQL. See
-`docs/decisions/0020-a-double-is-never-more-capable.md`.
+the never-more-capable rule for doubles in `AGENTS.md`.
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ class FakeConnection:
                         f"for {column_name!r}, but oid {oid} decodes to "
                         f"{expected!r} ({type(expected).__name__}). Script what the "
                         f"driver returns, not what the test wishes it returned -- "
-                        f"see docs/decisions/0020-a-double-is-never-more-capable.md"
+                        f"a double is never more capable than the real thing"
                     )
 
     def _result(self, sql: str) -> Any:

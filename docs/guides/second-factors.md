@@ -59,7 +59,7 @@ POST /users/login   {"email": "...", "password": "..."}
 ```
 
 No session is written. That does lock out a deployment that is wired wrong,
-which is the trade `docs/decisions/0019-refuse-rather-than-half-wire.md`
+which is the trade the refuse-rather-than-half-wire rule in `AGENTS.md`
 makes on purpose — a locked door that names its own misconfiguration beats one
 that opens quietly — and it is scoped to accounts that actually have a factor,
 so a user with nothing enrolled signs in either way. Pass the same store to both

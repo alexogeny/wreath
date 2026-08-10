@@ -93,7 +93,7 @@ without an instrumentation package at either end.
 
 The parent is the request's **own server span**, not the remote parent it inherited: work
 a request causes is a child of *that request*. On the native path that span id is the
-recorder's real one; on the pure and bare-ASGI paths `server_span()` falls back to the
+recorder's real one; on the Python and bare-ASGI paths `server_span()` falls back to the
 incoming parent, which keeps the trace joined one level coarser.
 
 Three properties worth knowing:

@@ -154,7 +154,7 @@ def measure(
         raise H2LoadError(f"suspicious HTTP method for h2load: {method!r}")
 
     # h2 and h3 require TLS. HTTP/1.1 may be measured cleartext (tls=False) so a
-    # plaintext-h1 run is not bottlenecked on the pure-Python built-in client;
+    # plaintext-h1 run is not bottlenecked on the built-in Python client;
     # cleartext and TLS rows are never mixed in one run (the caller passes the
     # run's actual TLS state), so the "encryption tax" comparison stays honest.
     cleartext = not tls and protocol == "http/1.1"

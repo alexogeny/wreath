@@ -8,7 +8,7 @@ parts are re-derived four times -- and they are the parts that fail silently:
 * **the cursor**, which is the whole of it. A `bigserial` is allocated *before*
   commit, so a reader that remembers `max(seq)` skips every row a slower
   transaction commits afterwards with a lower number. The gap is invisible,
-  intermittent and load-dependent. See the decision record `0027-a-log-cursor-is-a-transaction-id`;
+  intermittent and load-dependent -- see `docs/reference/log.md` for the proof;
 * the table name reaches SQL by interpolation, so it must be a plain identifier;
 * the schema is *offered* (`Log.component`) and never applied, because schema
   changes belong in the migration history with the rest of the schema;
@@ -100,7 +100,7 @@ class Cursor(NamedTuple):
     neither is the sequence gated on visibility: sequence order is *allocation*
     order, and rows do not commit in the order they allocate. Ordering by
     `(xid, seq)` and remembering both is what makes "everything after this"
-    mean it. `docs/decisions/0027-a-log-cursor-is-a-transaction-id.md` has the
+    mean it. `wreath.log`'s cursor contract has the
     proof and the two wrong answers it rules out.
 
     Opaque to a caller: build one with `start` or take it from a `Batch`,

@@ -4,7 +4,7 @@ This is the threaded, network-facing half of OTLP support: the projector hands
 each finished `ProjectedTrace` to
 `ExportPipeline.on_trace`, which enqueues it on a bounded queue; a
 dedicated exporter thread drains the queue on an interval, batches it, maps it to
-OTLP through the pure `wreath._otlp` builders, and pushes it over a
+OTLP through the `wreath._otlp` builders, and pushes it over a
 transport. Metrics are exported on the same tick from a snapshot provider.
 
 Two isolation guarantees hold the plan's line that exporter behavior never

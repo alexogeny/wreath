@@ -68,7 +68,7 @@ uvicorn app:app             # ... or any ASGI server you already run
 |---|---|
 | **Weaves the whole circle** | Routing, binding, auth, ORM, migrations, jobs, OpenAPI, and a server — one project, one release, one set of docs that agree with each other. |
 | **Asks for nothing underneath** | The framework core has no mandatory runtime dependency. The Postgres driver, the JWT implementation, the template engine, the docs generator: all Wreath's own code. |
-| **Fast where it matters, honest about it** | The hot path is C, with a pure-Python twin that must agree with it — `WREATH_PURE=1` switches anywhere. No performance claim comes from a single run. |
+| **Fast where it matters, honest about it** | The hot path is C — routing, HTTP parsing, the codecs, validation — and the wheel ships it prebuilt. No performance claim comes from a single run. |
 | **Speaks plain** | The imagery lives in the story we tell; the code uses conventional names. Nothing is themed — no threads, roots, kindling, or leaves in the API. |
 | **Runs where you already run** | Any conforming ASGI server serves a Wreath app unchanged. The native server is an upgrade, never a requirement. |
 | **Tests what you declared** | `wreath mutant` deletes one *declared control* at a time — a policy, a refusal, a rate limit — and reports the ones your tests would not have noticed. |
@@ -122,7 +122,7 @@ in your head.
 
 | Module or command | What it gives you |
 |---|---|
-| `wreath.server` | HTTP/1.1, HTTP/2 and optional HTTP/3, with WebSockets, TLS, and a development runner — with a pure-Python reference always in agreement |
+| `wreath.server` | HTTP/1.1, HTTP/2 and optional HTTP/3, with WebSockets, TLS, and a development runner |
 | `wreath.telemetry`, `wreath.logging` | Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, and replay |
 | `wreath.health`, `wreath.flags`, `wreath.versioning` | Liveness and readiness, feature flags with deterministic percentage rollouts, and API versioning |
 | `wreath.testing` | An in-process test client that runs the real lifespan, WebSocket sessions included, plus a pytest plugin |
@@ -143,10 +143,8 @@ pip install wreath
 uv add wreath
 ```
 
-Installing from source builds the native C extensions automatically, and falls
-back to the pure-Python implementation when no compiler is available. That
-fallback is not a lesser mode: it is the reference the C is checked against, and
-you can select it deliberately anywhere with `WREATH_PURE=1`.
+A wheel ships the C extensions prebuilt, so this needs no compiler. Installing
+from source builds them, which needs a C compiler and the CPython headers.
 
 ## Your first few minutes
 

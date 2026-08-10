@@ -1,15 +1,15 @@
-"""The native and pure geospatial twins agree.
+"""`geo_haversine` against the haversine formula, to a stated tolerance.
 
-Structurally this is `tests/test_msgpack_parity.py`, with one deliberate
-difference: the codec twins are held **byte-for-byte**, and these are held to a
-**stated tolerance**. That is not a weaker test, it is the only correct one.
-`sin`, `cos` and `asin` are not required by IEEE-754 to be correctly rounded,
-so two implementations calling different libm paths may differ in the last
-ulp. A bit-equality assertion here would pass on this machine and fail on
-someone else's for no defect, which is the shape of test that gets deleted
-rather than fixed.
+The oracle is the formula itself, written out below in `math` -- so this checks
+the C against the definition rather than against another transcription of it.
 
-The tolerance is what `wreath.geospatial`'s guide promises, so this file is
+The comparison is to a **tolerance**, not bit-equality, and that is the only
+correct form. `sin`, `cos` and `asin` are not required by IEEE-754 to be
+correctly rounded, so the C and CPython's `math` may reach different libm paths
+and differ in the last ulp. A bit-equality assertion would pass on this machine
+and fail on someone else's for no defect.
+
+The tolerance is what `wreath.geospatial`'s guide promises, so this file is also
 what stops the guide drifting from the code.
 """
 
@@ -19,16 +19,31 @@ import math
 
 import pytest
 
-from wreath._pure import geospatial as pure
+from wreath._geodesy import EARTH_RADIUS_M
+from wreath._native import _core as _native
 
-_native = pytest.importorskip(
-    "wreath._native._core",
-    reason="native extension not built; the pure twin is the reference and is "
-    "covered by tests/test_geospatial.py",
-)
 
-if not hasattr(_native, "geo_haversine"):  # pragma: no cover - stale build
-    pytest.skip("native build predates geo_haversine", allow_module_level=True)
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle metres, straight from the formula.
+
+    `2R * asin(sqrt(sin^2(dlat/2) + cos(lat1) cos(lat2) sin^2(dlon/2)))`, on the
+    sphere `EARTH_RADIUS_M` names.
+
+    The `min(1.0, ...)` guards `asin` against an argument an ulp above 1, which
+    is possible for points a half-turn apart and gives NaN. It does not fire for
+    either antipodal case below on CPython's libm -- both land on exactly 1.0 --
+    so it is here to keep the reference total rather than because it is
+    load-bearing. `test_antipodal_points_are_half_a_circumference_not_nan` is
+    what holds the C to the same behaviour.
+    """
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(min(1.0, a)))
 
 
 #: Relative agreement required between the twins. Far tighter than the ~0.5%
@@ -54,30 +69,34 @@ _CASES = [
 
 
 @pytest.mark.parametrize("name,lat1,lon1,lat2,lon2", _CASES, ids=[c[0] for c in _CASES])
-def test_the_twins_agree(
+def test_the_c_matches_the_formula(
     name: str, lat1: float, lon1: float, lat2: float, lon2: float
 ) -> None:
     native = _native.geo_haversine(lat1, lon1, lat2, lon2)
-    reference = pure.haversine(lat1, lon1, lat2, lon2)
-    assert native == pytest.approx(reference, rel=TWIN_TOLERANCE, abs=1e-6)
+    assert native == pytest.approx(
+        haversine(lat1, lon1, lat2, lon2), rel=TWIN_TOLERANCE, abs=1e-6
+    )
 
 
-def test_the_twins_share_one_earth_radius() -> None:
+def test_the_c_measures_on_the_radius_python_sizes_boxes_with() -> None:
     """A divergent radius is a uniform scaling error no shape test would catch.
 
-    One degree of latitude is exactly `R * pi / 180`, so this reads the native
-    side's constant back out rather than trusting the `#define` matches.
+    `wreath.geospatial` sizes its bounding box from `_geodesy.EARTH_RADIUS_M`
+    and then filters with `geo_haversine`; if the two spheres differ, a row can
+    fall inside the box and outside the radius. One degree of latitude is
+    exactly `R * pi / 180`, so this reads the C's constant back out rather than
+    trusting the `#define` matches.
     """
     native_degree = _native.geo_haversine(0.0, 0.0, 1.0, 0.0)
     implied_radius = native_degree * 180.0 / math.pi
-    assert implied_radius == pytest.approx(pure.EARTH_RADIUS_M, rel=1e-12)
+    assert implied_radius == pytest.approx(EARTH_RADIUS_M, rel=1e-12)
 
 
-def test_the_native_side_clamps_antipodal_rounding() -> None:
-    """`asin(sqrt(a))` with `a` an ulp over 1 is NaN unless both sides clamp."""
+def test_antipodal_points_are_half_a_circumference_not_nan() -> None:
+    """`asin(sqrt(a))` with `a` an ulp over 1 is NaN unless the C clamps."""
     metres = _native.geo_haversine(0.0, 0.0, 0.0, 180.0)
     assert math.isfinite(metres)
-    assert metres == pytest.approx(pure.EARTH_RADIUS_M * math.pi, rel=1e-9)
+    assert metres == pytest.approx(EARTH_RADIUS_M * math.pi, rel=1e-9)
 
 
 def test_the_native_side_refuses_the_wrong_arity() -> None:

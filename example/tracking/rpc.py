@@ -10,7 +10,7 @@ stays open and each position goes up as it arrives.
 Three things are worth knowing before reading the code.
 
 **This runs on wreath's own server and nowhere else.** gRPC needs HTTP/2 to
-carry response trailers, `_pure/server.py` has no HTTP/2, and `serve` negotiates
+carry response trailers, a foreign ASGI server exposes no HTTP/2, and `serve` negotiates
 `h2` through ALPN — so it also needs TLS. A call arriving over HTTP/1.1 is
 refused with `UNIMPLEMENTED` naming the transport rather than failing obscurely.
 The REST relay is not going anywhere; a deployment behind somebody else's ASGI

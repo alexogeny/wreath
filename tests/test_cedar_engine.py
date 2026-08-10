@@ -1,9 +1,6 @@
 """The built-in Cedar engine: parsing, evaluation semantics, and the app path.
 
-Every semantic case runs through ``CedarPolicies.is_authorized``, which selects
-the native evaluator when it is built and the pure one otherwise; the explicit
-parity test at the bottom runs both and asserts identical output, so the two
-implementations cannot drift apart unnoticed.
+Every semantic case runs through ``CedarPolicies.is_authorized``.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ import pytest
 
 from wreath import Wreath
 from wreath._auth.cedar import _request_now
+from wreath._native import _core
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import (
     CedarAuthorizer,
@@ -595,38 +593,85 @@ async def test_one_application_resource_provider_can_supply_route_hierarchy_and_
     assert (await invoke(app, "account"))[0]["status"] == 200
 
 
-# -- pure/native parity -------------------------------------------------------
+# -- evaluator semantics over a spread of policy shapes ----------------------
 
 
-def _both_evaluators():
-    from wreath._native import _core
-    from wreath._pure import cedar as pure
-
-    evaluators = [("pure", pure.cedar_is_authorized)]
-    native = getattr(_core, "cedar_is_authorized", None) if _core is not None else None
-    if native is not None:
-        evaluators.append(("native", native))
-    return evaluators
-
-
-PARITY_SOURCES = [
-    "permit(principal, action, resource);",
-    'permit(principal == User::"alice", action in [Action::"read"], resource)'
-    "  when { context.n + 1 == 2 } unless { context.veto };",
-    'forbid(principal is User in Group::"banned", action, resource);'
-    "permit(principal, action, resource)"
-    "  when { resource has owner && resource.owner == principal };",
-    "permit(principal, action, resource) when { context.missing == 1 };",
-    'permit(principal, action, resource) when { [1, {a: "x"}].contains({a: "x"}) };',
-    'permit(principal, action, resource) when { "wreath" like "w*h" };',
-    'permit(principal, action, resource in Folder::"archive") '
-    "when { context.now >= 100 && context.now < 200 };",
-    "permit(principal, action, resource) when { 9223372036854775807 + 1 == 0 };",
+#: One policy set per Cedar feature, with the decision Cedar's semantics
+#: specify. The answers are written down rather than read off the evaluator: the
+#: request is fixed (alice reads Document::"42", which she owns and which sits
+#: in Folder::"archive", while she is in Group::"banned"; context is
+#: `n=1, veto=false, now=150`), so each of these has exactly one right answer
+#: and the interesting half is *why* it is that answer.
+CEDAR_SEMANTICS = [
+    pytest.param(
+        "permit(principal, action, resource);",
+        (True, "cedar permit", ("permit policy0 matched",)),
+        id="unconstrained-permit",
+    ),
+    pytest.param(
+        'permit(principal == User::"alice", action in [Action::"read"], resource)'
+        "  when { context.n + 1 == 2 } unless { context.veto };",
+        (True, "cedar permit", ("permit policy0 matched",)),
+        id="scope-when-and-unless",  # 1+1==2 holds, veto is false, so both pass
+    ),
+    pytest.param(
+        'forbid(principal is User in Group::"banned", action, resource);'
+        "permit(principal, action, resource)"
+        "  when { resource has owner && resource.owner == principal };",
+        # A forbid that matches beats any permit, however many match -- and the
+        # permit here does match, which is what makes this the real test.
+        (
+            False,
+            "explicit forbid",
+            ("forbid policy0 matched", "permit policy1 matched"),
+        ),
+        id="forbid-overrides-a-matching-permit",
+    ),
+    pytest.param(
+        "permit(principal, action, resource) when { context.missing == 1 };",
+        # An absent attribute is an evaluation error, and an erroring policy is
+        # *skipped* rather than treated as true or as a forbid.
+        (
+            False,
+            "no permit policy matched",
+            ("permit policy0 skipped: record has no attribute 'missing'",),
+        ),
+        id="absent-context-attribute-skips",
+    ),
+    pytest.param(
+        'permit(principal, action, resource) when { [1, {a: "x"}].contains({a: "x"}) };',
+        (True, "cedar permit", ("permit policy0 matched",)),
+        id="contains-compares-records-by-value",
+    ),
+    pytest.param(
+        'permit(principal, action, resource) when { "wreath" like "w*h" };',
+        (True, "cedar permit", ("permit policy0 matched",)),
+        id="like-wildcard",
+    ),
+    pytest.param(
+        'permit(principal, action, resource in Folder::"archive") '
+        "when { context.now >= 100 && context.now < 200 };",
+        (True, "cedar permit", ("permit policy0 matched",)),
+        id="resource-in-parent-and-a-time-window",
+    ),
+    pytest.param(
+        "permit(principal, action, resource) when { 9223372036854775807 + 1 == 0 };",
+        # Cedar integers are i64 and do not wrap: overflow is an error, so the
+        # policy is skipped rather than silently becoming true.
+        (
+            False,
+            "no permit policy matched",
+            ("permit policy0 skipped: arithmetic overflowed i64",),
+        ),
+        id="i64-overflow-is-an-error-not-a-wrap",
+    ),
 ]
 
 
-@pytest.mark.parametrize("source", PARITY_SOURCES)
-def test_pure_and_native_evaluators_agree(source: str) -> None:
+@pytest.mark.parametrize(("source", "expected"), CEDAR_SEMANTICS)
+def test_the_evaluator_decides_what_cedar_specifies(
+    source: str, expected: tuple[bool, str, tuple[str, ...]]
+) -> None:
     engine = CedarPolicies(
         source,
         entities=(
@@ -638,17 +683,12 @@ def test_pure_and_native_evaluators_agree(source: str) -> None:
             CedarEntity(ALICE, parents=(EntityUid("Group", "banned"),)),
         ),
     )
-    request = dict(
-        principal=("User", "alice"),
-        action=("Action", "read"),
-        resource=("Document", "42"),
-        context={"n": 1, "veto": False, "now": 150},
+    decision = _core.cedar_is_authorized(
+        engine._policies,
+        ("User", "alice"),
+        ("Action", "read"),
+        ("Document", "42"),
+        {"n": 1, "veto": False, "now": 150},
+        engine._store,
     )
-    results = [
-        (name, evaluate(engine._policies, *request.values(), engine._store))
-        for name, evaluate in _both_evaluators()
-    ]
-    first = results[0][1]
-    for name, result in results[1:]:
-        assert result == first, f"{name} disagreed: {result} != {first}"
-    assert isinstance(first, tuple) and len(first) == 3
+    assert decision == expected

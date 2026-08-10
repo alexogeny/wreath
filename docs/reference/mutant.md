@@ -77,7 +77,7 @@ and counting it would report safety that is not there.
 | --- | --- |
 | `killed` | A baseline-passing test failed with the control removed. The suite is watching it. |
 | `survived` | Every test that reaches the line still passed. A question, not a verdict. |
-| `unreached` | No test in the baseline executed the line. ADR 0024's shape in its purest form. |
+| `unreached` | No test in the baseline executed the line. a check with nothing to check, in its purest form. |
 | `equivalent` | The mutation compiles to identical bytecode. Provably not a finding. |
 | `timeout` | The mutant exceeded `--timeout`. Undecided, and said so. |
 | `error` | This tool could not build or apply the mutant. Its fault, not yours, and counted where you can see it. |
@@ -157,7 +157,7 @@ exercises any one operation kills that mutant and the rest are reported as
 watched without having been checked — a coarse mutant that dies easily reports
 coverage that does not exist, which is the same optimistic-union error
 [AGENTS.md](https://github.com/alexogeny/wreath/blob/main/AGENTS.md) records for
-native and pure runs, in a different dimension. `crud.drop-operation-authorize`
+separately swept execution modes, in a different dimension. `crud.drop-operation-authorize`
 and `crud.widen-access` take one entry at a time; `crud.unprotect-column` does
 the same for `readonly=` and `exclude=`.
 
@@ -258,7 +258,7 @@ and copy an id out of the report.
 **A selector that matches nothing is now refused with exit 2** rather than
 reporting `0 killed, 0 survived` and exiting 0. A bound that silently selects
 nothing is a check that passes because it has nothing to check — the same shape
-ADR 0024 names, one level up — and it cost one agent a whole pass that described
+AGENTS.md names, one level up — and it cost one agent a whole pass that described
 unrelated code.
 
 ### The one module this tool cannot measure

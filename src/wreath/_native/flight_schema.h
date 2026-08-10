@@ -8,7 +8,7 @@
  *
  * Stage 0 defines the schema only: no recorder, ring, or runtime code lives
  * here. The Stage 1 runtime API (flight.h) includes this header. See
- * docs/plans/native-flight-recorder-stage-1.md and ADR 0021.
+ * docs/plans/native-flight-recorder-stage-1.md.
  *
  * All fields are little-endian. The field order is chosen so the natural C
  * layout on LP64 little-endian targets already matches the packed Python

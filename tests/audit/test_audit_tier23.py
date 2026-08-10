@@ -1,6 +1,6 @@
 """wreath audit Tier 2/3: contrast, render/inline perf rules, --fix remediation,
-runtime response auditing, static auto-discovery, and the dev middleware. Pure Python —
-holds under WREATH_PURE=1.
+runtime response auditing, static auto-discovery, and the dev middleware. No C
+of its own.
 """
 from __future__ import annotations
 

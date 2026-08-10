@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from wreath._pure.dtrouter import DecisionRouteTable as PureDecisionRouteTable
-
 try:
     from wreath._native import _core
 except ImportError:  # pragma: no cover
@@ -13,7 +11,6 @@ except ImportError:  # pragma: no cover
 @pytest.mark.parametrize(
     "table_type",
     [
-        pytest.param(PureDecisionRouteTable, id="pure"),
         pytest.param(
             None if _core is None else _core.DecisionRouteTable,
             id="native",
@@ -75,7 +72,6 @@ def test_decision_router_prunes_routes_above_caller_access(table_type: type) -> 
 # up as a route that can no longer be reached.
 
 _DECISION_TABLES = [
-    pytest.param(PureDecisionRouteTable, id="pure"),
     pytest.param(
         None if _core is None else _core.DecisionRouteTable,
         id="native",

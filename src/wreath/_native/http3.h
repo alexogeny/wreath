@@ -1,4 +1,4 @@
-/* Optional HTTP/3 backend boundary for Wreath (ADR 0011).
+/* Optional HTTP/3 backend boundary for Wreath (HTTP/3 is opt-in at build time).
  *
  * All ngtcp2 / nghttp3 usage is isolated behind this header. Built only when
  * WREATH_BUILD_HTTP3=1; a default install never references it.

@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from wreath._pure import postgres as pure
+from wreath import _pgdriver as pure
 
 native: Any = None
 try:
@@ -175,7 +175,7 @@ def test_jsonb_rejects_unknown_wire_version(backend: Any) -> None:
 #
 # Text-format bytea is decoded in C through a nibble table, with no per-field
 # `binascii` import or method dispatch. Behavior must stay byte-for-byte
-# identical to the pure backend.
+# identical to `_pgdriver`.
 
 HEX_BYTEA_CASES = [
     pytest.param(b"", b"", id="empty"),

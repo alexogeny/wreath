@@ -34,7 +34,6 @@ class TypegenOptions:
     #: the other whether regenerating would break you.
     check_contract: bool = False
     allow_unknown: bool = False
-    pure: bool = False
     factory: bool = False
     title: str = "Wreath"
     version: str = "0.1.0"
@@ -90,7 +89,6 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
         api,
         react_query=options.react_query,
         base_url_env=options.base_url_env,
-        pure=options.pure,
     )
 
 

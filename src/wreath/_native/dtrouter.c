@@ -9,8 +9,8 @@
  * fully verified once and parameters captured. Static routes take a
  * hash-table fast path checked before the tree.
  *
- * Semantics are identical to wreath._native._core.RouteTable and the pure twins;
- * the differential tests assert parity.
+ * Semantics are identical to wreath._native._core.RouteTable and BitsetRouteTable;
+ * the differential tests route one corpus through all three and compare.
  */
 #include "wreathcore.h"
 

@@ -2,7 +2,7 @@
 
 Drives each shape through the app's ASGI boundary with the in-process
 TestClient and reports median/p95/p99 per shape. This is a micro-latency
-harness for relative comparison (e.g. native vs WREATH_PURE=1); a full throughput
+harness for relative comparison across shapes; a full throughput
 comparison uses an external ASGI server and load generator. Every trial is
 retained so the distribution — not a single number — is what is reported.
 

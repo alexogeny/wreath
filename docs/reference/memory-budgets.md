@@ -31,7 +31,7 @@ reading only if something makes it true, which is the same reason
 | Parsed GraphQL documents | `graphql` | `cache_size` | per-schema |
 | Pinned permission tokens | `_auth.permissions` | `max_entries` | 64 |
 | Compiled query plans | `orm.Registry` | `query_cache_size`, `query_cache_bytes` | 512, 8 MiB |
-| Prepared statements, per connection | `postgres` driver | `statement_cache_size`, `statement_cache_bytes` | per-pool |
+| Prepared statements, per connection | `postgres` / `_pgdriver` | `statement_cache_size`, `statement_cache_bytes` | per-pool |
 
 ## The queues
 

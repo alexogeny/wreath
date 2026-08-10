@@ -40,8 +40,6 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-import subprocess
-import sys
 
 import pytest
 
@@ -301,26 +299,6 @@ async def test_the_native_path_keeps_the_smuggling_refusals(
     finally:
         await handle.aclose()
         await origin.close()
-
-
-def test_wreath_pure_does_not_disable_the_native_proxy() -> None:
-    """`WREATH_PURE=1` selects a pure twin. `wreath.edge` has none.
-
-    Pinned because the obvious reading of the variable is "switch off the C",
-    and applying it here would turn "run the readable implementation" into "this
-    module cannot be imported" -- a different and worse thing, and one that would
-    be discovered in whichever environment sets it rather than in review. What
-    refuses is a *build* without the extension, which raises a named `ImportError`
-    at import rather than degrading to something slower.
-    """
-    result = subprocess.run(
-        [sys.executable, "-c",
-         "import wreath.edge as e; print(e.serve.__name__)"],
-        env={**os.environ, "WREATH_PURE": "1"},
-        capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "serve"
 
 
 async def test_serve_terminates_tls_natively() -> None:

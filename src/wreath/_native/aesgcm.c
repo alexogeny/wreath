@@ -1,4 +1,4 @@
-/* AES-128-GCM on AES-NI and PCLMULQDQ, twinned with a pure-Python fallback.
+/* AES-128-GCM on AES-NI and PCLMULQDQ, with a portable Python arm beside it.
  *
  * CPython ships no AES, so `wreath._webpush` writes AES-128-GCM out in Python
  * for RFC 8291 web push. That is correct and it is slow: measured on this repo,
@@ -13,7 +13,7 @@
  *                instructions instead of ten table-driven Python loops.
  *   PCLMULQDQ    `pclmulqdq` is the carry-less multiply GHASH is defined in
  *                terms of, replacing the 128-iteration shift-and-xor loop that
- *                the pure `_gf_mul` runs per 16 bytes.
+ *                the Python `_gf_mul` runs per 16 bytes.
  *
  * AVX2 is deliberately *not* used. Emulating AES in 256-bit lane arithmetic is
  * strictly worse than the instruction that exists, and the only thing left to
@@ -28,7 +28,7 @@
  * miss in cache, and the tag comparison is a branch-free XOR-accumulate. That
  * is the substantive security difference from the fallback, not a side effect.
  *
- * **The pure twin is not constant time**, and this file does not change that.
+ * **The Python arm is not constant time**, and this file does not change that.
  * `wreath._webpush._SBOX` is a byte table indexed by secret state, so it leaks
  * through the cache, and `_gf_mul` branches on the bits of its operand. A
  * machine without AES-NI runs that code, and `wreath._webpush`'s docstring says
@@ -37,11 +37,11 @@
  *
  * ## Structure
  *
- * One arm, not four. The other implementation is Python, held byte-for-byte
- * equal by `tests/test_aesgcm_parity.py`, so there is nothing here for
- * `simd_probe` to cross. Feature detection lives in `simd.h` beside the AVX2
- * detection it copies; `aesgcm_arms()` reports the result, and the facade in
- * `wreath._webpush` binds the pure twin when it comes back empty.
+ * One arm, not four. The portable path is Python, and both are pinned to the
+ * NIST SP 800-38D vectors by `tests/test_aesgcm_parity.py`, so there is nothing
+ * here for `simd_probe` to cross. Feature detection lives in `simd.h` beside
+ * the AVX2 detection it copies; `aesgcm_arms()` reports the result, and
+ * `wreath._webpush` binds the Python arm when it comes back empty.
  *
  * GHASH runs as its own pass over the ciphertext rather than folded into the
  * counter-mode loop. It costs a second pass over a buffer that RFC 8291 caps at
@@ -60,14 +60,14 @@
 
 /* Raised when the module is asked for a hardware path the CPU or the build does
  * not have. `wreath._webpush` never reaches it: it asks `aesgcm_arms()` once at
- * import and binds the pure twin when the answer is empty. Defined outside both
- * arms of the guard below so the message cannot drift between them. */
+ * import and binds the Python arm when the answer is empty. Defined outside
+ * both arms of the guard below so the message cannot drift between them. */
 static PyObject *
 wreath_aesgcm_unavailable(const char *name)
 {
     PyErr_Format(PyExc_NotImplementedError,
                  "%s needs AES-NI and PCLMULQDQ; this build or CPU has neither, "
-                 "so wreath._webpush uses its pure-Python twin instead",
+                 "so wreath._webpush uses its Python implementation instead",
                  name);
     return NULL;
 }
@@ -355,7 +355,7 @@ wreath_aesgcm_transform(const uint8_t *key, const uint8_t *nonce,
 
 /* Branch-free equality, because a tag comparison that returns early tells an
  * attacker how many leading bytes were right, and forging a tag one byte at a
- * time is a very different problem from forging it all at once. The pure twin
+ * time is a very different problem from forging it all at once. The Python arm
  * reaches the same property through `hmac.compare_digest`. */
 static int
 wreath_aesgcm_tags_equal(const uint8_t *a, const uint8_t *b)
@@ -428,7 +428,7 @@ wreath_aesgcm_dispatch(PyObject *args, const char *name, int encrypting)
         }
         if (!wreath_aesgcm_tags_equal(tag, (const uint8_t *)data + out_len)) {
             /* None rather than an exception: the facade owns the message, so
-             * the pure and native paths refuse in exactly the same words. */
+             * the Python and hardware paths refuse in exactly the same words. */
             Py_DECREF(out);
             Py_RETURN_NONE;
         }
@@ -438,7 +438,7 @@ wreath_aesgcm_dispatch(PyObject *args, const char *name, int encrypting)
 #else
 /* No AES-NI in this build -- a non-x86 target, or a compiler without
  * per-function target selection. Nothing above was compiled, `aesgcm_arms()`
- * reports nothing, and `wreath._webpush` binds its pure twin. */
+ * reports nothing, and `wreath._webpush` binds its Python arm. */
 static PyObject *
 wreath_aesgcm_dispatch(PyObject *args, const char *name, int encrypting)
 {

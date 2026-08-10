@@ -5,7 +5,6 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath._pure.dtrouter import DecisionRouteTable as PureDecisionRouteTable
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, authorize, roles
 
@@ -38,7 +37,6 @@ async def invoke(
 @pytest.mark.parametrize(
     "table_type",
     [
-        pytest.param(PureDecisionRouteTable, id="pure"),
         pytest.param(
             None if _core is None else _core.DecisionRouteTable,
             id="native",
@@ -65,7 +63,6 @@ def test_probe_classifies_public_protected_and_missing_paths(table_type: type) -
 @pytest.mark.parametrize(
     "table_type",
     [
-        pytest.param(PureDecisionRouteTable, id="pure"),
         pytest.param(
             None if _core is None else _core.DecisionRouteTable,
             id="native",
@@ -92,7 +89,6 @@ def test_single_pass_classification_resolves_protected_ticket(table_type: type) 
 @pytest.mark.parametrize(
     "table_type",
     [
-        pytest.param(PureDecisionRouteTable, id="pure"),
         pytest.param(
             None if _core is None else _core.DecisionRouteTable,
             id="native",

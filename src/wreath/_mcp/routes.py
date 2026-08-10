@@ -24,7 +24,7 @@ Two refusals follow from the same reasoning, and both happen at registration:
   or a `dependencies=[Depends(require_api_key)]` that raises, would simply not
   run -- and those are the shapes a guard is usually written in. Carrying the
   `AuthRequirement` and dropping the two controls beside it silently is the
-  worst of the three available answers; refusing is ADR 0019's, and it leaves
+  worst of the three available answers; refusing is the rule here, and it leaves
   the door open to running them later where admitting the call would not.
 
 What a route brings with it is the point. The exposed tool carries the route's

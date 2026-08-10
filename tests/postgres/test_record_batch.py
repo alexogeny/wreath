@@ -6,9 +6,9 @@ from typing import Any
 import pytest
 
 from wreath._native import extension
-from wreath._pure.postgres import Record as PureRecord
-from wreath._pure.postgres import RecordBatch as PureRecordBatch
-from wreath._pure.templates import (
+from wreath._pgdriver import Record as PureRecord
+from wreath._pgdriver import RecordBatch as PureRecordBatch
+from wreath._template_tape import (
     MAX_OUTPUT_BYTES,
     Markup,
     TemplateRenderError,
@@ -17,7 +17,7 @@ from wreath._pure.templates import (
 from wreath.postgres import RecordBatch, _implementation
 from wreath.templates import Template
 
-_postgres = extension("_postgres", ignore_pure=True)
+_postgres = extension("_postgres")
 
 
 def _data_row(fields: tuple[bytes | None, ...]) -> memoryview:
@@ -85,7 +85,7 @@ def test_template_consumes_native_batch_without_changing_output() -> None:
 
 
 def test_native_tagged_batch_sorts_and_renders_without_materializing_cells() -> None:
-    native_core = extension("_core", ignore_pure=True)
+    native_core = extension("_core")
     native_core.template_configure(Markup, TemplateRenderError)
     native_core.template_record_configure(_postgres._RECORD_C_API)
     tape = compile_tape(

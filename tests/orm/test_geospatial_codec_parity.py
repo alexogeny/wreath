@@ -2,7 +2,7 @@
 
 Lane G established that the *expression compiler* needs no C for a new operator
 token. The *wire codec* is a separate axis and does: the prepared path binds
-parameters in binary, and both the pure and the native encoder enumerate OIDs
+parameters in binary, and both both encoders enumerate OIDs
 with no shared fallback. So `point` has two encoders, and this is what keeps
 them from drifting.
 """
@@ -13,7 +13,7 @@ import struct
 
 import pytest
 
-from wreath._pure.postgres import _encode_point as _pure_encode_point
+from wreath._pgdriver import _encode_point as _pure_encode_point
 
 _core = pytest.importorskip("wreath._native.postgres", reason="native driver not built")
 
@@ -42,17 +42,17 @@ def test_the_binary_dispatch_routes_oid_600_to_the_point_encoder(literal: str) -
     """Through `_encode_binary`, not just the helper.
 
     The helper is reachable from a test; the *dispatch arm* that selects it is
-    only reached when a point is bound on the prepared path, which under the
-    native driver never enters this module at all. Calling the dispatcher
-    directly is what covers the pure twin without `WREATH_PURE=1`.
+    only reached when a point is bound on the prepared path, which the native
+    driver answers in C without entering this module at all. Calling the
+    dispatcher directly is what covers the Python arm.
     """
-    from wreath._pure.postgres import _encode_binary
+    from wreath._pgdriver import _encode_binary
 
     assert _encode_binary(literal, 600) == _pure_encode_point(literal)
 
 
 def test_the_binary_dispatch_still_refuses_an_oid_it_has_no_encoder_for() -> None:
-    from wreath._pure.postgres import _encode_binary
+    from wreath._pgdriver import _encode_binary
 
     with pytest.raises(TypeError, match="no binary encoder"):
         _encode_binary("whatever", 1_000_000)
@@ -103,7 +103,7 @@ def test_the_native_encoder_is_covered_by_the_live_round_trip() -> None:
 # rather than from a `case` -- but the wall is identical: the prepared path
 # binds in binary and neither twin falls back for an OID it does not enumerate.
 
-#: An OID the pure codec table can be told about without colliding with the one
+#: An OID the Python codec table can be told about without colliding with the one
 #: a live PostGIS assigns. Registered into the *pure* table directly, because
 #: `bind_extension_oid` writes to whichever backend is active and that is the
 #: native one in a normal build.
@@ -123,7 +123,7 @@ GEOGRAPHY_CASES = [
 
 
 def _register_pure_geography() -> None:
-    from wreath._pure.postgres import (
+    from wreath._pgdriver import (
         _EXT_KIND_GEOGRAPHY,
         _register_extension_type,
     )
@@ -133,7 +133,7 @@ def _register_pure_geography() -> None:
 
 @pytest.mark.parametrize("hexed", GEOGRAPHY_CASES)
 def test_the_pure_encoder_un_hexes_and_nothing_else(hexed: str) -> None:
-    from wreath._pure.postgres import _encode_geography
+    from wreath._pgdriver import _encode_geography
 
     assert _encode_geography(hexed) == bytes.fromhex(hexed)
 
@@ -141,7 +141,7 @@ def test_the_pure_encoder_un_hexes_and_nothing_else(hexed: str) -> None:
 @pytest.mark.parametrize("hexed", GEOGRAPHY_CASES)
 def test_the_binary_dispatch_routes_a_geography_oid_to_its_encoder(hexed: str) -> None:
     """Through `_encode_binary`, for the reason the `point` arm above gives."""
-    from wreath._pure.postgres import _encode_binary, _encode_geography
+    from wreath._pgdriver import _encode_binary, _encode_geography
 
     _register_pure_geography()
     assert _encode_binary(hexed, GEOGRAPHY_OID) == _encode_geography(hexed)
@@ -149,14 +149,14 @@ def test_the_binary_dispatch_routes_a_geography_oid_to_its_encoder(hexed: str) -
 
 @pytest.mark.parametrize("bad", ["abc", "zz", "01 02", "01\n", "0g"])
 def test_a_malformed_hex_value_is_refused_rather_than_guessed(bad: str) -> None:
-    from wreath._pure.postgres import _encode_geography
+    from wreath._pgdriver import _encode_geography
 
     with pytest.raises(TypeError, match="geography codec"):
         _encode_geography(bad)
 
 
 def test_a_non_string_is_refused_by_the_geography_encoder() -> None:
-    from wreath._pure.postgres import _encode_geography
+    from wreath._pgdriver import _encode_geography
 
     with pytest.raises(TypeError, match="geography codec"):
         _encode_geography(1.5)
@@ -169,7 +169,7 @@ def test_an_unknown_codec_kind_is_still_refused_at_registration() -> None:
     stopped refusing would let an unknown OID decode as raw bytes at query time
     instead of failing at startup.
     """
-    from wreath._pure.postgres import _register_extension_type
+    from wreath._pgdriver import _register_extension_type
 
     with pytest.raises(ValueError, match="unknown extension codec kind"):
         _register_extension_type("nonsense", GEOGRAPHY_OID + 1, 99)
@@ -197,7 +197,7 @@ def test_the_native_geography_encoder_is_covered_by_the_live_round_trip() -> Non
 
 @pytest.mark.parametrize("format_code", [0, 1])
 def test_the_pure_decoder_hands_a_geography_back_unread(format_code: int) -> None:
-    from wreath._pure.postgres import _decode_value
+    from wreath._pgdriver import _decode_value
 
     _register_pure_geography()
     payload = bytes.fromhex(GEOGRAPHY_CASES[1])

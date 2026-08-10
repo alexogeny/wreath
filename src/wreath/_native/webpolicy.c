@@ -64,8 +64,8 @@ wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
     /* Qualities are thousandths, and 0 already means "not acceptable", so it
      * doubles as the not-offered sentinel. Only gzip tracks whether it was
      * *named*, because that is what decides whether the wildcard applies to it.
-     * Mirrors _pure/webpolicy.py::select_content_encoding exactly; the two are
-     * held equal by tests/test_webpolicy_parity.py. */
+     * RFC 9110 §12.5.3; the worked examples in it are the vectors
+     * tests/test_webpolicy_parity.py holds this to. */
     int gzip_named = 0, gzip_q = 0, zstd_q = 0, wildcard_q = 0;
     for (Py_ssize_t i = 0; i <= view.len; i++) {
         if (i < view.len && data[i] != ',') continue;

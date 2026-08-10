@@ -379,8 +379,8 @@ site = Site(
         "Guides, cookbook, and API reference for the Wreath ASGI framework "
         "and native server."
     ),
-    # Working notes, ADRs, and agent manifests live under docs/ but aren't
-    # published — mirrors mkdocs' exclude_docs / not_in_nav.
+    # Working notes and agent manifests live under docs/ but aren't published —
+    # mirrors mkdocs' exclude_docs / not_in_nav.
     #
     # Per-version release notes are deliberately NOT excluded and ARE in the
     # nav above: they are user-facing, the index lists them, and publish.yml
@@ -389,7 +389,6 @@ site = Site(
     # follow the documented workflow failed the docs gate on a dead link.
     exclude=(
         "plans/",
-        "decisions/",
         "agents/",
     ),
 )

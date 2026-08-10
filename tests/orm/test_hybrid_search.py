@@ -245,7 +245,7 @@ def test_a_search_written_inline_is_refused() -> None:
     reach a query's `Select`, and it can only report attributes. A half written
     inside the `fuse(...)` call is on no class, so it appears in no listing and
     is silently skipped -- refusing it makes the gap structurally impossible
-    rather than documented (ADR 0019).
+    rather than documented (refuse rather than half-wire).
     """
     with pytest.raises(DeclarationError, match="named attribute"):
 

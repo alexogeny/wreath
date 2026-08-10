@@ -175,6 +175,12 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         NEEDS_REVIEW,
         "Move gt/ge/lt/le, min_length/max_length and pattern to Annotated[T, wreath.binding.Field(...)]. Keep a matching ORM check as well when the value is persisted.",
     ),
+    "pydantic.field_metadata_exact": (
+        "field",
+        "pydantic_models",
+        TRANSLATED,
+        "Field aliases and validation metadata map directly to Annotated[T, wreath.binding.Field(...)]; the ordinary dataclass default remains outside Annotated.",
+    ),
     # -- pydantic extras (not floor-checked) ----------------------------------
     "pydantic.config_forbid": (
         "config",
@@ -199,6 +205,20 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "other",
         NEEDS_REVIEW,
         "A validator is code, so it has to be moved by hand. For a rule about one field, use narrow() on the column; for a rule spanning fields, use @rule(). Both run once when the app starts rather than on every request.",
+    ),
+    "pydantic.validator_literal": (
+        "validator",
+        "other",
+        TRANSLATED,
+        "This validator only repeats the field's Literal members. Delete it: Wreath binding validates the same closed set from the annotation.",
+    ),
+    "pydantic.partial": (
+        "model_as_partial",
+        "other",
+        NEEDS_REVIEW,
+        "This model is generated through model_as_partial(), and Wreath has no "
+        "equivalent model primitive. Keep this Pydantic model family together "
+        "until the partial request dataclass is written explicitly.",
     ),
     "pydantic.get_pydantic": (
         "get_pydantic",
@@ -344,6 +364,18 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         UNSUPPORTED,
         "This is an ormar query and it was left as written. Queries become Model.select() with .where(...) on it, run through a session: await session.fetch(...) for a list, fetch_one(...) for one row, count(...) for a number.",
     ),
+    "orm.manager_value": (
+        "orm_query",
+        "queries",
+        NEEDS_REVIEW,
+        "This stores Model.objects as a repository dependency. Replace the manager parameter and fallback with one Session parameter; queries then use Model.select() through that session. Do not recreate a manager compatibility object.",
+    ),
+    "orm.manager_patch": (
+        "orm_query",
+        "queries",
+        NEEDS_REVIEW,
+        "This test patches Model.objects.__class__. Construct the repository with an AsyncMock(spec=Session), configure get/fetch/fetch_one on that session, and assert the session call instead.",
+    ),
     # The emitter writes the determined queries out in full, and can only do that
     # where a session is in scope. Inside a route handler wreath supplies one;
     # anywhere else the function has to take one, and that is a change to every
@@ -421,7 +453,7 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "orm_query",
         "queries",
         TRANSLATED,
-        "limit(n)/offset(n) becomes Model.select().limit(n)/offset(n), run with session.fetch(...). Pass --opinionated and this is written out for you.",
+        "limit(n)/offset(n) becomes Model.select().limit(n)/offset(n); paginate(page, page_size) becomes the same limit plus offset=(page - 1) * page_size. The query is run with session.fetch(...). Pass --opinionated and this is written out for you.",
     ),
     "orm.query.eager": (
         "orm_query",
@@ -435,6 +467,12 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         UNSUPPORTED,
         "select_all() is deliberately not portable. Unbounded graph expansion hides query count and response size. Name the few relationships the use case reads, or write one explicit SQL projection/JSON aggregate for a genuinely wide response; Wreath will not recreate the switch.",
     ),
+    "orm.query.select_all_exact": (
+        "orm_query",
+        "queries",
+        TRANSLATED,
+        "This model declares no relationships, so select_all() expands nothing. It becomes Model.select() and is run through the session like all().",
+    ),
     "orm.query.eager_exact": (
         "orm_query",
         "queries",
@@ -446,6 +484,12 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "queries",
         NEEDS_REVIEW,
         "values([...]) returned dictionaries. The wreath equivalent, Model.select(Model.a, Model.b), returns model objects with only those columns filled in -- so the code reading these rows has to use attributes instead of keys.",
+    ),
+    "orm.query.values_exact": (
+        "orm_query",
+        "queries",
+        TRANSLATED,
+        "A literal values([...]) projection becomes Model.select(Model.a, Model.b) plus a dictionary comprehension; values_list(...) uses a tuple comprehension. Both work at the head or after filter()/fields() and add no compatibility function.",
     ),
     "orm.query.bulk": (
         "orm_query",
@@ -480,8 +524,14 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "orm.query.get_or_create": (
         "orm_query",
         "queries",
-        UNSUPPORTED,
-        "get_or_create looks up a row and creates it if it is missing, in one call. Two requests can run that at the same time and both create. Wreath has no equivalent on purpose: write the insert with ON CONFLICT, or add a unique index and catch the violation.",
+        NEEDS_REVIEW,
+        "get_or_create is a check-then-create convenience. Static field values can be expanded onto Session.fetch_one and Session.create; dynamic defaults or lookup arguments stay here so the port does not guess which values select and which values create.",
+    ),
+    "orm.query.get_or_create_exact": (
+        "orm_query",
+        "queries",
+        TRANSLATED,
+        "Static field values become a Session.fetch_one check followed by Session.create when absent, preserving the (row, created) result with existing Wreath primitives. This deliberately exposes the legacy check-then-create race instead of inventing an atomic compatibility helper.",
     ),
     "orm.query.order": (
         "orm_query",
@@ -493,7 +543,7 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "orm_query",
         "queries",
         TRANSLATED,
-        "order_by('name') becomes .order_by(Model.name) and order_by('-created') becomes .order_by(Model.created.desc()), on a Model.select() run with session.fetch(). Pass --opinionated and this is written out for you.",
+        "order_by('name') becomes .order_by(Model.name), order_by('-created') becomes .order_by(Model.created.desc()), and an already-explicit Model.created.desc() carries across unchanged. The Model.select() is run with the session. Pass --opinionated and this is written out for you.",
     ),
     # -- middleware / lifespan / infra (not floor-checked) --------------------
     "mw.cors": (
@@ -507,6 +557,24 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "other",
         TRANSLATED,
         "TrustedHostMiddleware -> first-class TrustedHostPolicy",
+    ),
+    "mw.trustedhost_noop": (
+        "middleware",
+        "other",
+        TRANSLATED,
+        "TrustedHostMiddleware with allowed_hosts=['*'] accepts every valid host, so remove it instead of emitting a no-op policy.",
+    ),
+    "mw.state": (
+        "middleware",
+        "other",
+        NEEDS_REVIEW,
+        "This middleware writes request or application state. Move startup-owned values into the app factory and request-owned values into an explicit dependency; use structured logging and Flight Recorder for observations rather than a wrapping middleware.",
+    ),
+    "mw.exception": (
+        "middleware",
+        "other",
+        NEEDS_REVIEW,
+        "This middleware translates exceptions. Register the exception type with @app.exception_handler and return the corresponding Wreath response; no request wrapper is needed.",
     ),
     "mw.custom": (
         "middleware",
@@ -610,6 +678,24 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         UNSUPPORTED,
         "This talks to an AWS service wreath has no equivalent for. Keep boto3 and this code as it is.",
     ),
+    "ext.boto3_scheduler": (
+        "external",
+        "other",
+        NEEDS_REVIEW,
+        "A one-shot Scheduler/EventBridge delivery becomes jobs.enqueue(..., run_at=..., key=...). Creating a schedule maps directly; updates and deletes must preserve replacement and cancellation semantics before the external schedule is removed.",
+    ),
+    "ext.boto3_observability": (
+        "external",
+        "other",
+        NEEDS_REVIEW,
+        "CloudWatch metric emission becomes Wreath metrics, structured logging, and Flight Recorder. A Logs Insights query is an external reporting integration and should keep its client until that query is deliberately replaced.",
+    ),
+    "ext.boto3_identity": (
+        "external",
+        "other",
+        NEEDS_REVIEW,
+        "Token verification and group-to-role mapping move to app.oidc_provider() plus BearerTokenBackend. Administrative identity-provider calls remain an external adapter and should not be mistaken for request authentication.",
+    ),
     "ext.boto3_s3": (
         "external",
         "other",
@@ -657,6 +743,12 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "other",
         NEEDS_REVIEW,
         "Verifying a JWT by hand is easy to get subtly wrong. Wreath does it for you: app.oidc_provider() for a standard provider, or BearerTokenBackend with JwtVerifier for a token you issue. Both fetch and cache signing keys and check the claims.",
+    ),
+    "auth.oidc_manual": (
+        "auth",
+        "other",
+        NEEDS_REVIEW,
+        "This manually verifies an issuer- and audience-bound JWT. Replace the key fetch and decode together with app.oidc_provider(...), then configure BearerTokenBackend(provider.bearer_verifier()); keep only application-specific claim mapping.",
     ),
     "auth.oauth": (
         "auth",
@@ -817,6 +909,18 @@ RULES: dict[str, tuple[str, str, str, str]] = {
         "other",
         NEEDS_REVIEW,
         'There is no dependency_overrides in wreath. Authentication becomes client.acting_as("principal", roles=[...]); an outbound service becomes a registered ServiceClient over a test transport adapter; database tests keep the same Session and select a real or replay PostgreSQL adapter underneath it. Delete fake repositories instead of porting or injecting them.',
+    ),
+    "test.dependency_override_auth": (
+        "test",
+        "other",
+        NEEDS_REVIEW,
+        "This overrides an authentication dependency. Delete the global override and set the test identity with client.acting_as(subject, roles=...) inside the TestClient lifespan.",
+    ),
+    "test.dependency_override_adapter": (
+        "test",
+        "other",
+        NEEDS_REVIEW,
+        "This overrides an application adapter. Make the adapter an explicit build_app(...) argument and construct the test app with an in-memory, replay, or test-transport implementation; Wreath intentionally has no global override map.",
     ),
     # -- libraries that are not framework features ----------------------------
     "ext.pandas": (

@@ -1,20 +1,41 @@
-"""The AES-NI/PCLMULQDQ path and the pure twin produce identical bytes.
+"""Both AES-128-GCM paths, against answers nobody in this repository wrote.
 
 `wreath._webpush` has two AES-128-GCM implementations: one written in Python
 because CPython ships no AES, and one in `src/wreath/_native/aesgcm.c` that runs
 the block cipher on `aesenc` and GHASH on `pclmulqdq`. A machine without those
 instructions runs the first; every other machine runs the second. Both ship.
 
-That is the shape a differential test exists for. Crypto passes its own tests
-while being wrong, and a *pair* of implementations can be wrong in two different
-ways at once -- so this file compares them to each other byte for byte, and
-`tests/test_aesgcm_vectors.py` compares both to something written by somebody
-else. Neither file on its own would be enough:
+This file used to assert `native(x) == pure(x)` across the block boundaries.
+That is the wrong instrument for crypto: two implementations written from one
+reading of SP 800-38D agree perfectly while both compute a tag no receiver
+accepts, and the failure is silent -- ciphertext is ciphertext. So every case
+below drives *both* arms and holds each of them, separately, against something
+external:
 
-* agreement without an external reference proves only that two implementations
-  share an author's misreading of SP 800-38D;
-* known answers without agreement proves only that whichever path this CPU
-  happens to run is correct, and says nothing about the other one.
+* **NIST known answers**, as constants. A vector cannot be wrong in a way that
+  tracks a bug in either arm, and it does not depend on anything being
+  installed. Two sets are inlined, each labelled with its identifier:
+  - the **NIST CAVP** `gcmEncryptExtIV128` file from the Cryptographic
+    Algorithm Validation Program, downloaded from
+    <https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip>
+    (`gcmEncryptExtIV128.rsp`, generated 2012-08-31, CAVS 14.0;
+    sha256 30156236f768b0d81e58a3e5bd3bd79ce294cf9ef0ba0a84cf7b869c89ebd9fd).
+    Each entry names its `[IVlen/PTlen/AADlen]` group and its `Count`.
+  - McGrew and Viega's **"The Galois/Counter Mode of Operation (GCM)"**, the
+    submission SP 800-38D was standardised from, Appendix B Test Cases 1-4 --
+    the AES-128 ones with a 96-bit IV. They are the vectors everyone cites, and
+    Test Case 1 (all-zero key, all-zero IV, empty plaintext, empty AAD) is the
+    one an implementation with an uninitialised buffer passes by accident.
+* **`cryptography`'s `AESGCM`**, which is OpenSSL, for the lengths no published
+  vector covers. It is a *test* dependency, declared in the `dev` group and
+  asserted present by `tests/test_dev_environment.py`; nothing under
+  `src/wreath` imports it, because the whole reason `wreath._webpush` exists is
+  that Wreath's core takes no such dependency.
+
+`tests/test_aesgcm_vectors.py` covers the same two oracles at a coarser sweep
+and is the place to read for the seam between them; the overlap is deliberate,
+because this file's length sweep is the one that walks the C path's block
+schedule and it would otherwise have no anchor at all.
 
 The lengths are chosen around the block boundaries, because that is where the
 implementations differ structurally: the C path steps four blocks at a time,
@@ -28,6 +49,7 @@ from __future__ import annotations
 import random
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from wreath._native import _core
 from wreath._webpush import (
@@ -49,7 +71,7 @@ ARMS: tuple[str, ...] = (
 
 needs_hardware = pytest.mark.skipif(
     not ARMS,
-    reason="no AES-NI/PCLMULQDQ on this CPU or in this build; only the pure twin exists",
+    reason="no AES-NI/PCLMULQDQ on this CPU or in this build; only the Python arm runs",
 )
 
 KEY = bytes(range(16))
@@ -74,10 +96,145 @@ LENGTHS = [
 
 AAD_LENGTHS = [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1000]
 
+#: (label, key, iv, plaintext, aad, ciphertext, tag), all hex.
+#:
+#: The CAVP file publishes AES-128 encryption at PTlen 0/104/128/256/408 bits
+#: and AADlen 0/128/160/384/720 bits, so the plaintext sizes below are
+#: 0, 13, 16, 32 and 51 bytes -- an empty message, a part block, exactly one
+#: block, exactly two, and three blocks plus a three-byte tail.
+NIST_VECTORS = [
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=0 AADlen=0] Count=0",
+        "11754cd72aec309bf52f7687212e8957",
+        "3c819d9a9bed087615030b65",
+        "",
+        "",
+        "",
+        "250327c674aaf477aef2675748cf6971",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=0 AADlen=128] Count=0",
+        "77be63708971c4e240d1cb79e8d77feb",
+        "e0e00f19fed7ba0136a797f3",
+        "",
+        "7a43ec1d9c0a5a78a0b16533a6213cab",
+        "",
+        "209fcc8d3675ed938e9c7166709dd946",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=104 AADlen=0] Count=0",
+        "fe9bb47deb3a61e423c2231841cfd1fb",
+        "4d328eb776f500a2f7fb47aa",
+        "f1cc3818e421876bb6b8bbd6c9",
+        "",
+        "b88c5c1977b35b517b0aeae967",
+        "43fd4727fe5cdb4b5b42818dea7ef8c9",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=128 AADlen=0] Count=0",
+        "7fddb57453c241d03efbed3ac44e371c",
+        "ee283a3fc75575e33efd4887",
+        "d5de42b461646c255c87bd2962d3b9a2",
+        "",
+        "2ccda4a5415cb91e135c2a0f78c9b2fd",
+        "b36d1df9b9d5e596f83e8b7f52971cb3",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=128 AADlen=160] Count=0",
+        "d4a22488f8dd1d5c6c19a7d6ca17964c",
+        "f3d5837f22ac1a0425e0d1d5",
+        "7b43016a16896497fb457be6d2a54122",
+        "f1c5d424b83f96c6ad8cb28ca0d20e475e023b5a",
+        "c2bd67eef5e95cac27e3b06e3031d0a8",
+        "f23eacf9d1cdf8737726c58648826e9c",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=256 AADlen=384] Count=0",
+        "48b7f337cdf9252687ecc760bd8ec184",
+        "3e894ebb16ce82a53c3e05b2",
+        "bb2bac67a4709430c39c2eb9acfabc0d456c80d30aa1734e57997d548a8f0603",
+        "7d924cfd37b3d046a96eb5e132042405c8731e06509787bbeb41f2582757"
+        "46495e884d69871f77634c584bb007312234",
+        "d263228b8ce051f67e9baf1ce7df97d10cd5f3bc972362055130c7d13c3ab2e7",
+        "71446737ca1fa92e6d026d7d2ed1aa9c",
+    ),
+    (
+        "CAVP gcmEncryptExtIV128 [IVlen=96 PTlen=408 AADlen=720] Count=0",
+        "2c1f21cf0f6fb3661943155c3e3d8492",
+        "23cb5ff362e22426984d1907",
+        "42f758836986954db44bf37c6ef5e4ac0adaf38f27252a1b82d02ea949c8"
+        "a1a2dbc0d68b5615ba7c1220ff6510e259f06655d8",
+        "5d3624879d35e46849953e45a32a624d6a6c536ed9857c613b572b0333e7"
+        "01557a713e3f010ecdf9a6bd6c9e3e44b065208645aff4aabee611b3915"
+        "28514170084ccf587177f4488f33cfb5e979e42b6e1cfc0a60238982a7aec",
+        "81824f0e0d523db30d3da369fdc0d60894c7a0a20646dd015073ad2732bd"
+        "989b14a222b6ad57af43e1895df9dca2a5344a62cc",
+        "57a3ee28136e94c74838997ae9823f3a",
+    ),
+    (
+        # The all-zero case: key, IV, plaintext and AAD are all zero or empty,
+        # so the whole answer is E(J0) and nothing masks a buffer that was
+        # never written.
+        "McGrew-Viega GCM Appendix B Test Case 1",
+        "00000000000000000000000000000000",
+        "000000000000000000000000",
+        "",
+        "",
+        "",
+        "58e2fccefa7e3061367f1d57a4e7455a",
+    ),
+    (
+        "McGrew-Viega GCM Appendix B Test Case 2",
+        "00000000000000000000000000000000",
+        "000000000000000000000000",
+        "00000000000000000000000000000000",
+        "",
+        "0388dace60b6a392f328c2b971b2fe78",
+        "ab6e47d42cec13bdf53a67b21257bddf",
+    ),
+    (
+        "McGrew-Viega GCM Appendix B Test Case 3",
+        "feffe9928665731c6d6a8f9467308308",
+        "cafebabefacedbaddecaf888",
+        "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+        "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+        "",
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+        "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+        "4d5c2af327cd64a62cf35abd2ba6fab4",
+    ),
+    (
+        # 60 bytes of plaintext against 20 of AAD: the case where the GHASH
+        # length block carries two different non-zero bit counts, and where
+        # both operands need zero-padding to a block.
+        "McGrew-Viega GCM Appendix B Test Case 4",
+        "feffe9928665731c6d6a8f9467308308",
+        "cafebabefacedbaddecaf888",
+        "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+        "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+        "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+        "5bc94fbc3221a5db94fae95ae7121a47",
+    ),
+]
+
+#: CAVP publishes AES-128 GCM at IVlen 8 and 1024 bits as well as 96, and this
+#: profile takes 96 only. These are the two lengths from that file, so the
+#: refusal below is measured against the sizes NIST actually validates rather
+#: than against invented ones. `Count=0` of `[IVlen=1024 PTlen=128 AADlen=0]`
+#: was checked to reproduce under OpenSSL before being cited here.
+NIST_NON_96_BIT_IV_LENGTHS = [1, 128]
+
 
 def _body(length: int) -> bytes:
     """`length` bytes that are not all the same, so a misplaced block shows."""
     return bytes((index * 7 + 3) & 0xFF for index in range(length))
+
+
+def _openssl(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
+    """`ciphertext || tag` according to OpenSSL, which is not this repository."""
+    return AESGCM(key).encrypt(nonce, plaintext, aad or None)
 
 
 def _native_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
@@ -88,41 +245,95 @@ def _native_decrypt(key: bytes, nonce: bytes, message: bytes, aad: bytes) -> byt
     return _core.aes128gcm_decrypt(key, nonce, message, aad)
 
 
+# --- the known answers --------------------------------------------------------
+
+
+@pytest.mark.parametrize("vector", NIST_VECTORS, ids=lambda vector: vector[0])
+def test_both_paths_reproduce_the_published_vectors(vector: tuple[str, ...]) -> None:
+    """A constant, so it cannot be wrong in a way that tracks a bug in either arm."""
+    label, *parts = vector
+    key, nonce, plaintext, aad, ciphertext, tag = (bytes.fromhex(part) for part in parts)
+    assert _aes128gcm_encrypt_pure(key, nonce, plaintext, aad) == ciphertext + tag, label
+    if ARMS:
+        assert _native_encrypt(key, nonce, plaintext, aad) == ciphertext + tag, label
+
+
+@pytest.mark.parametrize("vector", NIST_VECTORS, ids=lambda vector: vector[0])
+def test_both_paths_recover_the_published_plaintexts(vector: tuple[str, ...]) -> None:
+    """The other direction: decryption is pinned to the same constants."""
+    label, *parts = vector
+    key, nonce, plaintext, aad, ciphertext, tag = (bytes.fromhex(part) for part in parts)
+    assert _aes128gcm_decrypt_pure(key, nonce, ciphertext + tag, aad) == plaintext, label
+    if ARMS:
+        assert _native_decrypt(key, nonce, ciphertext + tag, aad) == plaintext, label
+
+
+@pytest.mark.parametrize("nonce_length", NIST_NON_96_BIT_IV_LENGTHS)
+def test_the_non_96_bit_ivs_nist_publishes_are_refused_rather_than_guessed(
+    nonce_length: int,
+) -> None:
+    """GCM is defined for any IV length; this profile is not, and says so.
+
+    An IV that is not 96 bits makes J0 a GHASH of the IV rather than the IV
+    with a counter appended, which is a different derivation neither arm
+    implements. CAVP validates those lengths, so the honest answer is a
+    refusal at the parameter check rather than a tag computed from the wrong
+    J0 -- which is what an implementation that merely truncates would produce.
+    """
+    nonce = bytes(nonce_length)
+    with pytest.raises(PushError, match="96-bit nonce"):
+        aes128gcm_encrypt(KEY, nonce, b"payload")
+    if ARMS:
+        with pytest.raises(ValueError, match="96-bit nonce"):
+            _core.aes128gcm_encrypt(KEY, nonce, b"payload", b"")
+
+
+# --- the lengths no published vector covers -----------------------------------
+
+
 @needs_hardware
 @pytest.mark.parametrize("length", LENGTHS)
-def test_native_and_pure_agree_on_every_block_boundary(length: int) -> None:
+def test_both_paths_match_openssl_on_every_block_boundary(length: int) -> None:
+    """OpenSSL is the anchor here because CAVP publishes only five PTlens.
+
+    The point of the sweep is the C path's block schedule -- four blocks, then
+    one, then a zero-padded tail -- and no vector file walks it. An independent
+    implementation does.
+    """
     plaintext = _body(length)
-    assert _native_encrypt(KEY, NONCE, plaintext, b"") == _aes128gcm_encrypt_pure(
-        KEY, NONCE, plaintext, b""
-    )
+    expected = _openssl(KEY, NONCE, plaintext, b"")
+    assert _aes128gcm_encrypt_pure(KEY, NONCE, plaintext, b"") == expected
+    assert _native_encrypt(KEY, NONCE, plaintext, b"") == expected
 
 
 @needs_hardware
 @pytest.mark.parametrize("aad_length", AAD_LENGTHS)
-def test_native_and_pure_agree_on_additional_data(aad_length: int) -> None:
+def test_both_paths_match_openssl_on_additional_data(aad_length: int) -> None:
     """AAD is hashed but not encrypted, so a wrong length block shows up here.
 
     The failure this catches is specific: the length block at the end of GHASH
     carries the AAD's bit count and the ciphertext's, and swapping them, or
     zero-padding the AAD to the wrong multiple, produces a tag that is wrong
-    only when both are non-empty and of different lengths.
+    only when both are non-empty and of different lengths. Swapping them is
+    also exactly the mistake two implementations by one author make together,
+    which is why the expectation is OpenSSL's and not the other arm's.
     """
     aad = bytes((index * 13 + 1) & 0xFF for index in range(aad_length))
     for length in (0, 1, 16, 17, 4000):
         plaintext = _body(length)
-        assert _native_encrypt(KEY, NONCE, plaintext, aad) == _aes128gcm_encrypt_pure(
-            KEY, NONCE, plaintext, aad
-        )
+        expected = _openssl(KEY, NONCE, plaintext, aad)
+        assert _aes128gcm_encrypt_pure(KEY, NONCE, plaintext, aad) == expected
+        assert _native_encrypt(KEY, NONCE, plaintext, aad) == expected
 
 
 #: Length ceilings for the fuzz, chosen so the loop's *iterations* pay for the
 #: coverage and its *bytes* do not.
 #:
-#: The pure twin is CPython doing AES, and it was measured at 0.13 MB/s and
+#: The Python arm is CPython doing AES, and it was measured at 0.13 MB/s and
 #: 8.1 ms per iteration -- 400 iterations of encrypt-plus-decrypt cost 6.2s,
 #: which the model predicts to within 5% (400 * 8.1ms * 2 = 6.5s). Both halves
 #: of that loop matter, and only one of them buys anything here: what this test
-#: adds over `test_both_agree_across_the_block_boundaries` is random
+#: adds over `test_both_paths_match_openssl_on_every_block_boundary` is random
 #: *combinations* of key, nonce, length and AAD, which is the iteration count.
 #:
 #: The lengths are not where the structure lives. The C path steps four blocks
@@ -137,7 +348,7 @@ MAX_FUZZ_AAD = 96
 
 
 @needs_hardware
-def test_native_and_pure_agree_under_a_seeded_fuzz() -> None:
+def test_both_paths_match_openssl_under_a_seeded_fuzz() -> None:
     """Random keys, nonces, lengths and AAD, from a seed so a failure repeats."""
     rng = random.Random(0xAE5C_C4)
     for _ in range(400):
@@ -147,17 +358,18 @@ def test_native_and_pure_agree_under_a_seeded_fuzz() -> None:
             rng.randrange(256) for _ in range(rng.randrange(0, MAX_FUZZ_PLAINTEXT))
         )
         aad = bytes(rng.randrange(256) for _ in range(rng.randrange(0, MAX_FUZZ_AAD)))
-        native = _native_encrypt(key, nonce, plaintext, aad)
-        pure = _aes128gcm_encrypt_pure(key, nonce, plaintext, aad)
-        assert native == pure, (
-            f"disagreed on {len(plaintext)} bytes with {len(aad)} bytes of AAD"
+        expected = _openssl(key, nonce, plaintext, aad)
+        detail = f"{len(plaintext)} bytes with {len(aad)} bytes of AAD"
+        assert _native_encrypt(key, nonce, plaintext, aad) == expected, f"native: {detail}"
+        assert _aes128gcm_encrypt_pure(key, nonce, plaintext, aad) == expected, (
+            f"pure: {detail}"
         )
-        assert _native_decrypt(key, nonce, native, aad) == plaintext
-        assert _aes128gcm_decrypt_pure(key, nonce, pure, aad) == plaintext
+        assert _native_decrypt(key, nonce, expected, aad) == plaintext
+        assert _aes128gcm_decrypt_pure(key, nonce, expected, aad) == plaintext
 
 
 @needs_hardware
-def test_the_tag_is_where_the_two_agree_last() -> None:
+def test_the_tag_is_the_half_that_fails_on_its_own() -> None:
     """Stated separately because the ciphertext and the tag fail apart.
 
     A wrong GHASH leaves the ciphertext byte-identical and only the last 16
@@ -166,10 +378,11 @@ def test_the_tag_is_where_the_two_agree_last() -> None:
     broken.
     """
     plaintext = bytes(range(256)) * 4
-    native = _native_encrypt(KEY, NONCE, plaintext, b"aad")
-    pure = _aes128gcm_encrypt_pure(KEY, NONCE, plaintext, b"aad")
-    assert native[:-TAG_BYTES] == pure[:-TAG_BYTES], "the counter-mode halves differ"
-    assert native[-TAG_BYTES:] == pure[-TAG_BYTES:], "GHASH differs"
+    expected = _openssl(KEY, NONCE, plaintext, b"aad")
+    for label, encrypt in (("pure", _aes128gcm_encrypt_pure), ("native", _native_encrypt)):
+        message = encrypt(KEY, NONCE, plaintext, b"aad")
+        assert message[:-TAG_BYTES] == expected[:-TAG_BYTES], f"{label} counter mode"
+        assert message[-TAG_BYTES:] == expected[-TAG_BYTES:], f"{label} GHASH"
 
 
 # --- refusals ----------------------------------------------------------------
@@ -181,10 +394,11 @@ def test_both_refuse_a_tag_altered_in_any_bit(length: int) -> None:
     """Every bit of the tag, not a representative one.
 
     A comparison that reads fifteen of the sixteen bytes accepts a forgery one
-    time in 256 and passes a test that flips the first byte.
+    time in 256 and passes a test that flips the first byte. The message is
+    OpenSSL's, so this is a forgery against a genuine ciphertext.
     """
     plaintext = _body(length)
-    message = _native_encrypt(KEY, NONCE, plaintext, b"")
+    message = _openssl(KEY, NONCE, plaintext, b"")
     for index in range(TAG_BYTES):
         for bit in (0x01, 0x40, 0x80):
             altered = bytearray(message)
@@ -196,7 +410,7 @@ def test_both_refuse_a_tag_altered_in_any_bit(length: int) -> None:
 @needs_hardware
 def test_both_refuse_an_altered_ciphertext() -> None:
     plaintext = bytes(range(64))
-    message = _native_encrypt(KEY, NONCE, plaintext, b"")
+    message = _openssl(KEY, NONCE, plaintext, b"")
     for index in range(len(plaintext)):
         altered = bytearray(message)
         altered[index] ^= 0x01
@@ -207,10 +421,11 @@ def test_both_refuse_an_altered_ciphertext() -> None:
 @needs_hardware
 def test_both_refuse_additional_data_that_changed_in_flight() -> None:
     """AAD is not carried in the message, so this is the only thing binding it."""
-    message = _native_encrypt(KEY, NONCE, b"payload", b"origin=a")
+    message = _openssl(KEY, NONCE, b"payload", b"origin=a")
     assert _native_decrypt(KEY, NONCE, message, b"origin=b") is None
     assert _aes128gcm_decrypt_pure(KEY, NONCE, message, b"origin=b") is None
     assert _native_decrypt(KEY, NONCE, message, b"") is None
+    assert _aes128gcm_decrypt_pure(KEY, NONCE, message, b"") is None
 
 
 @needs_hardware
@@ -255,7 +470,7 @@ def test_the_facade_actually_calls_the_bound_implementation(
 ) -> None:
     """Both paths return the same bytes, so agreement cannot prove which ran.
 
-    Without this, deleting the dispatch and always running the pure twin is
+    Without this, deleting the dispatch and always running the Python arm is
     invisible: every other test in this file still passes, and the 4000x the
     hardware path is worth is silently gone. So the call is observed rather than
     inferred.
@@ -291,7 +506,7 @@ def test_the_facade_falls_back_to_the_pure_twin_when_nothing_is_bound(
     monkeypatch.setattr(webpush, "_native_gcm_encrypt", None)
     monkeypatch.setattr(webpush, "_native_gcm_decrypt", None)
     message = aes128gcm_encrypt(KEY, NONCE, b"body", b"extra")
-    assert message == _aes128gcm_encrypt_pure(KEY, NONCE, b"body", b"extra")
+    assert message == _openssl(KEY, NONCE, b"body", b"extra")
     assert aes128gcm_decrypt(KEY, NONCE, message, b"extra") == b"body"
     with pytest.raises(PushError, match="does not authenticate"):
         aes128gcm_decrypt(KEY, NONCE, message[:-1] + bytes(1), b"extra")
@@ -301,10 +516,12 @@ def test_the_facade_falls_back_to_the_pure_twin_when_nothing_is_bound(
 
 
 @pytest.mark.parametrize("length", [0, 1, 15, 16, 17, 63, 64, 65, 1000])
-def test_the_facade_round_trips_whichever_path_is_bound(length: int) -> None:
+def test_the_facade_produces_what_openssl_produces(length: int) -> None:
+    """Whichever path this machine bound, read against an independent encoder."""
     plaintext = _body(length)
     message = aes128gcm_encrypt(KEY, NONCE, plaintext, b"aad")
     assert len(message) == length + TAG_BYTES
+    assert message == _openssl(KEY, NONCE, plaintext, b"aad")
     assert aes128gcm_decrypt(KEY, NONCE, message, b"aad") == plaintext
 
 

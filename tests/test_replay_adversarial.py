@@ -5,7 +5,6 @@ property/matrix sweep: it drives the owned parser, pool lifecycle, and outbound
 path across many adversarial inputs and fault placements and asserts the owned
 invariants hold every time —
 
-- the two protocol twins agree under adversity (a native/pure fork is a bug);
 - a truncated or reset stream never crashes and never fabricates a ``200``;
 - every owned outcome is deterministic on a re-run;
 - a boundary fault never leaks a connection, whatever the handler does.
@@ -43,14 +42,12 @@ try:
 except ImportError:
     _NATIVE_HTTP1 = None
 
-from wreath._pure.server import Http1Protocol as _PURE_HTTP1
 
 proto = pytest.mark.parametrize(
     "protocol_cls",
     [
-        pytest.param(_PURE_HTTP1, id="pure"),
         pytest.param(
-            _NATIVE_HTTP1, id="native",
+            _NATIVE_HTTP1, id="http1",
             marks=pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built"),
         ),
     ],
@@ -75,7 +72,7 @@ def _app() -> wreath.Wreath:
 
 # A spread of adversarial-but-parseable and outright-malformed requests. The
 # owned decision differs per input; the point is that it is *some* owned decision,
-# the same each time and the same across twins.
+# the same each time.
 ADVERSARIAL = {
     "pipelined": b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\nGET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",  # noqa: E501
     "chunked_ok": b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n",  # noqa: E501
@@ -88,21 +85,6 @@ ADVERSARIAL = {
     "bare_lf": b"GET /ping HTTP/1.1\nHost: x\nConnection: close\n\n",
     "space_before_colon": b"GET /ping HTTP/1.1\r\nHost : x\r\nConnection: close\r\n\r\n",
 }
-
-
-# --- twin parity under adversity ---------------------------------------------
-
-
-@pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built")
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", list(ADVERSARIAL))
-async def test_native_and_pure_agree_under_adversity(name: str) -> None:
-    rec = record_transport_segments([ADVERSARIAL[name]])
-    native = await replay_transport(_app(), rec, protocol_cls=_NATIVE_HTTP1)
-    pure = await replay_transport(_app(), rec, protocol_cls=_PURE_HTTP1)
-    # The accelerator is a faster twin of the reference, never a behavioural fork.
-    assert native.normalized == pure.normalized
-    assert native.terminal == pure.terminal
 
 
 @proto

@@ -433,7 +433,7 @@ kv_release(WreathKV *self, size_t slot)
  * to be told. Returns 0, or -1 with an exception set.
  *
  * The recording is what lets a cache whose entries own something outside the
- * table use one. `_pure/postgres` is the case that made it necessary: an
+ * table use one. `wreath._pgdriver` is the case that made it necessary: an
  * evicted prepared plan still exists on the PostgreSQL backend until a
  * `Close ('S')` goes out on the wire, so a table that evicted silently would
  * leak a server-side statement per eviction. `orm/registry` needs none of
@@ -508,10 +508,12 @@ kv_ensure_room(WreathKV *self, double now)
         return -1;
     }
     /* Counted here and not only inside the rebuild, because the rebuild is also
-     * how a table reclaims its dead. Dropping this made `expirations` disagree
-     * with the pure twin on nine of thirty randomised trials while every
-     * operation result and every other counter matched exactly -- the shape of
-     * divergence that is invisible until somebody reads the number. */
+     * how a table reclaims its dead. Dropping this made `expirations` come up
+     * short on nine of thirty randomised trials while every operation result
+     * and every other counter matched exactly -- the shape of defect that is
+     * invisible until somebody reads the number. `test_kv.py`'s conservation
+     * check is what catches it: admissions == evictions + expirations +
+     * removals + residents, and nothing else. */
     self->expirations += (uint64_t)expired;
     /* Evict until both bounds hold. The tail is the least recently used, so a
      * key nobody has read since the last eviction goes first. */
@@ -569,8 +571,8 @@ kv_lookup_live(WreathKV *self, PyObject *key, double now, size_t *slot)
  * every single call. Measured on this table, `wreath.cache.BoundedCache.get`
  * -- one Python method that forwards to `KV.get` with one keyword -- cost
  * 0.51us against the 0.20us the lookup underneath it takes, and it was
- * *slower* than the pure-Python implementation it replaced. Two objects
- * allocated and freed per lookup is the whole difference.
+ * *slower* than the Python dict-and-deque it replaced. Two objects allocated
+ * and freed per lookup is the whole difference.
  *
  * Keyword lookup is a linear scan over at most five short names, which beats a
  * hash for this size and needs no interned-string table to keep in step with

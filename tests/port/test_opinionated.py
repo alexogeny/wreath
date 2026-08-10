@@ -252,6 +252,7 @@ def test_a_generator_argument_gains_its_brackets_with_the_keyword(tmp_path):
     (root / "repo.py").write_text(
         "async def llamas_for(herd):\n"
         "    return await Llama.objects.filter(herd=herd).all()\n\n\n"
+        '@router.get("/herds")\n'
         "async def herd_sizes(herds):\n"
         "    return sum(len(await llamas_for(h)) for h in herds)\n",
         encoding="utf-8",

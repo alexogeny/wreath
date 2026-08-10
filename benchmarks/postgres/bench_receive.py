@@ -19,7 +19,7 @@ import time
 import tracemalloc
 from typing import Any
 
-from wreath._pure import postgres as pure_postgres
+from wreath import _pgdriver as pure_postgres
 
 
 def _native_backend() -> Any:

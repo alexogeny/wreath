@@ -1,9 +1,7 @@
 """Compare ORM hydration paths: Record-to-model versus direct native hydration.
 
-Four paths over the same rows and the same models:
+Three paths over the same rows and the same models:
 
-* ``record_to_pure_model``  -- Records decoded by the reference driver, then
-  copied into pure-Python model storage;
 * ``record_to_native_model`` -- Records decoded natively, then copied into
   native model storage;
 * ``direct_native``          -- the field tape decoded straight into native

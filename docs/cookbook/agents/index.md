@@ -39,5 +39,6 @@ These are the shape of the wreath. Hold them.
   state is what it holds while running. They don't share an API.
 - **The public top level stays small.** A new feature lives in its own
   clearly-named module, not re-exported from `wreath`.
-- **The native and pure implementations must agree.** An accelerator is a faster
-  twin of the pure reference, never a behavioural fork — check both.
+- **An accelerator is checked against something outside Wreath.** The RFC, the
+  published vectors, the stdlib — never a second implementation of ours, which
+  can be wrong in both halves and agree.

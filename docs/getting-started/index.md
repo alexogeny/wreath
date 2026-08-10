@@ -21,10 +21,12 @@ pip install wreath
 uv add wreath
 ```
 
-Installing from source builds the native C extensions for you. If no compiler is
-available, that's fine — Wreath falls back to a pure-Python implementation that
-behaves identically, just without the extra speed. You can choose that path
-deliberately anywhere by setting `WREATH_PURE=1`.
+A wheel ships the C extensions prebuilt, so this needs no compiler. Installing
+from source builds them, which needs a C compiler and the CPython headers.
+
+Routing, HTTP parsing, the JSON and msgpack codecs, header handling, validation
+and policy evaluation are C. There is no slower mode to fall back to, so a build
+without them says so at import rather than degrading quietly.
 
 ## Your first application
 

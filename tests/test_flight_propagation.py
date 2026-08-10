@@ -1,9 +1,9 @@
 """Stage 2 (part): strict W3C traceparent parsing + correlation cells.
 
 The parser must reject every malformed value without raising or reflecting the
-input, agree byte-for-byte with the pure twin (including under fuzzing), and a
-propagated request must emit a paired correlation cell carrying the incoming
-trace.
+input, agree byte-for-byte with `wreath._flight_reference.parse_traceparent`
+(including under fuzzing), and a propagated request must emit a paired
+correlation cell carrying the incoming trace.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import random
 import pytest
 
 from wreath import _flight_schema as fs
-from wreath._pure.flight import parse_traceparent as pure_parse
+from wreath._flight_reference import parse_traceparent as pure_parse
 
 _flight = pytest.importorskip("wreath._native._flight")
 

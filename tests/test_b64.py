@@ -1,39 +1,27 @@
-"""`wreath._b64`, and the two twins agreeing about what is not base64url.
+"""`wreath._b64`: what is base64url, and what is only nearly base64url.
 
 The module exists because `base64.urlsafe_b64decode` is lax in three ways that
 matter to anything reading a value off the wire: it re-pads, it accepts `+`/`/`
 as well as `-`/`_`, and it *discards* characters outside the alphabet instead of
 refusing them. `wreath._auth.jwt` documents what that cost -- two spellings of
 one JWK decoding to the same key -- and found it by differential testing rather
-than from a failing test, which is why the differential test is the first one
-here.
+than from a failing test.
 
-The strictness is only worth anything if both arms have it. A guard present in
-the accelerated build and absent under `WREATH_PURE=1` is not a guard, so every
-refusal below is asserted against *both*, and `pure` is a fixture rather than a
-separate test file so the two can never drift apart.
+So the anchor here is the stdlib, used the other way round: every value in
+`LAX_INPUTS` decodes to *something* through `urlsafe_b64decode`, and every one
+of them has to be refused. Round-tripping against `urlsafe_b64encode` covers the
+agreeing half, where the stdlib is exact.
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 
 import pytest
 
 from wreath import _b64
 from wreath._b64 import MAX_INPUT_BYTES, b64url_decode
-
-#: Read at import, before any fixture can null the arm out. A test that asks
-#: `_b64._native_b64url is not None` *after* taking the `pure` fixture is asking
-#: whether the fixture ran, and skips itself every time.
-HAS_NATIVE = _b64._native_b64url is not None
-
-
-@pytest.fixture
-def pure(monkeypatch):
-    """The module with its native arm removed, i.e. what `WREATH_PURE=1` runs."""
-    monkeypatch.setattr(_b64, "_native_b64url", None)
-    return b64url_decode
 
 
 def _encoded(n: int) -> tuple[str, bytes]:
@@ -41,90 +29,78 @@ def _encoded(n: int) -> tuple[str, bytes]:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="), raw
 
 
-# --- the twins agree ---------------------------------------------------------
+# --- what it accepts ---------------------------------------------------------
 
 
-def test_both_arms_decode_every_length_identically(pure) -> None:
-    """The differential test. Lengths 0..256 cover all four residues mod 4 many
-    times over, which is where a decoder's tail handling goes wrong."""
-    if not HAS_NATIVE:
-        pytest.skip("no native _core to differentiate against")
+def test_every_length_decodes_to_what_the_stdlib_encoded() -> None:
+    """Lengths 0..256 cover all four residues mod 4 many times over, which is
+    where a decoder's tail handling goes wrong."""
     for n in range(257):
         text, raw = _encoded(n)
-        assert pure(text) == raw, f"pure arm wrong at {n}"
+        assert b64url_decode(text) == raw, f"wrong at length {n}"
 
 
-def test_the_native_arm_matches_the_pure_arm(monkeypatch) -> None:
-    native = _b64._native_b64url
-    if native is None:
-        pytest.skip("no native _core")
-    for n in range(257):
-        text, raw = _encoded(n)
-        assert native(text) == raw, f"native arm wrong at {n}"
+# --- what it must refuse -----------------------------------------------------
 
-
-# --- what both arms must refuse ----------------------------------------------
-
-#: Every one of these decodes to *something* through
-#: `base64.urlsafe_b64decode`, which is the point.
+#: Each of these decodes to *something* through `base64.urlsafe_b64decode`,
+#: which is the point: they are not base64url, and the stdlib takes them anyway.
 LAX_INPUTS = [
     pytest.param("QQ==", id="padded"),
     pytest.param("a+b/", id="standard-alphabet"),
     pytest.param("ab cd", id="space"),
     pytest.param("ab\ncd", id="newline"),
     pytest.param("ab.cd", id="dot"),
+]
+
+#: Refused by the stdlib too, for a different reason -- 1 more than a multiple
+#: of 4 data characters encodes no whole byte. Kept separate because the claim
+#: is different: here wreath must refuse with the *same* exception type it uses
+#: for everything else, so a caller has one `except ValueError` rather than
+#: needing to know `binascii.Error` exists.
+UNDECODABLE_LENGTHS = [
     pytest.param("Q", id="length-1-mod-4"),
     pytest.param("abcde", id="length-5"),
 ]
 
 
 @pytest.mark.parametrize("text", LAX_INPUTS)
-def test_native_refuses_what_the_stdlib_would_take(text: str) -> None:
-    if _b64._native_b64url is None:
-        pytest.skip("no native _core")
+def test_it_refuses_what_the_stdlib_would_take(text: str) -> None:
+    # The stdlib call first, and not in a `raises`: it has to *succeed* for this
+    # case to mean anything. A value that stopped being lax would fail here
+    # rather than quietly turning the assertion below into a tautology.
+    assert base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
     with pytest.raises(ValueError):
         b64url_decode(text)
 
 
-@pytest.mark.parametrize("text", LAX_INPUTS)
-def test_the_pure_twin_refuses_exactly_the_same_set(pure, text: str) -> None:
+@pytest.mark.parametrize("text", UNDECODABLE_LENGTHS)
+def test_an_impossible_length_is_a_value_error(text: str) -> None:
+    with pytest.raises(binascii.Error):
+        base64.urlsafe_b64decode(text)
     with pytest.raises(ValueError):
-        pure(text)
+        b64url_decode(text)
 
 
-def test_the_dash_and_plus_spellings_do_not_collide(pure) -> None:
+def test_the_dash_and_plus_spellings_do_not_collide() -> None:
     """The JWK bug in one assertion: `-` and `+` carry the same six bits, so a
     decoder that accepts both maps two distinct strings onto one key."""
-    for decode in filter(None, (b64url_decode, pure)):
-        assert decode("a-b_") == base64.urlsafe_b64decode("a-b_")
-        with pytest.raises(ValueError):
-            decode("a+b/")
+    assert b64url_decode("a-b_") == base64.urlsafe_b64decode("a-b_")
+    with pytest.raises(ValueError):
+        b64url_decode("a+b/")
 
 
-@pytest.mark.parametrize("arm", ["native", "pure"])
-def test_non_str_is_a_type_error(monkeypatch, arm: str) -> None:
-    if arm == "pure":
-        monkeypatch.setattr(_b64, "_native_b64url", None)
-    elif _b64._native_b64url is None:
-        pytest.skip("no native _core")
+def test_non_str_is_a_type_error() -> None:
     with pytest.raises(TypeError):
         b64url_decode(b"QUJD")
 
 
-def test_the_size_cap_survives_losing_the_native_arm(pure) -> None:
-    """A DoS bound that only exists in the accelerated build is not a bound."""
-    oversize = "A" * (MAX_INPUT_BYTES + 4)
+def test_input_past_the_size_cap_is_refused() -> None:
     with pytest.raises(ValueError):
-        pure(oversize)
-    if HAS_NATIVE:
-        with pytest.raises(ValueError):
-            b64url_decode(oversize)
+        b64url_decode("A" * (MAX_INPUT_BYTES + 4))
 
 
-def test_empty_decodes_to_empty(pure) -> None:
-    assert pure("") == b""
-    if HAS_NATIVE:
-        assert b64url_decode("") == b""
+def test_empty_decodes_to_empty() -> None:
+    assert b64url_decode("") == b""
 
 
 # --- the callers kept their contracts ----------------------------------------
@@ -181,41 +157,25 @@ def test_a_password_record_round_trips() -> None:
 
 # --- the encode half ---------------------------------------------------------
 
-#: Both arms by name. Not a `monkeypatch` of the selection: the arm is chosen at
-#: import, so a test that nulls `_native_encode` afterwards is asserting that the
-#: patch ran rather than that the twin is correct.
-ENCODE_ARMS = [
-    pytest.param(_b64._b64url_encode_pure, _b64._b64_encode_pure, id="pure"),
-    pytest.param(
-        _b64._b64url_encode_native,
-        _b64._native_encode,
-        id="native",
-        marks=pytest.mark.skipif(
-            _b64._native_encode is None, reason="no native _core"
-        ),
-    ),
-]
-
-
-@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
-def test_both_encode_arms_agree_at_every_length(url_arm, std_arm) -> None:
-    """The differential test for the direction added second.
+def test_the_encoders_match_the_stdlib_at_every_length() -> None:
+    """Against `base64`, which is exact in this direction.
 
     Lengths 0..256 cover every residue mod 3 many times over, which is where an
     encoder's tail -- the one and two leftover bytes that decide how much
-    padding there would have been -- goes wrong. The native arm switches from
-    its AVX2 body to a scalar tail inside this range, so the boundary is
+    padding there would have been -- goes wrong. `wreath_b64_encode` switches
+    from its AVX2 body to a scalar tail inside this range, so the boundary is
     covered rather than assumed.
     """
     for n in range(257):
         raw = bytes((i * 37 + 11) % 256 for i in range(n))
         expected = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-        assert url_arm(raw) == expected, f"unpadded base64url wrong at {n}"
-        assert std_arm(raw) == base64.b64encode(raw).decode("ascii"), f"padded wrong at {n}"
+        assert _b64.b64url_encode(raw) == expected, f"unpadded base64url wrong at {n}"
+        assert _b64.b64_encode(raw) == base64.b64encode(raw).decode("ascii"), (
+            f"padded wrong at {n}"
+        )
 
 
-@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
-def test_the_encoders_round_trip_through_the_strict_decoder(url_arm, std_arm) -> None:
+def test_the_encoders_round_trip_through_the_strict_decoder() -> None:
     """`b64url_encode` must produce something `b64url_decode` accepts.
 
     Not a tautology: the decoder refuses padding, so an encoder that left the
@@ -224,24 +184,13 @@ def test_the_encoders_round_trip_through_the_strict_decoder(url_arm, std_arm) ->
     """
     for n in range(130):
         raw = bytes((i * 53 + 7) % 256 for i in range(n))
-        assert b64url_decode(url_arm(raw)) == raw
+        assert b64url_decode(_b64.b64url_encode(raw)) == raw
 
 
-@pytest.mark.parametrize(("url_arm", "std_arm"), ENCODE_ARMS)
-def test_b64url_encode_never_emits_padding_or_the_standard_alphabet(
-    url_arm, std_arm
-) -> None:
-    """The two properties every caller depends on, asserted against both arms."""
+def test_b64url_encode_never_emits_padding_or_the_standard_alphabet() -> None:
+    """The two properties every caller depends on."""
     for n in range(1, 130):
         raw = bytes((i * 91 + 3) % 256 for i in range(n))
-        text = url_arm(raw)
+        text = _b64.b64url_encode(raw)
         assert "=" not in text
         assert "+" not in text and "/" not in text
-
-
-def test_the_selected_encoders_are_one_of_the_two_arms() -> None:
-    """What the module actually exported, so the selection itself is covered."""
-    assert _b64.b64url_encode in (_b64._b64url_encode_pure, _b64._b64url_encode_native)
-    assert _b64.b64_encode in (_b64._b64_encode_pure, _b64._native_encode)
-    if HAS_NATIVE:
-        assert _b64.b64_encode is _b64._native_encode, "native build must bind native"

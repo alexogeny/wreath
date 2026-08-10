@@ -25,8 +25,9 @@ class Outcome(StrEnum):
     #: Every test that reaches this line still passed without the control.
     #: A question, not a verdict -- see `Verdict.note`.
     SURVIVED = "survived"
-    #: No test in the baseline run executed this line at all. This is ADR
-    #: 0024's shape in its purest form and is reported separately, because
+    #: No test in the baseline run executed this line at all. That is a check
+    #: with nothing to check in its purest form, and it is reported separately
+    #: from `survived`, because
     #: "the suite would not notice" and "the suite never looks" are different
     #: findings with different fixes.
     UNREACHED = "unreached"

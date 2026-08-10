@@ -29,10 +29,7 @@ from typing import Any
 from .._native import _core
 from ..request import Request
 
-if _core is not None and hasattr(_core, "TrustedNetworks"):
-    TrustedNetworks: Any = _core.TrustedNetworks
-else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
-    from .._pure.proxy import TrustedNetworks
+TrustedNetworks: Any = _core.TrustedNetworks
 
 _SCHEMES = frozenset({"http", "https"})
 

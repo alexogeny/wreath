@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from wreath._native._core import TrustedNetworks
 
 from wreath import Wreath
-from wreath._pure.proxy import TrustedNetworks
 from wreath._secondfactor import MemoryChallengeStore
 from wreath.auth import authenticated
 from wreath.crud import SENSITIVE_FIELD

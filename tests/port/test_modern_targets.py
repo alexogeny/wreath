@@ -450,11 +450,9 @@ def test_a_fastapi_test_client_is_reported(tmp_path) -> None:
 def test_a_dependency_override_points_at_acting_as(tmp_path) -> None:
     """Most overrides swap the auth dependency, and wreath has a way to do that."""
     source = "app.dependency_overrides[authenticate] = lambda: rider\n"
-    message = _message(tmp_path, source, "test.dependency_override")
+    message = _message(tmp_path, source, "test.dependency_override_auth")
     assert "acting_as" in message
-    assert "ServiceClient" in message
-    assert "same Session" in message
-    assert "Delete fake repositories" in message
+    assert "TestClient" in message
     assert "app.state" not in message
 
 

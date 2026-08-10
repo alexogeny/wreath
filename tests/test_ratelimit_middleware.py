@@ -9,7 +9,6 @@ from _doubles import PooledConnection
 
 from wreath import Wreath
 from wreath._native import _core
-from wreath._pure.ratelimit import TokenBucket as PureTokenBucket
 from wreath.policy import (
     HttpPolicy,
     MemoryRateLimitStore,
@@ -18,9 +17,7 @@ from wreath.policy import (
 )
 from wreath.testing import TestClient
 
-_BUCKETS = [PureTokenBucket]
-if _core is not None and hasattr(_core, "TokenBucket"):
-    _BUCKETS.append(_core.TokenBucket)
+_BUCKETS = [_core.TokenBucket]
 
 
 # --- bucket mechanics -------------------------------------------------------
@@ -72,8 +69,7 @@ def test_bucket_validates_configuration(bucket_type: Any) -> None:
 def test_bucket_honours_max_entries_under_key_spraying(bucket_type: Any) -> None:
     """Distinct-key floods must not grow the table without bound."""
     bucket = bucket_type(capacity=5.0, rate=1.0, max_entries=100)
-    # Four complete table turnovers prove repeated eviction without paying for
-    # 200 turnovers through the pure twin's bounded linear victim scan.
+    # Four complete table turnovers prove repeated eviction.
     for index in range(400):
         bucket.acquire(f"attacker-{index}", 1000.0 + index * 0.001)
     assert bucket.tracked <= 100
@@ -96,17 +92,63 @@ def test_bucket_keeps_limiting_a_key_it_still_tracks(bucket_type: Any) -> None:
     assert bucket.acquire("victim", 1000.0) == 0.0
 
 
-def test_native_bucket_agrees_with_pure_reference() -> None:
-    if _core is None or not hasattr(_core, "TokenBucket"):
-        pytest.skip("native core unavailable")
-    native = _core.TokenBucket(capacity=3.0, rate=2.0, max_entries=64)
-    pure = PureTokenBucket(capacity=3.0, rate=2.0, max_entries=64)
+class _ModelBucket:
+    """The token bucket written from its definition, as the arithmetic oracle.
+
+    `tokens = min(capacity, tokens + rate * elapsed)`, spend `cost` when there
+    is enough and otherwise report how long the shortfall takes to refill. It
+    tracks one key, keeps no table, and evicts nothing -- the parts the C exists
+    to do well -- so a divergence over the sweep below is arithmetic, which is
+    the half a bounded table cannot be allowed to perturb.
+    """
+
+    def __init__(self, capacity: float, rate: float) -> None:
+        self.capacity, self.rate = capacity, rate
+        self.tokens, self.last = capacity, None
+
+    def acquire(self, now: float, cost: float = 1.0) -> float:
+        if self.last is not None:
+            self.tokens = min(self.capacity, self.tokens + self.rate * max(0.0, now - self.last))
+        self.last = now if self.last is None else max(self.last, now)
+        if self.tokens >= cost:
+            self.tokens -= cost
+            return 0.0
+        return (cost - self.tokens) / self.rate
+
+
+@pytest.mark.parametrize("bucket_type", _BUCKETS)
+def test_bucket_refill_matches_the_arithmetic_over_a_long_sweep(bucket_type: Any) -> None:
+    """400 steps that spend faster than the rate refills, so the branch crosses.
+
+    The parameters are the point. Each of three keys is asked every 90ms while
+    it earns 0.18 tokens in that time, so the bucket drains within four visits
+    and then alternates: five or six refusals whose retry-after must count down
+    correctly, then one admission. An earlier version of this swept seventeen
+    keys, which gave each one 1.02 tokens between visits against a cost of 1 --
+    it never drained, every call returned 0.0, and the test could not tell any
+    arithmetic from any other.
+
+    Three things it now crosses that a monotonic sweep does not: an idle hour
+    (the refill must clamp at capacity, so the burst after it is three and not
+    thirty), a clock that steps backwards (elapsed is floored at zero, never
+    minting), and a cost of 2 against a capacity of 3 (the shortfall is
+    `cost - tokens`, not `cost`).
+    """
+    bucket = bucket_type(capacity=3.0, rate=2.0, max_entries=64)
+    models = {f"k{index}": _ModelBucket(3.0, 2.0) for index in range(3)}
     now = 1000.0
     for step in range(400):
-        key = f"k{step % 17}"
+        key = f"k{step % 3}"
         now += 0.03
-        assert native.acquire(key, now) == pytest.approx(pure.acquire(key, now)), (key, now)
-    assert native.tracked == pure.tracked
+        if step == 200:
+            now += 3600.0  # idle an hour: refill clamps at capacity
+        elif step == 300:
+            now -= 5.0  # a clock that went backwards mints nothing
+        cost = 2.0 if step % 37 == 0 else 1.0
+        assert bucket.acquire(key, now, cost) == pytest.approx(
+            models[key].acquire(now, cost)
+        ), (step, key, now, cost)
+    assert bucket.tracked == len(models)
 
 
 # --- middleware -------------------------------------------------------------

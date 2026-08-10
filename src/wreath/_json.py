@@ -22,8 +22,7 @@ a frame is small against a serialization measured in microseconds — but that
 last part is an expectation, not a measurement, and AGENTS.md does not let it
 be stated as one. If `wreath-decomp` ever attributes a response-path delta
 here, the way to remove the frame is to teach the encoders about temporal
-values directly, which means changing `_native/json.c` and its pure twin
-together and byte-for-byte.
+values directly, in `_native/json.c`.
 """
 
 from __future__ import annotations
@@ -32,14 +31,9 @@ from typing import Any
 
 from ._native import _core
 
-if _core is not None:
-    _dumps = _core.json_dumps
-    loads = _core.json_loads
-    _configure = _core.json_configure
-else:
-    from ._pure.json import json_configure as _configure
-    from ._pure.json import json_dumps as _dumps
-    from ._pure.json import json_loads as loads
+_dumps = _core.json_dumps
+loads = _core.json_loads
+_configure = _core.json_configure
 
 
 def _install_temporal() -> None:

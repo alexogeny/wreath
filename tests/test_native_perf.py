@@ -5,22 +5,21 @@ best-of-N timing and thresholds set far below observed margins so they do not
 flake under CI load. The full six-way matrix is printed (run pytest -s) for
 visibility.
 
+Every comparand is something a caller could plausibly reach for instead -- the
+stdlib, or another routing backend -- so a ratio here means "faster than the
+alternative", never "faster than the version this replaced".
+
 Established orderings (observed multiples in parentheses are typical, not
 asserted verbatim):
-  * native routers beat their pure twins (~4-6x)
-  * on a large table with many routes sharing a segment position, the three C
-    backends are comparable. This previously asserted the decision tree winning
-    by ~3-4x over the trie, which held only while the trie linear-scanned a
-    node's children; sorting those children and binary searching them closed the
-    gap. The decision tree remains the default for capability pruning, not for
-    literal dispatch -- see test_c_backends_are_comparable_at_scale below.
-  * native json/codecs/ws/http beat their pure twins (6-24x); native json
-    encode beats stdlib (~3.3x) and native json decode beats stdlib (~2.2x)
-
-Note deliberately NOT asserted: py-dt is *not* faster than py-trie. In
-interpreted Python the decision tree's per-node dict lookups cost more than
-the trie's plain walk; the decision tree's win is realised in C. The default
-backend is C-first, so this is the intended trade-off.
+  * on a large table with many routes sharing a segment position, the three
+    routing backends are comparable. This previously asserted the decision tree
+    winning by ~3-4x over the trie, which held only while the trie linear-scanned
+    a node's children; sorting those children and binary searching them closed
+    the gap. The decision tree remains the default for capability pruning, not
+    for literal dispatch -- see test_c_backends_are_comparable_at_scale below.
+  * `json_dumps` beats `json.dumps` (~3.3x) and `json_loads` beats `json.loads`
+    (~2.2x); `parse_qs` beats `urllib.parse.parse_qsl` (~17x, measured
+    2026-08-10 against an A/A floor of 1.003x).
 """
 
 from __future__ import annotations
@@ -28,15 +27,12 @@ from __future__ import annotations
 import json as stdlib_json
 import random
 import time
+import urllib.parse
 
 import pytest
 from _routing_impls import IMPLS, build
 
 from wreath._native import _core
-from wreath._pure import codecs as pure_codecs
-from wreath._pure import http as pure_http
-from wreath._pure import json as pure_json
-from wreath._pure import ws as pure_ws
 
 pytestmark = [
     pytest.mark.performance,
@@ -76,35 +72,6 @@ def _run_matches(table, queries):
     return run
 
 
-def test_native_routers_beat_pure() -> None:
-    routes = [
-        ("GET", "/"), ("GET", "/users"), ("GET", "/users/{id}"),
-        ("GET", "/users/{id}/posts"), ("POST", "/users/{id}/posts"),
-        ("GET", "/health"), ("GET", "/static/{path}"),
-    ]
-    rng = random.Random(7)
-    choices = [
-        ("GET", "/users/42"), ("GET", "/health"), ("POST", "/users/9/posts"),
-        ("GET", "/static/x"), ("GET", "/nope"), ("GET", "/users/1/posts"),
-    ]
-    queries = [rng.choice(choices) for _ in range(20000)]
-
-    timings = {}
-    for name, factory in IMPLS.items():
-        table = build(factory, routes)
-        for method, path in queries[:1000]:  # compile / warm
-            table.match(method, path)
-        timings[name] = _best(_run_matches(table, queries))
-
-    print("\nsmall-api routing (lower is better):")
-    for name in ("c-dt", "c-trie", "c-bitset", "py-dt", "py-trie", "py-bitset"):
-        if name in timings:
-            print(f"  {name:9} {timings[name] * 1e3:7.2f} ms")
-
-    assert timings["c-dt"] < timings["py-dt"] / 1.8
-    assert timings["c-dt"] < timings["py-trie"] / 1.8
-    assert timings["c-trie"] < timings["py-trie"] / 1.8
-    assert timings["c-bitset"] < timings["py-bitset"] / 1.8
 
 
 def test_c_backends_are_comparable_at_scale() -> None:
@@ -155,7 +122,7 @@ def test_c_backends_are_comparable_at_scale() -> None:
 
 # --- json -----------------------------------------------------------------
 
-def test_native_json_beats_pure_and_stdlib() -> None:
+def test_json_dumps_beats_the_stdlib_encoder() -> None:
     payload = {
         "users": [
             {"id": i, "name": f"user{i}", "active": i % 2 == 0, "score": i * 1.5}
@@ -167,22 +134,18 @@ def test_native_json_beats_pure_and_stdlib() -> None:
         for _ in range(3000):
             _core.json_dumps(payload)
 
-    def pure():
-        for _ in range(3000):
-            pure_json.json_dumps(payload)
-
     def stdlib():
         for _ in range(3000):
             stdlib_json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-    vs_pure = _speedup(pure, native)
-    vs_stdlib = _speedup(stdlib, native)
-    print(f"\njson: native is {vs_pure:.2f}x pure, {vs_stdlib:.2f}x stdlib")
-    assert vs_pure > 2.5
-    assert vs_stdlib > 1.5
+    ratio = _speedup(stdlib, native)
+    print(f"\njson dumps: {ratio:.2f}x stdlib")
+    # Observed ~3.3x. The stdlib arm includes the `.encode()` because bytes are
+    # what a response needs, and leaving it out would be timing a different job.
+    assert ratio > 1.5
 
 
-def test_native_json_loads_beats_stdlib() -> None:
+def test_json_loads_beats_the_stdlib_decoder() -> None:
     payload = {
         "users": [
             {"id": i, "name": f"user{i}", "active": i % 2 == 0, "score": i * 1.5}
@@ -200,61 +163,38 @@ def test_native_json_loads_beats_stdlib() -> None:
             stdlib_json.loads(document)
 
     ratio = _speedup(stdlib, native)
-    print(f"\njson loads: native is {ratio:.2f}x stdlib")
+    print(f"\njson loads: {ratio:.2f}x stdlib")
     # Observed ~2.2x: the native decoder parses UTF-8 bytes in place instead
     # of decoding the whole document to str first.
     assert ratio > 1.3
 
 
-# --- codecs / ws / http ---------------------------------------------------
+# --- query strings --------------------------------------------------------
 
-def test_native_parse_qs_beats_pure() -> None:
+def test_parse_qs_beats_the_stdlib_query_parser() -> None:
+    """Against `urllib.parse.parse_qsl`, which produces the identical pairs.
+
+    Observed 17.8x on 2026-08-10 with an A/A floor of 1.003x; asserted at 4x so
+    a loaded box cannot flake it. `keep_blank_values=True` is what makes the two
+    comparable -- without it the stdlib drops `flag` and is answering an easier
+    question, which the equality assertion below is here to keep honest.
+    """
     query = b"a=1&b=%C3%A9&flag&k=x+y&z=%20%21" * 3
+    text = query.decode()
+    assert _core.parse_qs(query) == urllib.parse.parse_qsl(text, keep_blank_values=True)
 
     def native():
         for _ in range(10000):
             _core.parse_qs(query)
 
-    def pure():
+    def stdlib():
         for _ in range(10000):
-            pure_codecs.parse_qs(query)
+            urllib.parse.parse_qsl(text, keep_blank_values=True)
 
-    ratio = _speedup(pure, native)
-    print(f"\nparse_qs: native is {ratio:.2f}x pure")
-    assert ratio > 3.0
-
-
-def test_native_ws_mask_beats_pure() -> None:
-    data = bytes(random.Random(1).randint(0, 255) for _ in range(2000))
-    key = b"\x01\x02\x03\x04"
-
-    def native():
-        for _ in range(10000):
-            _core.ws_mask(data, key)
-
-    def pure():
-        for _ in range(10000):
-            pure_ws.ws_mask(data, key)
-
-    ratio = _speedup(pure, native)
-    print(f"\nws_mask: native is {ratio:.2f}x pure")
-    assert ratio > 5.0
+    ratio = _speedup(stdlib, native)
+    print(f"\nparse_qs: {ratio:.2f}x urllib.parse.parse_qsl")
+    assert ratio > 4.0
 
 
-def test_native_http_parser_beats_pure() -> None:
-    request = (
-        b"GET /api/v1/users?page=2 HTTP/1.1\r\nHost: example.com\r\n"
-        b"Accept: application/json\r\nUser-Agent: x\r\n\r\n"
-    )
 
-    def native():
-        for _ in range(10000):
-            _core.http_parse_request(request)
 
-    def pure():
-        for _ in range(10000):
-            pure_http.http_parse_request(request)
-
-    ratio = _speedup(pure, native)
-    print(f"\nhttp parser: native is {ratio:.2f}x pure")
-    assert ratio > 3.0

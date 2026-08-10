@@ -481,8 +481,8 @@ with a trailing `{#custom-id}`.)
 
 ## Keeping working notes out of the build
 
-Not every markdown file under `source` is meant to publish — design notes, ADRs,
-an agent manifest. List glob patterns in `exclude` and they won't be built, or
+Not every markdown file under `source` is meant to publish — design notes, an
+agent manifest. List glob patterns in `exclude` and they won't be built, or
 flagged as orphans, or link-checked — `exclude` means "not part of this site", so
 it opts out of every signal, which is the difference between it and simply
 leaving a page out of the nav (the equivalent of mkdocs' `exclude_docs`):

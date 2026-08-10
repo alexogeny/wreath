@@ -266,7 +266,7 @@ class Site:
             `<meta>` when a page has none of its own).
         exclude: glob patterns (matched against each source-relative `.md` path)
             for files that live under `source` but are deliberately unpublished —
-            working notes, ADRs, agent manifests. Matching files never raise an
+            working notes, an agent manifest. Matching files never raise an
             orphan warning. Mirrors mkdocs' `exclude_docs`.
         source_url: base URL each page's "Edit this page" link is built from, e.g.
             `https://github.com/you/proj/edit/main/docs`. Empty means no edit

@@ -1,7 +1,7 @@
 /* wreath._native._core: hand-written C accelerators for Wreath's hot paths.
  *
- * Every function here has a pure-Python twin in wreath._pure with identical
- * observable behavior; the facades in wreath.* select whichever is available.
+ * Required: `wreath._native` refuses at import without this module. The facades
+ * in wreath.* bind straight to what they need here.
  */
 #include "wreathcore.h"
 
@@ -131,7 +131,7 @@ static PyMethodDef core_methods[] = {
     {"aesgcm_arms", wreath_aesgcm_arms, METH_NOARGS,
      "aesgcm_arms() -> tuple[str, ...]\n"
      "('aesni', 'pclmul') when this CPU and build can run the hardware "
-     "AES-128-GCM path, or () when wreath._webpush must use its pure twin.\n"
+     "AES-128-GCM path, or () when wreath._webpush must use its Python arm.\n"
      "build sentinel: wreath-aesgcm-aesni-pclmul"},
     {"aes128gcm_encrypt", wreath_aes128gcm_encrypt, METH_VARARGS,
      "aes128gcm_encrypt(key, nonce, plaintext, aad) -> ciphertext || tag"},
@@ -218,7 +218,7 @@ static PyMethodDef core_methods[] = {
 static struct PyModuleDef core_module = {
     PyModuleDef_HEAD_INIT,
     "wreath._native._core",
-    "C accelerators for Wreath (optional; pure-Python twins live in wreath._pure).",
+    "The C core Wreath requires: routing, HTTP, codecs, headers, validation, Cedar.",
     -1,
     core_methods,
     NULL,

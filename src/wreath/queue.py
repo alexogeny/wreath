@@ -42,28 +42,22 @@ from typing import TYPE_CHECKING, Any
 
 from ._native import _core
 
-# The exception classes come from the pure module on *both* arms: they are one
-# pair of classes, so `except QueueEmpty` catches whichever ring raised. Only the
-# ring itself is selected here.
-from ._pure.queue import QueueEmpty, QueueFull, _Ready
+# One pair of exception classes on *both* arms, so `except QueueEmpty` catches
+# whichever ring raised, and one `_Ready` for the rotation below to hand back.
+# Only the ring itself is selected here; see `wreath._queue_protocol`.
+from ._queue_protocol import QueueEmpty, QueueFull, _Ready
 
-if _core is not None and hasattr(_core, "Queue"):
-    _Ring: Any = _core.Queue
-    _Heap: Any = _core.PriorityQueue
-else:  # pragma: no cover - exercised by the WREATH_PURE parity run
-    from ._pure.queue import PriorityQueue as _Heap
-    from ._pure.queue import Queue as _Ring
+_Ring: Any = _core.Queue
+_Heap: Any = _core.PriorityQueue
 
 
 class Awaiting:
     """The awaiting half, over whichever ring it is mixed into.
 
-    A mixin rather than a base class with the ring built in, because the two
-    rings are separate C-level layouts and a class cannot inherit from both --
-    so a test that wanted the awaiting half over the *unselected* arm had
-    nowhere to stand. `Queue` below is the composition callers want; this is
-    what lets the pure arm be exercised on a machine where the native one was
-    selected, and vice versa.
+    A mixin rather than a base class with the ring built in, because the FIFO
+    ring and the priority heap are separate C-level layouts and a class cannot
+    inherit from both. `Queue` and `PriorityQueue` below are the two
+    compositions callers want.
 
     Carries no instance layout of its own -- `__slots__` is empty here, and
     **every concrete class that mixes this in must declare `_loop` and

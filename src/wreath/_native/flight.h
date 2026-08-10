@@ -8,7 +8,7 @@
  *
  * This header is the C runtime surface. The wire schema it emits is defined by
  * flight_schema.h (the Python-mirrored cell layouts). See
- * docs/plans/native-flight-recorder-stage-1.md and ADR 0021.
+ * docs/plans/native-flight-recorder-stage-1.md.
  */
 #ifndef WREATH_FLIGHT_H
 #define WREATH_FLIGHT_H
@@ -34,7 +34,7 @@
 #define WREATH_FLIGHT_WORKER_CAPSULE "wreath._native._flight.worker"
 
 /* Per-request context. Embedded inline in HTTP/1 request state and each
- * HTTP/2/3 stream (ADR 0021). Off never initializes it; Pulse fills only
+ * HTTP/2/3 stream (provisional bounds, not tuning targets). Off never initializes it; Pulse fills only
  * correlation, active state, route attribution, and completion fields. */
 typedef struct {
     uint64_t request_id;
@@ -78,7 +78,7 @@ typedef struct wreath_nfr_worker wreath_nfr_worker;
 int wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell);
 
 /* SipHash-2-4 over `data`, the keyed redaction fingerprint. Exposed so the log
- * emitter can hash with the site registry's key -- the same key the pure Python
+ * emitter can hash with the site registry's key -- the same key the Python
  * packer uses, so the two agree byte for byte. */
 uint64_t wreath_nfr_fingerprint(const void *data, size_t len, uint64_t k0,
                                 uint64_t k1);

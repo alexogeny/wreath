@@ -1,7 +1,6 @@
 """Native API-docs subsystem: fail-closed gating, self-containment, escaping.
 
-These are pure-Python (v1 has no native code of its own), so they hold under
-both the default build and ``WREATH_PURE=1``.
+v1 has no C of its own; these drive the Python that builds and gates the page.
 """
 
 from __future__ import annotations

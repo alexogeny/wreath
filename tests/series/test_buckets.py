@@ -143,7 +143,7 @@ class TestAmbiguousAndMissingLocalTimes:
 
         Not a preference -- it is what `timestamp AT TIME ZONE zone` does, so
         `floor` and `date_trunc` name the same instant. Measured against a live
-        server in `tests/postgres/test_series_integration.py`; the pure check
+        server in `tests/postgres/test_series_integration.py`; the Python check
         here is the fast mirror of it.
         """
         # 00:30 UTC on that date is 01:30 BST, the *first* pass through 01:30 --

@@ -1,9 +1,9 @@
 /* The connection pipeline state machine, in C.
  *
- * `_pure/postgres.py` owns the reference implementation and the reasoning; this
- * file owns the same state machine for the native tier, and the two are held to
- * identical observable behaviour by `tests/postgres/` running every case against
- * both backends.
+ * `wreath._pgdriver` owns the Python half and the reasoning; this file owns the
+ * same state machine in C, and the two are held to identical observable
+ * behaviour by `tests/postgres/` running every case against both. They are not
+ * alternatives: `_native._postgres.Connection` *subclasses* the Python one.
  *
  * Why this exists: the native tier accelerated the *codec* -- encode, decode,
  * row hydration -- and left submission, flushing and completion in Python. On a
@@ -16,7 +16,7 @@
  *
  * ## State lives in the Python object, and is read at struct offsets
  *
- * The native `Connection` subclasses the pure one, so every field is a
+ * The native `Connection` subclasses the Python one, so every field is a
  * `__slots__` member on the base. This file does not copy that state into a C
  * struct -- it resolves each slot's offset once at import (`resolve_offsets`)
  * and reads it as `*(PyObject **)((char *)self + offset)`.
@@ -322,7 +322,7 @@ resolve_one(PyObject *type, const char *name, Py_ssize_t *out)
         PyErr_Format(
             PyExc_RuntimeError,
             "wreath._native._postgres: %s has no __slots__ member %s; the "
-            "native pipeline and wreath._pure.postgres are out of step and "
+            "native pipeline and wreath._pgdriver are out of step and "
             "the extension must be rebuilt",
             ((PyTypeObject *)type)->tp_name, name
         );
@@ -629,7 +629,7 @@ static PyMethodDef pipeline_module_methods[] = {
  * The native type is a heap subclass with `basicsize = 0`, so it inherited that
  * Python constructor and paid a frame plus 24 STORE_ATTR for every operation
  * the driver created. The slots and their order are the reference's
- * (`_pure/postgres.py:1372`); this writes the same values at the offsets
+ * (`wreath._pgdriver`); this writes the same values at the offsets
  * `resolve_offsets` already found.
  *
  * `rows` is `[]` for a fetch and `None` otherwise, which is the one field whose
@@ -1686,11 +1686,10 @@ submit(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
             /* A catalog destination decodes binary only, and a cold operation
                otherwise binds text -- so the *first* catalog read on any
                connection failed, and failed as a hang. Deliberately the Python
-               builder even when the C one is bound, matching the reference:
-               the accelerated `_build_cold` takes five positional arguments and
-               adding a sixth means moving both twins under the byte-for-byte
-               parity contract to serve a path that runs once per connection,
-               off the hot path, only for migration reads. */
+               builder even when the C one is bound: the accelerated
+               `_build_cold` takes five positional arguments and adding a sixth
+               means changing both builders to serve a path that runs once per
+               connection, off the hot path, only for migration reads. */
             PyObject *call_args = PyTuple_Pack(
                 5, SLOT(operation, op_off.statement_name), sql, args,
                 SLOT(operation, op_off.parameter_oids), mode);
@@ -3043,7 +3042,7 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     PyObject *asyncio_module = NULL;
 
     connection_type_ref = connection_type;
-    pure_module = PyImport_ImportModule("wreath._pure.postgres");
+    pure_module = PyImport_ImportModule("wreath._pgdriver");
     if (pure_module == NULL) return -1;
     asyncio_module = PyImport_ImportModule("asyncio");
     if (asyncio_module == NULL) return -1;
@@ -3167,7 +3166,7 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
      * have to land on the *subclass* after `PyType_FromSpecWithBases` has
      * inherited the Python originals -- and because a descriptor set here is
      * visible to `resolve_offsets` having already run, so a mismatch between
-     * this file and `_pure/postgres.py` fails the import rather than producing
+     * this file and `wreath._pgdriver` fails the import rather than producing
      * a Connection whose C half reads different words from its Python half. */
     for (PyMethodDef *def = pipeline_methods; def->ml_name != NULL; def++) {
         PyObject *descriptor = PyDescr_NewMethod(

@@ -1210,7 +1210,7 @@ async def confirm_webauthn_registration(
     # to find where it ends, and refuses an unusable algorithm by name while it
     # does -- so a second `parse_cose_key(auth_data.public_key)` in this function
     # could never fail, and a check that cannot fail reports a safety it is not
-    # providing (docs/decisions/0024). One existed here and was removed.
+    # providing (a check that has nothing to check). One existed here and was removed.
     rows = await store.credentials(user_id)
     for row in rows:
         if row.kind != "webauthn":

@@ -6,9 +6,10 @@ drive the flow it affects and watch what happens — don't infer from the diff.
 1. **Exercise it in process** with `TestClient`, hitting the real route so the
    request travels the whole path — middleware, authentication, binding — not
    just the function you edited.
-2. **Check both twins** when you've touched an accelerated path. Run with the
-   native extension built, and again with `WREATH_PURE=1`. They must agree; a
-   disagreement is a bug in one of them.
+2. **Anchor it outside Wreath** when you've touched an accelerated path. Assert
+   what the RFC, the published vectors, or the stdlib says the answer is — not
+   what another implementation of ours produces, which agrees happily when both
+   are wrong.
 3. **Price the boundary** if you were near the request path:
    `uv run wreath-request-trace --check` must not report new Python↔native
    crossings unless you meant to add them (then update the baseline, and say why).

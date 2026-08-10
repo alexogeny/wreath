@@ -244,7 +244,7 @@ class StreamCursor(NamedTuple):
 
     Three parts and a stream tag, because all four are load-bearing. The log
     cursor `(xid, seq)` is the resume point and cannot skip (see
-    `docs/decisions/0027-a-log-cursor-is-a-transaction-id.md`); `fence` is the
+    `wreath.log`'s cursor contract); `fence` is the
     attempt the client last read under, which is what lets `follow` say *your
     content was replaced* instead of leaving the client to notice; and `token`
     binds the whole thing to one stream key.

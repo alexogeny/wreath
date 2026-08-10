@@ -18,7 +18,7 @@ import enum
 
 import pytest
 
-from wreath._pure import protobuf as wire
+from wreath import _protobuf_plan as wire
 from wreath.protobuf import ProtobufDeclarationError, field, message
 
 

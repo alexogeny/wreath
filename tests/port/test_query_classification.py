@@ -66,14 +66,17 @@ def _query_rules(tmp_path, source: str) -> list[str]:
         ("Llama.objects.select_related('treks')", "orm.query.eager_exact"),
         ("Llama.objects.select_all()", "orm.query.select_all"),
         ("Llama.objects.prefetch_related('treks')", "orm.query.eager_exact"),
-        ("Llama.objects.values(['name'])", "orm.query.values"),
+        ("Llama.objects.values(['name'])", "orm.query.values_exact"),
         ("Llama.objects.bulk_create([])", "orm.query.bulk"),
         ("Llama.objects.bulk_update([])", "orm.query.bulk"),
         ("Llama.objects.count()", "orm.query.count"),
         ("Llama.objects.exists()", "orm.query.exists"),
         ("Llama.objects.delete()", "orm.query.delete"),
         ("Llama.objects.first()", "orm.query.first"),
-        ("Llama.objects.get_or_create(name='Bea')", "orm.query.get_or_create"),
+        (
+            "Llama.objects.get_or_create(name='Bea')",
+            "orm.query.get_or_create_exact",
+        ),
         ("Llama.objects.update_or_create(name='Bea')", "orm.query.get_or_create"),
     ],
 )
@@ -88,7 +91,8 @@ def test_an_unrecognised_verb_still_reports(tmp_path) -> None:
 
 def test_a_bare_objects_attribute_reports(tmp_path) -> None:
     """`.objects` handed around as a value is still a query surface to port."""
-    assert _query_rules(tmp_path, "manager = Llama.objects\n") == ["orm.query"]
+    assert _query_rules(tmp_path, "manager = Llama.objects\n") == []
+    assert _rule_ids(tmp_path, "manager = Llama.objects\n") == ["orm.manager_value"]
 
 
 # --- the chain is one finding, not one per link ---------------------------------
@@ -205,7 +209,6 @@ def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
         ("Llama.objects.filter(Q(a=1))", "positional Q object"),
         ("Llama.objects.filter(**criteria)", "keys are a runtime value"),
         ("Llama.objects.filter(a=1).first()", "wreath needs an explicit order"),
-        ("Llama.objects.filter(a=1).values(['b'])", "rows come back as models"),
         ("Llama.objects.filter(a=1).order_by(column)", "runtime column name"),
     ],
 )

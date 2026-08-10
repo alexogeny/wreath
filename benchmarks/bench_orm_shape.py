@@ -22,7 +22,7 @@ from typing import Any
 
 from wreath._native import _core
 from wreath.orm import and_, or_
-from wreath.orm.compiler import _collect_binds_native, _collect_binds_pure, _shape_of_pure
+from wreath.orm.compiler import _collect_binds_native, _collect_binds_walk, _shape_of_walk
 
 
 def _build() -> tuple[Any, dict[str, Any]]:
@@ -82,13 +82,13 @@ def run(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     native_shape = _core.orm_shape
 
     def pure_shape(_ignored: Any, query: Any) -> Any:
-        return _shape_of_pure(registry, query)
+        return _shape_of_walk(registry, query)
 
     def nat_shape(_ignored: Any, query: Any) -> Any:
         return native_shape(registry, query)
 
     def pure_binds(_ignored: Any, query: Any) -> Any:
-        return _collect_binds_pure(query)
+        return _collect_binds_walk(query)
 
     def nat_binds(_ignored: Any, query: Any) -> Any:
         return _collect_binds_native(query)
@@ -96,8 +96,8 @@ def run(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     results = []
     for name, query in shapes.items():
         # Parity gate before timing: identical outputs or the comparison is void.
-        assert native_shape(registry, query) == _shape_of_pure(registry, query)
-        assert _collect_binds_native(query) == _collect_binds_pure(query)
+        assert native_shape(registry, query) == _shape_of_walk(registry, query)
+        assert _collect_binds_native(query) == _collect_binds_walk(query)
         for _ in range(warmup):
             nat_shape(None, query)
             nat_binds(None, query)

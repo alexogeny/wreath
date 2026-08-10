@@ -1,9 +1,9 @@
-/* Great-circle distance, the faster twin of src/wreath/_pure/geospatial.py.
+/* Great-circle distance.
  *
- * The pure module remains the reference. Unlike the codec twins -- msgpack and
- * JSON, which tests hold byte-for-byte -- this pair is held to a *stated
- * tolerance* rather than to bit equality, and that is a deliberate contract
- * rather than a weaker test. These are floating-point transcendentals: libm's
+ * Unlike the wire codecs -- msgpack and JSON, which tests hold byte-for-byte --
+ * this is held to the haversine formula at a *stated tolerance* rather than to
+ * bit equality, and that is a deliberate contract rather than a weaker test.
+ * These are floating-point transcendentals: libm's
  * sin/cos/asin are not required to be correctly rounded, and CPython's math
  * module calls the same libm but through its own error checking, so demanding
  * bit equality would produce a test that passes here and fails on a different
@@ -20,9 +20,10 @@
 
 #include <math.h>
 
-/* Mean Earth radius in metres (IUGG). Must equal EARTH_RADIUS_M in the pure
- * twin; a divergence here is a silent, uniform scaling error in every distance
- * the native build reports, which no unit test of *shape* would catch. */
+/* Mean Earth radius in metres (IUGG). Must equal EARTH_RADIUS_M in
+ * src/wreath/_geodesy.py, which is where both arms define the sphere; a
+ * divergence here is a silent, uniform scaling error in every distance the
+ * native build reports, which no unit test of *shape* would catch. */
 #define WREATH_EARTH_RADIUS_M 6371008.8
 
 static double
@@ -38,7 +39,7 @@ wreath_haversine_metres(double lat1, double lon1, double lat2, double lon2)
     double a = sin_phi * sin_phi + cos(phi1) * cos(phi2) * sin_lambda * sin_lambda;
 
     /* `a` can exceed 1 by an ulp for antipodal inputs, where asin() would
-     * return NaN. The pure twin clamps identically. */
+     * return NaN. `tests/test_geospatial_parity.py` pins the clamp. */
     if (a > 1.0) {
         a = 1.0;
     }

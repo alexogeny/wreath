@@ -22,7 +22,7 @@ from decimal import Decimal
 
 import pytest
 
-from wreath._pure.postgres import _decode_numeric, _encode_numeric
+from wreath._pgdriver import _decode_numeric, _encode_numeric
 from wreath.postgres import Database, PoolConfig
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
@@ -140,8 +140,13 @@ def test_a_negative_zero_goes_on_the_wire_as_postgresql_spells_it() -> None:
 
 
 @pytest.mark.skipif(_native is None, reason="native extension not built")
-def test_both_twins_agree_byte_for_byte() -> None:
-    """The parity contract: pure and native encode identically, decode identically."""
+def test_both_codecs_agree_byte_for_byte() -> None:
+    """`_pgdriver` and `codec.c` encode identically and decode identically.
+
+    They are not alternatives -- the C `Connection` subclasses the Python one --
+    but a row can be decoded through either depending on which entry point the
+    read took, so a divergence is a value that changes with the call path.
+    """
     domain = [*_domain(), *NON_FINITE]
     encode_diff = [v for v in domain if _encode_numeric(v) != _native._encode_binary(v, 1700)]
     assert not encode_diff, f"{len(encode_diff)} encode divergences: {encode_diff[:5]}"

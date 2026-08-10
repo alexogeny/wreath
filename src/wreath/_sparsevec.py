@@ -7,8 +7,8 @@ not zero, and there is no Python builtin that says both halves at once. A bare
 `dict` loses the dimension, a bare `list` defeats the point of the type, and a
 `(dim, dict)` tuple is a shape every caller has to remember the order of.
 
-So: one small immutable value, in a module that imports nothing, because *both*
-codec twins need it. `_pure/postgres.py` imports it directly and
+So: one small immutable value, in a module that imports nothing, because both
+halves of the driver need it. `wreath._pgdriver` imports it directly and
 `_native/postgres/codec.c` imports it at module init the same way it imports
 `uuid.UUID` and `decimal.Decimal`. Anything under `wreath/` importing anything
 else under `wreath/` from here would be a cycle, which is why this file holds

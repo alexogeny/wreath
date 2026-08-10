@@ -320,6 +320,7 @@ async def test_a_rate_limit_table_is_created_by_lifespan_startup() -> None:
 
 @requires_db
 async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
+    from wreath.policy import HttpPolicy
     from wreath.policy.idempotency import (
         IdempotencyPolicy,
         PostgresIdempotencyStore,
@@ -329,8 +330,12 @@ async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
     dsn = await _database("idem")
     app = Wreath()
     database = app.postgres("main", dsn=dsn)
-    app.add_middleware(
-        IdempotencyPolicy(store=PostgresIdempotencyStore(database, table=table))
+    app.configure_http_policy(
+        HttpPolicy(
+            idempotency=IdempotencyPolicy(
+                store=PostgresIdempotencyStore(database, table=table)
+            )
+        )
     )
 
     assert await _resolves(dsn, table) is None, "the table must not pre-exist"
@@ -341,6 +346,7 @@ async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
 
 @requires_db
 async def test_a_session_table_is_created_by_lifespan_startup() -> None:
+    from wreath.policy import HttpPolicy
     from wreath.policy.sessions import SessionPolicy
     from wreath.session_store import PostgresSessionStore
 
@@ -348,8 +354,12 @@ async def test_a_session_table_is_created_by_lifespan_startup() -> None:
     dsn = await _database("sess")
     app = Wreath()
     database = app.postgres("main", dsn=dsn)
-    app.add_middleware(
-        SessionPolicy("s" * 32, store=PostgresSessionStore(database, table=table))
+    app.configure_http_policy(
+        HttpPolicy(
+            session=SessionPolicy(
+                "s" * 32, store=PostgresSessionStore(database, table=table)
+            )
+        )
     )
 
     assert await _resolves(dsn, table) is None, "the table must not pre-exist"

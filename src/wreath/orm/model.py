@@ -8,8 +8,8 @@ Every concrete model gets a *storage base* holding its values:
 
 * the native backend generates one C type per model whose `tp_basicsize` is
   fixed, with unboxed inline cells for scalars and C descriptors for access;
-* `PureModel` is the reference implementation, over a list and integer
-  bitmaps.
+* `ListModel` is the portable one, over a list and integer bitmaps, used when
+  this build has no `_postgres`.
 
 Both implement the same storage protocol with the same observable behavior.
 Assignment validates through the column's `PgType.coerce` in both, so the
@@ -332,7 +332,7 @@ def _storage_base(
     rooting it at `Model` would make its metatype conflict with `ModelMeta`.
     """
     if _native is None:
-        return PureModel
+        return ListModel
     return _native._compile_model_layout(
         tuple(
             (item.pg_type.oid, item.primary_key, item.nullable) for item in columns
@@ -356,7 +356,7 @@ def rebind_storage_oid(model_type: type, index: int, oid: int) -> None:
     rebind that would alter the cell's kind, because a rebind that moved a cell
     would corrupt every instance already allocated against the old layout.
 
-    A no-op on the pure backend, which stores values as Python objects and reads
+    A no-op on `_pgdriver`, which stores values as Python objects and reads
     the OID from the column spec rather than from a layout.
     """
     if _native is None or not hasattr(_native, "_rebind_field_oid"):
@@ -500,9 +500,9 @@ class Model(metaclass=ModelMeta):
     #
     # The contract every storage base implements. ModelMeta prepends one to the
     # bases of each concrete model, so these stubs are always overridden; they
-    # are declared here to state the protocol in one place. PureModel is the
-    # reference implementation, and the native type must match its behavior --
-    # not its representation.
+    # are declared here to state the protocol in one place. `ListModel` is the
+    # readable one, and the generated type must match its behaviour -- not its
+    # representation.
 
     _orm_state: int
     _orm_owner: Any
@@ -572,11 +572,11 @@ class Model(metaclass=ModelMeta):
         return f"<{cls.__name__} {STATE_NAMES[self._orm_state]} {body}>"
 
 
-class PureModel(Model):
-    """Reference storage: a value list plus integer bitmaps.
+class ListModel(Model):
+    """Storage as a value list plus integer bitmaps.
 
-    This is the behavior the native storage must match. It is used whenever the
-    compiled extension is unavailable or `WREATH_PURE=1` is set.
+    The behaviour the generated per-model C layout must match. Used directly
+    when this build has no `_postgres` extension to generate one.
     """
 
     __slots__ = (
@@ -732,7 +732,7 @@ __all__ = [
     "TRANSIENT",
     "Model",
     "ModelMeta",
-    "PureModel",
+    "ListModel",
     "enforce_rules",
     "validate_identifier",
 ]

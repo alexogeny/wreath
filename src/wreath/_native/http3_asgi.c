@@ -1,6 +1,6 @@
 /* HTTP/3 ASGI bridge: nghttp3 framing/QPACK callbacks + per-stream ASGI.
  *
- * Built only when WREATH_BUILD_HTTP3=1 (ADR 0011). Maps QUIC request streams to
+ * Built only when WREATH_BUILD_HTTP3=1 (HTTP/3 is opt-in at build time). Maps QUIC request streams to
  * ASGI http scopes (http_version == "3") and turns ASGI responses back into
  * nghttp3 responses. Response segments are submitted while streaming and retained
  * under bounded acknowledgement-driven credit while ngtcp2 may retransmit them.

@@ -25,8 +25,8 @@ timed while it is on.
 
 ## The ungraft A/B
 
-`--ungraft` restores the pure-Python `_submit`, `_flush`, `_finish_operation`
-and the query entry points onto the *native* Connection at runtime, reproducing
+`--ungraft` restores the Python `_submit`, `_flush`, `_finish_operation` and
+the query entry points onto the Connection at runtime, reproducing
 the driver as it was before `_native/postgres/pipeline.c` existed. That makes
 the before/after a single flag on one build, in one session, on one box --
 rather than two builds measured minutes apart, which is exactly the comparison
@@ -126,8 +126,14 @@ def _child_command(
 # The child: performs the queries and exits.
 # ------------------------------------------------------------------ #
 
-def _ungraft_native() -> None:
-    """Put the Python state machine back on the native Connection.
+def _reference_state_machine() -> Any:
+    """The module the native Connection inherits its Python state machine from.
+
+    Read off the type rather than named: `_native/postgres/connection.c` makes
+    the native `Connection` a *subclass* of the reference one, so its base is
+    the same object a hardcoded import would give and stays right if that
+    module moves. Everything `pipeline.c` did not override still runs from
+    there, which is what makes `--ungraft` a restore rather than a rewrite.
 
     `import_module` rather than `from wreath._native import _postgres`, for the
     same reason `wreath/_native/__init__.py` uses it: the compiled submodule is
@@ -136,20 +142,65 @@ def _ungraft_native() -> None:
     """
     import importlib
 
-    from wreath._pure.postgres import Connection as Pure
-
     native = importlib.import_module("wreath._native._postgres")
-    for name in GRAFTED:
-        original = getattr(Pure, name, None)
-        if original is not None:
-            setattr(native.Connection, name, original)
+    return sys.modules[native.Connection.__mro__[1].__module__]
 
 
-async def _run_arm(arm: str, queries: int, target: str, count_calls: bool) -> None:
+def _transaction_test(*, ungrafted: bool) -> Any:
+    """The transaction-control test the *installed* `_submit` actually runs.
+
+    Native `_submit` decides it in C; the ungrafted Python state machine calls
+    the module global beside it. An arm that priced the Python one in both
+    halves would print a delta of zero for a difference that is real, in a tool
+    whose whole claim is that its before and after are one build in one session.
+    """
+    if ungrafted:
+        return _reference_state_machine()._is_transaction_sql
+
+    from wreath.postgres import _is_transaction_sql
+
+    return _is_transaction_sql
+
+
+def _graft_plan(reference: type) -> list[tuple[str, Any]]:
+    """Every method `--ungraft` would restore, or a refusal naming what is gone.
+
+    Decided separately from applying it because applying it rewrites a type for
+    the life of the process, so the decision is the only half a test can drive.
+    A partial graft is refused rather than measured: it reports a delta of
+    nearly nothing, which reads as "the port bought little" instead of "the A/B
+    did not happen", and that is a wrong number rather than a missing one.
+    """
+    plan = [(name, getattr(reference, name, None)) for name in GRAFTED]
+    missing = [name for name, original in plan if original is None]
+    if missing:
+        raise SystemExit(
+            f"--ungraft cannot find {', '.join(missing)} on "
+            f"{reference.__module__}.{reference.__qualname__}: the Python state "
+            "machine has moved, and the A/B would compare the native pipeline "
+            "against itself."
+        )
+    return plan
+
+
+def _ungraft_native() -> None:
+    """Put the Python state machine back on the native Connection."""
+    import importlib
+
+    plan = _graft_plan(_reference_state_machine().Connection)
+    native = importlib.import_module("wreath._native._postgres")
+    for name, original in plan:
+        setattr(native.Connection, name, original)
+
+
+async def _run_arm(
+    arm: str, queries: int, target: str, count_calls: bool, *, ungrafted: bool
+) -> None:
     import collections
 
-    from wreath._pure.postgres import _is_transaction_sql
     from wreath.postgres import connect
+
+    _is_transaction_sql = _transaction_test(ungrafted=ungrafted)
 
     concurrency = 16
     connections = [await connect(target) for _ in range(concurrency)]
@@ -372,7 +423,10 @@ def _child_main(args: argparse.Namespace) -> int:
             return asyncio.new_event_loop()
 
     asyncio.run(
-        _run_arm(args.run_child, args.queries, args.dsn, args.calls),
+        _run_arm(
+            args.run_child, args.queries, args.dsn, args.calls,
+            ungrafted=args.ungraft,
+        ),
         loop_factory=_loop,
     )
     return 0

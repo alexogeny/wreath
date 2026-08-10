@@ -1,7 +1,7 @@
 """Adversarial tests for the authentication and second-factor surface.
 
 Every test here was written as an *attack* and watched fail before the thing it
-attacks was fixed (docs/decisions/0024). Each attack sits beside a control that
+attacks was fixed (a check that has nothing to check). Each attack sits beside a control that
 passes in both trees, so a suite that has simply broken everywhere cannot be
 mistaken for one that caught something.
 
@@ -16,11 +16,11 @@ Five holes, in five different places:
   TOTP branch of `verify_second_factor` closes that race with the store's
   conditional counter advance; the recovery branch removed the row without ever
   asking whether it was the one that removed it.
-* **A compact JWS the pure build parses and the native build refuses.** The
-  stdlib fallback pads each segment before decoding, so a token with `=` glued
-  on the end verifies under `WREATH_PURE=1` and is rejected by `jose.c`. The
-  same fallback raises `TypeError` out of `verify_jwt`, which is documented to
-  return None and never raise, when `aud` holds an unhashable member.
+* **A compact JWS with padding glued on the end.** `base64.urlsafe_b64decode`
+  re-pads before decoding, so anything built on it verifies `<token>=` as
+  `<token>` -- an unbounded family of strings authenticating as one. The same
+  laxity raises `TypeError` out of `verify_jwt`, which is documented to return
+  None and never raise, when `aud` holds an unhashable member.
 * **An authentication backend that raises leaves through the front door.** On a
   classifying routing table -- `bitset`, the default, and `decision` -- the
   backend runs before the route is resolved and outside every error boundary,
@@ -86,7 +86,7 @@ def _cookie(response: Any) -> str:
 
 # --- 1. the half-wired second factor -----------------------------------------
 #
-# `docs/decisions/0019` settles the direction: a door that refuses and names its
+# AGENTS.md settles the direction: a door that refuses and names its
 # own misconfiguration beats one that opens quietly. `user_router` already does
 # that for `second_factors=None`. These drive the other half-wiring.
 
@@ -327,7 +327,8 @@ class _SuspendingStore(InMemorySecondFactorStore):
     where the flow itself awaits. A real store goes to a socket at each of these
     calls, and that is the shape the replay defence has to survive -- so the
     double models the *timing* of a database rather than adding a capability it
-    does not have (docs/decisions/0020). `_advance` is untouched: its atomicity
+    does not have: a double is never more capable than the real thing.
+    `_advance` is untouched: its atomicity
     is the thing under test.
     """
 
@@ -407,11 +408,11 @@ async def test_the_race_harness_sees_the_totp_replay_being_refused() -> None:
     assert [first is not None, second is not None].count(True) == 1
 
 
-# --- 3. the pure JWT build accepts what the native one refuses ---------------
+# --- 3. a hostile token must not authenticate ---------------------------------
 #
-# Driven in a subprocess, twice, because `WREATH_PURE=1` is read at import and
-# is the *real* second wiring rather than a monkeypatched approximation of it.
-# The probe `raise`s rather than asserting, so `python -O` cannot empty it.
+# Driven in a subprocess because these are import-time properties of a whole
+# application, not of an object a test can construct. The probe `raise`s rather
+# than asserting, so `python -O` cannot empty it.
 
 _PROBE = r"""
 import base64, hmac, json, sys
@@ -489,12 +490,13 @@ asyncio.run(main())
 """
 
 
-def _probe(pure: bool) -> dict[str, Any]:
+def _probe() -> dict[str, Any]:
+    """Run the probe script in a fresh interpreter and return what it reported.
+
+    A subprocess because these are import-time properties of a whole
+    application, not of an object a test can construct.
+    """
     environment = dict(os.environ)
-    if pure:
-        environment["WREATH_PURE"] = "1"
-    else:
-        environment.pop("WREATH_PURE", None)
     root = Path(__file__).resolve().parent.parent
     completed = subprocess.run(
         [sys.executable, "-c", _PROBE],
@@ -510,26 +512,24 @@ def _probe(pure: bool) -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def probes() -> dict[str, dict[str, Any]]:
-    return {"native": _probe(pure=False), "pure": _probe(pure=True)}
+def probes() -> dict[str, Any]:
+    return _probe()
 
 
-def test_the_probes_still_have_something_to_check(probes: dict[str, Any]) -> None:
-    """Guard on the guard: the two runs really are the two builds.
+def test_the_probe_still_has_something_to_check(probes: dict[str, Any]) -> None:
+    """Guard on the guard, and the control the attacks below are measured against.
 
-    A `WREATH_PURE=1` that stopped selecting the stdlib twins, or a build with
-    no `_core` at all, would make every comparison below a tautology over one
-    implementation -- green, and examining nothing (docs/decisions/0024).
+    Every assertion after this one is that some hostile token is *refused*. A
+    probe that refused everything -- a broken key, an app that never started --
+    would satisfy all of them while examining nothing
+    (a check that has nothing to check). So: the parser resolved, and a well-formed token
+    authenticates, with and without an audience configured.
     """
-    if probes["native"]["native"] is not True:
-        raise AssertionError("the native probe did not resolve the native jose parser")
-    if probes["pure"]["native"] is not False:
-        raise AssertionError("WREATH_PURE=1 did not select the pure jose fallback")
-    # Control: a well-formed token authenticates in both builds, with and
-    # without an audience configured.
-    if (probes["native"]["plain"], probes["pure"]["plain"]) != (200, 200):
+    if probes["native"] is not True:
+        raise AssertionError("the probe did not resolve the jose parser")
+    if probes["plain"] != 200:
         raise AssertionError(f"a valid token was refused: {probes}")
-    if (probes["native"]["plain_aud"], probes["pure"]["plain_aud"]) != (200, 200):
+    if probes["plain_aud"] != 200:
         raise AssertionError(f"a valid audience was refused: {probes}")
 
 
@@ -539,19 +539,13 @@ def test_base64_padding_glued_to_a_token_does_not_authenticate(
     """The attack: `<token>=` is a second string that verifies as the token.
 
     RFC 7515 writes compact-serialization segments as base64url *without*
-    padding, and `jose.c` refuses the `=`. The stdlib fallback re-pads before
-    decoding, so under `WREATH_PURE=1` an unbounded family of strings
-    authenticates as one token -- which quietly defeats any deployment that
-    blocklists a leaked token by its value.
+    padding, so the `=` must be refused. An implementation that re-padded before
+    decoding -- which `base64.urlsafe_b64decode` does -- would let an unbounded
+    family of strings authenticate as one token, quietly defeating any
+    deployment that blocklists a leaked token by its value.
     """
-    if probes["pure"]["padded"] != 401:
-        raise AssertionError(
-            f"the pure build authenticated a padded token: {probes['pure']}"
-        )
-    if probes["native"]["padded"] != 401:
-        raise AssertionError(
-            f"the native build authenticated a padded token: {probes['native']}"
-        )
+    if probes["padded"] != 401:
+        raise AssertionError(f"a padded token authenticated: {probes}")
 
 
 def test_a_nested_audience_is_a_refusal_not_a_server_error(
@@ -560,16 +554,13 @@ def test_a_nested_audience_is_a_refusal_not_a_server_error(
     """The attack: `aud: [["api"]]` takes the authentication path to a 500.
 
     `verify_jwt` documents that it "Returns None (never raises) for every
-    authentication failure". The stdlib claim validator builds `set(aud)`, which
-    raises `TypeError` on an unhashable member, and the raise leaves
-    `verify_jwt` altogether -- so a token that should have been refused becomes
-    a server error instead.
+    authentication failure". A claim validator that builds `set(aud)` raises
+    `TypeError` on an unhashable member, and the raise leaves `verify_jwt`
+    altogether -- so a token that should have been refused becomes a server
+    error instead.
     """
-    for build, result in probes.items():
-        if result["nested_aud"] != 401:
-            raise AssertionError(
-                f"the {build} build answered {result['nested_aud']} to a nested aud"
-            )
+    if probes["nested_aud"] != 401:
+        raise AssertionError(f"a nested aud answered {probes['nested_aud']}")
 
 
 # --- 4. an authentication backend that raises --------------------------------
@@ -793,7 +784,7 @@ async def test_the_identify_docstring_example_runs_as_written() -> None:
     The example is **read out of `identify.__doc__` and executed**, not
     transcribed into this file. A transcription would go green the moment it was
     written and stay green however the docstring drifted, which is the shape
-    docs/decisions/0024 is about: it would be testing this test.
+    AGENTS.md's has-nothing-to-check rule is about: it would be testing this test.
     """
     from wreath.auth import BearerTokenBackend, Identity, identify
     from wreath.request import Request

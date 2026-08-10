@@ -1,8 +1,8 @@
 """JWT verification: a thin facade over the native `jose` accelerators.
 
 The hot, non-crypto-inventing pieces (base64url, compact split, HS* HMAC, and
-registered-claim checks) run in `wreath._native._core` when it is present, with
-stdlib fallbacks so verification also works under `WREATH_PURE=1`. RSA (RS*/PS*)
+registered-claim checks) run in `wreath._native._core`, with stdlib fallbacks
+for a build predating `jose.c`. RSA (RS*/PS*)
 verification is done here with CPython's bigint `pow` and the stdlib — RSA
 verify is a public-key operation whose only risk is correctness, not timing, and
 its padding checks are far safer read against the stdlib than hand-written in C.
@@ -17,8 +17,7 @@ symmetric secret can never satisfy an RS*/PS*/ES256/EdDSA check, and vice versa.
 
 Every family's verifier is differentially tested against the `cryptography`
 oracle plus RFC 8032 / NIST known-answer vectors in
-`tests/compliance/test_jwt_ec.py`. A byte-identical `wreath._pure.jose` twin
-is still deferred per the C-first directive.
+`tests/compliance/test_jwt_ec.py`.
 """
 
 from __future__ import annotations
@@ -37,12 +36,10 @@ from .._native import _core
 from ._ecverify import on_p256_curve, verify_ed25519, verify_es256
 from .models import Identity
 
-# Resolve the native accelerators once, tolerating a _core built before jose.c
-# existed (each falls back to a stdlib implementation below). Mirrors the Cedar
-# engine's getattr-with-None-fallback selection.
-_native_parse = getattr(_core, "jose_parse", None) if _core is not None else None
-_native_hs = getattr(_core, "jose_verify_hs", None) if _core is not None else None
-_native_claims = getattr(_core, "jose_validate_claims", None) if _core is not None else None
+# The `jose.c` entry points, resolved once at import.
+_native_parse = _core.jose_parse
+_native_hs = _core.jose_verify_hs
+_native_claims = _core.jose_validate_claims
 
 __all__ = [
     "EcPublicKey",
@@ -81,8 +78,8 @@ _MAX_TOKEN_BYTES = 1 << 20
 #: fallback below has to as well, because `base64.urlsafe_b64decode` re-pads and
 #: silently discards anything outside its own alphabet. Without this, `<token>=`
 #: decoded to the same bytes as `<token>` and verified -- an unbounded family of
-#: strings authenticating as one token under `WREATH_PURE=1` and refused by the
-#: native build, which is exactly the sort of divergence a deployment that
+#: strings authenticating as one token on the stdlib arm and refused on the
+#: `jose.c` one, which is exactly the sort of divergence a deployment that
 #: blocklists a leaked token by its value discovers the hard way.
 #:
 #: `_parse_compact` is the only reader: `_b64url_decode` applies the same set
@@ -293,67 +290,17 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Primitive helpers: native when available, stdlib fallback otherwise.
+# Primitive helpers. Parsing, HS verification and claim validation are `jose.c`;
+# RSA, EC and Ed25519 verification are Python over the stdlib -- see the module
+# docstring for why each is where it is.
 # ---------------------------------------------------------------------------
 
 
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
     """Split + decode + JSON-parse a compact JWS. Raises ValueError if malformed."""
-    if _native_parse is not None:
-        header_bytes, payload_bytes, signing_input, signature = _native_parse(
-            token, _MAX_SEGMENT_BYTES
-        )
-    else:
-        # Enforce the same hard size caps as native jose_parse so the DoS guard
-        # (a giant segment fed to the JSON parser) holds under WREATH_PURE=1 and
-        # whenever _core is unavailable, not only on the native path.
-        if len(token) > _MAX_TOKEN_BYTES:
-            raise ValueError("compact JWT exceeds maximum size")
-        parts = token.split(".")
-        # Split the way native jose.c does. It counts separators before looking at
-        # the segments, so a wrong dot count and a right count with an empty part
-        # are different diagnoses; answering both with one message told the caller
-        # less than the shipped path does.
-        if len(parts) != 3:
-            raise ValueError("compact JWT must have exactly two dots")
-        if not all(parts):
-            raise ValueError("compact JWT has an empty segment")
-        # Bound each base64url segment before decoding. This is native's test
-        # (`b64len / 4 * 3 > max_seg`) written out, integer division included,
-        # rather than an approximation of it: an earlier
-        # `(_MAX_SEGMENT_BYTES * 4) // 3 + 4` bound differed by two characters, so
-        # segments of exactly 21848 and 21849 bytes were refused by the native path
-        # and accepted here -- one token, two verdicts, decided by which build was
-        # installed. Deriving both sides from the same expression is what stops that
-        # recurring; `tests/test_jwt_pure_parse_caps.py` pins the boundary in both
-        # modes.
-        if any(len(part) // 4 * 3 > _MAX_SEGMENT_BYTES for part in parts):
-            raise ValueError("JWT segment exceeds size cap")
-        if any(not _B64URL_SEGMENT.issuperset(part) for part in parts):
-            raise ValueError("a compact JWT segment must be unpadded base64url")
-        try:
-            header_bytes = _b64url_decode(parts[0])
-            payload_bytes = _b64url_decode(parts[1])
-            signature = _b64url_decode(parts[2])
-        except ValueError:
-            # The charset check above passes a segment whose *length* is still not
-            # a valid unpadded base64 length -- one character more than a multiple
-            # of four. Without this, `binascii.Error` escaped carrying a stdlib
-            # message ("Invalid base64-encoded string: number of data characters
-            # ..."), so the same token was refused with wreath's wording on the
-            # native path and CPython's here. It is a `ValueError` subclass, so
-            # callers caught it either way and nothing failed loudly; what leaked
-            # was an implementation detail, and only in the fallback build.
-            #
-            # `ValueError` rather than `binascii.Error` because `_b64url_decode` is
-            # now strict itself and raises the former; catching only the latter
-            # would let *its* wording through and reopen the divergence one layer
-            # down. This is the more specific message of the two -- it names the
-            # segment -- so it stays.
-            raise ValueError(
-                "a compact JWT segment must be unpadded base64url"
-            ) from None
-        signing_input = (parts[0] + "." + parts[1]).encode("ascii")
+    header_bytes, payload_bytes, signing_input, signature = _native_parse(
+        token, _MAX_SEGMENT_BYTES
+    )
     header = json.loads(header_bytes)
     claims = json.loads(payload_bytes)
     if not isinstance(header, dict) or not isinstance(claims, dict):
@@ -379,8 +326,7 @@ def peek_header(token: str) -> dict[str, Any] | None:
 
 def _verify_hs(alg: str, secret: bytes, signing_input: bytes, signature: bytes) -> bool:
     digestmod = _HASH[alg]
-    if _native_hs is not None:
-        return bool(_native_hs(digestmod, secret, signing_input, signature))
+    return bool(_native_hs(digestmod, secret, signing_input, signature))
     expected = hmac.new(secret, signing_input, digestmod).digest()
     return hmac.compare_digest(expected, signature)
 
@@ -525,10 +471,9 @@ def _reason_valid(
     audiences: tuple[str, ...],
     required: tuple[str, ...],
 ) -> int:
-    if _native_claims is not None:
-        return int(
-            _native_claims(dict(claims), now, leeway, issuer, audiences, required)
-        )
+    return int(
+        _native_claims(dict(claims), now, leeway, issuer, audiences, required)
+    )
     # Fallback mirrors jose.c's reason codes (0 == valid).
     def as_int(name: str) -> int | None:
         value = claims.get(name)

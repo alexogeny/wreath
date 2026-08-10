@@ -46,19 +46,14 @@ from collections.abc import Iterable, Sequence
 from math import ceil, cos, floor, isfinite, radians
 from typing import Any
 
+from ._geodesy import EARTH_RADIUS_M, latitude_span, longitude_span
 from ._native import _core as _core_module
-from ._pure import geospatial as _reference
 
-# `WREATH_PURE=1` is not re-read here: `wreath._native` is the one place that
-# gate lives, and it hands back `_core is None` in that mode. The `hasattr` is
-# the *other* question -- a build compiled before `geospatial.c` landed.
-if _core_module is not None and hasattr(_core_module, "geo_haversine"):
-    _haversine = _core_module.geo_haversine
-else:  # pragma: no cover - exercised under WREATH_PURE=1
-    _haversine = _reference.haversine
-
-#: Mean Earth radius in metres (IUGG), the sphere every distance here assumes.
-EARTH_RADIUS_M = _reference.EARTH_RADIUS_M
+# The `hasattr` asks one question: was this built before `geospatial.c` landed.
+#
+# The distance is the only thing selected. The radius and the two span
+# conversions above have no C arm -- see `wreath._geodesy` for why.
+_haversine = _core_module.geo_haversine
 
 __all__ = [
     "EARTH_RADIUS_M",
@@ -278,7 +273,7 @@ def bounding_boxes(centre: Coordinate, metres: float) -> tuple[BoundingBox, ...]
         raise TypeError("bounding_boxes() takes a Coordinate centre")
     span = _metres(metres)
 
-    d_lat = _reference.latitude_span(span)
+    d_lat = latitude_span(span)
     lat_min = centre.lat - d_lat
     lat_max = centre.lat + d_lat
 
@@ -291,7 +286,7 @@ def bounding_boxes(centre: Coordinate, metres: float) -> tuple[BoundingBox, ...]
     # the sentinel fires and yields the identical clamped full-longitude box.
     # Two spellings of one branch is how they drift apart later.
     widest = max(abs(lat_min), abs(lat_max))
-    d_lon = _reference.longitude_span(widest, span)
+    d_lon = longitude_span(widest, span)
     if d_lon < 0.0:
         return (BoundingBox(max(-90.0, lat_min), min(90.0, lat_max), -180.0, 180.0),)
 
@@ -582,9 +577,9 @@ def grid(extent: BoundingBox, *, metres: float) -> Grid:
             f"each half"
         )
 
-    lat_step = _reference.latitude_span(span)
+    lat_step = latitude_span(span)
     middle = (extent.lat_min + extent.lat_max) / 2.0
-    lon_step = _reference.longitude_span(middle, span)
+    lon_step = longitude_span(middle, span)
     if lon_step < 0.0:
         raise GeospatialError(
             f"a {span:g} m cell at latitude {middle:g} reaches a pole, where no "

@@ -1,21 +1,32 @@
 from __future__ import annotations
 
-import os
 import random
-import subprocess
-import sys
 
 import pytest
 
 from wreath import _client_codec
 from wreath._client_codec import serialize_request as selected_serialize_request
 from wreath._native import _client, _core
-from wreath._pure.http_client import (
-    parse_response_head,
-    response_framing,
-    response_keeps_alive,
-    serialize_request,
-)
+
+# Two implementations serve this, both C: `_client`, the dedicated outbound
+# protocol extension, and `_core`, whose inbound parser covers the same grammar.
+# `_client_codec` picks the first when the build has it. The names below are
+# `_core`'s, driven directly, so the parity tests hold two independently written
+# parsers to each other rather than one against itself.
+parse_response_head = _core.http_parse_response
+response_framing = _core.http_response_framing
+response_keeps_alive = _core.http_response_keeps_alive
+
+
+def serialize_request(
+    method: str,
+    target: bytes,
+    host: bytes,
+    *,
+    headers: tuple[tuple[bytes, bytes], ...] = (),
+    body: bytes = b"",
+) -> bytes:
+    return _core.http_serialize_request(method, target, host, tuple(headers), body)
 
 
 def test_serialize_fixed_request() -> None:
@@ -108,13 +119,21 @@ def test_parse_response_head_accepts_every_fragment_boundary() -> None:
 @pytest.mark.parametrize(
     ("data", "match"),
     [
-        (b"HTTP/2 200 OK\r\n\r\n", "version"),
-        (b"HTTP/1.1 two OK\r\n\r\n", "status"),
-        (b"HTTP/1.1 99 Nope\r\n\r\n", "status"),
-        (b"HTTP/1.1 200 O\x01K\r\n\r\n", "reason"),
-        (b"HTTP/1.1 200 OK\r\n folded: no\r\n\r\n", "folding"),
-        (b"HTTP/1.1 200 OK\r\nbad name: no\r\n\r\n", "header name"),
-        (b"HTTP/1.1 200 OK\r\nx-test: a\x01b\r\n\r\n", "header value"),
+        pytest.param(b"HTTP/2 200 OK\r\n\r\n", "status line", id="wrong-major-version"),
+        pytest.param(b"HTTP/1.1 two OK\r\n\r\n", "status line", id="non-numeric-status"),
+        pytest.param(b"HTTP/1.1 99 Nope\r\n\r\n", "status line", id="status-below-100"),
+        pytest.param(b"HTTP/1.1 200 O\x01K\r\n\r\n", "reason", id="control-byte-in-reason"),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\n folded: no\r\n\r\n", "folding", id="obs-fold"
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nbad name: no\r\n\r\n", "header name", id="space-in-name"
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nx-test: a\x01b\r\n\r\n",
+            "header value",
+            id="control-byte-in-value",
+        ),
     ],
 )
 def test_parse_response_head_rejects_malformed_input(data: bytes, match: str) -> None:
@@ -122,25 +141,19 @@ def test_parse_response_head_rejects_malformed_input(data: bytes, match: str) ->
         parse_response_head(data)
 
 
-@pytest.mark.skipif(
-    _core is None or not hasattr(_core, "http_parse_response"),
-    reason="native response parser is not built",
-)
-def test_native_response_head_parser_matches_pure_parser() -> None:
+@pytest.mark.skipif(_client is None, reason="native client extension is not built")
+def test_the_two_response_head_parsers_agree() -> None:
     samples = (
         b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}",
         b"HTTP/1.0 204 No Content\r\nx-test: yes\r\n\r\n",
         b"HTTP/1.1 304\r\n\r\n",
     )
     for sample in samples:
-        assert _core.http_parse_response(sample) == parse_response_head(sample)
+        assert _client.parse_response_head(sample) == parse_response_head(sample)
 
 
-@pytest.mark.skipif(
-    _core is None or not hasattr(_core, "http_serialize_request"),
-    reason="native request serializer is not built",
-)
-def test_native_request_serializer_matches_pure_serializer() -> None:
+@pytest.mark.skipif(_client is None, reason="native client extension is not built")
+def test_the_two_request_serializers_agree() -> None:
     cases = (
         ("GET", b"/", b"example.com", (), b""),
         (
@@ -174,23 +187,6 @@ def test_independent_native_client_module_is_selected_when_available() -> None:
     assert _client_codec._implementation == "native-client"
     assert callable(_client.serialize_request)
     assert callable(_client.parse_response_head)
-
-
-def test_wreath_pure_forces_outbound_codec_reference_implementation() -> None:
-    environment = os.environ.copy()
-    environment["WREATH_PURE"] = "1"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from wreath._client_codec import _implementation; print(_implementation)",
-        ],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert completed.stdout.strip() == "pure"
 
 
 @pytest.mark.skipif(_client is None, reason="native client extension is not built")

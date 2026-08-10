@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import builtins
 import os
+from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -35,13 +36,19 @@ _FIELD_CONSTRAINTS = _STR_CONSTRAINTS | frozenset({"ge", "le", "gt", "lt", "mult
 #: `Field(...)` keywords that carry the field's *default*, which a dataclass has
 #: a slot for: `= <value>` or `= field(default_factory=...)`.
 _FIELD_DEFAULTS = frozenset({"default", "default_factory"})
-#: `Field(...)` keywords that describe the field for a schema generator rather
-#: than change its value. Wreath's OpenAPI has no per-field description slot
-#: (`openapi.py` documents operations, not properties), so these are dropped —
-#: which is a documentation loss, never a runtime one, and so does not hold the
-#: field back. Every *other* keyword does: see `pydantic_field_rule`.
+#: `Field(...)` schema keywords. Metadata with a Wreath ``Field`` home is kept
+#: by the exact rule below; the remainder is documentation-only and may be
+#: dropped without changing runtime behaviour.
 _FIELD_DOC_ONLY = frozenset({
     "description", "title", "examples", "example", "json_schema_extra", "deprecated",
+})
+# Pydantic metadata with the same runtime meaning on ``wreath.binding.Field``.
+# ``regex`` is the Pydantic-v1 spelling of Wreath's ``pattern``. Deliberately
+# absent: ``multiple_of``, decimal digit constraints, strictness and exclusion;
+# those do not have the same contract and keep the generic review verdict.
+_WREATH_FIELD_METADATA = frozenset({
+    "alias", "description", "gt", "ge", "lt", "le",
+    "min_length", "max_length", "pattern", "regex",
 })
 
 # ormar QuerySet verb -> rule. The verb immediately after `.objects.` is the one
@@ -60,6 +67,7 @@ _QUERY_RULE = {
     "values": "orm.query.values",
     "values_list": "orm.query.values",
     "fields": "orm.query.values",
+    "paginate": "orm.query",
     "bulk_create": "orm.query.bulk",
     "bulk_update": "orm.query.bulk",
     "count": "orm.query.count",
@@ -126,6 +134,7 @@ _MECHANICAL_TAIL: dict[str, str] = {
     "count": "kwargs",
     "exists": "kwargs",
     "get_or_none": "kwargs",
+    "get": "kwargs",
     # A second `filter` is another `.where(...)`; wreath ands them together the
     # same way ormar does. `exclude` is deliberately absent — it negates, which
     # is a different call, and the translated message does not describe it.
@@ -133,6 +142,7 @@ _MECHANICAL_TAIL: dict[str, str] = {
     "limit": "value",
     "offset": "value",
     "order_by": "columns",
+    "paginate": "page",
     # `filter(a=1).select_related("owner")` is two rewrites that are each
     # already determined on their own — a `.where(...)` and an `.include(...)`.
     # Leaving them off this table meant that putting two translatable calls next
@@ -157,28 +167,162 @@ _QUERY_EXACT_RULE = {
     "order_by": "orm.query.order_exact",
     "select_related": "orm.query.eager_exact",
     "prefetch_related": "orm.query.eager_exact",
+    "select_all": "orm.query.select_all_exact",
+    "get_or_create": "orm.query.get_or_create_exact",
+    "values": "orm.query.values_exact",
+    "values_list": "orm.query.values_exact",
+    "paginate": "orm.query.page_exact",
     "limit": "orm.query.page_exact",
     "offset": "orm.query.page_exact",
 }
 
 
-def _eager_names_are_literal(call: ast.Call | None) -> bool:
+def _projection_names(call: ast.Call | None) -> tuple[str, ...] | None:
+    """Literal field names selected by an ormar ``values`` call."""
+    if call is None:
+        return None
+    allowed = {"fields", "exclude_through"}
+    if any(keyword.arg not in allowed for keyword in call.keywords):
+        return None
+    exclude = next(
+        (keyword.value for keyword in call.keywords if keyword.arg == "exclude_through"),
+        None,
+    )
+    if exclude is not None and not _is_true(exclude):
+        return None
+    fields = next(
+        (keyword.value for keyword in call.keywords if keyword.arg == "fields"),
+        None,
+    )
+    arguments: tuple[ast.expr, ...]
+    if fields is not None:
+        if call.args:
+            return None
+        arguments = (fields,)
+    else:
+        arguments = tuple(call.args)
+    names: list[str] = []
+    for argument in arguments:
+        values = (
+            argument.elts
+            if isinstance(argument, (ast.List, ast.Tuple, ast.Set))
+            else (argument,)
+        )
+        for value in values:
+            if not (
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and value.value
+            ):
+                return None
+            names.append(value.value)
+    return tuple(names) if names else None
+
+
+def _projection_is_mechanical(
+    call: ast.Call | None,
+    *,
+    model: str = "",
+    relations: dict[str, dict[str, str]] | None = None,
+    columns: dict[str, set[str]] | None = None,
+) -> bool:
+    """Whether a literal dictionary projection names known model fields."""
+    names = _projection_names(call)
+    if names is None:
+        return False
+    declared = set((columns or {}).get(model, ())) | set(
+        (relations or {}).get(model, ())
+    )
+    return not declared or set(names) <= declared
+
+
+def _pagination_values(call: ast.Call | None) -> tuple[ast.expr, ast.expr] | None:
+    """The page and page-size expressions of a static Ormar paginate call."""
+    if call is None or len(call.args) > 2:
+        return None
+    values: dict[str, ast.expr] = {}
+    for name, argument in zip(("page", "page_size"), call.args, strict=False):
+        values[name] = argument
+    for keyword in call.keywords:
+        if keyword.arg not in {"page", "page_size"} or keyword.arg in values:
+            return None
+        values[keyword.arg] = keyword.value
+    page = values.get("page")
+    page_size = values.get("page_size")
+    return (page, page_size) if page is not None and page_size is not None else None
+
+
+def _order_argument_is_mechanical(argument: ast.expr, model: str = "") -> bool:
+    """A literal column name or an already-explicit model order expression."""
+    if isinstance(argument, ast.Constant):
+        return isinstance(argument.value, str) and bool(argument.value.strip("-"))
+    expression = argument
+    if (
+        isinstance(expression, ast.Call)
+        and not expression.args
+        and not expression.keywords
+        and isinstance(expression.func, ast.Attribute)
+        and expression.func.attr in {"asc", "desc"}
+    ):
+        expression = expression.func.value
+    if not isinstance(expression, ast.Attribute):
+        return False
+    return bool(model) and ast.unparse(expression.value) == model
+
+
+def _eager_paths(call: ast.Call | None) -> tuple[str, ...] | None:
+    if call is None or not call.args or call.keywords:
+        return None
+    paths: list[str] = []
+    for argument in call.args:
+        values = (
+            argument.elts
+            if isinstance(argument, (ast.List, ast.Tuple, ast.Set))
+            else (argument,)
+        )
+        for value in values:
+            if not (
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and value.value
+            ):
+                return None
+            paths.append(value.value)
+    return tuple(paths) if paths else None
+
+
+def _relation_path_resolves(
+    model: str, path: str, relations: dict[str, dict[str, str]]
+) -> bool:
+    current = model
+    for name in path.split("__"):
+        target = relations.get(current, {}).get(name)
+        if target is None:
+            return False
+        current = target
+    return True
+
+
+def _eager_names_are_literal(
+    call: ast.Call | None,
+    *,
+    model: str = "",
+    relations: dict[str, dict[str, str]] | None = None,
+) -> bool:
     """Whether `select_related(...)` names relations this analyzer can resolve.
 
     `select_related("llama")` is `.include(Model.llama.selectin())` — a
     rename. `select_all()` is not: it means "every relation", and wreath has
     no such switch, so the set has to be written out by someone who knows which
-    ones the caller actually reads. A `a__b` trail is a nested include and a
-    non-literal is a runtime name; neither is resolved here.
+    ones the caller actually reads. A non-literal is a runtime name. A nested
+    ``a__b`` trail carries across when the tree index resolves every relation.
     """
-    if call is None or not call.args or call.keywords:
+    paths = _eager_paths(call)
+    if paths is None:
         return False
-    return all(
-        isinstance(argument, ast.Constant)
-        and isinstance(argument.value, str)
-        and "__" not in argument.value
-        for argument in call.args
-    )
+    if not model or relations is None or model not in relations:
+        return all("__" not in path for path in paths)
+    return all(_relation_path_resolves(model, path, relations) for path in paths)
 
 # Tail verbs that only a specific head makes mechanical. `first` is the case:
 # `orm.query.first` is held back because "first without an order is not
@@ -425,6 +569,8 @@ def query_rule(
     model: str = "",
     relations: dict[str, dict[str, str]] | None = None,
     columns: dict[str, set[str]] | None = None,
+    tables: dict[str, str] | None = None,
+    unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
     plain_mappings: frozenset[str] = frozenset(),
 ) -> str:
     """The rule for a `.objects.<verb>` chain, or the generic one.
@@ -443,15 +589,42 @@ def query_rule(
     exact = _QUERY_EXACT_RULE.get(verb or "")
     if exact is None:
         return base
-    if verb == "order_by":
+    if verb == "get_or_create":
+        if call is None or call.args or not call.keywords:
+            return base
+        names = {keyword.arg for keyword in call.keywords}
+        if None in names or "_defaults" in names or "defaults" in names:
+            return base
+        declared = (columns or {}).get(model)
+        if declared is not None and not names <= declared:
+            return base
+    elif verb in ("values", "values_list"):
+        if not _projection_is_mechanical(
+            call, model=model, relations=relations, columns=columns
+        ):
+            return base
+    elif verb == "select_all":
+        # An unknown model is not a relation-free model. `select_all()` is an
+        # exact no-op only where the tree index saw the declaration and found
+        # no relationships on it.
+        if relations is None or model not in relations or relations[model]:
+            return base
+        if call is None or call.args or call.keywords:
+            return base
+    elif verb == "order_by":
         # The head's own arguments are column names, not filters.
-        if not _tail_step_is_mechanical("order_by", call):
+        if not _tail_step_is_mechanical("order_by", call, model=model):
             return base
     elif verb in ("limit", "offset"):
         if not _tail_step_is_mechanical(verb, call):
             return base
+    elif verb == "paginate":
+        if _pagination_values(call) is None:
+            return base
     elif verb in ("select_related", "prefetch_related"):
-        if not _eager_names_are_literal(call):
+        if not _eager_names_are_literal(
+            call, model=model, relations=relations
+        ):
             return base
     elif verb == "create":
         if call is None or call.args:
@@ -464,19 +637,52 @@ def query_rule(
         plain_mappings=plain_mappings,
     ):
         return base
-    if not all(
-        _tail_step_is_mechanical(
+    ordered = verb == "order_by"
+    pending_projection = False
+    for step, node in tail:
+        if step == "fields":
+            if not _projection_is_mechanical(
+                node, model=model, relations=relations, columns=columns
+            ):
+                return base
+            pending_projection = True
+            continue
+        if step == "values":
+            empty_values = node is not None and not node.args and not node.keywords
+            if not (
+                (pending_projection and empty_values)
+                or _projection_is_mechanical(
+                    node, model=model, relations=relations, columns=columns
+                )
+            ):
+                return base
+            pending_projection = False
+            continue
+        if step == "values_list":
+            empty_values = node is not None and not node.args and not node.keywords
+            if not (
+                (pending_projection and empty_values)
+                or _projection_is_mechanical(
+                    node, model=model, relations=relations, columns=columns
+                )
+            ):
+                return base
+            pending_projection = False
+            continue
+        if pending_projection:
+            return base
+        context = "order_by" if ordered else verb or ""
+        if not _tail_step_is_mechanical(
             step,
             node,
-            verb or "",
+            context,
             model=model,
             relations=relations,
             columns=columns,
             plain_mappings=plain_mappings,
-        )
-        for step, node in tail
-    ):
-        return base
+        ):
+            return base
+        ordered = ordered or step == "order_by"
     return exact
 
 
@@ -517,18 +723,21 @@ def _tail_step_is_mechanical(
     if kind == "value":
         # `limit(n)`/`offset(n)`: one argument, whatever it is, carried across.
         return len(call.args) == 1 and not call.keywords
+    if kind == "page":
+        return _pagination_values(call) is not None
     if kind == "empty":
         return not call.args and not call.keywords
     if kind == "write_values":
         return not call.args and bool(call.keywords)
     if kind == "relations":
-        return _eager_names_are_literal(call)
+        return _eager_names_are_literal(
+            call, model=model, relations=relations
+        )
     # `order_by("name")` / `order_by("-created")` resolve to `Model.<col>` and
     # `.desc()`. A non-literal is a runtime column name, which is a lookup this
     # analyzer cannot do.
     return bool(call.args) and not call.keywords and all(
-        isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-        for argument in call.args
+        _order_argument_is_mechanical(argument, model) for argument in call.args
     )
 
 
@@ -957,6 +1166,8 @@ def _index_tree(
     dict[str, set[str]],
     dict[str, set[str]],
     dict[str, dict[str, str]],
+    dict[str, str],
+    dict[str, tuple[frozenset[str], ...]],
     set[str],
 ]:
     """Pass 1: model/settings class names, and each ORM model's declared columns.
@@ -964,10 +1175,18 @@ def _index_tree(
     The columns are what let a GraphQL type be compared with the model it claims
     to mirror; the names alone can only say the model exists.
     """
-    index: dict[str, set[str]] = {"pydantic": set(), "settings": set(), "orm": set()}
+    index: dict[str, set[str]] = {
+        "pydantic": set(),
+        "settings": set(),
+        "orm": set(),
+        "orm_mixin": set(),
+    }
     orm_columns: dict[str, set[str]] = {}
     orm_relations: dict[str, dict[str, str]] = {}
+    orm_tables: dict[str, str] = {}
+    orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] = {}
     positional_calls: set[str] = set()
+    classes: list[tuple[ast.ClassDef, _Imports]] = []
     for path in files:
         try:
             tree = _parse_file(path)
@@ -983,6 +1202,7 @@ def _index_tree(
                 elif isinstance(node.func, ast.Attribute):
                     positional_calls.add(node.func.attr)
             if isinstance(node, ast.ClassDef):
+                classes.append((node, imports))
                 kind = _base_kind(imports, node)
                 if kind == "pydantic":
                     index["pydantic"].add(node.name)
@@ -1012,7 +1232,145 @@ def _index_tree(
                         ):
                             relations[statement.target.id] = target.value
                     orm_relations[node.name] = relations
-    return index, orm_columns, orm_relations, positional_calls
+                    table = _declared_table(node)
+                    if table is not None:
+                        orm_tables[node.name] = table
+                    orm_unique_constraints[node.name] = _declared_unique_constraints(
+                        node, imports
+                    )
+                elif any(
+                    isinstance(statement, (ast.AnnAssign, ast.Assign))
+                    and isinstance(statement.value, ast.Call)
+                    and (
+                        isinstance(statement.target, ast.Name)
+                        if isinstance(statement, ast.AnnAssign)
+                        else len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name)
+                    )
+                    and imports.origin(statement.value.func).startswith("ormar.")
+                    for statement in node.body
+                ):
+                    # Ormar permits a plain class containing column declarations
+                    # to act as a model mixin. Wreath supports the same shape as
+                    # a table-less Model subclass, so index it across files and
+                    # let the emitter move the shared columns once at their
+                    # declaration rather than copying them into every table.
+                    index["orm_mixin"].add(node.name)
+                    orm_columns[node.name] = _declared_columns(node)
+    # Framework model families are transitive. A direct ``BaseModel`` class is
+    # only the root; every ordinary subclass and every ``model_as_partial()``
+    # subclass still describes a request/response model and must become a
+    # dataclass too. Stopping at the root produced syntactically valid output in
+    # which the subclass's own annotations were invisible to dataclasses and to
+    # Wreath's binder.
+    changed = True
+    while changed:
+        changed = False
+        for node, _imports in classes:
+            if node.name in index["pydantic"] or node.name in index["settings"]:
+                continue
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else None
+                partial_owner = (
+                    base.func.value.id
+                    if isinstance(base, ast.Call)
+                    and isinstance(base.func, ast.Attribute)
+                    and base.func.attr == "model_as_partial"
+                    and isinstance(base.func.value, ast.Name)
+                    else None
+                )
+                if name in index["pydantic"] or partial_owner in index["pydantic"]:
+                    index["pydantic"].add(node.name)
+                    changed = True
+                    break
+                if name in index["settings"]:
+                    index["settings"].add(node.name)
+                    changed = True
+                    break
+    return (
+        index,
+        orm_columns,
+        orm_relations,
+        orm_tables,
+        orm_unique_constraints,
+        positional_calls,
+    )
+
+
+def _declared_table(cls: ast.ClassDef) -> str | None:
+    """The literal table name on an ormar configuration, when present."""
+    for statement in cls.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "ormar_config"
+                for target in statement.targets
+            )
+            and isinstance(statement.value, ast.Call)
+        ):
+            continue
+        for keyword in statement.value.keywords:
+            if (
+                keyword.arg == "tablename"
+                and isinstance(keyword.value, ast.Constant)
+                and isinstance(keyword.value.value, str)
+            ):
+                return keyword.value.value
+    return None
+
+
+def _declared_unique_constraints(
+    cls: ast.ClassDef, imports: _Imports
+) -> tuple[frozenset[str], ...]:
+    """Unique column sets that PostgreSQL can arbitrate for get-or-create."""
+    constraints: list[frozenset[str]] = []
+    for statement in cls.body:
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and isinstance(statement.value, ast.Call)
+            and any(
+                keyword.arg == "unique" and _is_true(keyword.value)
+                for keyword in statement.value.keywords
+            )
+        ):
+            constraints.append(frozenset((statement.target.id,)))
+        if not (
+            isinstance(statement, ast.Assign)
+            and isinstance(statement.value, ast.Call)
+        ):
+            continue
+        values = next(
+            (
+                keyword.value
+                for keyword in statement.value.keywords
+                if keyword.arg == "constraints"
+            ),
+            None,
+        )
+        if not isinstance(values, (ast.List, ast.Tuple)):
+            continue
+        for value in values.elts:
+            if not (
+                isinstance(value, ast.Call)
+                and imports.origin(value.func).split(".")[-1] == "UniqueColumns"
+                and value.args
+                and all(
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    for argument in value.args
+                )
+            ):
+                continue
+            constraints.append(
+                frozenset(
+                    argument.value
+                    for argument in value.args
+                    if isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                )
+            )
+    return tuple(constraints)
 
 
 def _declared_columns(cls: ast.ClassDef) -> set[str]:
@@ -1059,11 +1417,109 @@ def _plain_graphql_dataclass(imports: _Imports, node: ast.ClassDef) -> bool:
     return found
 
 
+def _literal_members(annotation: ast.AST, imports: _Imports) -> frozenset[object] | None:
+    """The constant members of one ``Literal[...]`` annotation."""
+    if not (
+        isinstance(annotation, ast.Subscript)
+        and imports.origin(annotation.value) in {"typing.Literal", "typing_extensions.Literal"}
+    ):
+        return None
+    values = (
+        annotation.slice.elts
+        if isinstance(annotation.slice, ast.Tuple)
+        else [annotation.slice]
+    )
+    if not all(isinstance(value, ast.Constant) for value in values):
+        return None
+    return frozenset(value.value for value in values if isinstance(value, ast.Constant))
+
+
+def redundant_literal_validator(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    parents: dict[int, ast.AST],
+    imports: _Imports,
+) -> bool:
+    """Whether a field validator only restates a ``Literal`` membership test."""
+    decorator = next(
+        (
+            item
+            for item in node.decorator_list
+            if isinstance(item, ast.Call)
+            and imports.origin(item.func).split(".")[-1] == "field_validator"
+        ),
+        None,
+    )
+    if decorator is None or len(decorator.args) != 1 or decorator.keywords:
+        return False
+    field_arg = decorator.args[0]
+    if not isinstance(field_arg, ast.Constant) or not isinstance(field_arg.value, str):
+        return False
+    owner: ast.AST | None = parents.get(id(node))
+    if not isinstance(owner, ast.ClassDef):
+        return False
+    field = next(
+        (
+            statement
+            for statement in owner.body
+            if isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == field_arg.value
+        ),
+        None,
+    )
+    if field is None or (members := _literal_members(field.annotation, imports)) is None:
+        return False
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    if len(body) != 2 or not isinstance(body[0], ast.If) or not isinstance(body[1], ast.Return):
+        return False
+    check = body[0].test
+    returned = body[1].value
+    if not (
+        isinstance(check, ast.Compare)
+        and isinstance(check.left, ast.Name)
+        and len(check.ops) == 1
+        and isinstance(check.ops[0], ast.NotIn)
+        and len(check.comparators) == 1
+        and isinstance(check.comparators[0], (ast.Set, ast.Tuple, ast.List))
+        and isinstance(returned, ast.Name)
+        and returned.id == check.left.id
+        and len(body[0].body) == 1
+        and isinstance(body[0].body[0], ast.Raise)
+        and not body[0].orelse
+    ):
+        return False
+    compared = check.comparators[0].elts
+    return all(isinstance(value, ast.Constant) for value in compared) and frozenset(
+        value.value for value in compared if isinstance(value, ast.Constant)
+    ) == members
+
+
+def _middleware_writes_state(node: ast.ClassDef) -> bool:
+    """Whether a middleware class assigns through a ``.state`` attribute."""
+    for inner in ast.walk(node):
+        targets: list[ast.AST] = []
+        if isinstance(inner, ast.Assign):
+            targets.extend(inner.targets)
+        elif isinstance(inner, ast.AnnAssign):
+            targets.append(inner.target)
+        for target in targets:
+            current = target
+            while isinstance(current, ast.Attribute):
+                if current.attr == "state":
+                    return True
+                current = current.value
+    return False
+
+
 class _Analyzer(ast.NodeVisitor):
     def __init__(self, path: Path, root: Path, imports: _Imports, index: dict[str, set[str]],
                  pk_types: dict[str, str] | None = None,
                  orm_columns: dict[str, set[str]] | None = None,
                  orm_relations: dict[str, dict[str, str]] | None = None,
+                 orm_tables: dict[str, str] | None = None,
+                 orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
                  positional_model_calls: set[str] | frozenset[str] = frozenset()) -> None:
         self.rel = _relative_to(path, root)
         self.imports = imports
@@ -1074,6 +1530,8 @@ class _Analyzer(ast.NodeVisitor):
         # that comparison needs the columns, not just the class name.
         self.orm_columns = orm_columns or {}
         self.orm_relations = orm_relations or {}
+        self.orm_tables = orm_tables or {}
+        self.orm_unique_constraints = orm_unique_constraints or {}
         self.positional_model_calls = set(positional_model_calls)
         # Names the module hands to an application as `lifespan=`; filled by
         # `visit_Module`, because the `FastAPI(lifespan=...)` call sits below the
@@ -1141,7 +1599,15 @@ class _Analyzer(ast.NodeVisitor):
                 self._emit(rule_id, node.lineno, reason)
         kind = _base_kind(self.imports, node)
         if kind == "middleware":
-            self._emit("mw.custom", node.lineno)
+            lowered = node.name.lower()
+            self._emit(
+                "mw.exception"
+                if "exception" in lowered or "error" in lowered
+                else "mw.state"
+                if "state" in lowered or _middleware_writes_state(node)
+                else "mw.custom",
+                node.lineno,
+            )
         elif kind == "pydantic":
             self._emit("pydantic.model", node.lineno)
             offenders = dataclass_needs_kw_only(self.imports, node)
@@ -1303,7 +1769,12 @@ class _Analyzer(ast.NodeVisitor):
                 elif attr == "exception_handler":
                     self._emit("exc.handler", dec.lineno)
             if tail in ("field_validator", "model_validator", "validator", "root_validator"):
-                self._emit("pydantic.validator", getattr(dec, "lineno", node.lineno))
+                self._emit(
+                    "pydantic.validator_literal"
+                    if redundant_literal_validator(node, self._parents, self.imports)
+                    else "pydantic.validator",
+                    getattr(dec, "lineno", node.lineno),
+                )
             elif tail == "asynccontextmanager":
                 self._scan_lifespan(node)
             elif tail == "shared_task" or (tail == "task" and "celery" in origin.lower()):
@@ -1469,6 +1940,18 @@ class _Analyzer(ast.NodeVisitor):
             service = _boto3_service(node)
             if service == "s3":
                 self._once_emit("boto3-s3", "ext.boto3_s3", node.lineno)
+            elif service in {"scheduler", "events"}:
+                self._once_emit(
+                    "boto3-scheduler", "ext.boto3_scheduler", node.lineno
+                )
+            elif service in {"cloudwatch", "logs"}:
+                self._once_emit(
+                    "boto3-observability", "ext.boto3_observability", node.lineno
+                )
+            elif service in {"cognito-idp", "cognito-identity"}:
+                self._once_emit(
+                    "boto3-identity", "ext.boto3_identity", node.lineno
+                )
             else:
                 self._once_emit("boto3", "ext.boto3", node.lineno)
         elif origin in ("hmac.new", "hmac.compare_digest"):
@@ -1479,7 +1962,13 @@ class _Analyzer(ast.NodeVisitor):
         elif "dlock" in origin:
             self._once_emit("dlock", "lock.dlock", node.lineno)
         elif tail in ("decode", "get_unverified_header") and "jwt" in origin.lower():
-            self._emit("auth.jwt", node.lineno)
+            claims = {keyword.arg for keyword in node.keywords}
+            self._emit(
+                "auth.oidc_manual"
+                if {"issuer", "audience"} <= claims
+                else "auth.jwt",
+                node.lineno,
+            )
         elif tail == "OAuth2Session" or "authlib" in origin:
             self._emit("auth.oauth", node.lineno)
         elif origin.startswith("aiometer"):
@@ -1498,24 +1987,30 @@ class _Analyzer(ast.NodeVisitor):
         parent = self._parents.get(id(node))
         if isinstance(parent, ast.Await):
             return True
-        if not (
-            isinstance(parent, (ast.Assign, ast.AnnAssign))
-            and (
-                isinstance(getattr(parent, "target", None), ast.Name)
-                or (
-                    isinstance(parent, ast.Assign)
-                    and len(parent.targets) == 1
-                    and isinstance(parent.targets[0], ast.Name)
-                )
-            )
+        while isinstance(
+            parent,
+            (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.List, ast.Tuple),
         ):
-            return False
-        target = (
-            parent.target
-            if isinstance(parent, ast.AnnAssign)
-            else parent.targets[0]
-        )
-        if not isinstance(target, ast.Name):
+            parent = self._parents.get(id(parent))
+        tracked: set[str] = set()
+        if isinstance(parent, ast.AnnAssign) and isinstance(parent.target, ast.Name):
+            tracked.add(parent.target.id)
+        elif (
+            isinstance(parent, ast.Assign)
+            and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Name)
+        ):
+            tracked.add(parent.targets[0].id)
+        elif (
+            isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Attribute)
+            and parent.func.attr == "append"
+            and isinstance(parent.func.value, ast.Name)
+            and len(parent.args) == 1
+            and parent.args[0] is node
+        ):
+            tracked.add(parent.func.value.id)
+        else:
             return False
         ancestor: ast.AST | None = parent
         while ancestor is not None and not isinstance(
@@ -1524,17 +2019,42 @@ class _Analyzer(ast.NodeVisitor):
             ancestor = self._parents.get(id(ancestor))
         if not isinstance(ancestor, ast.AsyncFunctionDef):
             return False
+        # Follow the exact local accumulation shape without inventing a task
+        # compatibility layer: ``task = create_task(...); tasks.append(task)``
+        # and ``tasks.append(create_task(...))`` are both joined by a later
+        # ``gather(*tasks)``. Aliases and helper calls remain conservative.
         for candidate in ast.walk(ancestor):
-            if not isinstance(candidate, ast.Await):
+            if not (
+                isinstance(candidate, ast.Call)
+                and candidate.lineno >= node.lineno
+                and isinstance(candidate.func, ast.Attribute)
+                and candidate.func.attr == "append"
+                and isinstance(candidate.func.value, ast.Name)
+                and len(candidate.args) == 1
+                and isinstance(candidate.args[0], ast.Name)
+                and candidate.args[0].id in tracked
+            ):
                 continue
-            if isinstance(candidate.value, ast.Name) and candidate.value.id == target.id:
+            tracked.add(candidate.func.value.id)
+        for candidate in ast.walk(ancestor):
+            if not isinstance(candidate, ast.Await) or candidate.lineno < node.lineno:
+                continue
+            if isinstance(candidate.value, ast.Name) and candidate.value.id in tracked:
                 return True
             if isinstance(candidate.value, ast.Call):
                 awaited = candidate.value
                 if (
                     self.imports.origin(awaited.func) in ("asyncio.gather", "asyncio.wait")
                     and any(
-                        isinstance(argument, ast.Name) and argument.id == target.id
+                        (
+                            isinstance(argument, ast.Name)
+                            and argument.id in tracked
+                        )
+                        or (
+                            isinstance(argument, ast.Starred)
+                            and isinstance(argument.value, ast.Name)
+                            and argument.value.id in tracked
+                        )
                         for argument in awaited.args
                     )
                 ):
@@ -1546,7 +2066,14 @@ class _Analyzer(ast.NodeVisitor):
         # `Model.objects.<verb>` — the verb is what names the rewrite, so claim
         # the `.objects` underneath it. Visiting is top-down, so this node is
         # always reached before the one it claims.
-        if isinstance(value, ast.Attribute) and value.attr == "objects":
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "objects"
+            and node.attr == "__class__"
+        ):
+            self._claimed_objects.add(id(value))
+            self._emit("orm.manager_patch", value.lineno)
+        elif isinstance(value, ast.Attribute) and value.attr == "objects":
             self._claimed_objects.add(id(value))
             call = self._parents.get(id(node))
             model = ast.unparse(value.value)
@@ -1558,6 +2085,8 @@ class _Analyzer(ast.NodeVisitor):
                     model=model,
                     relations=self.orm_relations,
                     columns=self.orm_columns,
+                    tables=self.orm_tables,
+                    unique_constraints=self.orm_unique_constraints,
                     plain_mappings=plain_filter_mappings(
                         call if isinstance(call, ast.Call) else None, self._parents
                     ),
@@ -1567,11 +2096,29 @@ class _Analyzer(ast.NodeVisitor):
         elif node.attr == "objects" and id(node) not in self._claimed_objects:
             # `.objects` used as a value rather than called through: still a
             # query surface, but there is no verb to be specific about.
-            self._emit("orm.query", node.lineno)
+            self._emit("orm.manager_value", node.lineno)
         elif node.attr == "get_pydantic":
             self._emit(pydantic_projection_rule(node, self._parents), node.lineno)
         elif node.attr == "dependency_overrides":
-            self._once_emit("dep_override", "test.dependency_override", node.lineno)
+            parent = self._parents.get(id(node))
+            key = parent.slice if isinstance(parent, ast.Subscript) else None
+            key_name = (
+                key.id
+                if isinstance(key, ast.Name)
+                else key.attr
+                if isinstance(key, ast.Attribute)
+                else ""
+            ).lower()
+            is_auth = any(
+                word in key_name for word in ("auth", "user", "principal", "ranger")
+            )
+            self._once_emit(
+                "dep_override",
+                "test.dependency_override_auth"
+                if is_auth
+                else "test.dependency_override_adapter",
+                node.lineno,
+            )
         elif node.attr.startswith("HTTP_") and self.imports.origin(value) in (
             "fastapi.status", "starlette.status",
         ):
@@ -1692,7 +2239,20 @@ class _Analyzer(ast.NodeVisitor):
         if tail == "CORSMiddleware":
             self._emit("mw.cors", node.lineno)
         elif tail == "TrustedHostMiddleware":
-            self._emit("mw.trustedhost", node.lineno)
+            allowed = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "allowed_hosts"),
+                None,
+            )
+            wildcard = (
+                isinstance(allowed, (ast.List, ast.Tuple))
+                and len(allowed.elts) == 1
+                and isinstance(allowed.elts[0], ast.Constant)
+                and allowed.elts[0].value == "*"
+            )
+            self._emit(
+                "mw.trustedhost_noop" if wildcard else "mw.trustedhost",
+                node.lineno,
+            )
         else:
             self._emit("mw.custom", node.lineno)
 
@@ -1757,25 +2317,37 @@ def pydantic_field_rule(imports: _Imports, stmt: ast.AnnAssign) -> str:
     not disagree about one line, and the emitter must only rewrite what the
     report calls determined.
 
-    A dataclass field has exactly one slot — the default — so a `Field(...)`
-    translates when everything it carries either *is* the default or is
-    documentation wreath has nowhere to put:
+    A dataclass field has one default slot and Wreath's ``Field`` carries its
+    wire metadata, so both pieces translate when every keyword has a known home:
 
     * `pydantic.field` — a bare annotation, a plain default, or a `Field(...)`
       holding only `default=`/`default_factory=` and doc keywords. The marker is
       deleted and the default written as an ordinary Python default.
-    * `pydantic.field_constraint` — `ge=`/`max_length=`/a `con*` annotation. The
-      constraint has three possible homes and they do not behave alike, so it
-      stays for a human.
-    * `pydantic.field_marker` — anything else the marker carries. `alias=` is
-      the one that matters: wreath binds a body field by its own name, so
-      dropping the alias silently renames it on the wire.
+    * `pydantic.field_metadata_exact` — aliases and supported constraints move
+      to ``Annotated[T, wreath.binding.Field(...)]`` with the default outside.
+    * `pydantic.field_constraint` — an unsupported constraint such as
+      ``multiple_of=`` or a v1 ``con*`` annotation stays for a human.
+    * `pydantic.field_marker` — anything else the marker carries.
     """
-    if _is_field_constraint(stmt.value, imports) or _is_constrained_annotation(
+    value = stmt.value
+    if (
+        isinstance(value, ast.Call)
+        and imports.origin(value.func).startswith("pydantic.")
+        and imports.origin(value.func).split(".")[-1] == "Field"
+        and len(value.args) <= 1
+        and any(keyword.arg in _WREATH_FIELD_METADATA for keyword in value.keywords)
+        and all(
+            keyword.arg is not None
+            and keyword.arg
+            in _FIELD_DEFAULTS | _FIELD_DOC_ONLY | _WREATH_FIELD_METADATA
+            for keyword in value.keywords
+        )
+    ):
+        return "pydantic.field_metadata_exact"
+    if _is_field_constraint(value, imports) or _is_constrained_annotation(
         stmt.annotation, imports
     ):
         return "pydantic.field_constraint"
-    value = stmt.value
     if not (
         isinstance(value, ast.Call)
         and imports.origin(value.func).split(".")[-1] == "Field"
@@ -1811,7 +2383,10 @@ def field_has_default(imports: _Imports, stmt: ast.AnnAssign) -> bool:
     if value is None:
         return False
     if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
-        if pydantic_field_rule(imports, stmt) != "pydantic.field":
+        if pydantic_field_rule(imports, stmt) not in {
+            "pydantic.field",
+            "pydantic.field_metadata_exact",
+        }:
             return True                       # left in place, `=` and all
         if any(keyword.arg in _FIELD_DEFAULTS for keyword in value.keywords):
             return True
@@ -2204,11 +2779,13 @@ _RUNNING_VERBS = frozenset({
     "all",
     "get_or_none",
     "get",
+    "first",
     "create",
     "count",
     "exists",
     "update",
     "delete",
+    "get_or_create",
 })
 
 
@@ -2217,6 +2794,8 @@ def _function_query_names(
     imports: _Imports,
     orm_columns: dict[str, set[str]],
     orm_relations: dict[str, dict[str, str]],
+    orm_tables: dict[str, str],
+    orm_unique_constraints: dict[str, tuple[frozenset[str], ...]],
 ) -> tuple[set[str], set[str]]:
     """`(functions that run a query, every function name defined here)`.
 
@@ -2245,6 +2824,8 @@ def _function_query_names(
             model=ast.unparse(node.value.value),
             relations=orm_relations,
             columns=orm_columns,
+            tables=orm_tables,
+            unique_constraints=orm_unique_constraints,
             plain_mappings=plain_filter_mappings(
                 call if isinstance(call, ast.Call) else None, parents
             ),
@@ -2274,6 +2855,34 @@ def _called_names(tree: ast.Module) -> dict[str, set[str]]:
     return out
 
 
+def _stub_definition_counts(tree: ast.Module) -> Counter[str]:
+    """Count protocol/ABC declarations that intentionally have no body."""
+    counts: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = node.body
+        if len(body) != 1:
+            continue
+        statement = body[0]
+        if isinstance(statement, ast.Pass):
+            counts[node.name] += 1
+        elif (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and statement.value.value is Ellipsis
+        ):
+            counts[node.name] += 1
+        elif (
+            isinstance(statement, ast.Raise)
+            and isinstance(statement.exc, ast.Call)
+            and isinstance(statement.exc.func, ast.Name)
+            and statement.exc.func.id == "NotImplementedError"
+        ):
+            counts[node.name] += 1
+    return counts
+
+
 #: Query verdicts the emitter writes out in full. Defined here rather than in
 #: `emit` because `TreeContext` has to agree with it while deciding which
 #: functions need a session, and a second copy of the list would drift.
@@ -2282,7 +2891,9 @@ QUERY_TRANSLATED = frozenset({
     "orm.query.create_exact", "orm.query.all",
     "orm.query.page_exact",
     "orm.query.count", "orm.query.exists", "orm.query.order_exact",
-    "orm.query.eager_exact",
+    "orm.query.eager_exact", "orm.query.select_all_exact",
+    "orm.query.get_or_create_exact",
+    "orm.query.values_exact",
 })
 
 
@@ -2306,6 +2917,8 @@ def session_functions(
     *,
     orm_columns: dict[str, set[str]] | None = None,
     orm_relations: dict[str, dict[str, str]] | None = None,
+    orm_tables: dict[str, str] | None = None,
+    orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
 ) -> frozenset[str]:
     """Every function name that has to take a session, once it has spread.
 
@@ -2328,6 +2941,7 @@ def session_functions(
     runs: set[str] = set()
     calls: dict[str, set[str]] = {}
     definitions: dict[str, int] = {}
+    stubs: Counter[str] = Counter()
     for path in files:
         try:
             tree = _parse_file(path)
@@ -2336,20 +2950,30 @@ def session_functions(
                 on_skip(path, exc)
             continue
         imports = _Imports().visit(tree)
-        module_runs, module_defined = _function_query_names(
-            tree, imports, orm_columns or {}, orm_relations or {}
+        stubs.update(_stub_definition_counts(tree))
+        module_runs, _module_defined = _function_query_names(
+            tree,
+            imports,
+            orm_columns or {},
+            orm_relations or {},
+            orm_tables or {},
+            orm_unique_constraints or {},
         )
         runs |= module_runs
-        for name in module_defined:
-            definitions[name] = definitions.get(name, 0) + 1
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                definitions[candidate.name] = definitions.get(candidate.name, 0) + 1
         for name, called in _called_names(tree).items():
             calls.setdefault(name, set()).update(called)
-    # A name is only followed when it can only mean one thing: defined exactly
-    # once in the tree, and not something a built-in type also answers to. The
-    # tree has an `async def all(self)` in a repository, and without this guard
-    # every `all(...)` in it — the built-in — was handed a session.
+    # A unique definition is resolvable by name. The narrow duplicate case is a
+    # protocol/ABC declaration plus its one implementation: both signatures
+    # deliberately move together. Treating *every* repeated name as the same
+    # target infected unrelated repositories across a large monorepo (including
+    # abstract methods and lifecycle hooks) with session parameters.
     def usable(name: str) -> bool:
-        return definitions.get(name) == 1 and name not in _AMBIGUOUS_CALL_NAMES
+        count = definitions.get(name, 0)
+        resolvable = count == 1 or (count == 2 and stubs[name] == 1 and name in runs)
+        return resolvable and name not in _AMBIGUOUS_CALL_NAMES
     needs = {name for name in runs if usable(name)}
     changed = True
     while changed:                            # climb the call graph to a fixed point
@@ -2359,6 +2983,404 @@ def session_functions(
                 needs.add(name)
                 changed = True
     return frozenset(needs)
+
+
+def _annotation_names(annotation: ast.expr | None) -> frozenset[str]:
+    """Class-name tails mentioned by one annotation, including unions/generics."""
+    if annotation is None:
+        return frozenset()
+    names: set[str] = set()
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return frozenset(names)
+
+
+def session_sites(
+    files: list[Path],
+    on_skip=None,
+    *,
+    orm_columns: dict[str, set[str]] | None = None,
+    orm_relations: dict[str, dict[str, str]] | None = None,
+    orm_tables: dict[str, str] | None = None,
+    orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
+) -> tuple[frozenset[tuple[str, int]], frozenset[tuple[str, int, int]]]:
+    """Exact definition and call sites whose resolved target needs a session.
+
+    Method names are not identities. A large application can have dozens of
+    unrelated ``get`` or ``create`` methods, so propagating by the final name
+    mutates signatures that have no database call at all. This graph resolves
+    the static cases the source actually states: module functions, ``self`` and
+    class calls, annotated parameters, constructor-bound locals, and method
+    overrides on a uniquely named base class. Anything it cannot resolve stays
+    out of the graph and remains a visible ``needs_session`` finding.
+    """
+    FunctionKey = tuple[str, str | None, str]
+    ClassKey = tuple[str, str]
+    common_root = Path(
+        os.path.commonpath([str(path.resolve()) for path in files])
+        if files
+        else os.curdir
+    )
+    if common_root.suffix == ".py":
+        common_root = common_root.parent
+
+    trees: dict[str, tuple[ast.Module, _Imports, dict[int, ast.AST]]] = {}
+    definitions: dict[FunctionKey, ast.AsyncFunctionDef] = {}
+    function_keys: dict[tuple[str, int], FunctionKey] = {}
+    classes: dict[ClassKey, ast.ClassDef] = {}
+    class_bases: dict[ClassKey, frozenset[str]] = {}
+
+    def enclosing_class(path: str, node: ast.AST, parents: dict[int, ast.AST]) -> str | None:
+        current = parents.get(id(node))
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return None
+            if isinstance(current, ast.ClassDef):
+                return current.name
+            current = parents.get(id(current))
+        return None
+
+    for raw_path in files:
+        path = str(raw_path.resolve())
+        try:
+            tree = _parse_file(raw_path)
+        except _SKIPPABLE as exc:
+            if on_skip is not None:
+                on_skip(raw_path, exc)
+            continue
+        imports = _Imports().visit(tree)
+        parents = parent_map(tree)
+        trees[path] = (tree, imports, parents)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                key = (path, node.name)
+                classes[key] = node
+                class_bases[key] = frozenset(
+                    name
+                    for base in node.bases
+                    for name in _annotation_names(base)
+                )
+            elif isinstance(node, ast.AsyncFunctionDef):
+                owner = enclosing_class(path, node, parents)
+                key = (path, owner, node.name)
+                definitions[key] = node
+                function_keys[(path, id(node))] = key
+
+    classes_by_name: dict[str, list[ClassKey]] = {}
+    for key in classes:
+        classes_by_name.setdefault(key[1], []).append(key)
+    definitions_by_name: dict[str, list[FunctionKey]] = {}
+    for key in definitions:
+        definitions_by_name.setdefault(key[2], []).append(key)
+
+    direct: set[FunctionKey] = set()
+    edges: dict[FunctionKey, list[tuple[ast.Call, frozenset[FunctionKey]]]] = {}
+    overrides: dict[FunctionKey, set[FunctionKey]] = {}
+    injectable: set[FunctionKey] = set()
+
+    for key, function in definitions.items():
+        if any(
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr in HTTP_METHODS
+            for decorator in function.decorator_list
+        ) or any(
+            "Session" in _annotation_names(argument.annotation)
+            for argument in (
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            )
+        ):
+            injectable.add(key)
+
+    for class_key, base_names in class_bases.items():
+        path, class_name = class_key
+        own = {
+            key[2]: key
+            for key in definitions
+            if key[0] == path and key[1] == class_name
+        }
+        for base_name in base_names:
+            candidates = classes_by_name.get(base_name, ())
+            if len(candidates) != 1:
+                continue
+            base_path, resolved_base = candidates[0]
+            inherited = {
+                key[2]: key
+                for key in definitions
+                if key[0] == base_path and key[1] == resolved_base
+            }
+            for name in own.keys() & inherited.keys():
+                overrides.setdefault(own[name], set()).add(inherited[name])
+                overrides.setdefault(inherited[name], set()).add(own[name])
+
+    for path, (tree, _imports, parents) in trees.items():
+        module_functions = {
+            key[2]: key
+            for key in definitions
+            if key[0] == path and key[1] is None
+        }
+        local_classes = {key[1]: key for key in classes if key[0] == path}
+        class_attributes: dict[str, dict[str, frozenset[str]]] = {}
+        receiver_types: dict[FunctionKey, dict[str, frozenset[str]]] = {}
+
+        for key, function in definitions.items():
+            if key[0] != path:
+                continue
+            types = {
+                argument.arg: _annotation_names(argument.annotation)
+                for argument in (
+                    *function.args.posonlyargs,
+                    *function.args.args,
+                    *function.args.kwonlyargs,
+                )
+                if argument.annotation is not None
+            }
+            for statement in ast.walk(function):
+                if not (
+                    isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and statement.value is not None
+                    and isinstance(statement.value, ast.Call)
+                ):
+                    continue
+                target = (
+                    statement.target
+                    if isinstance(statement, ast.AnnAssign)
+                    else statement.targets[0] if len(statement.targets) == 1 else None
+                )
+                if isinstance(target, ast.Name):
+                    types[target.id] = _annotation_names(statement.value.func)
+            receiver_types[key] = types
+
+            if key[1] is None or function.name != "__init__":
+                continue
+            attrs = class_attributes.setdefault(key[1], {})
+            for statement in ast.walk(function):
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    continue
+                target = (
+                    statement.target
+                    if isinstance(statement, ast.AnnAssign)
+                    else statement.targets[0] if len(statement.targets) == 1 else None
+                )
+                value = statement.value
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and isinstance(value, ast.Name)
+                    and value.id in types
+                ):
+                    continue
+                attrs[target.attr] = types[value.id]
+
+        def owner_function(
+            node: ast.AST,
+            *,
+            _parents: dict[int, ast.AST] = parents,
+            _path: str = path,
+        ) -> FunctionKey | None:
+            current = _parents.get(id(node))
+            while current is not None:
+                if isinstance(current, ast.AsyncFunctionDef):
+                    return function_keys.get((_path, id(current)))
+                if isinstance(current, ast.FunctionDef):
+                    return None
+                current = _parents.get(id(current))
+            return None
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "objects"
+            ):
+                continue
+            owner = owner_function(node)
+            if owner is None:
+                continue
+            call = parents.get(id(node))
+            rule_id = query_rule(
+                node.attr,
+                call if isinstance(call, ast.Call) else None,
+                chain_tail(node, parents),
+                model=ast.unparse(node.value.value),
+                relations=orm_relations or {},
+                columns=orm_columns or {},
+                tables=orm_tables or {},
+                unique_constraints=orm_unique_constraints or {},
+                plain_mappings=plain_filter_mappings(
+                    call if isinstance(call, ast.Call) else None, parents
+                ),
+            )
+            if rule_id in QUERY_TRANSLATED and query_chain_runs(node, parents):
+                direct.add(owner)
+
+        def methods_for(class_names: frozenset[str], method: str) -> set[FunctionKey]:
+            resolved: set[FunctionKey] = set()
+            for class_name in class_names:
+                candidates = classes_by_name.get(class_name, ())
+                if len(candidates) != 1:
+                    continue
+                class_path, owner_name = candidates[0]
+                key = (class_path, owner_name, method)
+                if key in definitions:
+                    resolved.add(key)
+            return resolved
+
+        for call in (candidate for candidate in ast.walk(tree) if isinstance(candidate, ast.Call)):
+            caller = owner_function(call)
+            if caller is None:
+                continue
+            targets: set[FunctionKey] = set()
+            func = call.func
+            if isinstance(func, ast.Name):
+                local = module_functions.get(func.id)
+                if local is not None:
+                    targets.add(local)
+                elif len(definitions_by_name.get(func.id, ())) == 1:
+                    targets.add(definitions_by_name[func.id][0])
+            elif isinstance(func, ast.Attribute):
+                receiver = func.value
+                if isinstance(receiver, ast.Name):
+                    if receiver.id in {"self", "cls"} and caller[1] is not None:
+                        target = (path, caller[1], func.attr)
+                        if target in definitions:
+                            targets.add(target)
+                    elif receiver.id in local_classes:
+                        target = (path, receiver.id, func.attr)
+                        if target in definitions:
+                            targets.add(target)
+                    else:
+                        targets.update(
+                            methods_for(
+                                receiver_types.get(caller, {}).get(
+                                    receiver.id, frozenset()
+                                ),
+                                func.attr,
+                            )
+                        )
+                elif (
+                    isinstance(receiver, ast.Attribute)
+                    and isinstance(receiver.value, ast.Name)
+                    and receiver.value.id in {"self", "cls"}
+                    and caller[1] is not None
+                ):
+                    targets.update(
+                        methods_for(
+                            class_attributes.get(caller[1], {}).get(
+                                receiver.attr, frozenset()
+                            ),
+                            func.attr,
+                        )
+                    )
+                elif isinstance(receiver, ast.Call):
+                    targets.update(
+                        methods_for(_annotation_names(receiver.func), func.attr)
+                    )
+                if not targets and len(definitions_by_name.get(func.attr, ())) == 1:
+                    targets.add(definitions_by_name[func.attr][0])
+            if targets:
+                edges.setdefault(caller, []).append((call, frozenset(targets)))
+
+    needs = set(direct)
+    changed = True
+    while changed:
+        changed = False
+        for key in tuple(needs):
+            for peer in overrides.get(key, ()):
+                if peer not in needs:
+                    needs.add(peer)
+                    changed = True
+        for caller, calls in edges.items():
+            if caller not in needs and any(targets & needs for _call, targets in calls):
+                needs.add(caller)
+                changed = True
+
+    # A signature change is only complete when the requirement reaches a place
+    # Wreath already supplies a session: a route (or a function that already
+    # declares one). A standalone task, test, startup hook, or library method
+    # has no such boundary. Propagating into it merely replaces one TODO with a
+    # missing argument, so keep that whole branch visible instead.
+    def is_test_path(path: str) -> bool:
+        candidate = Path(path)
+        try:
+            relative = candidate.relative_to(common_root)
+        except ValueError:
+            relative = candidate
+        return (
+            candidate.name.startswith("test_")
+            or candidate.name == "conftest.py"
+            or any(part in {"test", "tests"} for part in relative.parts)
+        )
+
+    blocked_by_test = {
+        target
+        for caller, calls in edges.items()
+        if is_test_path(caller[0])
+        for _call, targets in calls
+        for target in targets
+    }
+    supported = {
+        key
+        for key in needs & injectable
+        if not is_test_path(key[0]) and key not in blocked_by_test
+    }
+    inbound = {
+        target
+        for calls in edges.values()
+        for _call, targets in calls
+        for target in targets
+    }
+    supported.update(
+        key
+        for key in direct
+        if key not in inbound
+        and not is_test_path(key[0])
+        and key not in blocked_by_test
+    )
+    changed = True
+    while changed:
+        changed = False
+        for caller in tuple(supported):
+            # `called` rather than `targets`: the name is already bound to a
+            # `set` at function scope above, and rebinding it here to the
+            # `frozenset` the edge carries is a type error rather than a shadow.
+            for _call, called in edges.get(caller, ()):
+                for target in called & needs:
+                    if (
+                        target not in supported
+                        and not is_test_path(target[0])
+                        and target not in blocked_by_test
+                    ):
+                        supported.add(target)
+                        changed = True
+            for peer in overrides.get(caller, ()):
+                if (
+                    peer in needs
+                    and peer not in supported
+                    and not is_test_path(peer[0])
+                    and peer not in blocked_by_test
+                ):
+                    supported.add(peer)
+                    changed = True
+    needs = supported
+
+    definition_sites = frozenset(
+        (key[0], definitions[key].lineno) for key in needs
+    )
+    call_sites = frozenset(
+        (caller[0], call.lineno, call.col_offset)
+        for caller, calls in edges.items()
+        if caller in needs
+        for call, targets in calls
+        if targets & needs
+    )
+    return definition_sites, call_sites
 
 
 @dataclass(frozen=True)
@@ -2374,35 +3396,76 @@ class TreeContext:
 
     pk_types: dict[str, str] = dataclass_field(default_factory=dict)
     index: dict[str, set[str]] = dataclass_field(
-        default_factory=lambda: {"pydantic": set(), "settings": set(), "orm": set()}
+        default_factory=lambda: {
+            "pydantic": set(),
+            "settings": set(),
+            "orm": set(),
+            "orm_mixin": set(),
+        }
     )
     orm_columns: dict[str, set[str]] = dataclass_field(default_factory=dict)
     orm_relations: dict[str, dict[str, str]] = dataclass_field(default_factory=dict)
+    orm_tables: dict[str, str] = dataclass_field(default_factory=dict)
+    orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] = dataclass_field(
+        default_factory=dict
+    )
     positional_model_calls: frozenset[str] = frozenset()
     #: Function names that have to take a session once the requirement has
     #: climbed the call graph. Only `--opinionated` acts on it, because acting on
     #: it changes signatures and call sites across the whole tree.
     session_functions: frozenset[str] = frozenset()
+    session_definition_sites: frozenset[tuple[str, int]] = frozenset()
+    session_call_sites: frozenset[tuple[str, int, int]] = frozenset()
+    session_sites_resolved: bool = False
 
     @classmethod
     def of(cls, files: list[Path], on_skip=None, *, opinionated: bool = False) -> TreeContext:
-        index, orm_columns, orm_relations, positional_calls = _index_tree(
+        (
+            index,
+            orm_columns,
+            orm_relations,
+            orm_tables,
+            orm_unique_constraints,
+            positional_calls,
+        ) = _index_tree(
             files, on_skip=on_skip
+        )
+        selected_names = (
+            session_functions(
+                files,
+                on_skip=on_skip,
+                orm_columns=orm_columns,
+                orm_relations=orm_relations,
+                orm_tables=orm_tables,
+                orm_unique_constraints=orm_unique_constraints,
+            )
+            if opinionated
+            else frozenset()
+        )
+        definition_sites, call_sites = (
+            session_sites(
+                files,
+                on_skip=on_skip,
+                orm_columns=orm_columns,
+                orm_relations=orm_relations,
+                orm_tables=orm_tables,
+                orm_unique_constraints=orm_unique_constraints,
+            )
+            if opinionated
+            else (frozenset(), frozenset())
         )
         return cls(
             tree_pk_types(files, on_skip=on_skip),
             index,
             orm_columns,
             orm_relations,
+            orm_tables,
+            orm_unique_constraints,
             frozenset(positional_calls),
-            session_functions(
-                files,
-                on_skip=on_skip,
-                orm_columns=orm_columns,
-                orm_relations=orm_relations,
-            )
-            if opinionated
-            else frozenset(),
+            selected_names,
+            definition_sites,
+            call_sites,
+            opinionated,
         )
 
 
@@ -2423,6 +3486,8 @@ def module_findings(
         {**context.pk_types, **module_pk_types(tree, imports)},
         context.orm_columns,
         context.orm_relations,
+        context.orm_tables,
+        context.orm_unique_constraints,
         context.positional_model_calls,
     )
     if imports.has_star:

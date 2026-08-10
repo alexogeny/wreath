@@ -1,8 +1,8 @@
 """Tests for `wreath.mutant`.
 
 The one that matters is `test_a_run_reports_both_a_killed_and_a_surviving_control`:
-a mutation tester that can only report KILLED is exactly the shape ADR 0024
-names -- a check that passes because it has nothing to check -- and it would be
+a mutation tester that can only report KILLED is exactly a check that passes
+because it has nothing to check -- and it would be
 trusted anyway, because a green mutation report reads like good news. So the
 end-to-end test drives a project with one *watched* control and one *unwatched*
 one, and demands that the tool tells them apart.
@@ -114,7 +114,7 @@ def _by(found: list[operators.Candidate], operator: str) -> list[operators.Candi
 
 
 def test_every_named_operator_is_reachable_from_the_public_surface() -> None:
-    """A derived list pins its own names (ADR 0024).
+    """A derived list pins its own names (a check that has nothing to check).
 
     Without this, an operator that stops being emitted shrinks coverage
     silently and the run still exits 0.
@@ -166,7 +166,7 @@ def test_the_always_true_mutation_watches_the_body_not_the_def_line(module: Path
     """A `def` line runs once, at import.
 
     Watching it attributed the mutation to no test at all, so a control every
-    test exercised was reported UNREACHED -- the tool inventing ADR 0024's own
+    test exercised was reported UNREACHED -- the tool inventing the tool's own
     failure mode.
     """
     found = _by(_scan(module), "predicate.always-true")[0]
@@ -306,7 +306,7 @@ def test_each_crud_operation_is_verified_independently(tmp_path: Path) -> None:
     so a suite that tests only `delete` still kills it while `list` and
     `create` go unverified. A coarse mutant that dies easily reports coverage
     that does not exist -- the same optimistic-union error AGENTS.md records
-    for native/pure runs, in a different dimension.
+    for separately swept execution modes, in a different dimension.
     """
     found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_ops")
     per_entry = _by(found, "crud.drop-operation-authorize")
@@ -960,7 +960,7 @@ PROJECT = {
 
         def test_redaction_runs():
             # Exercises `redact` without ever asserting that anything is withheld:
-            # the shape ADR 0024 names, and the survivor this run must report.
+            # the shape AGENTS.md names, and the survivor this run must report.
             assert "id" in redact({"id": 1, "token": "t"}, {"token"})
         '''
     ),
@@ -1392,7 +1392,7 @@ def test_a_selector_that_matches_nothing_is_refused(
     compound condition, a keyword's *value* line in a declaration -- not
     necessarily the line a human reads as the decision. Aiming at the latter
     selects zero, and the run then reports `0 killed, 0 survived` and exits 0,
-    which is the ADR 0024 shape one level up: a check that passes because it
+    which is the same failure one level up: a check that passes because it
     has nothing to check. It cost a sibling agent a whole pass that described
     unrelated code.
     """
@@ -1852,7 +1852,7 @@ def test_a_mutant_only_runs_the_tests_that_reach_it(sample_run: dict) -> None:
 def test_a_refusal_no_test_ever_triggers_is_reported_unreached_not_survived(
     sample_run: dict,
 ) -> None:
-    """ADR 0024, stated as an outcome.
+    """A check with nothing to check, stated as an outcome.
 
     No test in the fixture calls `authorize(None, ...)`, so the anonymous
     refusal never executes. "Nothing would notice if this were deleted" and

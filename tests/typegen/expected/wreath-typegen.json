@@ -7,7 +7,7 @@
     "react-query.ts"
   ],
   "generator": "wreath-typegen",
-  "renderer": "pure",
+  "renderer": "python",
   "title": "Fixture API",
   "version": "2.0.0"
 }

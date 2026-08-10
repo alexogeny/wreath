@@ -66,10 +66,10 @@ compile_commands.json
 /benchmark-smoke*/
 
 # Recorded runs. These are output, not source: a number measured on one machine
-# on one afternoon, which the next run replaces and no code reads. They should
-# never have been committed, and 106 of them already are -- ignoring them here
-# stops the tree growing, and `git rm --cached benchmarks/results` is the
-# separate decision that removes the ones already in history.
+# on one afternoon, which the next run replaces and no code reads. 106 of them
+# were committed before this rule existed and have since been removed; what a
+# measurement is worth is the number written down where it is cited, not the
+# blob it came out of.
 /benchmarks/results/
 *.prof
 *.profraw

@@ -6,15 +6,10 @@ conforming server without importing this module. `wreath.server` is an
 Wreath-owned protocol implementation that runs on top of an asyncio (or uvloop)
 transport.
 
-The protocol implementation is selected at import time:
-
-1. `WREATH_PURE` set -> the pure-Python reference (`wreath._pure.server`).
-2. otherwise the native extension (`wreath._native._server`) when built.
-3. falling back to the pure reference if the extension is absent.
-
-Server availability is independent of the framework accelerator `_core`: a
-missing `_server` extension never disables JSON, routing, codec, or parser
-acceleration.
+The protocol is `wreath._native._server`, resolved at import. A build without
+that extension cannot serve here and is refused by name at startup; it is
+independent of `_core`, so a missing `_server` never disables JSON, routing,
+codec or parser acceleration -- it only means this module cannot serve.
 
 This server is **experimental** until fuzzing, sanitizer, soak, and security
 review work is complete.
@@ -45,8 +40,7 @@ if TYPE_CHECKING:
 def _load_native_started_coroutine() -> Any | None:
     """The native continuation type, or None when this build has no extension.
 
-    Resolved once at import rather than per request, and by the same rule the
-    protocol selection uses: `WREATH_PURE` takes the readable implementation.
+    Resolved once at import rather than per request.
     """
     return getattr(_extension("_server"), "StartedCoroutine", None)
 
@@ -71,7 +65,7 @@ class _StartedCoroutine:
     The previous version of this was an `async def` that re-awaited each value
     itself. That cost a Python coroutine frame per resumption -- measured at
     ~7,000 instructions a suspending request, against ~15,000 for the Task the
-    loop needs regardless -- which is why the native twin below exists and why
+    loop needs regardless -- which is why the C version below exists and why
     this shape (an object that delegates) is what both implement.
 
     **Every exception goes into the coroutine, `CancelledError` included.** This
@@ -116,14 +110,14 @@ class _StartedCoroutine:
         return self.send(None)
 
 
-#: Neither twin registers with `collections.abc.Coroutine`, and neither needs
-#: to: that ABC's `__subclasshook__` accepts anything carrying `__await__`,
+#: Neither implementation registers with `collections.abc.Coroutine`, and
+#: neither needs to: that ABC's `__subclasshook__` accepts anything carrying `__await__`,
 #: `send`, `throw` and `close`, which is exactly what `asyncio.iscoroutine` --
 #: and therefore `loop.create_task` -- tests for. Renaming one of those four
 #: would make the loop refuse the continuation, so
 #: `tests/test_server_continuation.py` asserts `iscoroutine` on both.
 
-#: The native twin, when this build has one. `None` selects the class above.
+#: The C version, when this build has one. `None` selects the class above.
 _native_started_coroutine = _load_native_started_coroutine()
 
 
@@ -144,8 +138,8 @@ def _create_recorder(config: ServerConfig) -> Any:
     telemetry = config.telemetry
     if telemetry is None or telemetry.mode is Mode.OFF:
         return None
-    # `_flight` is declared as not honouring WREATH_PURE: the recorder's ring is
-    # native by definition and has no reference implementation to fall back to.
+    # No `_flight`, no telemetry: the recorder's ring is a mapped native
+    # structure, and there is nothing to degrade to. Windows builds none.
     flight = _extension("_flight")
     if flight is None:
         return None
@@ -242,9 +236,8 @@ def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
         limiter_capacity=settings.limiter_capacity,
         scratch_budget=settings.scratch_budget,
         # The native emitter when this recorder has one, packing a record
-        # straight into a ring cell in C. The sink above stays installed and
-        # stays the twin: a promoted buffer, and a pure recorder, still go
-        # through it.
+        # straight into a ring cell in C. The sink above stays installed: a
+        # promoted buffer still goes through it.
         native=wreath_logging.recorder_emitter(recorder),
     )
     # Carry the sites the application registered at import into the new runtime,
@@ -796,16 +789,21 @@ def configure_from_env(
 
 
 def _select_protocol() -> type:
-    # Re-resolved per call, not cached: `tests/test_server_cancel_on_disconnect`
-    # parametrizes native-versus-pure by setting WREATH_PURE between calls, and
-    # `Server` resolves its protocol class on the first connection.
+    """The HTTP protocol class, or a named refusal when `_server` is not built.
+
+    Refused here rather than degraded: there is no Python protocol to fall back
+    to any more, and the framework itself is unaffected -- `wreath.server` is an
+    *additional* way to serve an app, and every conforming ASGI server still
+    runs one without importing this module.
+    """
     server_ext = _extension("_server")
-    if server_ext is not None:
-        return cast(type, server_ext.HttpProtocol)
-
-    from ._pure.server import HttpProtocol
-
-    return HttpProtocol
+    if server_ext is None:
+        raise RuntimeError(
+            "wreath._native._server is not built, so wreath.server cannot serve. "
+            "Build it with `python setup.py build_ext --inplace`, or run the "
+            "application on any conforming ASGI server instead."
+        )
+    return cast(type, server_ext.HttpProtocol)
 
 
 def _native_server_module() -> Any | None:

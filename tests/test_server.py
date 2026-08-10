@@ -1,9 +1,8 @@
 """Loopback socket integration tests for ``wreath.server``.
 
 These drive the server end to end over a real (asyncio) TCP transport, asserting
-on bytes on the wire. They exercise whichever protocol implementation the
-facade selects (native when built, pure otherwise); ``WREATH_PURE`` selection is
-checked in an isolated subprocess.
+on bytes on the wire, through the protocol class the facade resolves — which is
+itself checked in an isolated subprocess.
 """
 
 from __future__ import annotations
@@ -575,17 +574,21 @@ def test_lifespan_runs() -> None:
     assert events == ["startup", "shutdown"]
 
 
-def test_wreath_pure_selection_in_subprocess() -> None:
+def test_protocol_selection_survives_a_fresh_interpreter() -> None:
+    """In a subprocess, so it is the real import path rather than this session's.
+
+    `_select_protocol` runs at import of `wreath.server`, which is where a
+    missing extension has to be found -- a test in this process would only
+    re-read a module `conftest` already imported successfully.
+    """
     code = (
-        "import os; os.environ['WREATH_PURE']='1';"
         "from wreath.server import _select_protocol;"
-        "cls=_select_protocol();"
-        "print(cls.__module__)"
+        "print(_select_protocol().__module__)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    assert result.stdout.strip() == "wreath._pure.server"
+    assert result.stdout.strip() == "wreath._native._server"
 
 
 # --- helpers ----------------------------------------------------------------
@@ -648,11 +651,6 @@ def test_http_protocol_alias_remains_http1() -> None:
     assert hasattr(module, "HttpProtocol")
     assert module.HttpProtocol is module.Http1Protocol
     assert selected is module.Http1Protocol
-
-    # The pure reference must also expose both names identically.
-    from wreath._pure import server as pure_server
-
-    assert pure_server.HttpProtocol is pure_server.Http1Protocol
 
 
 def test_default_config_enables_only_http11() -> None:
@@ -816,8 +814,7 @@ async def test_large_chunked_body_spans_many_buffered_reads() -> None:
 
     Both body paths slice a memoryview of the read buffer and then consume it;
     consuming compacts once the read cursor passes 64 KiB, and a bytearray
-    cannot be resized while a memoryview export of it is alive. Only the pure
-    server buffers this way, so this only bites under WREATH_PURE=1.
+    cannot be resized while a memoryview export of it is alive.
     """
     server = await _serve(make_wreath_app())
     try:

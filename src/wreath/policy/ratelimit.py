@@ -43,10 +43,7 @@ from ..request import Request
 from ..response import ProblemResponse
 from ..store import ALIAS, Column, Keyed, PostgresStore, Sql
 
-if _core is not None and hasattr(_core, "TokenBucket"):
-    TokenBucket: Any = _core.TokenBucket
-else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
-    from .._pure.ratelimit import TokenBucket
+TokenBucket: Any = _core.TokenBucket
 
 
 class RateLimitStore(Protocol):
@@ -493,7 +490,7 @@ class RateLimitPolicy:
         # request: neither store reports it (`acquire` answers "wait this long",
         # not "you have this many left"), and a number invented here would be
         # worse than no number. Exposing a real one needs a `TokenBucket` API
-        # change in both the pure and the native twin.
+        # change.
         self._policy_headers = (
             (b"x-ratelimit-limit", str(limit).encode("ascii")),
             (b"ratelimit-policy", f"{limit};w={window:g}".encode("ascii")),

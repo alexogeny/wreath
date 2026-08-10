@@ -929,9 +929,9 @@ def test_a_wrapped_list_item_still_renders_its_markup() -> None:
     once, after the whole item has been collected.
     """
     out = render(
-        "- A bullet long enough to wrap, with `WREATH_PURE=1` and a\n"
+        "- A bullet long enough to wrap, with `WREATH_BUILD_HTTP3=1` and a\n"
         "  [link](guides/routing.md) on the second line.\n")
-    assert "<code>WREATH_PURE=1</code>" in out.html
+    assert "<code>WREATH_BUILD_HTTP3=1</code>" in out.html
     assert 'href="guides/routing.md"' in out.html
     assert "`" not in out.html and "](" not in out.html
 
@@ -1083,8 +1083,9 @@ def test_the_bitset_figure_agrees_with_the_matching_it_illustrates() -> None:
     Each row claims how many segment tests its route survives; running the real
     table against the same request must pick the one row that survives them all.
     """
+    from wreath._native._core import BitsetRouteTable
+
     from wreath._docs.figures import _COLUMNS, _ROUTES
-    from wreath._pure.dtbitset import BitsetRouteTable
 
     table = BitsetRouteTable()
     for route, _ in _ROUTES:
@@ -1481,7 +1482,7 @@ def test_a_strict_build_refuses_a_module_directive_with_no_members() -> None:
     """The defect this gate exists for: `::: wreath.orm` rendered the package
     docstring and nothing else for as long as the page existed, because every
     public name is re-exported from a submodule and the member filter drops
-    those. An empty section still builds clean -- ADR 0024's shape."""
+    those. An empty section still builds clean -- the shape of a check with nothing to check."""
     import sys
 
     from wreath._docs import apidoc

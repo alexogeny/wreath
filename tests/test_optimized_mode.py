@@ -3,7 +3,7 @@
 `-O` strips every `assert` statement. An `assert` guarding a wire format or a
 struct layout therefore vanishes in exactly the interpreter mode nothing else
 here exercises -- the module imports with a wrong layout and says nothing, which
-is a check that silently has nothing to check (ADR 0024).
+is a check that silently has nothing to check (a check that has nothing to check).
 
 Eight module-level `assert`s guarded struct layouts in `wreath._flight_schema`
 and `wreath.migrations` until this was measured: under `-O`, a completion cell

@@ -1,10 +1,10 @@
 /* Server-Sent Event framing.
  *
- * The byte-for-byte twin of `_sse_frame_fields` in src/wreath/response.py,
- * which remains the reference implementation and the parity contract;
- * tests/test_sse_frame_parity.py asserts the two agree.
+ * Held to the `text/event-stream` grammar by tests/test_sse_frame_parity.py.
+ * `_sse_frame_fields` in src/wreath/response.py is the readable statement of the
+ * same framing.
  *
- * Why this is in C at all: the pure version normalises line endings with
+ * Why this is in C at all: the Python version normalises line endings with
  * `value.replace("\r\n", "\n").replace("\r", "\n").split("\n")`, which copies
  * the whole payload twice and then allocates a list of substrings, before an
  * f-string per line, a join, and an encode -- about five passes over the data
@@ -22,7 +22,7 @@
 
 /* Emit `text` as one `field: segment` line per line of text, normalising CRLF
  * and bare CR to LF on the fly. An empty segment emits `field:` with no space,
- * matching the pure encoder. Each line is terminated with LF here; the caller
+ * matching the Python encoder. Each line is terminated with LF here; the caller
  * appends the final blank line.
  *
  * CR and LF cannot occur inside a multi-byte UTF-8 sequence, so scanning bytes

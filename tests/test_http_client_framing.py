@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from wreath._client_codec import response_framing
-from wreath._pure.http_client import response_keeps_alive
+from wreath._client_codec import response_framing, response_keeps_alive
 
 
 def test_a_plain_content_length_frames_the_body() -> None:

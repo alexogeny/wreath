@@ -1,8 +1,8 @@
 /* Native ORM query cache-key builder.
  *
  * Mirrors wreath.orm.compiler.shape_of / _shape_expression / _shape_loads exactly:
- * it produces the same bytes (pieces joined by 0x1e), so pure and native keys
- * are interchangeable in the compiled-SQL cache. The win over the pure code is
+ * it produces the same bytes (pieces joined by 0x1e), so walked and native keys
+ * are interchangeable in the compiled-SQL cache. The win over the Python code is
  * eliminating the per-node Python recursion frame and building the key straight
  * into one growable buffer instead of a list of bytes objects joined at the end.
  *

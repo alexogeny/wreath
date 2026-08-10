@@ -206,9 +206,9 @@ construction and type inspection dominate every shape — at the `large` shape
 ~21 ms (~6% of total), and even at `stress` (10,000 routes) rendering is ~11% of
 a ~2.2 s command. Rendering scales approximately linearly (~35–48 MiB/s). Because
 rendering is not a material fraction of total command time, the native C renderer
-is **not justified**; Wreath carries only the pure reference renderer. Reopen the
+is **not justified**; Wreath carries only the Python renderer. Reopen the
 gate only if a retained decomposition shows rendering dominating, and require the
-pure and native SHA-256 values to match before comparing any timings.
+the rendered SHA-256 values to match before comparing any timings.
 
 ## Logging
 
@@ -240,9 +240,9 @@ samples. **A ring that fills makes its arm fast too**, for the same reason, so
 each native arm sizes its ring from the run's own record budget and refuses the
 result if a single record was lost.
 
-The retained baselines are `benchmarks/results/logging_2026-07-28_baseline.json`
-(the Python emitter) and `logging_2026-07-28_native.json` (after
-`wreath_nfr_log`). The plan carries the tables and what they mean; the short
+The baselines were measured 2026-07-28, before and after `wreath_nfr_log`.
+Recorded runs are output rather than source and are not kept in the tree --
+`docs/plans/first-class-logging.md` carries the tables and what they mean; the short
 version is that the fast tier was not fast until the emitter moved to C, and the
 cost has since moved off the request path and onto the projector thread. Every
 number is one machine — reproduce before quoting an absolute.
@@ -723,7 +723,7 @@ uv run python -m benchmarks.bench_web_policy_compression \
   --output benchmark-results-web-policy/after.json
 ```
 
-This compares native and pure policy parsing, adaptive missing-header insertion
+This compares policy parsing, adaptive missing-header insertion
 at 64–512 existing headers (including duplicate additions), and stdlib/native-zlib
 gzip paths across compressible and incompressible payloads. Results retain every
 trial, compression ratio, Python/platform data, and linked zlib metadata. Policy and
@@ -765,7 +765,6 @@ routes, table names, constants, or randomization. Domain names are generic
 ```bash
 uv run python -m benchmarks.workloads.verify        # assert semantic properties
 uv run python -m benchmarks.workloads.bench         # per-shape latency
-WREATH_PURE=1 uv run python -m benchmarks.workloads.verify
 ```
 
 The verifier asserts observable *properties* — one database operation per point

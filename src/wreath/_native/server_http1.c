@@ -1077,8 +1077,9 @@ validate_trailer_block(const char *data, Py_ssize_t size, Py_ssize_t max_count)
 static int
 parse_content_length_header(PyObject *value, Py_ssize_t *out)
 {
-    /* Fast path: plain decimal digits.  Anything else falls back to int()
-     * semantics to stay behaviorally identical to the pure twin. */
+    /* Fast path: plain decimal digits. Anything else falls back to int()
+     * semantics, which is what RFC 9112 §6.2's grammar plus Python's own
+     * integer parsing between them accept. */
     const char *data = PyBytes_AS_STRING(value);
     Py_ssize_t size = PyBytes_GET_SIZE(value);
     Py_ssize_t parsed = 0;
@@ -2478,7 +2479,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
      * the client can cost nothing but the work in flight; everything else is
      * left to finish, because unwinding a POST rolls its transaction back and
      * not the job it already enqueued. GET first: it is the common case, and a
-     * miss here costs three comparisons. `_SAFE_METHODS` is the pure twin. */
+     * miss here costs three comparisons. */
     self->cancel_on_disconnect =
         PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
         self->method_is_head ||
@@ -2665,7 +2666,7 @@ done:
 
 /* --- websocket ------------------------------------------------------------
  *
- * Mirrors the pure reference: the upgrade handshake, the ASGI websocket
+ * Mirrors the Python reference: the upgrade handshake, the ASGI websocket
  * message flow, automatic ping/pong, fragmented message reassembly, strict
  * UTF-8 text validation, and RFC 6455 close-code rules.  Frame parsing goes
  * through the shared wreath.ws accelerator; outgoing frames serialize into the
@@ -2772,7 +2773,7 @@ make_ws_disconnect_msg(int code)
 
 /* Deliver a websocket message to the app: directly into a pending waiter, or
  * queued with read-backpressure accounting (text counts code points, binary
- * counts bytes -- identical to the pure reference). */
+ * counts bytes -- identical to the Python reference). */
 static int
 ws_enqueue(WreathHttpProtocol *self, PyObject *msg, Py_ssize_t size)
 {
@@ -2922,7 +2923,7 @@ drive_ws_frame(WreathHttpProtocol *self)
         return ws_fail(self, 1002) < 0 ? -1 : 0;
     }
     /* Size limits are enforced per message on delivery (and per buffered
-     * fragment), matching the pure reference's order of checks. */
+     * fragment), matching the Python reference's order of checks. */
     fin = header.fin;
     opcode = header.opcode;
     payload = PyBytes_FromStringAndSize(NULL, header.payload_len);
@@ -4001,7 +4002,7 @@ apply_app_outcome(WreathHttpProtocol *self, PyObject *exc, int drive_buffered)
         goto advance;
     }
     if (self->ws_mode) {
-        /* Mirror the pure reference's _run_ws_app post-conditions. The session's
+        /* Mirror the Python reference's _run_ws_app post-conditions. The session's
          * completion cell records the handshake disposition as `status` (101 when
          * the socket was established, else the rejection status) and how the
          * session ended as `terminal`. */
@@ -4312,7 +4313,7 @@ http_protocol_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UN
         wreath_policy_state_init(&self->policy_state);
         self->state = ST_READING_HEAD;
         self->accepting = 1;
-        self->http11 = 1;  /* pre-request default matches the pure reference */
+        self->http11 = 1;  /* pre-request default matches the Python reference */
         self->request_more_body = 1;
         self->response_keep_alive = 1;
         self->deadline = Py_HUGE_VAL;

@@ -1,11 +1,11 @@
-"""A pure-Python CommonMark *subset* renderer — the first-slice parser.
+"""A CommonMark *subset* renderer — the first-slice parser.
 
 Covers the block and inline constructs wreath's own docs actually use: ATX
 headings (with GitHub slugs + a table of contents), fenced code blocks,
 unordered/ordered lists, blockquotes, thematic breaks, paragraphs, and inline
 code / strong / emphasis / links / autolinks. It renders straight to HTML today;
-the seam to watch is `render` — the native `_docs` extension will parse
-into the versioned WDT1 tape and this becomes the parity twin's render half.
+the seam to watch is `render` — the native `_docs` extension will parse into the
+versioned WDT1 tape and this becomes its render half.
 
 Security is the load-bearing property: every text and attribute span is HTML-
 escaped, and link targets are scheme-checked (no `javascript:` URLs). Full

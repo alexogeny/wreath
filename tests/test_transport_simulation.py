@@ -9,7 +9,6 @@ import pytest
 
 import wreath
 from wreath import _flight_schema as flight_schema
-from wreath._pure.server import HttpProtocol as PureHttpProtocol
 from wreath.replay import (
     FaultDescriptor,
     FaultKind,
@@ -30,7 +29,6 @@ NativeHttpProtocol = importlib.import_module("wreath._native._server").HttpProto
 flight = importlib.import_module("wreath._native._flight")
 
 PROTOCOLS = (
-    pytest.param(PureHttpProtocol, id="pure"),
     pytest.param(NativeHttpProtocol, id="native"),
 )
 

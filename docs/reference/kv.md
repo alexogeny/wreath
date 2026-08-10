@@ -35,7 +35,7 @@ which is about the floor for something that also bounds and expires.
 
 Two numbers in that table are worth more than the ratio. The first is that a
 native table was never theoretical headroom: `_core.TokenBucket` — a table that
-does strictly *more* per call — was already answering faster than the pure cache
+does strictly *more* per call — was already answering faster than the Python cache
 next door, which is what reopened a decision `cache.py` had closed. The second
 is that the first attempt at this made `BoundedCache` **21% slower** despite the
 table underneath being twice as fast, because a keyword argument forces a C

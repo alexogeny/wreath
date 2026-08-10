@@ -571,8 +571,7 @@ def _routing_backends_section(documents: list[dict[str, Any]]) -> str:
     return (
         '<section class="block"><h2>Routing backends, head to head</h2>'
         '<p class="sub">The same queries against every table implementation. Green and red '
-        "mark the fastest and slowest <em>native</em> backend; the pure-Python twins are "
-        "dimmed because they are a different contest.</p>"
+        "mark the fastest and slowest backend.</p>"
         f'{note}<div class="grid2">{"".join(blocks)}</div></section>'
     )
 
@@ -742,7 +741,7 @@ def _migration_artifact_block(documents: list[dict[str, Any]]) -> str:
 
 
 def _cedar_section(documents: list[dict[str, Any]]) -> str:
-    """Cedar authorization latency: built-in engine, pure twin, and cedarpy."""
+    """Cedar authorization latency: the built-in engine against cedarpy."""
     evaluate: dict[str, list[float]] = {}
     stateless: dict[str, list[float]] = {}
     fairness = ""
@@ -792,9 +791,8 @@ def _cedar_section(documents: list[dict[str, Any]]) -> str:
         "per call, median nanoseconds; lower is better. Decisions are verified to agree "
         "across engines before timing.</p>"
         f'<p class="within-noise">{escape(fairness)}</p>'
-        + table("Evaluate (policies compiled once; Wreath engine vs pure twin)",
-                evaluate, ranked=False)
-        + table("Parse and evaluate (full per-call cost, both arms)", stateless, ranked=True)
+        + table("Evaluate (policies compiled once)", evaluate, ranked=False)
+        + table("Parse and evaluate (full per-call cost)", stateless, ranked=True)
         + skip_note
         + "</section>"
     )

@@ -1,16 +1,17 @@
 /* MessagePack encoder (serialize only).
  *
- * The byte-for-byte twin of src/wreath/_pure/msgpack.py, which remains the
- * reference implementation and the parity contract; tests/test_negotiation.py
- * pins both to the spec's known-answer vectors.
+ * Held byte-for-byte to the MessagePack specification by
+ * tests/test_msgpack_parity.py, which transcribes the format-byte table and the
+ * "smallest number of bytes" serialization rule rather than comparing this
+ * against another implementation of ours.
  *
- * Scope matches the pure encoder deliberately: nil, bool, int, float, str, bin,
- * array, map -- enough for the JSON-shaped data content negotiation serves.
- * Decoding is not needed for response encoding and is absent from both sides.
+ * Scope is deliberate: nil, bool, int, float, str, bin, array, map -- enough for
+ * the JSON-shaped data content negotiation serves. Decoding is not needed for
+ * response encoding and is absent.
  *
- * Encoding choices that must not drift from the pure twin:
+ * Encoding choices the specification fixes:
  *   - float is always float64 (0xCB); no float32 narrowing, because a narrowing
- *     encoder is lossy and the pure side never did it.
+ *     encoder is lossy.
  *   - str uses str8 (0xD9) for lengths 32..255 rather than str16.
  *   - bool is tested before int, since Python's bool is an int subclass.
  *   - dict keys go through the same value encoder, but only after mp_key_ok
@@ -227,7 +228,7 @@ static int mp_encode_value(WreathBytesWriter *w, PyObject *obj, int depth);
  * Only tuple can actually reach this position -- list and dict are unhashable
  * and so can never be dict keys -- but the test is an allowlist of the scalars
  * the format can represent, which stays correct if a hashable container type is
- * ever added to the encoder. Mirrors _key_ok in the pure twin. */
+ * ever added to the encoder. */
 static int
 mp_key_ok(PyObject *key)
 {
@@ -253,7 +254,7 @@ mp_encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
         return mp_encode_int(w, obj);
     }
     if (PyFloat_Check(obj)) {
-        /* Always float64, matching the pure encoder. Narrowing to float32 for
+        /* Always float64, matching the Python encoder. Narrowing to float32 for
          * values that happen to fit would silently change what a client
          * receives. */
         double value = PyFloat_AS_DOUBLE(obj);

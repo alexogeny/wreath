@@ -6,10 +6,9 @@ an optional native renderer explicit and makes parity fixtures compact. Output
 assembly is linear: a list builder with one final join, no output-proportional
 string concatenation.
 
-**This is not a twin, which is why it does not live in `wreath._pure`.** It is
-the only renderer, and the "benchmark decision" `render.py` defers to has now
-been made: rendering a client is a cold path reached from `wreath typegen`, run
-by a developer occasionally rather than by a request, and the assembly above is
+**This stays Python.** The "benchmark decision" `render.py` defers to has been
+made: rendering a client is a cold path reached from `wreath typegen`, run by a
+developer occasionally rather than by a request, and the assembly above is
 already linear with a single join. `select_renderers` keeps its seam because it
 costs nothing, but a missing `_core.typegen_render_*` is not a gap.
 
@@ -163,9 +162,9 @@ def ts_type(node: tuple[Any, ...]) -> str:
         # Structural, not a named `Page<T>` alias. The Python target imports
         # `wreath.pagination.Page` because there is a real type to *be*; a
         # TypeScript client is standalone, so a named alias would have to be
-        # declared somewhere -- and `models.ts` is rendered by this module's
-        # native twin, where adding a preamble means keeping two emitters
-        # byte-identical for no gain. Inline always compiles and cannot drift.
+        # declared somewhere, and a preamble means one more thing two emitters
+        # have to agree on for no gain. Inline always compiles and cannot
+        # drift.
         inner = ts_type(args[0]) if args else "unknown"
         return (
             "{ items: readonly " + inner + "[]; total: number; "

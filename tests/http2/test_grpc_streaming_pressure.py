@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 
 from wreath import Wreath
+from wreath._native import extension as _extension
 from wreath.grpc import GrpcService
 from wreath.protobuf import field, message
 
@@ -454,10 +455,8 @@ def test_the_request_body_is_a_real_grpc_frame() -> None:
 
 
 def test_grpc_needs_http2_which_is_why_these_live_here() -> None:
-    """A note in executable form. `_pure/server.py` has no HTTP/2 at all, so
-    there is no pure twin of any of this -- which is why the whole file is
-    gated on the native protocol rather than parameterised over both, and why
-    a deployment on a foreign ASGI server cannot serve gRPC."""
-    from wreath._pure import server as pure_server
+    """A note in executable form: gRPC rides HTTP/2, which `wreath.server`
+    serves and a foreign ASGI server does not, so the whole file is gated on
+    `_server` rather than run against a portable transport."""
 
-    assert not hasattr(pure_server, "Http2Protocol")
+    assert hasattr(_extension("_server"), "Http2Protocol")

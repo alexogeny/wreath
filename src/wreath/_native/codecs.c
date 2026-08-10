@@ -190,12 +190,27 @@ wreath_parse_cookies(PyObject *Py_UNUSED(self), PyObject *args)
             continue; /* no '=': ignore the fragment */
         }
         Py_ssize_t eq = (Py_ssize_t)(split - data);
-        if (eq == lo) {
+        /* Trim the inner edges too, not just the ones facing the ';'. RFC
+         * 6265bis 5.8.3 strips WSP from both halves of a cookie-pair; trimming
+         * only the fragment left the space glued to the name, so `" a = 1 "`
+         * yielded `"a "` and a lookup of `"a"` found nothing. The outer trim
+         * above already took the name's leading and the value's trailing run,
+         * so only the two edges facing the '=' are left. */
+        Py_ssize_t name_hi = eq;
+        while (name_hi > lo && (data[name_hi - 1] == ' ' || data[name_hi - 1] == '\t')) {
+            name_hi--;
+        }
+        if (name_hi == lo) {
             continue; /* no name */
         }
-        PyObject *name = PyUnicode_DecodeLatin1((const char *)data + lo, eq - lo, NULL);
+        Py_ssize_t value_lo = eq + 1;
+        while (value_lo < hi && (data[value_lo] == ' ' || data[value_lo] == '\t')) {
+            value_lo++;
+        }
+        PyObject *name =
+            PyUnicode_DecodeLatin1((const char *)data + lo, name_hi - lo, NULL);
         PyObject *value =
-            PyUnicode_DecodeLatin1((const char *)data + eq + 1, hi - eq - 1, NULL);
+            PyUnicode_DecodeLatin1((const char *)data + value_lo, hi - value_lo, NULL);
         int failed = (name == NULL || value == NULL);
         /* First value wins for duplicate cookie names. `SetDefaultRef` says
          * exactly that in one hash and one probe, where `Contains` followed by

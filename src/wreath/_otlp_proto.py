@@ -37,7 +37,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._pure import protobuf as _ref
+from ._protobuf_plan import (
+    FLAG_REPEATED,
+    KIND_BYTES,
+    KIND_FIXED64,
+    KIND_INT64,
+    KIND_MESSAGE,
+    KIND_SFIXED64,
+    KIND_SINT64,
+    KIND_UINT64,
+)
 from .protobuf import encode as _encode
 from .protobuf import field, message
 
@@ -50,11 +59,11 @@ from .protobuf import field, message
 #: number is a double and cannot hold the whole 64-bit range).
 _STRING_ENCODED = frozenset(
     {
-        _ref.KIND_INT64,
-        _ref.KIND_UINT64,
-        _ref.KIND_SINT64,
-        _ref.KIND_FIXED64,
-        _ref.KIND_SFIXED64,
+        KIND_INT64,
+        KIND_UINT64,
+        KIND_SINT64,
+        KIND_FIXED64,
+        KIND_SFIXED64,
     }
 )
 
@@ -66,7 +75,7 @@ def _camel(name: str) -> str:
 
 
 def _scalar(kind: int, value: Any) -> Any:
-    if kind == _ref.KIND_BYTES:
+    if kind == KIND_BYTES:
         # OTLP sends ids as hex, not the base64 proto3 JSON would use.
         return bytes.fromhex(value) if isinstance(value, str) else bytes(value)
     if kind in _STRING_ENCODED:
@@ -98,12 +107,12 @@ def _from_json(cls: type, data: dict[str, Any]) -> Any:
         _number, kind, flags, _sub = plan[index]
         name = names[index]
         nested = holders[index]
-        if flags & _ref.FLAG_REPEATED:
-            if kind == _ref.KIND_MESSAGE:
+        if flags & FLAG_REPEATED:
+            if kind == KIND_MESSAGE:
                 kwargs[name] = [_from_json(nested, item) for item in value]
             else:
                 kwargs[name] = [_scalar(kind, item) for item in value]
-        elif kind == _ref.KIND_MESSAGE:
+        elif kind == KIND_MESSAGE:
             kwargs[name] = _from_json(nested, value)
         else:
             kwargs[name] = _scalar(kind, value)

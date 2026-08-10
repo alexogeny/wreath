@@ -9,8 +9,8 @@ it verbatim. There is no cryptographic algorithm here and there is not meant to
 be one.
 
 The CBOR decoder stays Python for the reason the plan gives: it runs at most
-twice per registration on a few hundred bytes, so a C twin would mean a second
-implementation plus a parity test to save time nobody can measure.
+twice per registration on a few hundred bytes, so moving it to C would save time
+nobody can measure.
 
 Everything a caller can be handed here is attacker-controlled -- a browser posts
 it -- so the parsers are strict on purpose and every refusal is a `raise`

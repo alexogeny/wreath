@@ -12,10 +12,7 @@ from typing import Any, NamedTuple
 from ._headers import find_header
 from ._native import _core
 
-if _core is not None:
-    _raw_parse = _core.multipart_parse
-else:
-    from ._pure.multipart import multipart_parse as _raw_parse
+_raw_parse = _core.multipart_parse
 
 
 class Part(NamedTuple):
@@ -56,7 +53,7 @@ def parse(
     """Split a complete multipart body into parts. A negative limit means none.
 
     The limits are enforced inside the parser, before an over-budget part is
-    copied out of the body, and behave identically in the native and pure
+    copied out of the body, and behave identically in the C and Python
     parsers.
     """
     # Convert each part while the low-level scanner owns it. This avoids a

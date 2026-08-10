@@ -33,14 +33,14 @@ import struct
 
 import pytest
 
-from wreath._flight_schema import MetadataImage, NamedMeta, SchemaError
-from wreath._pure.flight import (
+from wreath._flight_reference import (
     CELL_SIZE,
     SCHEMA_VERSION,
     decode_recording,
     encode_recording,
 )
-from wreath._pure.msgpack import packb
+from wreath._flight_schema import MetadataImage, NamedMeta, SchemaError
+from wreath.negotiation import _msgpack as packb
 
 SEED = 20260727
 

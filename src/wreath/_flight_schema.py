@@ -2,17 +2,17 @@
 
 This module is the single source of truth for the NFR wire format: cell sizes,
 field layouts, event kinds, modes, loss reasons, and the deterministic metadata
-image. The pure reference codec in `wreath._pure.flight` and the future
-`wreath._native._flight` C extension must agree with the constants here
-byte-for-byte; a parity test enforces that once the extension exists.
+image. The reference codec in `wreath._flight_reference` and the
+`wreath._native._flight` extension must both agree with the constants here
+byte-for-byte; a parity test enforces it.
 
 Nothing here performs runtime telemetry. Stage 0 defines the schema and the
 deterministic metadata image only -- there is no recorder, ring, or request-path
 behavior. See `docs/plans/native-flight-recorder-stage-1.md` and
-`docs/decisions/0021-native-flight-recorder-provisional-parameters.md`.
+`docs/plans/native-flight-recorder-stage-1.md`.
 
 The provisional sizes below are acceptance decisions to be tuned by the Stage 3
-benchmark matrix, not frozen guarantees (ADR 0021).
+benchmark matrix, not frozen guarantees (provisional bounds, not tuning targets).
 """
 
 from __future__ import annotations
@@ -546,11 +546,11 @@ class SchemaError(ValueError):
 #     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
 #     Recorder.publish_log()  bytes      -> ring        (_flightmodule.c)
 #
-# It is the pure twin of ADR 0005, not a fallback: `wreath_nfr_log` is checked
-# against it byte for byte over a corpus of every shape either can be handed
-# (tests/test_logging_native_parity.py), and writing that corpus found three
-# defects -- an int wider than the wire slot, a float too wide to narrow, and a
-# lone surrogate -- each of which raised out of a packer that promises never to.
+# `wreath_nfr_log` is checked against it byte for byte over a corpus of every
+# shape either can be handed (tests/test_logging_native_parity.py), and writing
+# that corpus found three defects -- an int wider than the wire slot, a float
+# too wide to narrow, and a lone surrogate -- each of which raised out of a
+# packer that promises never to.
 #
 # It is also what runs, by design, in three cases:
 #
@@ -570,7 +570,7 @@ class SchemaError(ValueError):
 # level check are what made that swap mechanical rather than a redesign.
 #
 # Still deferred, each decided rather than forgotten -- see
-# docs/plans/first-class-logging.md for the full list and ADR 0025 for why:
+# docs/plans/first-class-logging.md for the full list and the reasoning:
 #
 #   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
 #     blocks the request path" and "never loses a record" are incompatible
@@ -1184,7 +1184,7 @@ class RingFileHeader:
         return self.losses[index] if index < len(self.losses) else 0
 
     def encode(self) -> bytes:
-        """The full header page, for tests and for the pure twin."""
+        """The full header page, for tests and for the reference recorder."""
         fixed = _RING_FILE_HEADER.pack(
             RING_FILE_MAGIC,
             RING_FILE_VERSION,
@@ -1550,23 +1550,20 @@ def _ids(ids: tuple[int, ...]) -> bytes:
 # --- the metadata image's decoder, and the keyed fingerprint ----------------
 #
 # These three sit here, beside `MetadataImage.canonical_bytes` and `_u32`/
-# `_text`/`_ids`, because that is what they are the other half of. They spent a
-# while in `wreath._pure.flight` and none of them was ever a twin:
+# `_text`/`_ids`, because that is what they are the other half of:
 #
-# * `decode_metadata_image` is the exact inverse of `canonical_bytes` above --
-#   one format, and for a while two files, only one of which claimed to be a
-#   reference implementation. There is no C decoder to be a twin of.
+# * `decode_metadata_image` is the exact inverse of `canonical_bytes` above.
+#   There is no C decoder; one format, one file.
 # * `siphash24` *does* have a C counterpart (`_native/flight.c:74`, reachable
-#   across translation units as `wreath_nfr_fingerprint`), but it is not a twin
-#   either: the native packer hashes in C and never calls this, and this one
-#   runs on the fallback packing path that `logging.py`'s `publish` returns
-#   False for. Exporting the C to Python would accelerate only the path taken
-#   when the extension is *not* publishing, and would put a hard `_flight`
-#   dependency on `_logsite`, which has none and must not gain one -- Windows
-#   builds no `_flight` at all (`setup.py:398`).
+#   across translation units as `wreath_nfr_fingerprint`), and it is not
+#   exported to Python on purpose: the native packer hashes in C and never
+#   calls this, so exporting it would accelerate only the path taken when the
+#   extension is *not* publishing, and would put a hard `_flight` dependency on
+#   `_logsite`, which has none and must not gain one -- Windows builds no
+#   `_flight` at all (`setup.py:398`).
 #
 # The two implementations must still agree byte for byte or a fingerprint would
-# differ between the native and pure halves of one process and break correlation
+# differ between the C and Python packers in one process and break correlation
 # within a recording. `tests/test_flight_capture.py:52` pins the shared vector.
 
 #: Refuse to allocate for absurd declared sizes before the bytes are present.
@@ -1714,9 +1711,10 @@ def _rotl64(x: int, b: int) -> int:
 
 
 def siphash24(data: bytes, k0: int, k1: int) -> int:
-    """SipHash-2-4, the pure twin of siphash24() in flight.c. The recorder's
-    keyed redaction hash; the differential tests share a key so HASHED capture
-    slabs compare byte-for-byte. Word loads are little-endian."""
+    """SipHash-2-4, matching siphash24() in flight.c byte for byte.
+
+    The recorder's keyed redaction hash; the differential tests share a key so
+    HASHED capture slabs compare exactly. Word loads are little-endian."""
     v0 = 0x736F6D6570736575 ^ k0
     v1 = 0x646F72616E646F6D ^ k1
     v2 = 0x6C7967656E657261 ^ k0

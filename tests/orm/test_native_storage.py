@@ -42,7 +42,7 @@ except ImportError:
     pass
 
 requires_native = pytest.mark.skipif(
-    _native is None, reason="native PostgreSQL model storage not built or WREATH_PURE=1"
+    _native is None, reason="native PostgreSQL model storage not built"
 )
 
 # Inline (unboxed) cell kinds, mirroring WreathPgCellKind in model.h.
@@ -323,12 +323,12 @@ def test_the_storage_kind_matches_the_active_backend() -> None:
 
 
 def test_both_storages_expose_the_same_protocol() -> None:
-    from wreath.orm.model import PureModel
+    from wreath.orm.model import ListModel
 
     protocol = [
         name
-        for name in dir(PureModel)
-        if name.startswith("_orm_") and callable(getattr(PureModel, name, None))
+        for name in dir(ListModel)
+        if name.startswith("_orm_") and callable(getattr(ListModel, name, None))
     ]
     for name in protocol:
         assert hasattr(Wide, name), f"{Wide.__wreath_storage_kind__} storage lacks {name}"

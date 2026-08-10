@@ -1034,7 +1034,7 @@ class EventLoop(_LoopBase):
 # a source traceback. That is charged per future, and a PostgreSQL query creates
 # two of them -- the operation's, and the protocol's read waiter.
 #
-# The C twins return exactly what the originals did, `get_debug` included, so
+# The C replacements return exactly what the originals did, `get_debug` included, so
 # `loop.set_debug(True)` still works and a debug loop still captures tracebacks.
 # Grafted rather than declared in the class body because they are C methods on a
 # Python heap type; `_install_loop_fastpath` does the `PyDescr_NewMethod` and is

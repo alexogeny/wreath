@@ -1,7 +1,7 @@
 #include "wreathcore.h"
 #include "hmac_sha256.h"
 
-/* ---- signed double-submit CSRF tokens (see ADR 0018) --------------------
+/* ---- signed double-submit CSRF tokens ------------------------------------
  *
  * Token: "v1.<issued>.<nonce>.<signature>", where nonce and signature are each
  * 32 bytes in unpadded URL-safe base64 (43 characters).
@@ -15,7 +15,7 @@
  * What *was* wasted is narrower and was invisible at that altitude: HMAC
  * re-derives the key's two padded blocks on every call, and this framework signs
  * every token with the same key. `hmac_sha256.h` absorbs them once, which took
- * signing from 1377ns to 888ns. See it for the measurement and the ADR 0007
+ * signing from 1377ns to 888ns. See it for the measurement and the no-process-global-state
  * argument for caching them.
  */
 
@@ -163,7 +163,7 @@ wreath_csrf_sign(PyObject *self, PyObject *args)
  * Anything that is not Linux, and any failure at all, falls back to
  * `os.urandom`. A CSRF nonce is not a place to improvise when the fast path is
  * unavailable, and no cached buffer of pre-drawn bytes is kept: that would be
- * process-global mutable state (ADR 0007) holding unused key material.
+ * process-global mutable state (no process-global mutable state in C) holding unused key material.
  */
 static int
 fill_random(unsigned char *out, Py_ssize_t len)
@@ -339,10 +339,11 @@ wreath_csrf_validate(PyObject *self, PyObject *args)
     /* `end - number == lengths[1]`, not `*end == '\0'`. The two differ on an
      * *embedded* NUL: strtoll halts at it and leaves `end` pointing at a NUL,
      * which reads as "consumed the whole field" while the field still carries
-     * everything after it. The pure twin's `\Z`-anchored regex refuses that, so
-     * the cheaper test was a parity breach on a security primitive -- and it
-     * verified, because the message is rebuilt from the parsed `issued` and the
-     * tail vanishes before the HMAC is recomputed. */
+     * everything after it -- so `v1.1700000000\0junk` would be read as the
+     * timestamp 1700000000 and would *verify*, because the message is rebuilt
+     * from the parsed `issued` and the tail vanishes before the HMAC is
+     * recomputed. `tests/test_csrf_native_parity.py` carries the three
+     * interior-NUL cases. */
     if (end - number != lengths[1] || errno != 0) {
         return Py_BuildValue("(OL)", Py_False, 0LL);
     }

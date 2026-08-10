@@ -1,8 +1,8 @@
 """Pure/native parity for the ORM query cache key (`shape_of`).
 
 The key is a dict key for the compiled-SQL cache, so the native builder must
-produce bytes identical to the pure reference for every query shape -- a
-mismatch would silently split the cache. `_shape_of_pure` stays the reference.
+produce bytes identical to the Python reference for every query shape -- a
+mismatch would silently split the cache. `_shape_of_walk` stays the reference.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pytest
 
 from wreath._native import _core
 from wreath.orm import and_, not_, or_
-from wreath.orm.compiler import _collect_binds_native, _collect_binds_pure, _shape_of_pure
+from wreath.orm.compiler import _collect_binds_native, _collect_binds_walk, _shape_of_walk
 
 from .conftest import Membership, Post, User
 
@@ -54,21 +54,21 @@ def _queries() -> list[Any]:
 @pytest.mark.parametrize("index", range(len(_queries())))
 def test_native_key_matches_pure(registry: Any, index: int) -> None:
     query = _queries()[index]
-    assert _core.orm_shape(registry, query) == _shape_of_pure(registry, query)
+    assert _core.orm_shape(registry, query) == _shape_of_walk(registry, query)
 
 
 @native_only
 @pytest.mark.parametrize("index", range(len(_queries())))
 def test_native_binds_match_pure(registry: Any, index: int) -> None:
     # The native traversal collects the same value nodes, so encoded binds and
-    # oids are byte-identical to the pure walk in the same placeholder order.
+    # oids are byte-identical to the walked shape in the same placeholder order.
     query = _queries()[index]
-    assert _collect_binds_native(query) == _collect_binds_pure(query)
+    assert _collect_binds_native(query) == _collect_binds_walk(query)
 
 
 @native_only
 def test_native_keys_are_distinct_across_shapes(registry: Any) -> None:
-    # Different queries must not collide (the pure reference guarantees this;
+    # Different queries must not collide (the Python reference guarantees this;
     # the native builder must preserve it).
     keys = [_core.orm_shape(registry, query) for query in _queries()]
     # in_([]) vs in_([1..]) differ by count; all keys unique except intentional.
@@ -87,20 +87,20 @@ def test_facade_selects_native_when_available(registry: Any) -> None:
     from wreath.orm import compiler
 
     if _core is None or not hasattr(_core, "orm_shape"):
-        assert compiler.shape_of is compiler._shape_of_pure
+        assert compiler.shape_of is compiler._shape_of_walk
         return
 
     native: list[int] = []
     pure: list[int] = []
-    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_pure
+    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_walk
     compiler._shape_of_native = lambda *a: (native.append(1), original_native(*a))[1]
-    compiler._shape_of_pure = lambda *a: (pure.append(1), original_pure(*a))[1]
+    compiler._shape_of_walk = lambda *a: (pure.append(1), original_pure(*a))[1]
     try:
         compiler.shape_of(registry, User.select().where(User.id == 5))
     finally:
-        compiler._shape_of_native, compiler._shape_of_pure = original_native, original_pure
+        compiler._shape_of_native, compiler._shape_of_walk = original_native, original_pure
     assert native == [1], "an ordinary query must be keyed by the native builder"
-    assert pure == [], "and must not fall back to the pure builder"
+    assert pure == [], "and must not fall back to the walked builder"
 
 
 @native_only
@@ -116,7 +116,7 @@ def test_the_native_builder_keys_a_subquery_identically_to_pure(registry: Any) -
     query = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
-    assert _core.orm_shape(registry, query) == _shape_of_pure(registry, query)
+    assert _core.orm_shape(registry, query) == _shape_of_walk(registry, query)
 
 
 @native_only
@@ -148,7 +148,7 @@ def test_two_subqueries_of_different_shape_do_not_share_a_key(
     )
     variant = Post.select(Post.id).where(Post.author_id.in_(build_other()))
     assert _core.orm_shape(registry, base) != _core.orm_shape(registry, variant), label
-    assert _core.orm_shape(registry, variant) == _shape_of_pure(registry, variant)
+    assert _core.orm_shape(registry, variant) == _shape_of_walk(registry, variant)
 
 
 @native_only
@@ -169,7 +169,7 @@ def test_a_subquery_no_longer_falls_back_to_pure(registry: Any) -> None:
     """The point of teaching C the node: no raised-and-caught exception per compile.
 
     Parity alone cannot show this -- the fallback produced a correct key too, just
-    by way of an exception. Observing that `_shape_of_pure` is never reached is
+    by way of an exception. Observing that `_shape_of_walk` is never reached is
     the only assertion that distinguishes "C keys it" from "C refuses and Python
     rescues it", which is the whole difference this change makes.
     """
@@ -180,12 +180,12 @@ def test_a_subquery_no_longer_falls_back_to_pure(registry: Any) -> None:
     )
     native: list[int] = []
     pure: list[int] = []
-    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_pure
+    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_walk
     compiler._shape_of_native = lambda *a: (native.append(1), original_native(*a))[1]
-    compiler._shape_of_pure = lambda *a: (pure.append(1), original_pure(*a))[1]
+    compiler._shape_of_walk = lambda *a: (pure.append(1), original_pure(*a))[1]
     try:
         compiler.shape_of(registry, query)
     finally:
-        compiler._shape_of_native, compiler._shape_of_pure = original_native, original_pure
+        compiler._shape_of_native, compiler._shape_of_walk = original_native, original_pure
     assert native == [1], "the subquery must be keyed by the native builder"
     assert pure == [], "and must not fall back -- that fallback was the cost"

@@ -7,7 +7,7 @@ parameter has a type the driver can send.
 
 Every test here builds a synthetic tree rather than reading the real one, so a
 gate reaching zero in the repository does not make the suite vacuous -- which is
-the failure mode ADR 0024 names, and would be an unusually poor one to ship in
+the failure mode AGENTS.md names, and would be an unusually poor one to ship in
 the tests *for* these gates.
 """
 
@@ -278,8 +278,8 @@ def test_prose_beneath_the_table_is_not_a_row(tmp_path: Path) -> None:
 
 # --- sql_lint: a parameter typed by inference the driver cannot encode -------
 
-ENCODABLE = sql_lint.encodable_types(Path(__file__).resolve().parents[1])
-
+REPOSITORY = Path(__file__).resolve().parents[1]
+ENCODABLE = sql_lint.encodable_types(REPOSITORY)
 
 def _sql_findings(text: str) -> list[sql_lint.Finding]:
     return sql_lint._scan_text("q.py", 1, text, ENCODABLE)

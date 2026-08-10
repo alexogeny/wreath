@@ -317,12 +317,10 @@ def test_a_cache_hit_still_extracts_this_query_s_values(registry: Registry) -> N
 def test_cache_hit_executes_compiled_bind_program(monkeypatch, registry: Registry) -> None:
     """A cache hit reads this query's values without re-walking its tree.
 
-    Patched on whichever traversal the *current* build actually uses: the
-    native path calls `_collect_value_nodes`, which only exists when the C
-    extension bound it, and the pure path calls `_walk_values`. Naming only the
-    native one made this an `AttributeError` under `WREATH_PURE=1` rather than
-    a check -- so the mode the pure twin exists to protect was the one mode
-    this assertion never ran in.
+    Patched on whichever traversal the *current* build actually uses:
+    `_collect_value_nodes` when `orm_collect_values` is bound, and `_walk_values`
+    otherwise. Naming only one of them turns this into an `AttributeError`
+    instead of a check.
     """
     compile_select(registry, User.select(User.id).where(User.name == "A").limit(5))
 

@@ -15,8 +15,8 @@ blends into the field:
 - **Wreath (metal)** — wreath's **native C server** driving its own io_uring
   event loop (`--loop metal`). The headline.
 - **Wreath (native)** — the same **native C server**, on the uvloop event loop.
-- **Wreath (ASGI)** — wreath as a plain **pure-Python ASGI app** under uvicorn, no
-  native server at all. The baseline that shows what the C server actually buys.
+- **Wreath (ASGI)** — wreath as a plain **ASGI app** under uvicorn, with its own
+  server not in the picture. The baseline that shows what the C server buys.
 
 So the three bars isolate one variable at a time: ASGI → native is *the C server*,
 native → metal is *the io_uring loop*. Competitor bars are a muted hatch — "the
@@ -53,7 +53,7 @@ contributing to the win: on `--loop metal` there is no asyncio underneath. The
 socket read lands straight in a kernel-registered buffer (zero copy), submission
 and completion share a single `io_uring_enter`, and the adaptive busy-poll keeps
 the CPU on the socket through a burst instead of parking and being woken. The
-**Wreath (ASGI)** bar — the pure-Python app on uvicorn — sits right next to
+**Wreath (ASGI)** bar — the same app on uvicorn — sits right next to
 BlackSheep, which is the tell: at the bottom wreath is an ordinary well-built ASGI
 framework, and almost the whole jump to the top two bars is wreath's own **native
 C server** replacing uvicorn.
@@ -140,8 +140,8 @@ structure.
 ### Cedar authorization
 
 Evaluating a six-policy set (one allow + one deny per call), wreath's built-in
-Cedar engine — the C "metal" build vs. the pure-Python twin that must stay
-byte-for-byte identical:
+Cedar engine against `cedarpy`, the Rust binding to the reference
+implementation:
 
 ```chart
 source: perf/data/cedar.json
@@ -153,10 +153,11 @@ title: Cedar policy evaluation (authorizations/sec, higher is better)
 sort: desc
 ```
 
-What's contributing to the win: the metal engine compiles the policy set once and
-evaluates against pre-interned entities in C — **~820k authorizations/second**,
-about 7× the pure twin, which is itself no slouch at ~106k. That headroom is why
-putting authorization on *every* request (the RBAC bar above) costs so little.
+What's contributing to the win: the engine compiles the policy set once, in
+Python at startup, and the per-request evaluator walks that flat tape against
+pre-interned entities in C — **~820k authorizations/second**. That headroom is
+why putting authorization on *every* request (the RBAC bar above) costs so
+little.
 
 ## How it's measured
 
@@ -181,8 +182,8 @@ built to make honesty the path of least resistance:
   report says so instead of letting a green cell imply more than it should.
 
 The HTTP arms — **Wreath (metal)**, **Wreath (native)**, and **Wreath (ASGI)** —
-are described at the top; the migration and Cedar sections compare wreath's native
-build against the tool it replaces (Alembic/Django) and its own pure-Python twin.
+are described at the top; the migration and Cedar sections compare wreath
+against the tool it replaces (Alembic/Django, `cedarpy`).
 
 This run:
 
@@ -198,8 +199,9 @@ This run:
 
 The numbers above are an outcome, not a technique. Here's the machinery — grouped
 by where it sits on the request → metal → response path. Almost all of it is in
-the [native server](../guides/server.md); the pure-Python twin stays behaviourally
-identical, just slower.
+the [native server](../guides/server.md), which a deployment behind somebody
+else's ASGI server does not get — the framework works there, the server bars do
+not apply.
 
 ### The metal event loop (ingress)
 

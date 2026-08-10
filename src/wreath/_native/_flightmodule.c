@@ -368,9 +368,10 @@ recorder_publish_log(RecorderObject *self, PyObject *arg)
 /*
  * `wreath_nfr_log`: pack one record straight into a cell and publish it, with
  * no LogArg, no LogCell, and no `struct.pack` in between. This is the piece
- * stages 1-6 deliberately deferred; `_flight_schema.py` still holds the layout
- * and `_logsite.pack_value` / `LogCell.encode` remain the pure twin it is
- * checked against, byte for byte, by tests/test_logging_native_parity.py.
+ * stages 1-6 deliberately deferred; `_flight_schema.py` still holds the layout,
+ * and `_logsite.pack_value` / `LogCell.encode` -- which run when there is no
+ * ring, when a record is buffered, or when the caller is not the loop -- are
+ * held byte for byte to this by tests/test_logging_native_parity.py.
  *
  * What made the swap mechanical rather than a redesign is what stage 1 built
  * for it: a dense `site_id`, argument types declared at the call site, and a
@@ -388,7 +389,7 @@ recorder_publish_log(RecorderObject *self, PyObject *arg)
  */
 
 /* One argument's packing cursor over a cell's inline area. The fingerprint key
- * travels here rather than being read off the worker: the pure packer hashes
+ * travels here rather than being read off the worker: the Python packer hashes
  * with the site registry's key, and the two must agree byte for byte. */
 typedef struct {
     uint8_t *cursor;
@@ -704,7 +705,7 @@ recorder_log(RecorderObject *self, PyObject *const *args, Py_ssize_t nargs)
             break;
         }
         /* Fewer values than the site declares: the missing ones pack as `none`,
-         * exactly as the pure emitter pads them. The arity mismatch itself is
+         * exactly as the Python emitter pads them. The arity mismatch itself is
          * counted by the caller, which is the only side that knows the site. */
         PyObject *value = index < value_count ? PyTuple_GET_ITEM(args[6], index)
                                               : Py_None;

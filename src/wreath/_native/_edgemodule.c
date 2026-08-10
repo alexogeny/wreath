@@ -1,6 +1,6 @@
 /* wreath._native._edge: the reverse proxy's request path.
  *
- * `wreath.edge` is native-only by design and has no pure twin -- see AGENTS.md.
+ * `wreath.edge` has no Python path by design -- see AGENTS.md.
  * For a reverse proxy a Python fallback is a footgun rather than a safety net:
  * it degrades silently, by roughly five times, in the one component whose whole
  * job is to be faster than what it replaces, and nothing at runtime announces

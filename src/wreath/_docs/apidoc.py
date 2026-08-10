@@ -89,7 +89,7 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
     otherwise ship damaged and say nothing about it.
 
     So is a directive that resolves to a module and renders *no members*. That
-    one is ADR 0024's shape exactly: `::: wreath.orm` produced the package
+    one is exactly the shape of a check with nothing to check: `::: wreath.orm` produced the package
     docstring and nothing else from the day the page was written, and an empty
     section builds clean, so nothing ever said so. `_empty_module_finding` has
     the one allowance and what it costs.

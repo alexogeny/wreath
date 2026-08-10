@@ -149,7 +149,7 @@ PyObject *wreath_msgpack_dumps(PyObject *self, PyObject *arg);
 
 /* aesgcm.c: AES-128-GCM on AES-NI/PCLMULQDQ. `wreath_aesgcm_arms` returns an
  * empty tuple when the CPU or the build has neither, which is what
- * `wreath._webpush` reads to decide between this and its pure twin. */
+ * `wreath._webpush` reads to decide between this and its Python arm. */
 PyObject *wreath_aesgcm_arms(PyObject *self, PyObject *ignored);
 PyObject *wreath_aes128gcm_encrypt(PyObject *self, PyObject *args);
 PyObject *wreath_aes128gcm_decrypt(PyObject *self, PyObject *args);
@@ -166,8 +166,8 @@ PyObject *wreath_protobuf_decode(PyObject *self, PyObject *args);
 PyObject *wreath_sse_frame(PyObject *self, PyObject *args);
 
 /* xml.c: the strict XML profile behind wreath.xml. `wreath_xml_configure`
- * hands over the XMLRefusal type so C raises the same class the pure twin
- * does; without it every refusal is a RuntimeError instead. */
+ * hands over the XMLRefusal type so C raises the class `wreath._xml_model`
+ * declares; without it every refusal is a RuntimeError instead. */
 PyObject *wreath_xml_configure(PyObject *self, PyObject *arg);
 PyObject *wreath_xml_parse(PyObject *self, PyObject *args);
 PyObject *wreath_xml_c14n(PyObject *self, PyObject *args);

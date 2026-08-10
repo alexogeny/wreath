@@ -20,7 +20,6 @@ seeing it back.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from .._headers import find_header
@@ -28,17 +27,8 @@ from .._native import _core
 from .._webpolicy import replace_response_header
 from ..request import Request
 
-if _core is not None and hasattr(_core, "request_id_valid"):
-    _request_id_valid: Any = _core.request_id_valid
-else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
-    from .._pure.observability import request_id_valid as _request_id_valid
-
-if _core is not None and hasattr(_core, "random_hex"):
-    _random_hex: Any = _core.random_hex
-else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
-
-    def _random_hex(size: int) -> str:
-        return os.urandom(size).hex()
+_request_id_valid: Any = _core.request_id_valid
+_random_hex: Any = _core.random_hex
 
 _STATE_KEY = "_wreath_request_id"
 

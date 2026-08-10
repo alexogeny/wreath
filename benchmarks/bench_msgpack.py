@@ -1,10 +1,12 @@
-"""Microbenchmark: msgpack encoding against the native JSON encoder.
+"""Microbenchmark: msgpack encoding against the JSON encoder.
 
 `wreath.negotiation` offers JSON or msgpack from one `serialize(request, data)`
-call. JSON goes to `_core.json_dumps` (C); msgpack went to a recursive Python
-packer. Clients ask for msgpack to spend fewer bytes, so the format chosen for
-efficiency was the slower one to produce -- this measures that gap and, once a
-native encoder exists, what closes it.
+call, and both encoders are C. Clients ask for msgpack to spend fewer bytes, so
+this reports both the size it saves and what it costs to produce -- the two
+numbers that decide whether asking for it is worth it.
+
+msgpack once went to a recursive Python packer, which made the format chosen for
+efficiency the slower one to produce. That is what closing this gap fixed.
 
     python -m benchmarks.bench_msgpack --output benchmark-results-msgpack/before.json
 
@@ -24,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from wreath._native import _core
-from wreath._pure.msgpack import packb as pure_packb
 
 RESOLUTION_FACTOR = 2.0
 
@@ -77,20 +78,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    native_packb = getattr(_core, "msgpack_dumps", None)
+    packb = _core.msgpack_dumps
     encoders: list[tuple[str, Any]] = [
-        ("json-native", _core.json_dumps),
-        ("msgpack-pure", pure_packb),
+        ("json", _core.json_dumps),
+        ("msgpack", packb),
     ]
-    if native_packb is not None:
-        encoders.append(("msgpack-native", native_packb))
-    else:
-        print("note: _core.msgpack_dumps is absent; measuring the pure encoder only\n")
 
     scenarios: list[dict[str, Any]] = []
     for label, payload in _payloads().items():
         # Big payloads get fewer iterations; the per-call figure stays comparable.
-        size = len(pure_packb(payload))
+        size = len(packb(payload))
         iterations = max(20, args.iterations // max(1, size // 2048))
         results: dict[str, Any] = {}
         for name, fn in encoders:
@@ -105,10 +102,8 @@ def main() -> int:
         line = f"{label:14s} {size:8d}B"
         for name, _ in encoders:
             line += f"   {name}={results[name]['median_us']:9.2f}us"
-        if native_packb is not None:
-            pure_median = results["msgpack-pure"]["median_us"]
-            nat_median = results["msgpack-native"]["median_us"]
-            line += f"   speedup={pure_median / nat_median:5.2f}x"
+        json_bytes = len(results and _core.json_dumps(payload))
+        line += f"   msgpack/json bytes={size / json_bytes:5.2f}"
         print(line)
         scenarios.append(
             {
@@ -125,7 +120,6 @@ def main() -> int:
         "implementation": sys.implementation.name,
         "executable": sys.executable,
         "rounds": args.rounds,
-        "native_available": native_packb is not None,
         "scenarios": scenarios,
     }
     if args.output is not None:

@@ -155,13 +155,13 @@ def run_shape(shape: str, warmup: int, trials: int) -> dict[str, Any]:
             "app_construction": {"median": build_median, "p95": build_p95},
             "model_construction": {"median": model_median, "p95": model_p95},
             "planning": {"median": plan_median, "p95": plan_p95},
-            "render_pure": {"median": render_median, "p95": render_p95},
+            "render": {"median": render_median, "p95": render_p95},
             "render_native": None,  # not built; benchmark-gated follow-up
             "write": {"median": write_median, "p95": write_p95},
             "total": {"median": total_median, "p95": total_p95},
         },
         "render_noise_floor_ms": floor,
-        "render_pure_sha256": _sha(files),
+        "render_sha256": _sha(files),
         "render_native_sha256": None,
         "render_mib_per_second": (
             output_bytes / (1024 * 1024) / (render_median / 1e3) if render_median else 0.0
@@ -197,7 +197,7 @@ def main() -> None:
         print(
             f"{entry['shape']:8} routes={entry['routes']:6} models={entry['models']:5} "
             f"model={phases['model_construction']['median']:8.2f}ms "
-            f"render={phases['render_pure']['median']:8.2f}ms "
+            f"render={phases['render']['median']:8.2f}ms "
             f"total={phases['total']['median']:8.2f}ms "
             f"({entry['render_mib_per_second']:.1f} MiB/s, "
             f"floor={entry['render_noise_floor_ms']:.2f}ms)"

@@ -9,7 +9,7 @@ over an independent connection, is the evidence. Asserting that our own `await`
 raised `CancelledError` would prove only that asyncio works.
 
 Both drivers share this path rather than twinning it: the native `Connection`
-subclasses the pure one, so `_cancel_operation` and `_send_cancel_request` are
+subclasses the Python one, so `_cancel_operation` and `_send_cancel_request` are
 one implementation, exercised here under whichever backend is selected.
 
 **This file covers layers 2-4 of the cancellation chain and deliberately not

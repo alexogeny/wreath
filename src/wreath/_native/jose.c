@@ -24,10 +24,9 @@
  * hand-rolled cipher in an auth path. Linking libcrypto would make the default
  * build depend on OpenSSL, which _core deliberately does not.
  *
- * TODO(pure-twin): a byte-identical wreath._pure.jose twin plus a Project
- * Wycheproof + `cryptography` differential-oracle harness are deferred per the
- * C-first directive. The facade already falls back to stdlib hmac when _core is
- * absent, so the HS, RS, and PS families still function under WREATH_PURE=1.
+ * TODO: a Project Wycheproof + `cryptography` differential-oracle harness is
+ * deferred. `tests/compliance/test_jwt_ec.py` carries the RFC 8032 and NIST
+ * known-answer vectors in the meantime.
  */
 
 #include <errno.h>
@@ -126,12 +125,12 @@ wreath_jose_parse(PyObject *Py_UNUSED(self), PyObject *args)
     if (tok == NULL) {
         return NULL;
     }
-    /* Wording is shared with the pure twin in `_auth/jwt.py`, deliberately: the
-       two are one contract, and an error message that names which build parsed
-       the token is a difference callers can trip over. An *empty* token is not
+    /* Wording is shared with `_auth/jwt.py`, deliberately: the two are one
+       contract, and an error message that names which code parsed the token is
+       a difference callers can trip over. An *empty* token is not
        handled here -- it falls through to the separator count below and is
        answered "must have exactly two dots", which is both the more accurate
-       diagnosis and what the pure branch already said. */
+       diagnosis and what the Python branch already said. */
     if (tok_len > JOSE_ABS_MAX_TOKEN) {
         PyErr_SetString(PyExc_ValueError, "compact JWT exceeds maximum size");
         return NULL;
@@ -201,7 +200,7 @@ wreath_jose_parse(PyObject *Py_UNUSED(self), PyObject *args)
     if (hn < 0 || pn < 0 || sn < 0) {
         /* Covers both causes -- a character outside the alphabet, and a length
            that is not a valid unpadded base64 length -- because both are the
-           same instruction to the caller. Shared verbatim with the pure twin. */
+           same instruction to the caller. Shared verbatim with `_auth/jwt.py`. */
         PyErr_SetString(PyExc_ValueError, "a compact JWT segment must be unpadded base64url");
         goto error;
     }

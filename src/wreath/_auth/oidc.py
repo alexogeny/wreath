@@ -137,7 +137,7 @@ class OidcProvider:
         # that is not an inconsistency: this one is published as a public
         # attribute that any application may build its own redirect from, so the
         # pin belongs at the point the value *enters* -- the earliest moment the
-        # error is knowable (docs/decisions/0019), and a startup failure rather
+        # error is knowable (refuse rather than half-wire), and a startup failure rather
         # than one 500 per sign-in. It stays an absolute URL because it is a
         # browser redirect target, not something this process fetches.
         authorization_endpoint = document.get("authorization_endpoint")

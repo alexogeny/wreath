@@ -209,7 +209,9 @@ non-match. `test_docs_ssg`'s copytree-and-build (2.26 s) is untouched.
 
 ## 4. Interpreted-loop crypto — ~12 s serial  ◐ PARTLY FIXED
 
-`test_aesgcm_parity::test_native_and_pure_agree_under_a_seeded_fuzz`, 6.2 s.
+`test_aesgcm_parity::test_both_paths_match_openssl_under_a_seeded_fuzz`, 6.2 s.
+(Named `test_native_and_pure_agree_under_a_seeded_fuzz` when this was measured;
+the loop is unchanged, only what it asserts against.)
 
 Priced as a loop, both halves: pure-Python AES-128-GCM runs at **0.13 MB/s**,
 **8.1 ms per iteration** at the test's average size. 400 iterations × (encrypt +

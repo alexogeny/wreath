@@ -69,7 +69,7 @@ async def _bind_real_oid(connection) -> int:
     rows = await connection.fetch("SELECT oid FROM pg_type WHERE typname = 'halfvec'")
     assert rows, "pgvector is installed but has no halfvec type; needs pgvector >= 0.7"
     oid = int(rows[0]["oid"])
-    from wreath._pure import postgres as pure
+    from wreath import _pgdriver as pure
 
     pure._register_extension_type("halfvec", oid, EXT_KIND_HALFVEC)
     try:

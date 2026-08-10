@@ -10,7 +10,7 @@ directly and asserts that it *does* lose the row -- so this suite falsifies its
 own premise on the PostgreSQL it is running against, rather than asserting the
 correct implementation is correct and calling that proof.
 
-See `docs/decisions/0027-a-log-cursor-is-a-transaction-id.md`.
+See `wreath.log`'s cursor contract.
 """
 
 from __future__ import annotations

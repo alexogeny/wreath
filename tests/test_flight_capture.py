@@ -1,7 +1,7 @@
 """Stage 5 slice 5a — native forensic capture-slab core.
 
 Drives the native ``_flight.Recorder`` capture path directly and checks it
-byte-for-byte against the pure oracle in ``wreath._pure.flight``. The whole
+byte-for-byte against the reference recorder in ``wreath._flight_reference``. The whole
 point of this slice is the deny-by-default, bounded, redact-before-retention
 slab mechanism, so the tests lean on secret canaries, slab exhaustion, and
 per-field truncation as hard as on the differential parity. The extension is
@@ -14,16 +14,16 @@ import random
 
 import pytest
 
+from wreath import _flight_reference as codec
 from wreath import _flight_schema as fs
+from wreath._flight_reference import ReferenceRecorder
 from wreath._flight_schema import CaptureDisposition as D
 from wreath._flight_schema import CaptureFieldClass as FC
 from wreath._flight_schema import siphash24
-from wreath._pure import flight as codec
-from wreath._pure.flight import PureRecorder
 
 _flight = pytest.importorskip("wreath._native._flight")
 
-# A fixed key so HASHED capture is reproducible and native/pure slabs compare
+# A fixed key so HASHED capture is reproducible and native and reference slabs compare
 # byte-for-byte. Production draws a random per-worker key.
 KEY = (0xDEADBEEFCAFEF00D, 0x0123456789ABCDEF)
 
@@ -36,12 +36,12 @@ def _native(**kw: object) -> object:
     return _flight.Recorder(_flight.MODE_FORENSIC, **kw)
 
 
-def _pure(**kw: object) -> PureRecorder:
+def _pure(**kw: object) -> ReferenceRecorder:
     kw.setdefault("ring_records", 1024)
     kw.setdefault("active_requests", 64)
     kw.setdefault("detailed_sample_rate", 1.0)
     kw.setdefault("capture_hash_key", KEY)
-    return PureRecorder(fs.Mode.FORENSIC, **kw)
+    return ReferenceRecorder(fs.Mode.FORENSIC, **kw)
 
 
 # --- SipHash vector ---------------------------------------------------------
@@ -217,7 +217,7 @@ def test_raw_body_truncates_to_slab_and_flags() -> None:
 
 def test_raw_policy_max_bytes_cap_records_true_length() -> None:
     # A max_bytes cap keeps a prefix but records the true original length as
-    # truncated (distinct from the slab-overflow bound); native and pure agree.
+    # truncated (distinct from the slab-overflow bound); both packers agree.
     rec = _native(capture_slabs=2, slab_bytes=4096)
     pure = _pure(capture_slabs=2, slab_bytes=4096)
     big = b"abcdefghijklmnopqrstuvwxyz"  # 26 bytes, capped to 8

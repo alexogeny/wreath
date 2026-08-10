@@ -501,7 +501,7 @@ async def _run_protocol(
     env = os.environ.copy()
     env["WREATH_BENCH_FRAMEWORK"] = framework
     # h2/h3 need TLS. For HTTP/1.1 we now prefer h2load *cleartext* whenever it is
-    # installed: the pure-Python built-in client caps every server at its own
+    # installed: the built-in Python client caps every server at its own
     # throughput (~80k req/s here) and makes native servers indistinguishable, so
     # a fast C client is essential to measure the server rather than the client.
     tls = bool(args.tls_cert and args.tls_key)

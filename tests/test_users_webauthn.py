@@ -1072,7 +1072,7 @@ def _app(
         the path on which the ceremony's user binding is the last thing left to
         refuse a ceremony the previous holder began -- and a binding test that
         went through `/users/login` would be asserting a refusal whose subject
-        the login had already removed (docs/decisions/0024).
+        the login had already removed (a check that has nothing to check).
         """
         request.state.session["principal"] = {
             "sub": user_id, "type": "User", "roles": []

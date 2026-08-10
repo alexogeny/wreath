@@ -12,9 +12,9 @@ protocol is four primitives, three of which CPython already ships.
 `hashlib` and `hmac` cover SHA-256, HMAC and therefore HKDF. The elliptic-curve
 arithmetic and AES-GCM are here because the stdlib has neither -- there is no
 AES anywhere in CPython, which is the single reason this module is longer than
-it looks like it should be. The AES-GCM below is now the *twin* of a hardware
-implementation in `src/wreath/_native/aesgcm.c` rather than the only one; it
-still ships, because a CPU without AES-NI still has to encrypt a push.
+it looks like it should be. The AES-GCM below is the portable arm; the hardware
+one is in `src/wreath/_native/aesgcm.c`. Both ship, because a CPU without AES-NI
+still has to encrypt a push.
 
 **What is not here, deliberately.** No key generation for the *client* half, no
 subscription storage policy, and no retry loop: a push is delivered by a
@@ -55,10 +55,10 @@ facade arm to 0.02 us, which is what makes the ratio worth quoting at all.
 The AES was ablated rather than profiled, per `AGENTS.md`: of the 14.5 ms a
 4000-byte record took, the block cipher was 81% and GHASH 31%. Both halves have
 a hardware instruction -- `aesenc` for the cipher, `pclmulqdq` for GHASH's
-carry-less multiply -- so `src/wreath/_native/aesgcm.c` is where they now run,
-and this file keeps the Python as the twin `tests/test_aesgcm_parity.py` holds
-byte-for-byte equal to it. The 0.12 us between the two rows is the argument
-check and the dispatch, which is the whole cost of keeping the twin.
+carry-less multiply -- so `src/wreath/_native/aesgcm.c` is where they run on a
+CPU that has them. Both arms are pinned to the NIST SP 800-38D vectors by
+`tests/test_aesgcm_parity.py`. The 0.12 us between the two rows is the argument
+check and the dispatch.
 
 **That is the AES only, and saying more would overstate it.** Ablating one whole
 push over a 3900-byte payload, in the same interleaved run:
@@ -355,7 +355,7 @@ def _aes128gcm_decrypt_pure(
 ) -> bytes | None:
     """The plaintext, or None when the tag does not verify.
 
-    None rather than an exception so that the C twin -- which cannot raise
+    None rather than an exception so that the C arm -- which cannot raise
     Wreath's error type without a Python call -- refuses in the same words. The
     caller below owns the message.
     """
@@ -366,14 +366,13 @@ def _aes128gcm_decrypt_pure(
     return _ctr_pure(round_keys, nonce, ciphertext)
 
 
-# The hardware path, bound once at import. `aesgcm_arms()` is empty on a CPU
-# without AES-NI and PCLMULQDQ and on a build that could not compile them, and
-# `_core` is None under WREATH_PURE=1 -- all three land on the twin above.
-# `getattr` rather than a bare attribute because an in-place `.so` older than
-# this module is a routine state in a development tree, not a broken install.
+# The hardware path, bound once at import. `aesgcm_arms()` reports what this
+# CPU can actually run and is empty without AES-NI and PCLMULQDQ, which is a
+# property of the machine rather than of the build -- so the Python above stays
+# and is what runs there.
 _native_gcm_encrypt = None
 _native_gcm_decrypt = None
-if _core is not None and getattr(_core, "aesgcm_arms", tuple)():
+if _core.aesgcm_arms():
     _native_gcm_encrypt = _core.aes128gcm_encrypt
     _native_gcm_decrypt = _core.aes128gcm_decrypt
 
@@ -384,9 +383,9 @@ def aes128gcm_encrypt(
     """AES-128-GCM; returns ciphertext || 16-byte tag.
 
     Written out because CPython ships no AES at all. Runs on AES-NI and
-    PCLMULQDQ where the CPU has them, and on the pure twin above otherwise;
-    `tests/test_aesgcm_parity.py` holds the two byte-for-byte equal, and both
-    are pinned against the NIST SP 800-38D vectors and against `cryptography`.
+    PCLMULQDQ where the CPU has them, and on the Python above otherwise; both
+    arms are pinned against the NIST SP 800-38D vectors and against
+    `cryptography` by `tests/test_aesgcm_parity.py`.
 
     Raises:
         PushError: the key is not 16 bytes, the nonce is not 12, or the

@@ -1,6 +1,6 @@
 """Both AES-GCM paths, against answers nobody in this repository wrote.
 
-`tests/test_aesgcm_parity.py` proves the native and pure implementations agree.
+`tests/test_aesgcm_parity.py` proves the hardware and Python arms agree.
 Agreement is not correctness: two implementations written from the same reading
 of NIST SP 800-38D can be wrong in the same place, and a differential test is
 exactly the wrong instrument for that. So this file checks both of them against

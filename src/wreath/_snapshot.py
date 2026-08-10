@@ -7,10 +7,6 @@ complete generation and never a half-applied update. Old generations stay alive
 as long as a reader still references the value it read. Reads never perform I/O:
 a miss is an explicit miss, not a lazy load.
 
-**This is not a twin, which is why it does not live in `wreath._pure`.** There
-has never been a C `SnapshotCache`; `wreath.cache` carried a
-`hasattr(_core, "SnapshotCache")` guard that never once fired.
-
 **A native port was priced and declined.** `docs/plans/native-shared-primitives.md`
 named this a real candidate with "`kv.c` is the model to copy", so `kv.c` is what
 it was measured against -- 21 interleaved rounds, 40,000 iterations, performance
