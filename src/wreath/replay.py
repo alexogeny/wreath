@@ -219,8 +219,6 @@ def _chunk_map(
     return seen
 
 
-
-
 def _encode_addr(addr: tuple[str, int]) -> bytes:
     host = addr[0].encode("utf-8")
     return struct.pack("<HH", len(host), int(addr[1])) + host
@@ -229,7 +227,7 @@ def _encode_addr(addr: tuple[str, int]) -> bytes:
 def _decode_addr(payload: bytes, offset: int) -> tuple[tuple[str, int], int]:
     host_len, port = struct.unpack_from("<HH", payload, offset)
     offset += 4
-    host = payload[offset:offset + host_len].decode("utf-8")
+    host = payload[offset : offset + host_len].decode("utf-8")
     return (host, port), offset + host_len
 
 
@@ -306,7 +304,7 @@ class TransportRecording:
         for _ in range(count):
             arrival, kind, length = struct.unpack_from("<QBI", segs, offset)
             offset += struct.calcsize("<QBI")
-            payload = segs[offset:offset + length]
+            payload = segs[offset : offset + length]
             offset += length
             parsed.append(TransportSegment(arrival, kind, bytes(payload)))
         return cls(tuple(parsed), peername, sockname, build_id)
@@ -571,6 +569,7 @@ async def _drive_connection(
     protocol_cls: type,
     config: ServerConfig | None,
     faults: FaultSchedule | None,
+    recorder: object | None = None,
 ) -> tuple[bytes, str, int, int]:
     """Feed a recording into one protocol over a fake transport and return the
     raw response bytes, terminal disposition, write count, and segments fed.
@@ -582,7 +581,12 @@ async def _drive_connection(
     loop = asyncio.get_running_loop()
     transport = _ReplayTransport(recording.peername, recording.sockname)
     registry: set[Any] = set()
-    protocol = protocol_cls(app, config or ServerConfig(), loop, registry)
+    arguments = (app, config or ServerConfig(), loop, registry)
+    protocol = (
+        protocol_cls(*arguments)
+        if recorder is None
+        else protocol_cls(*arguments, recorder=recorder)
+    )
     protocol.connection_made(transport)
 
     clock = VirtualClock()
@@ -654,6 +658,7 @@ async def replay_transport(
     config: ServerConfig | None = None,
     protocol_cls: type | None = None,
     faults: FaultSchedule | None = None,
+    recorder: object | None = None,
 ) -> TransportReplayResult:
     """Re-drive the owned HTTP/1 protocol from a transport recording.
 
@@ -663,11 +668,13 @@ async def replay_transport(
     disposition. An optional `FaultSchedule` perturbs the inbound stream
     along transport seams before it reaches the parser. For HTTP/2 use
     `replay_transport_h2`, which decodes the frames it wrote back.
+    A supplied native Flight `recorder` receives the same completion and phase
+    cells as this protocol would emit under a live server.
     """
     if protocol_cls is None:
         protocol_cls = _default_protocol_cls()
     response, terminal, write_count, segments_fed = await _drive_connection(
-        app, recording, protocol_cls, config, faults
+        app, recording, protocol_cls, config, faults, recorder
     )
     return TransportReplayResult(
         response=response,
@@ -684,6 +691,7 @@ async def replay_transport_h2(
     *,
     config: ServerConfig | None = None,
     faults: FaultSchedule | None = None,
+    recorder: object | None = None,
 ) -> H2ReplayResult:
     """Re-drive the owned HTTP/2 protocol from a transport recording.
 
@@ -691,13 +699,14 @@ async def replay_transport_h2(
     DATA frames); byte-level faults apply exactly as for HTTP/1. The frames the
     server wrote back are decoded into per-stream owned responses so two builds
     can be compared without depending on HPACK byte layout or the `date` value.
+    A supplied native Flight `recorder` is passed to the protocol unchanged.
     """
     protocol_cls = _default_h2_protocol_cls()
     if protocol_cls is None:
         raise ReplayError("the native HTTP/2 protocol is not built")
     h2_config = config or ServerConfig(protocols=("h2",))
     response, terminal, write_count, segments_fed = await _drive_connection(
-        app, recording, protocol_cls, h2_config, faults
+        app, recording, protocol_cls, h2_config, faults, recorder
     )
     from ._h2_codec import decode_response, goaway_error
 
@@ -841,7 +850,7 @@ def _encode_str(text: str) -> bytes:
 def _decode_str(data: bytes, offset: int) -> tuple[str, int]:
     (length,) = struct.unpack_from("<H", data, offset)
     offset += 2
-    return data[offset:offset + length].decode("utf-8"), offset + length
+    return data[offset : offset + length].decode("utf-8"), offset + length
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,9 +883,7 @@ class FaultSchedule:
             raise ReplayError("not a WFS1 fault schedule")
         if len(data) < 5 or data[4] != _CONTAINER_VERSION:
             raise ReplayError("unsupported WFS1 container version")
-        chunks = _chunk_map(
-            data, 5, container="WFS1", recover_tail=False, known=_FAULT_CHUNKS
-        )
+        chunks = _chunk_map(data, 5, container="WFS1", recover_tail=False, known=_FAULT_CHUNKS)
         if b"FALT" not in chunks:
             raise ReplayError("fault schedule is missing its FALT chunk")
         body = chunks[b"FALT"]
@@ -1269,9 +1276,7 @@ def recorded_request(recording: TransportRecording) -> CanonicalRequest:
     than no test at all.
     """
     raw = b"".join(
-        segment.data
-        for segment in recording.segments
-        if segment.kind == int(SegmentKind.DATA)
+        segment.data for segment in recording.segments if segment.kind == int(SegmentKind.DATA)
     )
     if not raw.strip():
         raise ReplayError("the recording contains no request bytes")
@@ -1301,8 +1306,7 @@ def recorded_request(recording: TransportRecording) -> CanonicalRequest:
     declared = int(lookup.get(b"content-length", b"0") or 0)
     if len(rest) < declared:
         raise ReplayError(
-            f"the recorded request is incomplete: {len(rest)} body bytes of "
-            f"{declared} declared"
+            f"the recorded request is incomplete: {len(rest)} body bytes of {declared} declared"
         )
     if rest[declared:].strip():
         # A keep-alive connection carrying a second request concatenates into
@@ -1332,9 +1336,9 @@ def recorded_request(recording: TransportRecording) -> CanonicalRequest:
 
 
 def _test_name(request: CanonicalRequest) -> str:
-    slug = "".join(
-        character if character.isalnum() else "_" for character in request.path
-    ).strip("_")
+    slug = "".join(character if character.isalnum() else "_" for character in request.path).strip(
+        "_"
+    )
     return f"test_{request.method.lower()}_{slug}".rstrip("_").replace("__", "_")
 
 
@@ -1420,9 +1424,7 @@ async def reproduce_from_ring(
             )
         request_id = candidates[0]
 
-    expected = tuple(
-        record.decode().site_id for record in ring.logs_for(request_id)
-    )
+    expected = tuple(record.decode().site_id for record in ring.logs_for(request_id))
     if not expected:
         raise ReplayError(
             f"request {request_id} has no log records in the ring file, so there "
@@ -1477,8 +1479,8 @@ async def generate_test(
     async with TestClient(app) as client:
         response = await client.request(
             request.method,
-            request.path + (f"?{request.query_string.decode('latin-1')}"
-                            if request.query_string else ""),
+            request.path
+            + (f"?{request.query_string.decode('latin-1')}" if request.query_string else ""),
             headers={
                 name_.decode("latin-1"): value.decode("latin-1")
                 for name_, value in request.headers
@@ -1490,9 +1492,7 @@ async def generate_test(
         )
 
     module, _, attribute = target.partition(":")
-    import_line = (
-        f"from {module} import {attribute}" if attribute else f"import {module}"
-    )
+    import_line = f"from {module} import {attribute}" if attribute else f"import {module}"
     application = attribute or f"{module}.app"
     headers = {
         name_.decode("latin-1"): value.decode("latin-1")
@@ -1586,9 +1586,12 @@ _FAULT_TABLES: dict[int, dict[str, AdapterFault]] = {
 #: Which seams live on a database double rather than a client or a store.
 _DB_SEAMS = frozenset(
     {
-        int(AdapterSeam.DB_ACQUIRE), int(AdapterSeam.DB_QUERY),
-        int(AdapterSeam.DB_RELEASE), int(AdapterSeam.DB_LISTEN),
-        int(AdapterSeam.DB_TRANSACTION), int(AdapterSeam.DB_CONNECTION),
+        int(AdapterSeam.DB_ACQUIRE),
+        int(AdapterSeam.DB_QUERY),
+        int(AdapterSeam.DB_RELEASE),
+        int(AdapterSeam.DB_LISTEN),
+        int(AdapterSeam.DB_TRANSACTION),
+        int(AdapterSeam.DB_CONNECTION),
     }
 )
 
@@ -1644,9 +1647,7 @@ def attempt_adapters(record: Any, *, databases: tuple[str, ...] = ()) -> ReplayA
         elif event.seam == int(AdapterSeam.HTTP_REQUEST):
             adapters.clients.setdefault(event.target, FaultyHttpClient(event.target))
         elif event.seam == int(AdapterSeam.OBJECT_STORE):
-            adapters.object_stores.setdefault(
-                event.target, ObjectStoreDouble(event.target)
-            )
+            adapters.object_stores.setdefault(event.target, ObjectStoreDouble(event.target))
         else:
             # A seam this build has no double for. Refused rather than skipped:
             # a boundary with no double is one the replay reaches for real, and
@@ -1757,9 +1758,7 @@ async def replay_attempt(
     outcome: Any = AttemptOutcome.COMPLETED
     error: BaseException | None = None
     deadline = runner.deadline_for(record.task)
-    with installed_boundaries(
-        scope, adapters, slots=((runner, "_db", queue_database),)
-    ):
+    with installed_boundaries(scope, adapters, slots=((runner, "_db", queue_database),)):
         try:
             async with asyncio.timeout(deadline):
                 await task.func(context, *args)
@@ -1780,8 +1779,7 @@ async def replay_attempt(
         recorded = f" ({record.error_type})" if record.error_type else ""
         observed = f" ({error_type})" if error_type else ""
         note = (
-            f"the recording ended {record.outcome}{recorded}; this replay ended "
-            f"{outcome}{observed}"
+            f"the recording ended {record.outcome}{recorded}; this replay ended {outcome}{observed}"
         )
     return AttemptReplayResult(
         outcome=str(outcome),
@@ -1830,17 +1828,14 @@ async def generate_attempt_test(
     result = await replay_attempt(runner, record, args=args, scope=scope)
 
     module, _, attribute = target.partition(":")
-    import_line = (
-        f"from {module} import {attribute}" if attribute else f"import {module}"
-    )
+    import_line = f"from {module} import {attribute}" if attribute else f"import {module}"
     queue = attribute or f"{module}.jobs"
     where = f" from {origin}" if origin else ""
     tenant = f" for tenant {record.tenant!r}" if record.tenant else ""
     cause = (
         f"Enqueued under trace context {record.trace_context}."
         if record.trace_context
-        else "The queue row carried no trace context, so the enqueuing request "
-        "is not named."
+        else "The queue row carried no trace context, so the enqueuing request is not named."
     )
     lines = [
         _GENERATED_HEADER,
