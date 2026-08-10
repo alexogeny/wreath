@@ -1,17 +1,15 @@
-"""Pure/native selection for outbound HTTP byte codecs.
+"""Which extension serves the outbound HTTP byte codecs.
 
-Three tiers, not two, and the order is deliberate. `_client` is the dedicated
-client protocol extension and wins when built. `_core` is the framework
-accelerator, which happens to carry the same two functions for the inbound path;
-it is the fallback because a build may have one extension and not the other.
-`_pure.http_client` is the reference implementation and the parity contract --
-the native tiers are asserted byte-for-byte equal to it, so a divergence is a
-parity bug rather than a behaviour change.
+Two tiers, and the order is deliberate. `_client` is the dedicated client
+protocol extension and wins when built. `_core` is the framework accelerator,
+which happens to carry the same functions for the inbound path; it is the
+fallback because a build may have one extension and not the other. `_core` is
+mandatory, so one of the two is always there.
 
 Response framing uses the same tier as head parsing. Although its input is
-already structured, it scans every framing header and transfer-coding token;
+already structured, it scans every framing header and transfer-coding token, and
 keeping that bounded wire-policy loop native avoids rebuilding Python lists on
-every response while the pure implementation remains its parity contract.
+every response.
 
 `_implementation` records which tier was chosen, for tests and diagnostics that
 need to know which one they measured.
@@ -19,28 +17,36 @@ need to know which one they measured.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from ._native import _client, _core
+
+#: `parse_response_head(data)` -- a complete status line and header block to
+#: `(version, status, reason, headers, consumed)`, or `None` while the head is
+#: still incomplete. Annotated here because a compiled function is `Any`, and a
+#: caller that learns nothing from it infers `Any` all the way down.
+_ParsedHead = tuple[int, int, bytes, list[tuple[bytes, bytes]], int]
+parse_response_head: Callable[[bytes], _ParsedHead | None]
+
+#: `response_framing(method, status, headers)` -- `(mode, length)`, where mode
+#: is one of `"length"`, `"chunked"`, `"close"` or `"none"`.
+response_framing: Callable[[str, int, list[tuple[bytes, bytes]]], tuple[str, int]]
+
+#: `response_keeps_alive(minor_version, headers, framed)` -- whether the
+#: connection may be reused once this response is complete.
+response_keeps_alive: Callable[[int, list[tuple[bytes, bytes]], bool], bool]
 
 if _client is not None:
     parse_response_head = _client.parse_response_head
     response_framing = _client.response_framing
     response_keeps_alive = _client.response_keeps_alive
     _implementation = "native-client"
-elif _core is not None and hasattr(_core, "http_parse_response"):
+else:
     parse_response_head = _core.http_parse_response
     response_framing = _core.http_response_framing
     response_keeps_alive = _core.http_response_keeps_alive
     _implementation = "native-core"
-else:
-    from ._pure.http_client import (
-        parse_response_head,
-        response_framing,
-        response_keeps_alive,
-    )
 
-    _implementation = "pure"
 
 if _client is not None:
 
@@ -54,7 +60,7 @@ if _client is not None:
     ) -> bytes:
         return _client.serialize_request(method, target, host, tuple(headers), body)
 
-elif _core is not None and hasattr(_core, "http_serialize_request"):
+else:
 
     def serialize_request(
         method: str,
@@ -65,9 +71,6 @@ elif _core is not None and hasattr(_core, "http_serialize_request"):
         body: bytes | bytearray | memoryview = b"",
     ) -> bytes:
         return _core.http_serialize_request(method, target, host, tuple(headers), body)
-
-else:
-    from ._pure.http_client import serialize_request
 
 
 __all__ = [
