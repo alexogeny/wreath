@@ -1447,10 +1447,10 @@ def _render_geo_distance(
 ) -> None:
     """Render great-circle metres between a `point` column and a `point(...)`.
 
-    The haversine, in SQL, over the same sphere radius the Python and C twins
-    use -- `wreath.geospatial.EARTH_RADIUS_M`. Three implementations of one
-    formula is two too many, so the radius is written once here and asserted
-    equal to the module's constant by a test rather than being retyped.
+    The haversine, in SQL, over the same sphere radius the Python bounding box
+    and `geo_haversine` use -- `wreath.geospatial.EARTH_RADIUS_M`. Three
+    implementations of one formula is two too many, so the radius is written
+    once and asserted equal to the module's constant by a test.
 
     PostgreSQL indexes a `point` as `p[0]` = x = longitude and `p[1]` = y =
     latitude. Getting that pair backwards is the single most likely defect in
@@ -1595,7 +1595,7 @@ def _text_search_config(node: BinaryExpr) -> str:
     return config
 
 
-def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...]]:
+def _collect_binds_walk(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...]]:
     """Extract bind values in the order the compiler emits placeholders.
 
     A cache hit skips SQL generation but must still read this query's values,
@@ -1620,11 +1620,11 @@ def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...
 def _collect_binds_native(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...]]:
     """The native traversal returns the ordered value nodes; encoding to wire
     format stays in this flat Python loop (a per-value call must not cross into
-    C). Output is byte-identical to `_collect_binds_pure`."""
+    C). Output is byte-identical to `_collect_binds_walk`."""
     values: list[Any] = []
     oids: list[int] = []
     # A predicate-free read has no tree to walk; skip the C crossing so it is
-    # never slower than the pure short-circuit.
+    # never slower than the Python short-circuit.
     if select.predicates:
         for node in _collect_value_nodes(select):
             pg_type = node.pg_type
@@ -1644,11 +1644,8 @@ def _collect_binds_native(select: Select) -> tuple[tuple[Any, ...], tuple[int, .
     return tuple(values), tuple(oids)
 
 
-if _core is not None and hasattr(_core, "orm_collect_values"):
-    _collect_value_nodes = _core.orm_collect_values
-    _collect_binds = _collect_binds_native
-else:
-    _collect_binds = _collect_binds_pure
+_collect_value_nodes = _core.orm_collect_values
+_collect_binds = _collect_binds_native
 
 
 def _walk_values(node: Expression, values: list[Any], oids: list[int]) -> None:
@@ -1767,7 +1764,7 @@ def _shape_loads(options: tuple[LoadOption, ...], out: list[bytes]) -> None:
         _shape_loads(option.nested, out)
 
 
-def _shape_of_pure(registry: Any, select: Select) -> bytes:
+def _shape_of_walk(registry: Any, select: Select) -> bytes:
     """A cache key covering everything that changes the SQL, and no values.
 
     Runs on every query, so the pieces that cannot vary -- encoded column names,
@@ -1796,7 +1793,7 @@ def _shape_of_pure(registry: Any, select: Select) -> bytes:
             continue
         # A distance ordering keys through the whole expression: the operator
         # and the bound type both change the SQL text, and two searches over one
-        # column with different distances are two plans. Only the pure keyer
+        # column with different distances are two plans. Only the walked keyer
         # sees these -- `shape_of` routes them here deliberately.
         out.append(b"o")
         _shape_expression(expression, out)
@@ -1809,59 +1806,57 @@ def _shape_of_pure(registry: Any, select: Select) -> bytes:
     return b"\x1e".join(out)
 
 
-# The cache key runs on every query. The native builder skips the per-node
-# Python recursion frame and writes the key straight into one buffer; it is
-# configured with the Expression classes so it can dispatch by exact type, and
-# produces byte-identical keys to `_shape_of_pure` (pinned by parity tests).
-if _core is not None and hasattr(_core, "orm_shape"):
-    _core.orm_shape_configure(
-        ColumnExpr,
-        RelatedColumnExpr,
-        ValueExpr,
-        BinaryExpr,
-        InExpr,
-        InSubqueryExpr,
-        BooleanExpr,
-        UnaryExpr,
-        ORMError,
-    )
-    _shape_of_native = _core.orm_shape
+# The cache key runs on every query. `orm_shape` skips the per-node Python
+# recursion frame and writes the key straight into one buffer; it is configured
+# with the Expression classes so it can dispatch by exact type, and produces
+# byte-identical keys to `_shape_of_walk` (pinned by parity tests).
+_core.orm_shape_configure(
+    ColumnExpr,
+    RelatedColumnExpr,
+    ValueExpr,
+    BinaryExpr,
+    InExpr,
+    InSubqueryExpr,
+    BooleanExpr,
+    UnaryExpr,
+    ORMError,
+)
+_shape_of_native = _core.orm_shape
 
-    def shape_of(registry: Any, select: Select) -> bytes:
-        """The native key, falling back to the pure one for a node C cannot key.
 
-        `orm_shape_configure` hands the builder a fixed set of expression classes
-        and it dispatches by *exact* type, so a node added since the extension
-        was built raises `ORMError("cannot key ...")` rather than quietly
-        producing a key that ignores it. That refusal is what makes this fallback
-        safe: `_shape_of_pure` raises the identical error for anything genuinely
-        unkeyable, so catching it either recovers a node the C does not know yet
-        or re-raises exactly what the caller would have seen.
+def shape_of(registry: Any, select: Select) -> bytes:
+    """The keyed shape, walking the tree in Python for a node C cannot key.
 
-        **No shipped node takes this path.** `InSubqueryExpr` used to, at the
-        cost of one raised-and-caught exception per compile of a subquery-bearing
-        query; `orm_shape.c` now keys it directly. The fallback stays because its
-        value is prospective -- it is what lets a node be added to Python without
-        the extension being rebuilt in the same change, and without a stale
-        extension silently keying two different queries the same way. A
-        rebuild-order hazard that degrades to "slower" is worth keeping; the
-        alternative degrades to a wrong plan.
+    `orm_shape_configure` hands the builder a fixed set of expression classes and
+    it dispatches by *exact* type, so a node added since the extension was built
+    raises `ORMError("cannot key ...")` rather than quietly producing a key that
+    ignores it. That refusal is what makes the recovery safe: `_shape_of_walk`
+    raises the identical error for anything genuinely unkeyable, so catching it
+    either recovers a node the C does not know yet or re-raises exactly what the
+    caller would have seen.
 
-        An ordering that is not a bare column takes the pure path *before* the
-        call rather than through this fallback: the C keyer reads
-        `ordering.expression.column`, which a distance node does not have, and
-        that surfaces as an `AttributeError` -- not the `ORMError` this recovery
-        is built on. Deciding it from a flag the `Select` already computed is one
-        attribute read, and it keeps the contract above as narrow as it claims.
-        """
-        if not select.plain_orderings:
-            return _shape_of_pure(registry, select)
-        try:
-            return _shape_of_native(registry, select)
-        except ORMError:
-            return _shape_of_pure(registry, select)
-else:
-    shape_of = _shape_of_pure
+    **No shipped node takes the walked path.** `InSubqueryExpr` used to, at the
+    cost of one raised-and-caught exception per compile of a subquery-bearing
+    query; `orm_shape.c` now keys it directly. The recovery stays because its
+    value is prospective -- it is what lets a node be added to Python without the
+    extension being rebuilt in the same change, and without a stale extension
+    silently keying two different queries the same way. A rebuild-order hazard
+    that degrades to "slower" is worth keeping; the alternative degrades to a
+    wrong plan.
+
+    An ordering that is not a bare column walks *before* the call rather than
+    through the recovery: the C keyer reads `ordering.expression.column`, which a
+    distance node does not have, and that surfaces as an `AttributeError` -- not
+    the `ORMError` this recovery is built on. Deciding it from a flag the
+    `Select` already computed is one attribute read, and it keeps the contract
+    above as narrow as it claims.
+    """
+    if not select.plain_orderings:
+        return _shape_of_walk(registry, select)
+    try:
+        return _shape_of_native(registry, select)
+    except ORMError:
+        return _shape_of_walk(registry, select)
 
 
 __all__ = [

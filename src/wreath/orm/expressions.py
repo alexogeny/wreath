@@ -765,8 +765,8 @@ class BinaryExpr(Predicate):
 
     # A distance node -- and a text-search one -- is a `BinaryExpr` on purpose
     # rather than a class of its own: every walker in the compiler -- bind
-    # collection, the generated bind program, the plan-cache key, and their
-    # native twins -- already dispatches on this exact type and recurses through
+    # collection, the generated bind program, the plan-cache key, and their C
+    # counterparts -- already dispatches on this exact type and recurses through
     # `left`/`right`. A new node type would have to be taught to each of them, in
     # two languages, for a tree shape they already handle. `ts_rank(a, b)` is a
     # function call rather than an infix operator, which the *renderer* special-

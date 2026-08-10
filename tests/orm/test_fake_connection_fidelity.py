@@ -3,7 +3,7 @@
 `FakeConnection` is the most-used double in the tree -- 86 scripted responses
 across eight files -- and for a long time it accepted anything and returned
 whatever container it was handed. That is the exact shape
-`docs/decisions/0020-a-double-is-never-more-capable.md` records: thirteen
+the never-more-capable rule for doubles in `AGENTS.md` records: thirteen
 introspection tests drove a fake modelling a driver with catalog codecs, all
 green, while `validate_schema="error"` had never once completed lifespan
 startup against a real PostgreSQL.

@@ -30,7 +30,7 @@ except ImportError:
 
 requires_native = pytest.mark.skipif(
     _native is None or native is None or not hasattr(native, "_compile_hydrate_plan"),
-    reason="native model hydration not built or WREATH_PURE=1",
+    reason="native model hydration not built",
 )
 
 
@@ -84,7 +84,7 @@ def encode(
     moment: datetime.datetime | None = MOMENT,
     key: uuid.UUID | None = KEY,
 ) -> bytes:
-    from wreath._pure import postgres as pure
+    from wreath import _pgdriver as pure
 
     return data_row(
         (

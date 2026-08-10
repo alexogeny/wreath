@@ -492,7 +492,7 @@ def compile_column_validator(column: Any, owner: str) -> Callable[[Any], Any]:
     become comparisons inside it rather than calls of their own.
 
     The result is the *only* thing that proves a value for this column. Both the
-    native and the pure storage assign through it, and the body validator runs
+    native and the Python storage assign through it, and the body validator runs
     it, so the type rules and the business rules cannot drift apart -- there is
     one function and three callers.
     """

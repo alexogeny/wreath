@@ -53,6 +53,16 @@ _TIER1_DATABASE = "wreath_tier1_no_extensions"
 #: ordinary outcome and not a failure.
 _DUPLICATE_DATABASE = "42P04"
 
+#: ... but only when the loser looked *after* the winner committed. Two workers
+#: that reach `CREATE DATABASE` at the same moment both pass the existence check
+#: and the loser is refused by the catalog's unique index instead, with `23505`
+#: and a message naming `pg_database_datname_index` -- the same race the schema
+#: fixtures hit as `pg_namespace_nspname_index`, and it reads like anything
+#: except a test-isolation bug. Matched on the index name as well as the code so
+#: a unique violation from anything else still raises.
+_UNIQUE_VIOLATION = "23505"
+_DATNAME_INDEX = "pg_database_datname_index"
+
 
 def _database_dsn(dsn: str, name: str) -> str:
     """`dsn` with its database name replaced, query string preserved."""
@@ -80,7 +90,10 @@ async def _connect() -> Any:
         # that makes CREATE DATABASE fail for reasons unrelated to this suite.
         await admin.execute(f'CREATE DATABASE "{_TIER1_DATABASE}" TEMPLATE template0')
     except PostgresError as error:
-        if error.sqlstate != _DUPLICATE_DATABASE:
+        lost_the_race = error.sqlstate == _DUPLICATE_DATABASE or (
+            error.sqlstate == _UNIQUE_VIOLATION and _DATNAME_INDEX in str(error)
+        )
+        if not lost_the_race:
             raise
     finally:
         await admin.close()

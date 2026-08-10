@@ -8,9 +8,29 @@ so `wreath._sparsevec.SparseVector` carries both and the codec frames *it*.
 Two numberings meet in this file and must not be confused. `SparseVector` counts
 positions from **1**, because that is what pgvector's text form
 (`'{1:1.5,3:3.5}/5'`) and its documentation use. The **binary** wire counts from
-**0**. Every off-by-one this type can produce lives at that boundary, so the
-conversion is asserted directly rather than only through a round trip -- a round
-trip is exactly the thing that stays green when both directions are wrong.
+**0**. That is not a wreath convention; it is pgvector's, stated twice in its own
+source. `sparsevec_send` and `sparsevec_recv` in `src/sparsevec.c` each carry the
+comment "Binary representation uses zero-based numbering for indices", while
+`sparsevec_in` converts the other way ("Convert 1-based numbering (SQL) to
+0-based (C)") and `sparsevec_out` converts back. Every off-by-one this type can
+produce lives at that boundary, so the conversion is asserted against literal
+bytes rather than only through a round trip -- a round trip is exactly the thing
+that stays green when both directions are wrong.
+
+Both twins are driven and **neither is the other's oracle**. The anchor is
+`sparsevec_send`:
+
+    pq_sendint(&buf, svec->dim, sizeof(int32));
+    pq_sendint(&buf, svec->nnz, sizeof(int32));
+    pq_sendint(&buf, svec->unused, sizeof(int32));
+    for (int i = 0; i < svec->nnz; i++)
+        pq_sendint(&buf, svec->indices[i], sizeof(int32));
+    for (int i = 0; i < svec->nnz; i++)
+        pq_sendfloat4(&buf, values[i]);
+
+-- three big-endian `int32`s, then all of the indices, then all of the values.
+The indices are not interleaved with the values, and the third header word is
+`unused` and must be zero, which `sparsevec_recv` enforces.
 """
 
 from __future__ import annotations
@@ -20,7 +40,7 @@ import struct
 
 import pytest
 
-from wreath._pure import postgres as pure
+from wreath import _pgdriver as pure
 from wreath.orm.errors import DeclarationError
 from wreath.orm.types import (
     EXT_KIND_SPARSEVEC,
@@ -45,22 +65,64 @@ def _registered() -> None:
     native._register_extension_type("sparsevec", SPARSEVEC_OID, EXT_KIND_SPARSEVEC)
 
 
-def _same_binary(value: SparseVector) -> bytes:
-    """Encode through both twins, assert byte equality, and decode through both."""
-    expected = pure._encode_binary(value, SPARSEVEC_OID)
-    assert native._encode_binary(value, SPARSEVEC_OID) == expected
-    assert pure._decode_value(SPARSEVEC_OID, 1, expected) == native._decode_value(
-        SPARSEVEC_OID, 1, expected
+def _sparsevec_send(value: SparseVector) -> bytes:
+    """pgvector's `sparsevec_send` frame, built from the format, not from the codec.
+
+    The `- 1` is pgvector's own "Convert 1-based numbering (SQL) to 0-based (C)",
+    written here so the wire's numbering is stated by the test rather than
+    inherited from whichever twin is under examination. Header, indices and
+    values are packed as three separate calls, unlike `_encode_sparsevec`'s single
+    format string, so one wrong format cannot satisfy both sides.
+    """
+    nnz = len(value.indices)
+    return (
+        struct.pack(">iii", value.dim, nnz, 0)
+        + struct.pack(f">{nnz}i", *[index - 1 for index in value.indices])
+        + struct.pack(f">{nnz}f", *value.values)
     )
+
+
+def _narrowed(value: SparseVector) -> SparseVector:
+    """`value` with every element put through IEEE-754 binary32, as the wire does.
+
+    `sparsevec` stores float4s, so a decoded value equals the original only where
+    every element was already representable. The stdlib's packer, not the other
+    twin, says what the rest become.
+    """
+    return SparseVector(
+        value.dim,
+        {
+            index: struct.unpack(">f", struct.pack(">f", number))[0]
+            for index, number in zip(value.indices, value.values, strict=True)
+        },
+    )
+
+
+def _both_twins_frame(value: SparseVector) -> bytes:
+    """Assert both twins encode to pgvector's frame and decode it back to `value`.
+
+    Each arm is asserted against the anchor, never against the other arm.
+    """
+    expected = _sparsevec_send(value)
+    assert pure._encode_binary(value, SPARSEVEC_OID) == expected
+    assert native._encode_binary(value, SPARSEVEC_OID) == expected
+    assert pure._decode_value(SPARSEVEC_OID, 1, expected) == _narrowed(value)
+    assert native._decode_value(SPARSEVEC_OID, 1, expected) == _narrowed(value)
     return expected
 
 
-def _same_text(value: SparseVector) -> bytes:
-    expected = pure._encode_text(value, SPARSEVEC_OID)
+def _both_twins_text(value: SparseVector, expected: bytes) -> bytes:
+    """Assert both twins print `expected` and read it back as `value`.
+
+    `expected` is written down at the call site rather than taken from a twin.
+    pgvector's documented text form is `'{1:1.5,3:3.5}/5'` -- brace-delimited
+    1-based `index:value` pairs, then a slash and the dimension -- and unlike the
+    dense types' text form, that spelling is exact enough to pin the bytes.
+    """
+    assert pure._encode_text(value, SPARSEVEC_OID) == expected
     assert native._encode_text(value, SPARSEVEC_OID) == expected
-    assert pure._decode_value(SPARSEVEC_OID, 0, expected) == native._decode_value(
-        SPARSEVEC_OID, 0, expected
-    )
+    assert pure._decode_value(SPARSEVEC_OID, 0, expected) == value
+    assert native._decode_value(SPARSEVEC_OID, 0, expected) == value
     return expected
 
 
@@ -130,68 +192,121 @@ def test_more_non_zeros_than_pgvector_allows_is_refused() -> None:
 # -- wire format --------------------------------------------------------------
 
 
+def test_the_published_frame_for_a_two_element_sparsevec() -> None:
+    """The whole layout in hex, owing nothing to `struct` or to either twin.
+
+    Source: pgvector `src/sparsevec.c`, `sparsevec_send`. `{1:1.5,3:3.5}/5` is
+    dim 5, nnz 2, unused 0; then the two indices **zero-based**, so the 1-based
+    1 and 3 the value holds appear as 0x00000000 and 0x00000002; then the two
+    float4s, 1.5 = 0x3FC00000 and 3.5 = 0x40600000.
+
+    This single literal pins every decision the format makes at once: big-endian
+    int32s, the third header word, the index base, and values-after-indices.
+    """
+    assert _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5})) == bytes.fromhex(
+        "00000005" "00000002" "00000000" "00000000" "00000002" "3fc00000" "40600000"
+    )
+
+
 def test_header_is_dimension_then_count_then_two_reserved_words() -> None:
-    wire = _same_binary(SparseVector(5, {1: 1.5, 3: 3.5}))
+    wire = _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5}))
     assert struct.unpack_from("!iii", wire, 0) == (5, 2, 0)
 
 
 def test_the_binary_indices_are_zero_based_and_the_value_is_one_based() -> None:
-    """The single conversion in the type, asserted against the bytes themselves."""
-    wire = _same_binary(SparseVector(5, {1: 1.5, 3: 3.5}))
+    """The single conversion in the type, asserted against the bytes themselves.
+
+    pgvector settles the direction: `sparsevec_send` carries the comment "Binary
+    representation uses zero-based numbering for indices", and `sparsevec_out`
+    adds 1 on the way to the text form. So a value holding 1-based 1 and 3 must
+    put 0 and 2 on the wire -- not 1 and 3, and not 0 and 3.
+    """
+    wire = _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5}))
     assert struct.unpack_from("!ii", wire, 12) == (0, 2)
 
 
 def test_values_follow_all_of_the_indices_rather_than_interleaving() -> None:
-    wire = _same_binary(SparseVector(5, {1: 1.5, 3: 3.5}))
+    wire = _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5}))
     assert struct.unpack_from("!ff", wire, 20) == (1.5, 3.5)
     assert len(wire) == 12 + 2 * 4 + 2 * 4
 
 
 def test_an_empty_sparsevec_is_just_a_header() -> None:
-    assert _same_binary(SparseVector(9)) == struct.pack("!iii", 9, 0, 0)
+    assert _both_twins_frame(SparseVector(9)) == struct.pack("!iii", 9, 0, 0)
 
 
 def test_a_huge_dimension_costs_nothing_which_is_the_point_of_the_type() -> None:
-    """A billion positions, two of them stored: 28 bytes."""
-    wire = _same_binary(SparseVector(MAX_SPARSEVEC_DIM, {1: 1.0, 999_999_999: 2.0}))
+    """A billion positions, two of them stored: 28 bytes.
+
+    The last index is the largest a `sparsevec` can carry, and it must appear on
+    the wire one lower than the value holds -- 999_999_998 = 0x3B9AC9FE -- which
+    is where an unsigned/signed or off-by-one slip would show first.
+    """
+    wire = _both_twins_frame(SparseVector(MAX_SPARSEVEC_DIM, {1: 1.0, 999_999_999: 2.0}))
     assert len(wire) == 28
+    assert wire == bytes.fromhex(
+        "3b9aca00" "00000002" "00000000"
+        "00000000" "3b9ac9fe"
+        "3f800000" "40000000"
+    )
 
 
 def test_elements_round_trip_through_the_binary_form() -> None:
     sparse = SparseVector(1000, {1: 1.5, 17: -0.25, 999: 8.0})
-    wire = _same_binary(sparse)
+    wire = _both_twins_frame(sparse)
+    # Every element is a dyadic rational, so binary32 holds it exactly and the
+    # decoded value must equal the original outright.
+    assert wire == bytes.fromhex(
+        "000003e8" "00000003" "00000000"
+        "00000000" "00000010" "000003e6"
+        "3fc00000" "be800000" "41000000"
+    )
     assert pure._decode_value(SPARSEVEC_OID, 1, wire) == sparse
+    assert native._decode_value(SPARSEVEC_OID, 1, wire) == sparse
 
 
 def test_float4_rounding_is_the_same_rounding_vector_gets() -> None:
-    """`sparsevec` stores float4s, so 0.1 comes back as `vector`'s 0.1 does."""
-    wire = _same_binary(SparseVector(3, {2: 0.1}))
-    assert pure._decode_value(SPARSEVEC_OID, 1, wire).to_dict() == {
-        2: struct.unpack("!f", struct.pack("!f", 0.1))[0]
-    }
+    """`sparsevec` stores float4s, so 0.1 becomes 0x3DCCCCCD as it does in `vector`."""
+    wire = _both_twins_frame(SparseVector(3, {2: 0.1}))
+    assert wire == bytes.fromhex(
+        "00000003" "00000001" "00000000" "00000001" "3dcccccd"
+    )
+    for codec in (pure, native):
+        assert codec._decode_value(SPARSEVEC_OID, 1, wire).to_dict() == {
+            2: 0.10000000149011612
+        }
 
 
 # -- the text form ------------------------------------------------------------
 
 
 def test_the_text_form_is_braced_elements_over_the_dimension() -> None:
-    assert _same_text(SparseVector(5, {1: 1.5, 3: 3.5})) == b"{1:1.5,3:3.5}/5"
+    """pgvector's documented spelling, quoted from its README: `'{1:1.5,3:3.5}/5'`."""
+    _both_twins_text(SparseVector(5, {1: 1.5, 3: 3.5}), b"{1:1.5,3:3.5}/5")
 
 
 def test_an_empty_value_still_names_its_dimension_in_text() -> None:
-    assert _same_text(SparseVector(9)) == b"{}/9"
+    _both_twins_text(SparseVector(9), b"{}/9")
 
 
 def test_the_text_form_round_trips() -> None:
     sparse = SparseVector(1000, {1: 1.5, 17: -0.25, 999: 8.0})
-    assert pure._decode_value(SPARSEVEC_OID, 0, _same_text(sparse)) == sparse
+    _both_twins_text(sparse, b"{1:1.5,17:-0.25,999:8.0}/1000")
 
 
 def test_text_indices_are_the_one_based_ones_the_value_holds() -> None:
-    """What `psql` prints and what Python holds must be the same numbers."""
-    decoded = pure._decode_value(SPARSEVEC_OID, 0, b"{1:1.5,3:3.5}/5")
-    assert decoded.indices == (1, 3)
-    assert native._decode_value(SPARSEVEC_OID, 0, b"{1:1.5,3:3.5}/5") == decoded
+    """What `psql` prints and what Python holds must be the same numbers.
+
+    The counterpart to the binary test above, and the reason the two must be
+    asserted separately: `sparsevec_in` converts 1-based to 0-based while
+    `sparsevec_recv` does not, so a codec that applied one rule to both forms
+    would still round-trip cleanly through itself.
+    """
+    for codec in (pure, native):
+        decoded = codec._decode_value(SPARSEVEC_OID, 0, b"{1:1.5,3:3.5}/5")
+        assert decoded.indices == (1, 3)
+        assert decoded.values == (1.5, 3.5)
+        assert decoded.dim == 5
 
 
 # -- refusals -----------------------------------------------------------------
@@ -210,8 +325,8 @@ def test_a_dict_is_refused_because_it_names_no_dimension() -> None:
 
 
 def test_a_truncated_header_is_a_protocol_error_not_an_index_error() -> None:
-    # The pure twin raises its own `ProtocolError` for a wire-format fault and
-    # the C twin raises `ValueError`, exactly as for `vector` and `halfvec`.
+    # `_pgdriver` raises its own `ProtocolError` for a wire-format fault and
+    # `codec.c` raises `ValueError`, exactly as for `vector` and `halfvec`.
     for codec in (pure, native):
         with pytest.raises((ProtocolError, ValueError), match="header is truncated"):
             codec._decode_value(SPARSEVEC_OID, 1, b"\x00\x00\x00\x05")
