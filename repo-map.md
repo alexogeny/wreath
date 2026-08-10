@@ -1,6 +1,6 @@
 # Repository map
 
-A quick routing guide for Wreath contributors and coding agents. Start with `AGENTS.md` for repository rules, then use `docs/agents/manifest.json` for the machine-readable subsystem map — it gives every subsystem's guides, reference pages, sources, tests, invariant `policy`, and the ADRs behind it, and `uv run wreath-map-lint` fails if it drifts from what is actually here.
+A quick routing guide for Wreath contributors and coding agents. Start with `AGENTS.md` for repository rules, then use `docs/agents/manifest.json` for the machine-readable subsystem map — it gives every subsystem's guides, reference pages, sources, tests, and the invariant `policy` behind it, and `uv run wreath-map-lint` fails if it drifts from what is actually here.
 
 ## Top level
 
@@ -9,7 +9,7 @@ A quick routing guide for Wreath contributors and coding agents. Start with `AGE
 | `src/wreath/` | Dependency-free Python framework and server package, plus optional C accelerators. |
 | `tests/` | Framework, protocol, native-parity, ORM, and PostgreSQL tests. |
 | `benchmarks/` | Reproducible framework/server/ORM benchmarks, competitor apps, load tooling, and reports. |
-| `docs/` | User guides, API reference, internals, ADRs, plans, and agent guidance. |
+| `docs/` | User guides, API reference, internals, plans, and agent guidance. |
 | `tools/` | Native checks and sanitizer build helpers. |
 | `example/` | The canonical camera-trap application built on wreath. Not shipped to users who install the package. |
 | `setup.py` | Optional C-extension build definitions and feature detection. |
@@ -38,12 +38,12 @@ rather than reading here.
 | Area | Primary paths | Notes |
 | --- | --- | --- |
 | Application/lifecycle | `app.py`, `router.py`, `state.py`, `exceptions.py` | `Wreath` registration, startup compilation, ASGI dispatch, lifespan, state, and RFC 9457 error handling. |
-| Routing | `_routing.py` | Route declaration lives on the app and `Router`; the matcher backends are in `_pure/router.py` and `_native/router.c`. |
+| Routing | `_routing.py` | Route declaration lives on the app and `Router`; the matcher backends are `_native/router.c`, `_native/dtrouter.c` and `_native/dtbitset.c`. |
 | Requests and responses | `request.py`, `response.py`, `background.py`, `_http.py`, `_headers.py`, `_codecs.py`, `_json.py`, `_multipart.py` | Inbound HTTP objects, every response type including SSE and streaming, and response-bound background work. |
 | Outbound HTTP | `http_client.py`, `webhooks.py`, `_client_codec.py` | Managed pooling with native codecs, and signed webhook delivery with durable inbox/outbox contracts. |
 | Model Context Protocol | `mcp.py`, `_mcp/` | A first-party MCP server: declared callables served to a model as tools over streamable HTTP. Adds no C — the envelope is `_json.py`, the stream is `SSEResponse`, and a call is an ordinary route activation. Tool schemas are derived by `binding.py` and rendered by `openapi.py`, which is the parity that keeps them from drifting. |
-| Binding/OpenAPI | `binding.py`, `openapi.py`, `_native/validate.c` | Handler parameter resolution, dependency markers, native body validation (plan interpreter, pure twin in `binding.validate`), schema generation, and opt-in docs endpoints. |
-| Type generation | `typegen/`, `_pure/typegen.py` | Canonical IR from routes/binding, TypeScript + fetch + React Query targets, `wreath typegen` CLI. |
+| Binding/OpenAPI | `binding.py`, `openapi.py`, `_native/validate.c` | Handler parameter resolution, dependency markers, native body validation (a plan interpreter, with `binding.validate` for the shapes a flat plan cannot express), schema generation, and opt-in docs endpoints. |
+| Type generation | `typegen/` | Canonical IR from routes/binding, TypeScript + fetch + React Query targets, `wreath typegen` CLI. |
 | Middleware | `middleware/`, `compression.py`, `cache_control.py`, `_webpolicy.py` | Base pipeline plus CORS, CSRF, sessions, security headers, rate limiting, request IDs, timing, proxy headers, cache, and compression. |
 | Auth | `auth.py`, `authorization.py`, `_auth/` | Authentication (identity) and authorization (roles, permissions, the built-in Cedar engine), kept firmly apart. |
 | Users | `users.py`, `_userkit.py` | Registration, sessions, and the ready-made user router. |
@@ -60,12 +60,11 @@ rather than reading here.
 
 ### Backend split
 
-- `src/wreath/_pure/` contains the Python reference/fallback implementations for routing, codecs, HTTP, server protocols, PostgreSQL, compression, security, and WebSocket behavior.
 - `src/wreath/_native/` contains optional CPython C accelerators. Module entry files are `_coremodule.c`, `_clientmodule.c`, `_servermodule.c`, `_postgresmodule.c`, and `_http3module.c`.
 - `src/wreath/_native/postgres/` owns native PostgreSQL protocol, buffering, decoding, codecs, model storage/hydration, and related plans/records.
 - `src/wreath/_devtools/` contains native complexity, boundary, GIL, memory, and error linters, profiling support, and `request_trace.py` (`wreath-request-trace`), which counts the Python/native boundary crossings of one request against the realistic app in `sample_app.py` and diffs them against `docs/agents/request-boundary-baseline.json`. `tape_decomp.py` (`wreath-tape-decomp`) prices that same tape, reporting a measured noise floor and refusing to attribute deltas below it. `decomp.py` (`wreath-decomp`) prices the rest of the request -- lifecycle stages, one ORM read, and ns-per-frame/ns-per-await calibrations -- over the shared harness in `measure.py`, which documents the measurement rules. `map_lint.py` (`wreath-map-lint`) checks that this file, `AGENTS.md`, `docs/llms.txt`, and the manifest still describe the repository. `tasks.py` provides `wreath-check`/`wreath-docs`/`wreath-bench`, which install their own dependency group with `uv sync --inexact` so one job never uninstalls another's.
 
-When changing an accelerated feature, preserve parity between its public facade, `_pure` implementation, `_native` implementation, and parity tests. Keep framework and server layers separable.
+When changing an accelerated feature, keep its public facade, its `_native` implementation and its tests in step. Keep framework and server layers separable.
 
 ## Tests
 
@@ -98,8 +97,8 @@ Prefer a focused test near the changed subsystem. The canonical commands and mar
 | Public API | `docs/reference/` |
 | Coming from the FastAPI stack | `docs/from-fastapi/` |
 | What is deliberately not shipped yet | `docs/reference/roadmap.md` |
-| Native implementation details | `docs/plans/` (the `native-*` designs), `docs/decisions/`, `docs/agents/python-complexity-audit.md` |
-| Architectural decisions | `docs/decisions/` |
+| Native implementation details | `docs/plans/` (the `native-*` designs), `docs/agents/python-complexity-audit.md` |
+| Why the code is shaped the way it is | [`AGENTS.md`](AGENTS.md), and the module docstring of whatever you are reading |
 | Active or historical design work | `docs/plans/` |
 | Compact LLM documentation index | `docs/llms.txt` |
 

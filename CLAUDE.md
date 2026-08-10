@@ -14,7 +14,7 @@ caught one accepted-then-worthless optimization.
 
 | You want | Read |
 | --- | --- |
-| Which files a subsystem owns, and its tests, invariants, and ADRs | `docs/agents/manifest.json` — look up the subsystem before grepping |
+| Which files a subsystem owns, and its tests and invariants | `docs/agents/manifest.json` — look up the subsystem before grepping |
 | The shape of the repository in prose | [`repo-map.md`](repo-map.md) |
 | Every check a change must pass | [`docs/cookbook/agents/checks.md`](docs/cookbook/agents/checks.md) |
 | The smallest correct change, end to end | [`docs/cookbook/agents/add-an-endpoint.md`](docs/cookbook/agents/add-an-endpoint.md) |

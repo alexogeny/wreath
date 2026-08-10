@@ -31,6 +31,28 @@ while a sibling is running tests produces failures nobody can attribute.
 ## Engineering rules
 
 - Target CPython 3.14; do not preserve compatibility with older Python versions unless explicitly requested.
+- **Refuse at the earliest point the error is knowable, naming the offending
+  element *and the correct form*.** Prefer declaration or startup time over
+  request time: route compilation runs during the ASGI lifespan scope, so a
+  refusal there is a startup failure under any server rather than a per-request
+  surprise. Half-supported is worse than refused, and it is *more* code.
+- **Native code owns no process-global mutable state.** Caches live for the
+  operation that created them; buffers are allocated uninitialised and filled,
+  never obtained-then-mutated. The JSON decoder is the pattern:
+  `PyObject *key_cache[512]` is a member of the `Parser` struct
+  (`_native/json.c`), created per decode and released with it. For object
+  construction use `PyBytes_FromStringAndSize(NULL, n)` and fill the buffer --
+  `NULL` always allocates, so the idiom cannot reach a cached singleton, and
+  unlike a length guard it cannot regress when someone changes the bound. This
+  is what keeps the free-threaded build honest.
+- **Hot-path complexity is an asserted contract, not a docstring.**
+  `wreath-complexity-probe` measures doubling-size scaling ratios against
+  `docs/agents/complexity-baseline.json` -- ~1 constant, ~2 linear, ~4
+  quadratic. **Every probe needs a same-size control**: without one it proves
+  only that something is slow at size. A known-defective contract is *marked*,
+  not silently tolerated -- a marked probe still runs, records its observed and
+  target degree with a written reason, and fails if the subject gets better as
+  well as worse, so the mark cannot rot into permission.
 - **`python -O` is supported, and no invariant may depend on `assert`.** `-O`
   strips every `assert` statement, so an `assert` guarding a wire format, a
   layout, or any other invariant silently disappears in the one interpreter mode
@@ -52,11 +74,11 @@ while a sibling is running tests produces failures nobody can attribute.
 - Treat free-threading and the optional JIT as separately tested execution modes, not assumptions.
 - Add focused tests for every behavior change and regression.
 - **A mutant killed in one execution mode and surviving in another has
-  survived.** `wreath mutant` reports per run, and a module with a native/pure
-  fork has to be swept in both (`WREATH_PURE=1` for the second). When combining
-  those runs, the rule is **survived wins**, never "killed in either":
+  survived.** `wreath mutant` reports per run, and free-threading and the JIT are
+  separately swept modes. When combining runs, the rule is **survived wins**,
+  never "killed in either":
 
-  | native | pure | combined |
+  | mode A | mode B | combined |
   | --- | --- | --- |
   | killed | killed | killed |
   | killed | unreached | killed |
@@ -69,17 +91,11 @@ while a sibling is running tests produces failures nobody can attribute.
   line, so it neither confirms nor denies. `survived` is evidence: the line *was*
   executed and no test objected, so a regression on it ships undetected to
   everyone running that mode. Taking the optimistic union instead reports a
-  module as covered when one of its two shipped configurations is not, which is
-  the same lie as a wrong `--tests` set, in the same direction.
-
-  This is not hypothetical: `_auth/jwt.py` has four mutants that one mode catches
-  and the other does not, and scoring them optimistically overstated the module
-  by four. Three are caught only by the pure suite (the native path answers in C,
-  so the Python guard never runs) and one only by the native suite.
-- **`wreath.edge` is native-only, and that is deliberate. Do not give it a pure
-  twin.** It is the one exception in the tree, and the reason is that for a
-  reverse proxy a Python fallback is a footgun rather than a safety net. A twin
-  here does not degrade gracefully -- it degrades *silently*, by roughly 6x, in
+  module as covered when one of its shipped configurations is not, which is the
+  same lie as a wrong `--tests` set, in the same direction.
+- **`wreath.edge` has no Python path, and that is deliberate. Do not add one.**
+  For a reverse proxy a Python fallback is a footgun rather than a safety net: it
+  does not degrade gracefully -- it degrades *silently*, by roughly 6x, in
   the one component whose entire job is to be faster than the thing in front of
   it. Measured on this machine, per *physical core* with the load generator
   pinned elsewhere: `serve()` forwards 33,300-33,900 plaintext requests a second
@@ -119,18 +135,15 @@ while a sibling is running tests produces failures nobody can attribute.
     raises when the pool is constructed, naming what is missing. Loud, at
     startup, in front of a developer -- never a silent slow path in production.
   * **Correctness is checked against an independent implementation, not against
-    ourselves.** A self-twin can be wrong in both halves and still agree; the
-    oracle is a differential corpus run through haproxy and nginx, comparing
-    forwarded bytes -- hop-by-hop stripping, `Connection` tokens, `Host` and
-    `Content-Length` re-framing, smuggling vectors.
+    ourselves.** Two implementations of ours can be wrong in both halves and
+    still agree; the oracle is a differential corpus run through haproxy and
+    nginx, comparing forwarded bytes -- hop-by-hop stripping, `Connection`
+    tokens, `Host` and `Content-Length` re-framing, smuggling vectors. **This is
+    the rule for the whole tree, not just for `edge`**: anchor on the RFC, the
+    published vectors or the stdlib.
 
-  Consequences to accept rather than rediscover: **`WREATH_PURE=1` does not
-  disable `wreath.edge`.** That variable selects the pure twin where one exists,
-  and here none does, so gating the extension on it would turn "run the readable
-  implementation" into "this module cannot be imported" -- a different and worse
-  thing. What refuses is a *build* without the extension, and it refuses at
-  import with a named error rather than degrading. Mutation is swept in one mode,
-  so `survived wins` collapses to the native run.
+  What refuses here is a *build* without the extension, and it refuses at import
+  with a named error rather than degrading.
 - **Never `xfail`, and never `skip`, to park a test for something unbuilt.** A
   test exists to be green or to be red. `xfail` invents a third state that means
   "we know", and a checklist of `xfail`s is worse than no checklist: it reports
@@ -365,9 +378,10 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   debugger to. This recommendation is measured rather than aspirational: on the
   12,002-test default-marker suite, three warm runs with mutation disabled were
   26.404s ± 0.138s for `wreath test` against 29.055s ± 2.069s for
-  `pytest -n 6` on the same six workers (1.10x ± 0.08x). The raw commands and
-  samples live in `benchmarks/results/test_runner_2026-08-02.json`; the updated
-  worker curve lives in `benchmarks/results/test_runner_2026-08-03.json`. A first run
+  `pytest -n 6` on the same six workers (1.10x ± 0.08x), measured 2026-08-02,
+  with the worker curve re-measured the next day. Recorded runs are output
+  rather than source and are not kept in the tree; re-run both to reproduce.
+  A first run
   after source changes also builds the mutation candidate catalog; its planning
   and compilation overlap the ordinary workers without collecting the whole
   suite again. One hundred ninety-two sampled controls are watched by default.
@@ -547,11 +561,13 @@ None is discoverable by reading the code you are changing.
 - **`uv run` does not reliably rebuild after a `.c` edit.** A stale `.so` has
   produced two confident, wrong diagnoses. `uv sync --reinstall-package wreath`
   is the rebuild that works.
-- **The native driver subclasses the pure one.** `_native._postgres.Connection`
-  inherits from `_pure.postgres.Connection`, so grepping for a wire constant and
-  finding it only under `_pure/` does **not** mean the native path lacks the
-  feature. One session concluded cancellation was unimplemented natively on
-  exactly that evidence; the MRO says otherwise.
+- **The native driver subclasses the Python one.** `_native._postgres.Connection`
+  inherits from `wreath._pgdriver.Connection`, the C pipeline reads fifteen
+  module-level names out of that module at init, and `resolve_offsets` resolves
+  its `__slots__` byte offsets -- so grepping for a wire constant and finding it
+  only in `_pgdriver.py` does **not** mean the native path lacks the feature. One
+  session concluded cancellation was unimplemented natively on exactly that
+  evidence; the MRO says otherwise.
 - **`execute("LISTEN ...")` registers with PostgreSQL but not with the driver**,
   so notifications are never pumped and a listener receives nothing at all.
   `connection.listen()` is the API, and it is why `Doorbell` holds its own
@@ -579,6 +595,20 @@ None is discoverable by reading the code you are changing.
 The same failure in test form. `AGENTS.md`'s rules above say what to write; these
 say how a written test still manages to assert nothing.
 
+- **A check that silently has nothing to check is the failure mode this whole
+  section is named after.** Prove a check *can* fail: break the subject, watch
+  it go red, restore -- in a scratchpad shadow tree, never by reverting in
+  place. An assertion never observed failing is not evidence. Assert the
+  property, not the symptom ("foreign keys are emitted last", not "this
+  particular ordering bug does not recur"). A case list derived from a
+  generated corpus must pin its own count and names, so an entry that stops
+  being generated turns the suite red rather than quietly shrinking it. And a
+  waiver names what it buys -- a bare directive is itself a finding.
+- **A double is never more capable than the real thing.** Where a real
+  implementation refuses -- an unencodable parameter, an unprepared statement, a
+  type with no codec -- the double refuses identically. Prefer doubles that
+  *derive* their refusals from the real implementation rather than restating
+  them, so the two cannot drift.
 - **Falsify the harness before trusting it.** Point `WREATH_TEST_POSTGRES_DSN` at
   a dead port and confirm the gated tests *fail* rather than skip; neuter the
   implementation and confirm the test goes red. Several suites have looked green
