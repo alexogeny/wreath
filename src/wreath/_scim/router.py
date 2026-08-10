@@ -162,7 +162,7 @@ def scim_router(
 
     Building the router **refuses** when the application has no authorizer
     configured, rather than serving a provisioning API to any authenticated
-    caller -- `docs/decisions/0019-refuse-rather-than-half-wire.md` is why that
+    caller -- the refuse-rather-than-half-wire rule in `AGENTS.md` is why that
     is the right way round.
 
     ## The two de-provisioning verbs, which are not the same
