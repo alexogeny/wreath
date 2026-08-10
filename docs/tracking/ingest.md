@@ -181,7 +181,7 @@ decisions are the transport's own:
   ingest this module exists not to be.
 
 **This runs on wreath's own server and nowhere else, and it needs TLS.** gRPC
-puts its status in HTTP/2 trailers, `_pure/server.py` has no HTTP/2 at all, and
+puts its status in HTTP/2 trailers, which a foreign ASGI server does not expose, and
 `serve` negotiates `h2` through ALPN rather than sniffing the first application
 bytes — so prior-knowledge `h2c` is unavailable too. A call arriving over
 HTTP/1.1 is answered `UNIMPLEMENTED` with a message naming the transport, which
