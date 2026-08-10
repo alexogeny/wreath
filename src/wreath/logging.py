@@ -45,11 +45,10 @@ Formatting is deferred: the record holds arguments, the registry holds the
 template, and `render` puts them together off the request path.
 
 **A published record is packed in C** -- `wreath_nfr_log` writes it straight
-into a ring cell, with no intermediate object -- and the Python packer beside it
-is the twin that C is checked against byte for byte, not a fallback. It is also
-what runs when there is no ring to pack into, when a record is buffered for a
-possible promotion, and when the caller is not the loop. Which is which, and
-why, is written once: the head of the log-record section in
+into a ring cell, with no intermediate object. The Python packer beside it runs
+when there is no ring to pack into, when a record is buffered for a possible
+promotion, and when the caller is not the loop. Which is which, and why, is
+written once: the head of the log-record section in
 `wreath._flight_schema`, immediately above `Severity`.
 `docs/plans/first-class-logging.md` is the longer form, with the measurements.
 
@@ -228,10 +227,9 @@ class LogRuntime:
         self.registry = SiteRegistry(site_capacity)
         #: The native emitter, when a recorder provides one. Packing a record in
         #: Python and encoding it costs ~2.5us before the ring ever sees it; the
-        #: same work in C is ~0.2us, which is why this exists and why the pure
-        #: path stays as its checked twin rather than being deleted. None means
-        #: the pure path -- which is what a test capture, `testing_runtime` and
-        #: any non-recorder sink get, because there is nothing else to pack for.
+        #: same work in C is ~0.2us, which is why this exists. `None` means the
+        #: Python packer -- what a test capture, `testing_runtime` and any
+        #: non-recorder sink get, because there is no ring to pack for.
         self.native = native
         #: At and above this, a record is published.
         self.level = level
@@ -316,7 +314,7 @@ class LogRuntime:
         The caller has already decided this record is being published now -- the
         level check, the scratch decision and the limiter all ran above -- so
         this is packing and nothing else. It returns a bool rather than raising
-        so the pure path stays one `if` away, which is what makes the two
+        so the Python path stays one `if` away, which is what makes the two
         interchangeable and therefore comparable.
 
         `limited` says whether this record went through the per-call-site
@@ -335,7 +333,7 @@ class LogRuntime:
             return False
         if self.off_loop is not None and _thread_id() != self.writer_thread:
             # Off the loop, and the ring has exactly one writer. Refuse, so the
-            # caller packs a `LogCell` on the pure path and `emit` stages it.
+            # caller packs a `LogCell` on the Python path and `emit` stages it.
             return False
         key = self.registry.key
         outcome = native(
@@ -706,9 +704,9 @@ class _PublishesCells(_Protocol):
 def recorder_emitter(recorder: object) -> NativeEmitter | None:
     """The recorder's native emitter, or None when it has no C to offer.
 
-    The pure oracle and every test double satisfy `_PublishesCells` without
-    having a `log`; they get the Python packer, which is the twin the native one
-    is checked against, so the two are never both required to exist.
+    The reference recorder and every test double satisfy `_PublishesCells`
+    without having a `log`; they get the Python packer, so a sink never has to
+    provide both.
     """
     native = getattr(recorder, "log", None)
     return native if callable(native) else None

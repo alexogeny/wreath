@@ -37,13 +37,13 @@ projector thread          drain, join to trace by request_id, settle on a quiet 
 | — | The six measurements | landed |
 | — | Native emitter `wreath_nfr_log`, with a byte-for-byte parity corpus | landed |
 | — | Off-loop emission: bounded stage, loop drain, `LOG_FLAG_OFF_LOOP` | landed |
-| 7 | mmap-backed forensic ring, binary archival stream, decoder | landed — [plan](native-flight-recorder-crash-forensics.md) |
+| 7 | mmap-backed forensic ring, binary archival stream, decoder | landed |
 
 Stage 7 landed on the framing stage 1 built for it, which is the whole point of
 having built it: the cell carries its schema version in byte 0 and every decode
 validates lengths against the buffer, so a file-backed ring needed a header in
 front of the cells rather than a format break. See
-[crash forensics](native-flight-recorder-crash-forensics.md).
+crash forensics, which is not in this repository -- it was never built.
 
 ## Files
 
@@ -64,7 +64,7 @@ front of the cells rather than a format break. See
 | Ring publish seam | `wreath_nfr_publish_cell` (`flight.c`), `Recorder.publish_log` |
 | Per-request scope | `src/wreath/app.py` (`_handle_http` / `_finish_http`) |
 | Runtime, writer and off-loop lifecycle | `src/wreath/server.py` (`_create_logging`, `_drain_off_loop_logs`) |
-| Measurements | `benchmarks/bench_logging.py`, `benchmarks/results/logging_2026-07-28_*.json` |
+| Measurements | `benchmarks/bench_logging.py` |
 
 ## What the measurements said
 
@@ -72,8 +72,8 @@ Run on CPython 3.14, Linux x86-64, 2026-07-28.
 `uv run python -m benchmarks.bench_logging --suite all`. Arms interleaved, an A/A
 control at the far end of each round, medians; a delta below twice the measured
 floor is reported unresolved rather than as a number. Two retained runs:
-`benchmarks/results/logging_2026-07-28_baseline.json` (the Python emitter) and
-`logging_2026-07-28_native.json` (after). Neither is a single run — each arm is
+measured 2026-07-28, the Python emitter against the native one. Neither is a
+single run — each arm is
 11 rounds of 20,000 iterations — but both are one machine, and a second machine
 would be worth having before any of this is quoted anywhere permanent.
 

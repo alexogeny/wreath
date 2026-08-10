@@ -1,10 +1,11 @@
-"""The native log emitter against its pure twin, byte for byte.
+"""The native log emitter against the Python packer, byte for byte.
 
 `wreath_nfr_log` packs a record straight into a ring cell in C. `pack_value`
-plus `LogCell.encode` do the same work in Python. ADR 0005 makes the pure half
-the oracle rather than a fallback, so the contract is not "both produce
+plus `LogCell.encode` do the same work in Python, and both ship: the Python one
+runs when there is no ring, when a record is buffered for a possible promotion,
+and when the caller is not the loop. So the contract is not "both produce
 something readable" -- it is that the 64 bytes are *identical*, for every shape
-either can be handed.
+either can be handed, because a reader cannot tell which packed a given cell.
 
 The corpus below is deliberately weighted towards the cases where two
 independent implementations drift apart: a bool that is also an int, an int one
@@ -211,7 +212,7 @@ def test_the_native_emitter_packs_what_the_pure_one_packs(
     pure = _pure_cell(registry, 7, Severity.WARN, 99, fields, values)
     native, _mismatches = _native_cell(registry, 7, Severity.WARN, 99, fields, values)
     assert native == pure, (
-        f"{label}: the native emitter and the pure packer disagree.\n"
+        f"{label}: the native emitter and the Python packer disagree.\n"
         f"  pure   {pure.hex(' ', 4)}\n  native {native.hex(' ', 4)}"
     )
 
@@ -253,7 +254,7 @@ def test_the_fingerprint_key_is_the_registrys_own() -> None:
 
     A fingerprint exists so two occurrences of one value can be recognised as
     the same within a recording. If the native emitter hashed with the worker's
-    key while the pure path used the registry's, records from the two would
+    key while the Python path used the registry's, records from the two would
     never match -- and nothing would raise to say so.
     """
     fields = (_field(str, HASHED),)
@@ -327,7 +328,7 @@ def test_a_template_whose_value_types_drift_still_packs_the_value_passed() -> No
     `log.info("v is {v}", v=1)` and the same line with a string reach one
     interned site, whose declared fields are whichever call arrived first.
     Packing the second call against the first call's types would turn its value
-    into a counted mismatch and lose it -- which the pure packer never did, so
+    into a counted mismatch and lose it -- which the Python packer never did, so
     the native emitter must not either.
     """
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
@@ -352,8 +353,8 @@ def test_a_template_whose_value_types_drift_still_packs_the_value_passed() -> No
     assert runtime.counters.type_mismatch == 0
 
 
-def test_a_recorder_without_a_native_emitter_falls_back_to_the_pure_packer() -> None:
-    class PureRecorder:
+def test_a_recorder_without_a_native_emitter_uses_the_python_packer() -> None:
+    class SinkOnlyRecorder:
         def __init__(self) -> None:
             self.cells: list[bytes] = []
 
@@ -361,7 +362,7 @@ def test_a_recorder_without_a_native_emitter_falls_back_to_the_pure_packer() -> 
             self.cells.append(cell)
             return True
 
-    recorder = PureRecorder()
+    recorder = SinkOnlyRecorder()
     assert log.recorder_emitter(recorder) is None
     runtime = log.LogRuntime(
         log.recorder_sink(recorder), level=log.INFO, native=log.recorder_emitter(recorder)
