@@ -13,7 +13,7 @@ so these let user code opt in only at the call site, degrading to an immutable
 `wreath._projector`, `wreath._otlp`, and `wreath._export`.
 
 See `docs/plans/native-flight-recorder-stage-1.md` (modes, sizing) and
-`docs/decisions/0021-native-flight-recorder-provisional-parameters.md`.
+`docs/plans/native-flight-recorder-stage-1.md`.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ __all__ = [
 ]
 
 #: Hard ceilings so a misconfiguration cannot ask for unbounded memory. These are
-#: generous provisional bounds (ADR 0021), not tuning targets.
+#: generous provisional bounds (provisional bounds, not tuning targets), not tuning targets.
 _MAX_RING_RECORDS = 1 << 24  # 16 Mi cells (~1 GiB at 64 B) upper sanity bound
 _MAX_ACTIVE_REQUESTS = 1 << 20
 _MAX_PHASE_SLOTS = 1 << 20
@@ -78,7 +78,7 @@ _MAX_CAPTURE_SLABS = 1 << 16
 _MAX_CAPTURE_BYTES = 1 << 30  # 1 GiB per recorder/worker
 _MAX_EXPORT_QUEUE = 1 << 20
 #: Ceilings on logging's tables, in the same spirit: generous provisional bounds
-#: so a misconfiguration cannot ask for unbounded memory (ADR 0021).
+#: so a misconfiguration cannot ask for unbounded memory (provisional bounds, not tuning targets).
 _MAX_LOG_SITES = 1 << 20
 _MAX_LOG_SCRATCH = 1 << 16
 _MAX_LOG_QUEUE = 1 << 22
@@ -557,7 +557,7 @@ def bind_propagation(request: object) -> object | None:
     The context is the request's **owned server span** (`server_span`), not the
     incoming remote parent: work this request causes is a child of *this*
     server's span, and on the native path that id is real rather than inferred.
-    Where the recorder cannot supply one -- the pure and bare-ASGI paths --
+    Where the recorder cannot supply one -- the Python and bare-ASGI paths --
     `server_span` already falls back to the incoming parent, which keeps the
     trace joined even though the parentage is one level coarser.
     """
@@ -598,7 +598,7 @@ def current_span(request: object) -> SpanContextView:
         header = getter("traceparent")
     if not header:
         return SpanContextView()
-    from ._pure.flight import parse_traceparent
+    from ._flight_reference import parse_traceparent
 
     parsed = parse_traceparent(header.encode("ascii", "ignore"))
     if parsed is None:
