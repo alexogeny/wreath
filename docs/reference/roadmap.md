@@ -168,16 +168,6 @@ part a single-module analysis cannot establish, because the transaction is
 usually opened by the caller. A rule that guessed would fire on every correct
 handler that reads before it writes, which is all of them.
 
-**A route that should not be public.** An unauthenticated debug endpoint is
-indistinguishable, at the route table, from an unauthenticated health endpoint;
-both are routes with no `AuthRequirement`. What would make this reportable is
-not a rule but a *declaration*: a mode in which a route with no authentication
-requirement has to say so, so that a new route is public because somebody wrote
-`@public()` rather than because nobody wrote anything. That mode is not built.
-It would be a configuration-tier check rather than a source rule, since the
-route table at startup already holds everything it needs.
-<!-- absent: wreath.hardening.public_routes -->
-
 ## Cross-site request forgery for HTML form posts
 
 `wreath.policy.CsrfPolicy` reads the resubmitted token from a request
