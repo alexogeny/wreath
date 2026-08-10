@@ -79,7 +79,7 @@ def test_client_only_references_interfaces_the_models_module_declares(
     async def handler(request, limit: int = 1) -> dict[str, str]:  # pragma: no cover
         ...
 
-    files = render_typescript(build_api_model(app, allow_unknown=True), pure=True)
+    files = render_typescript(build_api_model(app, allow_unknown=True))
     declared = set(re.findall(r"export interface (\S+)", files["models.ts"]))
     referenced = set(re.findall(r"parameters: (\w+)", files["client.ts"]))
     assert referenced <= declared, (

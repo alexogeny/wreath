@@ -34,7 +34,7 @@ def test_generates_all_files(tmp_path: Path) -> None:
     }
     manifest = json.loads((tmp_path / MANIFEST_NAME).read_text())
     assert manifest["generator"] == "wreath-typegen"
-    assert manifest["renderer"] == "pure"
+    assert manifest["renderer"] == "python"
 
 
 def test_check_passes_when_current(tmp_path: Path) -> None:

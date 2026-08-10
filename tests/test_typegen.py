@@ -265,11 +265,6 @@ def test_generation_is_deterministic() -> None:
     assert _generate_fixture() == _generate_fixture()
 
 
-def test_pure_flag_matches_default_backend() -> None:
-    # No native renderer is built, so --pure produces identical bytes.
-    assert _generate_fixture(pure=True) == _generate_fixture()
-
-
 def test_no_secrets_paths_or_timestamps_in_output() -> None:
     import re
 
