@@ -21,7 +21,7 @@ Both read the request scheme and `Host`, so behind a proxy both belong after
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from ipaddress import AddressValueError, IPv6Address
 
 from .._native import _core
@@ -69,7 +69,9 @@ def _normalize_host(value: str, *, pattern: bool = False) -> str | None:
     return host
 
 
-_host_allowed = _core.host_allowed
+#: `host_allowed(host, patterns)` -- whether a Host value matches the compiled
+#: allowlist. A `*.` pattern stands for exactly one non-empty leftmost label.
+_host_allowed: Callable[[str, tuple[str, ...]], bool] = _core.host_allowed
 
 
 class TrustedHostPolicy:
