@@ -12,7 +12,7 @@ import math
 
 import pytest
 
-from wreath.geospatial import Coordinate, GeospatialError, distance
+from wreath.geospatial import Coordinate, GeospatialError, Polygon, distance
 
 
 class TestCoordinateRefusesAmbiguity:
@@ -120,6 +120,82 @@ class TestCoordinateRefusesAmbiguity:
         """
         with pytest.raises(TypeError):
             Coordinate(1.0, 2.0, lat=-27.4698, lon=153.0251)  # ty: ignore[too-many-positional-arguments]
+
+
+class TestPolygonRing:
+    """The ring's construction refusals, which only the PostGIS suite reached.
+
+    Those tests need a live database, so on a machine without one every refusal
+    below was collected and skipped -- and `Polygon` is where the transposition
+    trap this module exists to refuse is easiest to fall into, because WKT is a
+    string a caller can paste.
+    """
+
+    CORNERS = (
+        Coordinate(lat=-27.0, lon=153.0),
+        Coordinate(lat=-27.0, lon=154.0),
+        Coordinate(lat=-28.0, lon=153.5),
+    )
+
+    def test_wkt_text_is_refused_rather_than_parsed(self) -> None:
+        """A pasted `POLYGON(...)` is longitude-first and would describe
+        somewhere else entirely, with nothing to raise about it."""
+        with pytest.raises(TypeError) as caught:
+            Polygon("POLYGON((153.0 -27.0, 154.0 -27.0, 153.5 -28.0, 153.0 -27.0))")  # ty: ignore[invalid-argument-type]
+        message = str(caught.value)
+        assert "WKT" in message
+        assert "longitude" in message
+
+    def test_a_bare_pair_among_the_vertices_is_refused_by_index(self) -> None:
+        """The same ambiguity as one bare pair, repeated -- and the index is
+        what makes it findable in a ring of forty."""
+        with pytest.raises(TypeError) as caught:
+            Polygon([*self.CORNERS, (153.0, -27.0)])  # ty: ignore[invalid-argument-type]
+        assert "vertex 3" in str(caught.value)
+
+    def test_an_open_ring_is_closed_for_you(self) -> None:
+        ring = Polygon(self.CORNERS)
+        assert ring.vertices[0] == ring.vertices[-1]
+        assert len(ring.vertices) == 4
+
+    def test_a_hand_closed_ring_does_not_count_its_last_vertex_twice(self) -> None:
+        """A triangle written as four points is still a triangle.
+
+        Without the closed-ring check the repeated vertex counts towards the
+        three-distinct minimum, so the *correctly* closed ring -- the one a
+        caller who read the WKT specification writes -- is the one refused.
+        """
+        by_hand = Polygon([*self.CORNERS, self.CORNERS[0]])
+        assert by_hand.vertices == Polygon(self.CORNERS).vertices
+
+    def test_three_distinct_vertices_are_enough(self) -> None:
+        """The boundary the minimum is written against, from the accepting side:
+        truncating an *unclosed* ring would leave two and refuse this."""
+        assert len(Polygon(self.CORNERS).vertices) == 4
+
+    @pytest.mark.parametrize(
+        ("ring", "distinct"),
+        [
+            (CORNERS[:2], 2),
+            ((CORNERS[0], CORNERS[1], CORNERS[0]), 2),
+            ((CORNERS[0],), 0),
+            ((), 0),
+        ],
+        ids=["two-points", "a-duplicate-is-not-a-third", "one-point", "empty"],
+    )
+    def test_fewer_than_three_distinct_vertices_encloses_nothing(
+        self, ring: tuple[Coordinate, ...], distinct: int
+    ) -> None:
+        """Including the empty ring, which has no first vertex to compare.
+
+        A single vertex counts as **zero**, not one: it is trivially its own
+        last vertex, so the closing rule drops it before the minimum is
+        measured. The count in the message is of what was left to enclose
+        something with, which is the number the refusal is about.
+        """
+        with pytest.raises(ValueError) as caught:
+            Polygon(ring)
+        assert f"got {distinct}" in str(caught.value)
 
 
 class TestDistance:
