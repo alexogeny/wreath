@@ -4,14 +4,13 @@ import random
 
 import pytest
 
-from wreath import _client_codec
 from wreath._client_codec import serialize_request as selected_serialize_request
 from wreath._native import _client, _core
 
 # Two implementations serve this, both C: `_client`, the dedicated outbound
 # protocol extension, and `_core`, whose inbound parser covers the same grammar.
-# `_client_codec` picks the first when the build has it. The names below are
-# `_core`'s, driven directly, so the parity tests hold two independently written
+# The names below are `_core`'s, driven directly, so the parity tests hold two
+# independently written
 # parsers to each other rather than one against itself.
 parse_response_head = _core.http_parse_response
 response_framing = _core.http_response_framing
@@ -141,7 +140,6 @@ def test_parse_response_head_rejects_malformed_input(data: bytes, match: str) ->
         parse_response_head(data)
 
 
-@pytest.mark.skipif(_client is None, reason="native client extension is not built")
 def test_the_two_response_head_parsers_agree() -> None:
     samples = (
         b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}",
@@ -152,7 +150,6 @@ def test_the_two_response_head_parsers_agree() -> None:
         assert _client.parse_response_head(sample) == parse_response_head(sample)
 
 
-@pytest.mark.skipif(_client is None, reason="native client extension is not built")
 def test_the_two_request_serializers_agree() -> None:
     cases = (
         ("GET", b"/", b"example.com", (), b""),
@@ -181,15 +178,11 @@ def test_the_two_request_serializers_agree() -> None:
         ) == expected
 
 
-def test_independent_native_client_module_is_selected_when_available() -> None:
-    if _client is None:
-        pytest.skip("native client extension is not built")
-    assert _client_codec._implementation == "native-client"
+def test_client_module_exports_the_bound_codecs() -> None:
     assert callable(_client.serialize_request)
     assert callable(_client.parse_response_head)
 
 
-@pytest.mark.skipif(_client is None, reason="native client extension is not built")
 def test_native_client_codec_randomized_parity() -> None:
     rng = random.Random(20260716)
     for index in range(500):
@@ -251,7 +244,6 @@ def test_native_client_codec_randomized_parity() -> None:
         )
 
 
-@pytest.mark.skipif(_client is None, reason="native client extension is not built")
 def test_native_client_codec_malformed_input_parity() -> None:
     malformed_responses = (
         b"HTTP/2 200 OK\r\n\r\n",

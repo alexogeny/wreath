@@ -1229,7 +1229,7 @@ async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
 
     server, internal_port = await _serve(handler)
     loop = asyncio.get_running_loop()
-    open_connection = asyncio.open_connection
+    create_connection = loop.create_connection
 
     async def malicious_dns(
         *_args: object, **_kwargs: object
@@ -1245,15 +1245,14 @@ async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
         ]
 
     async def nat64_connect(
-        _address: str, _port: int, **kwargs: object
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        factory: object, _address: str, _port: int, **kwargs: object
+    ) -> tuple[asyncio.BaseTransport, asyncio.BaseProtocol]:
         kwargs.pop("family", None)
         kwargs.pop("flags", None)
-        return await open_connection("127.0.0.1", internal_port, **kwargs)
+        return await create_connection(factory, "127.0.0.1", internal_port, **kwargs)
 
     monkeypatch.setattr(loop, "getaddrinfo", malicious_dns)
-    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
-    monkeypatch.setattr(asyncio, "open_connection", nat64_connect)
+    monkeypatch.setattr(loop, "create_connection", nat64_connect)
     client = HTTPClient("nat64", base_url="http://attacker.example")
     try:
         await client.start()
@@ -1300,8 +1299,7 @@ async def test_one_unsafe_dns_answer_refuses_the_whole_resolution(
         raise AssertionError("the client connected before validating every DNS answer")
 
     monkeypatch.setattr(loop, "getaddrinfo", mixed_dns)
-    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
-    monkeypatch.setattr(asyncio, "open_connection", forbidden_connect)
+    monkeypatch.setattr(loop, "create_connection", forbidden_connect)
     client = HTTPClient("mixed-dns", base_url="http://attacker.example")
     try:
         await client.start()
@@ -1338,11 +1336,14 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
         contexts += 1
         return cast(ssl.SSLContext, object())
 
-    async def open_connection(
-        *_args: object, **kwargs: object
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        connection_limits.append(cast(int, kwargs["limit"]))
-        return cast(asyncio.StreamReader, object()), cast(asyncio.StreamWriter, object())
+    class Stream:
+        def __init__(self, *, limit: int) -> None:
+            connection_limits.append(limit)
+
+    async def create_connection(
+        factory: Callable[[], object], *_args: object, **_kwargs: object
+    ) -> tuple[asyncio.Transport, object]:
+        return cast(asyncio.Transport, object()), factory()
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
     # Counted at the client's own builder rather than at `ssl` module level:
@@ -1350,9 +1351,8 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
     # function is no longer the seam. What is under test -- built once, not per
     # request -- is unchanged.
     monkeypatch.setattr(HTTPClient, "_build_ssl_context", build_ssl_context)
-    # DNS/TLS-setup caching is transport-agnostic; spoof the streams seam.
-    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
-    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    monkeypatch.setattr("wreath.http_client._ClientStream", Stream)
+    monkeypatch.setattr(loop, "create_connection", create_connection)
 
     limits = ClientLimits(read_high_water=12345, dns_cache_ttl=30)
     client = HTTPClient("cached", base_url="https://example.com", limits=limits)
@@ -1376,21 +1376,24 @@ async def test_client_races_resolved_addresses(monkeypatch: pytest.MonkeyPatch) 
             (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.1.1.1", 80)),
         ]
 
-    async def open_connection(
-        address: str, _port: int, **_kwargs: object
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    class Stream:
+        def __init__(self, *, limit: int) -> None:
+            self.limit = limit
+
+    async def create_connection(
+        factory: Callable[[], object], address: str, _port: int, **_kwargs: object
+    ) -> tuple[asyncio.Transport, object]:
         attempted.append(address)
         if address == "8.8.8.8":
             await slow.wait()
-        return cast(asyncio.StreamReader, object()), cast(asyncio.StreamWriter, object())
+        return cast(asyncio.Transport, object()), factory()
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
-    # Address racing is transport-agnostic; spoof the streams seam.
-    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
+    monkeypatch.setattr("wreath.http_client._ClientStream", Stream)
     # Winner selection is the contract here, not the production stagger.  A
     # separate slow first attempt still proves the second address is raced.
     monkeypatch.setattr("wreath.http_client._HAPPY_EYEBALLS_DELAY", 0)
-    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    monkeypatch.setattr(loop, "create_connection", create_connection)
 
     client = HTTPClient("race", base_url="http://example.com")
     await asyncio.wait_for(client._connect(), 1)
