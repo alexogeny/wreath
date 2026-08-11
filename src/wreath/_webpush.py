@@ -1,105 +1,21 @@
-"""Web Push (RFC 8030/8291/8292) with no dependency at all.
+"""Web Push according to RFC 8030, RFC 8291, and RFC 8292.
 
-Every other Python web-push implementation reaches for `pywebpush` and
-`cryptography`. Wreath cannot, and it turns out not to need to: the whole
-protocol is four primitives, three of which CPython already ships.
+VAPID uses ECDSA P-256; message encryption uses P-256 ECDH, HKDF-SHA256,
+and AES-128-GCM with the RFC 8188 ``aes128gcm`` content coding. AES-GCM is
+implemented in ``_native/aesgcm.c`` and dispatches to AES-NI/PCLMULQDQ when
+the processor exposes them. The scalar kernel covers every other supported
+Linux, macOS, and Windows target. Published NIST vectors and OpenSSL outputs
+pin both instruction paths independently.
 
-* **VAPID** (RFC 8292) is an ECDSA P-256 keypair and a signed JWT.
-* **Message encryption** (RFC 8291) is ECDH on P-256, then HKDF-SHA256, then
-  AES-128-GCM over the `aes128gcm` content coding of RFC 8188.
-* **Delivery** is an HTTP POST to whatever endpoint the browser handed you.
+A 404 or 410 response expires a subscription, and the encrypted payload is
+limited to 4096 octets. Both are protocol requirements enforced here. Retry,
+storage, and dead-letter policy belong to the job and application layers.
 
-`hashlib` and `hmac` cover SHA-256, HMAC and therefore HKDF. The elliptic-curve
-arithmetic and AES-GCM are here because the stdlib has neither -- there is no
-AES anywhere in CPython, which is the single reason this module is longer than
-it looks like it should be. The AES-GCM below is the portable arm; the hardware
-one is in `src/wreath/_native/aesgcm.c`. Both ship, because a CPU without AES-NI
-still has to encrypt a push.
-
-**What is not here, deliberately.** No key generation for the *client* half, no
-subscription storage policy, and no retry loop: a push is delivered by a
-`wreath.jobs` job, which already owns retries, backoff and dead-lettering.
-
-Two things the protocol makes non-optional and implementations routinely skip:
-
-* A `404` or `410` from the push service means the subscription is gone and the
-  caller **must** stop using it. `PushResult.expired` says so, and the shipped
-  channel prunes on it -- a store that never prunes is a slow leak plus a rising
-  error rate nobody attributes.
-* The payload is capped at 4096 octets *after* encryption. That is checked when
-  the message is built rather than when it is sent, so an over-size notification
-  is a programming error at declaration time instead of a delivery failure in a
-  job an hour later.
-
-The P-256 arithmetic used to duplicate the private half of
-`wreath._auth._ecverify`, which is verify-only by design and kept its group
-operations private, so a module that had to *sign* wrote its own. Both now share
-`wreath._curves`. What stays here is what is specific to this protocol: SEC1
-encoding in a `PushError` vocabulary, the hedged nonce, and low-S normalisation.
-Every scalar this module multiplies is secret, so it calls the constant-shape
-`p256_scalarmult_secret` and never the variable-time form a verifier uses.
-
-## What this costs, measured
-
-Medians of 15 interleaved rounds on a 12-core x86-64 box, 2026-08-02, against
-an A/A control that put the noise floor at 2.0-11.1 us (0.02-0.09% of the pure
-baseline). Two runs minutes apart reproduced the native arm exactly and the
-facade arm to 0.02 us, which is what makes the ratio worth quoting at all.
-
-| Operation | pure Python | AES-NI + PCLMULQDQ |
-| --- | --- | --- |
-| AES-128-GCM over 4000 B (the payload cap) | 11.58 ms | 4.03 us |
-| ... entered through `aes128gcm_encrypt` | 11.58 ms | 4.15 us |
-| AES-128-GCM over 200 B | 705 us | 0.44 us |
-
-The AES was ablated rather than profiled, per `AGENTS.md`: of the 14.5 ms a
-4000-byte record took, the block cipher was 81% and GHASH 31%. Both halves have
-a hardware instruction -- `aesenc` for the cipher, `pclmulqdq` for GHASH's
-carry-less multiply -- so `src/wreath/_native/aesgcm.c` is where they run on a
-CPU that has them. Both arms are pinned to the NIST SP 800-38D vectors by
-`tests/test_aesgcm_parity.py`. The 0.12 us between the two rows is the argument
-check and the dispatch.
-
-**That is the AES only, and saying more would overstate it.** Ablating one whole
-push over a 3900-byte payload, in the same interleaved run:
-
-| Arm | Cost |
-| --- | --- |
-| `encrypt()` end to end | 4.32 ms |
-| ... its two P-256 scalar multiplications alone | 4.32 ms |
-| ... its AES-128-GCM alone | 4.54 us |
-
-So the curve *is* the push now: the two arms are indistinguishable at a 79.8 us
-floor, and the AES is three orders of magnitude below either. A fan-out of
-10,000 maximum-size pushes loses about two minutes of block cipher and keeps
-about forty-three seconds of elliptic curve.
-
-Read those two rows as belonging to different owners. The AES was worth moving
-because one C call replaced an interpreter loop running over every byte; the
-curve is a scalar multiplication in `wreath._curves`, shared with
-`_auth/_ecverify` and `_dkim`, and whatever happens to it next happens there.
-
-## What is constant time here, and what is not
-
-**The pure code below is not, and never was.** `_SBOX` is a byte table indexed
-by secret state, so an attacker who can observe the cache learns about the key;
-`_gf_mul` branches on the bits of its operand. The native path *is* -- `aesenc`
-and `pclmulqdq` are fixed-latency instructions with no data-dependent memory
-access, and the tag comparison is branch-free on both paths (`hmac.compare_digest`
-here, an XOR-accumulate in C).
-
-Which one runs depends on the CPU, so "Wreath's AES-GCM is constant time" is not
-a true sentence. It is true of a machine with AES-NI and PCLMULQDQ, and false of
-one without, and `_core.aesgcm_arms()` is how you tell which you have.
-
-The elliptic curve is a weaker claim than the native AES and a stronger one than
-it used to be. The old `while k: if k & 1:` here leaked the scalar's bit length
-through the iteration count and its Hamming weight through the branch;
-`p256_scalarmult_secret` removes both, running a fixed 257-step ladder with
-mask-selected registers. What it cannot remove is CPython's own big-integer
-arithmetic, whose timing depends on operand magnitude, so **this is not
-constant-time code and `_curves` does not claim it is** -- it is code whose
-control flow the secret does not steer.
+Secret P-256 scalars use the fixed-width, fixed-step ladder in
+``_native/curves.c``. Scalar bits steer neither control flow nor memory
+indexing. The AES-NI/PCLMULQDQ kernel likewise has no data-dependent table
+lookup; the scalar AES S-box does, so only the hardware path carries that
+stronger timing property.
 """
 
 from __future__ import annotations
@@ -128,8 +44,8 @@ __all__ = [
 
 # --- NIST P-256 -------------------------------------------------------------
 
-#: The curve constants, the group law and the two scalar multiplications all
-#: live in `wreath._curves`, shared with `_auth/_ecverify` and `_dkim`. What
+#: The curve constants, group law and scalar multiplication share the curve
+#: library with `_auth/_ecverify` and `_dkim`. What
 #: stays here is what is specific to *this* protocol: SEC1 encoding with a
 #: `PushError` vocabulary, the hedged nonce, and low-S normalisation.
 _N: Final = P256_N
@@ -159,7 +75,7 @@ def _mul(k: int, point: tuple[int, int]) -> Point:
     the signing key. So this is `p256_scalarmult_secret`, whose iteration count
     and sequence of group operations do not depend on the scalar, and never the
     variable-time `_public` form a verifier is entitled to use. `_curves`'s
-    module docstring says what that does and does not buy in pure Python.
+    module docstring says what that does and does not guarantee.
 
     Raises:
         ValueError: `k` is outside `[1, n)`. Callers guard for it and report a
@@ -193,92 +109,10 @@ def _encode_point(point: Point) -> bytes:
     return b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
 
 
-# --- AES-128 ----------------------------------------------------------------
-#
-# Encryption only: GCM never runs the block cipher backwards, so there is no
-# decryption path here to get wrong or to maintain.
-
-_SBOX: Final = bytes.fromhex(
-    "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0"
-    "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275"
-    "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf"
-    "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2"
-    "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb"
-    "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08"
-    "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e"
-    "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16"
-)
-_RCON: Final = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
-
-
-def _xtime(value: int) -> int:
-    value <<= 1
-    return (value ^ 0x1B) & 0xFF if value & 0x100 else value
-
-
-def _expand_key(key: bytes) -> list[list[int]]:
-    """Expand a 16-byte key into eleven round keys.
-
-    No length check: every caller has already been through
-    `_check_gcm_parameters`, which refuses anything that is not 16 bytes with a
-    message naming the algorithm. A second check here was a mutant survivor, and
-    two spellings of one condition is how they drift apart.
-    """
-    words = [list(key[i : i + 4]) for i in range(0, 16, 4)]
-    for index in range(4, 44):
-        word = list(words[index - 1])
-        if index % 4 == 0:
-            word = word[1:] + word[:1]
-            word = [_SBOX[b] for b in word]
-            word[0] ^= _RCON[index // 4 - 1]
-        words.append([a ^ b for a, b in zip(words[index - 4], word, strict=True)])
-    return [sum(words[r * 4 : r * 4 + 4], []) for r in range(11)]
-
-
-def _encrypt_block(round_keys: list[list[int]], block: bytes) -> bytes:
-    state = [b ^ k for b, k in zip(block, round_keys[0], strict=True)]
-    for rnd in range(1, 11):
-        state = [_SBOX[b] for b in state]
-        # ShiftRows, in column-major order: byte at (row, col) is state[col*4+row].
-        state = [state[(i + (i % 4) * 4) % 16] for i in range(16)]
-        if rnd != 10:
-            mixed: list[int] = []
-            for col in range(4):
-                a = state[col * 4 : col * 4 + 4]
-                t = a[0] ^ a[1] ^ a[2] ^ a[3]
-                mixed += [
-                    a[0] ^ t ^ _xtime(a[0] ^ a[1]),
-                    a[1] ^ t ^ _xtime(a[1] ^ a[2]),
-                    a[2] ^ t ^ _xtime(a[2] ^ a[3]),
-                    a[3] ^ t ^ _xtime(a[3] ^ a[0]),
-                ]
-            state = mixed
-        state = [b ^ k for b, k in zip(state, round_keys[rnd], strict=True)]
-    return bytes(state)
-
-
-# --- GCM --------------------------------------------------------------------
-
-_GCM_R: Final = 0xE1000000000000000000000000000000
-
-
-def _gf_mul(x: int, y: int) -> int:
-    """Multiply in GF(2^128) with GCM's bit ordering (NIST SP 800-38D §6.3)."""
-    z = 0
-    v = y
-    for i in range(127, -1, -1):
-        if (x >> i) & 1:
-            z ^= v
-        v = (v >> 1) ^ _GCM_R if v & 1 else v >> 1
-    return z
-
-
-def _ghash(h: int, data: bytes) -> int:
-    y = 0
-    for offset in range(0, len(data), 16):
-        block = data[offset : offset + 16].ljust(16, b"\x00")
-        y = _gf_mul(y ^ int.from_bytes(block, "big"), h)
-    return y
+# --- AES-128-GCM -----------------------------------------------------------
+# The complete cipher and authentication loops live in `_native/aesgcm.c`.
+# Its scalar kernel is always present; AES-NI/PCLMULQDQ replaces it per
+# call on capable x86 processors.
 
 
 #: The GCM tag, in bytes. Fixed by the mode, not a policy of this module.
@@ -294,10 +128,7 @@ MAX_GCM_PLAINTEXT_BYTES: Final = (1 << 36) - 32
 def _check_gcm_parameters(key: bytes, nonce: bytes, length: int) -> None:
     """Refuse anything the mode is not defined for, before any of it runs.
 
-    Shared by both implementations and by both directions, so the native and
-    pure paths refuse identical inputs in identical words -- which is the only
-    way a differential test can compare their *failures* as well as their
-    outputs.
+    Shared by encryption and decryption so refusal wording cannot drift.
     """
     if len(key) != 16:
         raise PushError("AES-128 takes a 16-byte key")
@@ -310,91 +141,20 @@ def _check_gcm_parameters(key: bytes, nonce: bytes, length: int) -> None:
         )
 
 
-def _ctr_pure(round_keys: list[list[int]], nonce: bytes, data: bytes) -> bytes:
-    """XOR `data` with the AES-CTR keystream from counter 2 onwards.
-
-    Its own inverse, which is why decryption needs no backwards block cipher.
-    """
-    out = bytearray()
-    counter = int.from_bytes(nonce + b"\x00\x00\x00\x01", "big")
-    for offset in range(0, len(data), 16):
-        counter = (counter & ~0xFFFFFFFF) | ((counter + 1) & 0xFFFFFFFF)
-        stream = _encrypt_block(round_keys, counter.to_bytes(16, "big"))
-        chunk = data[offset : offset + 16]
-        out += bytes(a ^ b for a, b in zip(chunk, stream, strict=False))
-    return bytes(out)
-
-
-def _gcm_tag_pure(
-    round_keys: list[list[int]], nonce: bytes, ciphertext: bytes, aad: bytes
-) -> bytes:
-    """GHASH over the AAD and the ciphertext, masked with E(J0)."""
-    h = int.from_bytes(_encrypt_block(round_keys, b"\x00" * 16), "big")
-    j0 = nonce + b"\x00\x00\x00\x01"
-    lengths = (len(aad) * 8).to_bytes(8, "big") + (len(ciphertext) * 8).to_bytes(8, "big")
-    hashed = _ghash(
-        h,
-        aad
-        + b"\x00" * (-len(aad) % 16)
-        + ciphertext
-        + b"\x00" * (-len(ciphertext) % 16)
-        + lengths,
-    )
-    tag = hashed ^ int.from_bytes(_encrypt_block(round_keys, j0), "big")
-    return tag.to_bytes(TAG_BYTES, "big")
-
-
-def _aes128gcm_encrypt_pure(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
-    round_keys = _expand_key(key)
-    ciphertext = _ctr_pure(round_keys, nonce, plaintext)
-    return ciphertext + _gcm_tag_pure(round_keys, nonce, ciphertext, aad)
-
-
-def _aes128gcm_decrypt_pure(
-    key: bytes, nonce: bytes, message: bytes, aad: bytes
-) -> bytes | None:
-    """The plaintext, or None when the tag does not verify.
-
-    None rather than an exception so that the C arm -- which cannot raise
-    Wreath's error type without a Python call -- refuses in the same words. The
-    caller below owns the message.
-    """
-    ciphertext, tag = message[:-TAG_BYTES], message[-TAG_BYTES:]
-    round_keys = _expand_key(key)
-    if not hmac.compare_digest(tag, _gcm_tag_pure(round_keys, nonce, ciphertext, aad)):
-        return None
-    return _ctr_pure(round_keys, nonce, ciphertext)
-
-
-# The hardware path, bound once at import. `aesgcm_arms()` reports what this
-# CPU can actually run and is empty without AES-NI and PCLMULQDQ, which is a
-# property of the machine rather than of the build -- so the Python above stays
-# and is what runs there.
-_native_gcm_encrypt = None
-_native_gcm_decrypt = None
-if _core.aesgcm_arms():
-    _native_gcm_encrypt = _core.aes128gcm_encrypt
-    _native_gcm_decrypt = _core.aes128gcm_decrypt
-
-
 def aes128gcm_encrypt(
     key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b""
 ) -> bytes:
     """AES-128-GCM; returns ciphertext || 16-byte tag.
 
-    Written out because CPython ships no AES at all. Runs on AES-NI and
-    PCLMULQDQ where the CPU has them, and on the Python above otherwise; both
-    arms are pinned against the NIST SP 800-38D vectors and against
-    `cryptography` by `tests/test_aesgcm_parity.py`.
+    Pinned against NIST SP 800-38D vectors and OpenSSL outputs by
+    `tests/test_aesgcm_parity.py`.
 
     Raises:
         PushError: the key is not 16 bytes, the nonce is not 12, or the
             plaintext is longer than one key and nonce may cover.
     """
     _check_gcm_parameters(key, nonce, len(plaintext))
-    if _native_gcm_encrypt is not None:
-        return _native_gcm_encrypt(key, nonce, plaintext, aad)
-    return _aes128gcm_encrypt_pure(key, nonce, plaintext, aad)
+    return _core.aes128gcm_encrypt(key, nonce, plaintext, aad)
 
 
 def aes128gcm_decrypt(
@@ -414,10 +174,7 @@ def aes128gcm_decrypt(
     if len(message) < TAG_BYTES:
         raise PushError(f"an AES-GCM message carries a {TAG_BYTES}-byte tag")
     _check_gcm_parameters(key, nonce, len(message) - TAG_BYTES)
-    if _native_gcm_decrypt is not None:
-        plaintext = _native_gcm_decrypt(key, nonce, message, aad)
-    else:
-        plaintext = _aes128gcm_decrypt_pure(key, nonce, message, aad)
+    plaintext = _core.aes128gcm_decrypt(key, nonce, message, aad)
     if plaintext is None:
         raise PushError("the AES-GCM tag does not authenticate this message")
     return plaintext
@@ -442,7 +199,6 @@ def _ecdsa_sign(private: int, digest: bytes) -> bytes:
     outright, and hedging means that holds only if `os.urandom` fails **and**
     HMAC-SHA256 is broken, rather than if either one is.
     """
-    z = int.from_bytes(digest, "big")
     seed = private.to_bytes(32, "big") + digest + os.urandom(32)
     # The three retries below are required by FIPS 186-4 §6.4 and are each
     # reached with probability around 2^-128, so no test can drive them and
@@ -451,26 +207,13 @@ def _ecdsa_sign(private: int, digest: bytes) -> bytes:
     # the private key, and the loop is the specified handling rather than
     # defensive padding.
     while True:
-        k = int.from_bytes(hmac.new(b"wreath-webpush-nonce", seed, hashlib.sha512).digest(), "big")
-        k %= _N - 1
-        k += 1
-        point = _mul(k, P256_G)
-        if point is None:
-            seed = hashlib.sha256(seed).digest()
-            continue
-        r = point[0] % _N
-        if r == 0:
-            seed = hashlib.sha256(seed).digest()
-            continue
-        s = pow(k, -1, _N) * (z + r * private) % _N
-        if s == 0:
-            seed = hashlib.sha256(seed).digest()
-            continue
-        # Low-S, as JOSE and every modern verifier expect. Both forms are valid
-        # ECDSA; publishing the high one makes signatures malleable for no gain.
-        if s > _N // 2:
-            s = _N - s
-        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        nonce = hmac.new(
+            b"wreath-webpush-nonce", seed, hashlib.sha512
+        ).digest()
+        signature = _core.curve_p256_sign(private, digest, nonce)
+        if signature is not None:
+            return signature
+        seed = hashlib.sha256(seed).digest()
 
 
 # --- VAPID ------------------------------------------------------------------
