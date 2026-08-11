@@ -317,3 +317,61 @@ def test_cookie_and_header_names_must_be_http_tokens(kwargs: dict) -> None:
     """A name with a separator in it is a header-splitting or cookie-parsing bug."""
     with pytest.raises(ValueError, match="valid HTTP tokens"):
         CsrfPolicy("s" * 32, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_token_that_does_not_match_the_cookie_is_refused() -> None:
+    """Double submit, and the comparison that makes it a defence.
+
+    An attacker's page cannot read the cookie, but the browser sends it anyway;
+    what they cannot do is put its value in a header. So the whole control is
+    `compare_digest(cookie, submitted)` -- and every test above sends the *same*
+    value in both places, which passes whether or not that comparison happens.
+
+    Both tokens here are individually valid and signed by this middleware. Only
+    their being different is what must refuse the request.
+    """
+    middleware = CsrfPolicy("s" * 32)
+
+    first, second = _request("GET"), _request("GET")
+    assert await middleware._ingress(first) is None
+    assert await middleware._ingress(second) is None
+    cookie_token, other_token = csrf_token(first), csrf_token(second)
+    assert cookie_token != other_token, "two mints must differ, or this proves nothing"
+
+    unsafe = _request(
+        "POST",
+        [
+            (b"host", b"example.test"),
+            (b"origin", b"https://example.test"),
+            (b"cookie", f"wreath_csrf={cookie_token}".encode()),
+            (b"x-csrf-token", other_token.encode()),
+        ],
+    )
+    refusal = await middleware._ingress(unsafe)
+    assert refusal is not None and refusal.status == 403
+
+
+@pytest.mark.asyncio
+async def test_an_unsafe_request_with_a_cookie_and_no_submitted_token_is_refused() -> None:
+    """The other half of the same `and`: the browser sends the cookie by itself.
+
+    That is precisely the cross-site request -- cookie present because cookies
+    are attached automatically, header absent because the attacker's page could
+    not add one.
+    """
+    middleware = CsrfPolicy("s" * 32)
+    safe = _request("GET")
+    assert await middleware._ingress(safe) is None
+    token = csrf_token(safe)
+
+    unsafe = _request(
+        "POST",
+        [
+            (b"host", b"example.test"),
+            (b"origin", b"https://example.test"),
+            (b"cookie", f"wreath_csrf={token}".encode()),
+        ],
+    )
+    refusal = await middleware._ingress(unsafe)
+    assert refusal is not None and refusal.status == 403

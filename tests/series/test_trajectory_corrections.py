@@ -144,6 +144,21 @@ class TestATrajectoryRefusesWhatItCannotMeasure:
         with pytest.raises(GeospatialError, match=r"fix 0 must be a \(timestamp"):
             Trajectory([(at(MONDAY, 0),)])
 
+    def test_a_fix_with_no_length_at_all_is_refused_by_name(self):
+        """`isinstance` before `len`, and that order is the whole guard.
+
+        A wrong length is the case a reader thinks of; a fix that is not a
+        sequence is the one that arrives from real code -- a bare timestamp, a
+        row object, a `None` from a query that found nothing. Measuring it
+        first raises `TypeError: object of type 'X' has no len()`, which names
+        neither the fix nor what it should have been.
+        """
+        with pytest.raises(GeospatialError, match=r"fix 0 must be a \(timestamp"):
+            Trajectory([at(MONDAY, 0)])
+
+        with pytest.raises(GeospatialError, match=r"fix 1 must be a \(timestamp"):
+            Trajectory([BASE[0], None])
+
     def test_a_fix_whose_position_is_not_a_coordinate_is_refused(self):
         """The message names the type it got, so a swapped pair is diagnosable."""
         with pytest.raises(GeospatialError, match="must carry a Coordinate, got tuple"):
