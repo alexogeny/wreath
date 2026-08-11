@@ -1,7 +1,7 @@
 name: ci
 
-# Pull-request and main validation: the fast test suite, and a strict docs
-# build on main. Benchmarks are not run here — they live in benchmarks/, are
+# Pull-request and main validation: the fast test suite and a strict docs
+# build. Benchmarks are not run here — they live in benchmarks/, are
 # never collected by pytest (testpaths = ["tests"]), and are regenerated on the
 # maintainer's host, not in CI.
 #
@@ -120,6 +120,12 @@ jobs:
         run: uv run --no-sync ruff check .
       - name: Ty
         run: uv run --no-sync ty check
+
+      - name: Build site (strict)
+        # This is also the release gate. The Pages workflow still renders and
+        # uploads its own artifact, but publish no longer rebuilds the native
+        # environment merely to repeat this three-second check.
+        run: uv run --no-sync wreath docs check
 
       - name: Fast tests
         # Default marks exclude fuzz/performance/network. The suite is ~14,500

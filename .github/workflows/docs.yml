@@ -9,12 +9,11 @@ name: docs
 # docstrings statically) because the `:::` reference directive imports the
 # modules it documents.
 
-# Every push to main, with no `paths:` filter. This is now the only strict docs
-# build on main -- `ci`'s `docs-build` job was deleted as a duplicate of this
-# one (identical output on every sampled push, and this job is the superset: it
-# sets GITHUB_TOKEN and uploads the Pages artifact). A filter would reopen the
-# gap that deletion closed: a push touching only `tests/**`, `README.md`,
-# `setup.py` or `.github/workflows/ci.yml` would then build no docs at all.
+# Every push to main, with no `paths:` filter. CI already checks the strict
+# build, while this workflow owns the distinct deployment work: it renders with
+# repository metadata, uploads the Pages artifact, and deploys it. A filter
+# would leave the public site stale after changes outside docs/, including
+# reference material imported from source modules.
 on:
   push:
     branches: [main]
