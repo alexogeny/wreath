@@ -105,6 +105,12 @@ jobs:
           enable-cache: true
       - name: Sync (default 'dev' group; builds the native extension)
         run: uv sync --frozen
+      - name: Build Linux development capabilities in place
+        # The base distribution deliberately excludes io_uring and native TLS.
+        # CI exercises those Linux capabilities too, so build them explicitly;
+        # otherwise a clean runner lacks `_reactor` while a maintainer checkout
+        # with an older in-place artifact passes the same tests.
+        run: WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace
 
       # Cheapest first, so a formatting slip fails at ~30s rather than after the
       # 78s suite. Every step below is `--no-sync`: the environment is already

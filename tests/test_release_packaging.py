@@ -59,6 +59,26 @@ def test_base_build_cleans_stale_capability_outputs() -> None:
     assert 'cmdclass={"build": _CleanBuild' in setup
 
 
+def test_linux_test_workflows_build_the_development_capability() -> None:
+    workflows = {
+        ".github/workflows/ci.yml": "checks",
+        ".github/workflows/publish.yml": "verify",
+    }
+    for path, job_name in workflows.items():
+        workflow = yaml.safe_load((ROOT / path).read_text())
+        steps = workflow["jobs"][job_name]["steps"]
+        commands = [step.get("run", "") for step in steps]
+        build_index = commands.index(
+            "WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace"
+        )
+        test_index = next(
+            index
+            for index, command in enumerate(commands)
+            if "wreath test" in command
+        )
+        assert build_index < test_index
+
+
 def test_publish_matrix_covers_native_linux_macos_and_windows() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
     matrix = workflow["jobs"]["wheels"]["strategy"]["matrix"]["include"]
