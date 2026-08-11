@@ -166,6 +166,7 @@ class OtlpHttpExporter:
 
     __slots__ = (
         "_encode",
+        "_encoding",
         "_headers",
         "_logs_url",
         "_metrics_url",
@@ -196,30 +197,123 @@ class OtlpHttpExporter:
         self._logs_url = f"{base}/v1/logs"
         self._timeout = timeout
         self._encode = encode
+        self._encoding = encoding
         self._headers = {"content-type": media_type, **(headers or {})}
         self._opener = urllib.request.build_opener(
             _SameOriginRedirectHandler(origin)
         )
 
-    def _post(self, url: str, request: dict[str, Any], signal: str) -> None:
-        body = self._encode(request, signal)
+    def _post_body(self, url: str, body: bytes) -> None:
         req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
         with self._opener.open(req, timeout=self._timeout) as response:
             # Drain and discard: the OTLP response body is not needed, but leaving
             # it unread can wedge keep-alive connections.
             response.read()
 
+    def _post(self, url: str, request: dict[str, Any], signal: str) -> None:
+        self._post_body(url, self._encode(request, signal))
+
     def export_traces(self, request: dict[str, Any]) -> None:
         if request.get("resourceSpans"):
             self._post(self._traces_url, request, "traces")
+
+    def export_projected_traces(
+        self,
+        traces: list[ProjectedTrace],
+        *,
+        image: Any,
+        resource_attributes: dict[str, str] | None,
+    ) -> None:
+        """Export projected traces without a request tree for protobuf."""
+        if not traces:
+            return
+        if self._encoding == "protobuf":
+            from ._otlp_proto import encode_projected_traces
+
+            body = encode_projected_traces(
+                traces,
+                image=image,
+                resource_attributes=resource_attributes,
+            )
+            self._post_body(self._traces_url, body)
+            return
+        self.export_traces(
+            build_trace_request(
+                traces,
+                image=image,
+                resource_attributes=resource_attributes,
+            )
+        )
 
     def export_logs(self, request: dict[str, Any]) -> None:
         if request.get("resourceLogs"):
             self._post(self._logs_url, request, "logs")
 
+    def export_projected_logs(
+        self,
+        records: list[ProjectedLog],
+        *,
+        registry: Any,
+        resource_attributes: dict[str, str] | None,
+    ) -> None:
+        """Export projected logs without a request tree for protobuf."""
+        if not records:
+            return
+        if self._encoding == "protobuf":
+            from ._otlp_proto import encode_projected_logs
+
+            body = encode_projected_logs(
+                records,
+                registry=registry,
+                resource_attributes=resource_attributes,
+            )
+            self._post_body(self._logs_url, body)
+            return
+        self.export_logs(
+            build_logs_request(
+                records,
+                registry=registry,
+                resource_attributes=resource_attributes,
+            )
+        )
+
     def export_metrics(self, request: dict[str, Any]) -> None:
         if request.get("resourceMetrics"):
             self._post(self._metrics_url, request, "metrics")
+
+    def export_projected_metrics(
+        self,
+        snapshot: ProjectorSnapshot,
+        *,
+        image: Any,
+        start_unix_nano: int,
+        now_unix_nano: int,
+        resource_attributes: dict[str, str] | None,
+    ) -> None:
+        """Export a snapshot without a request tree on the protobuf transport."""
+        if not snapshot.routes:
+            return
+        if self._encoding == "protobuf":
+            from ._otlp_proto import encode_projected_metrics
+
+            body = encode_projected_metrics(
+                snapshot,
+                image=image,
+                start_unix_nano=start_unix_nano,
+                now_unix_nano=now_unix_nano,
+                resource_attributes=resource_attributes,
+            )
+            self._post_body(self._metrics_url, body)
+            return
+        self.export_metrics(
+            build_metrics_request(
+                snapshot,
+                image=image,
+                start_unix_nano=start_unix_nano,
+                now_unix_nano=now_unix_nano,
+                resource_attributes=resource_attributes,
+            )
+        )
 
 
 class ExportPipeline:
@@ -346,13 +440,23 @@ class ExportPipeline:
         pending = self._queue.drain()
         if not pending:
             return
+        projected = getattr(self._transport, "export_projected_traces", None)
         for start in range(0, len(pending), self._batch_size):
             batch = pending[start : start + self._batch_size]
-            request = build_trace_request(
-                batch, image=self._image, resource_attributes=self._resource
-            )
             try:
-                self._transport.export_traces(request)
+                if projected is not None:
+                    projected(
+                        batch,
+                        image=self._image,
+                        resource_attributes=self._resource,
+                    )
+                else:
+                    request = build_trace_request(
+                        batch,
+                        image=self._image,
+                        resource_attributes=self._resource,
+                    )
+                    self._transport.export_traces(request)
             except Exception:  # noqa: BLE001 -- isolate exporter failure to a counter
                 with self._lock:
                     self._trace_errors += 1
@@ -375,13 +479,23 @@ class ExportPipeline:
             with self._lock:
                 self._log_errors += 1
             return
+        projected = getattr(self._transport, "export_projected_logs", None)
         for start in range(0, len(pending), self._batch_size):
             batch = pending[start : start + self._batch_size]
-            request = build_logs_request(
-                batch, registry=registry, resource_attributes=self._resource
-            )
             try:
-                exporter(request)
+                if projected is not None:
+                    projected(
+                        batch,
+                        registry=registry,
+                        resource_attributes=self._resource,
+                    )
+                else:
+                    request = build_logs_request(
+                        batch,
+                        registry=registry,
+                        resource_attributes=self._resource,
+                    )
+                    exporter(request)
             except Exception:  # noqa: BLE001 -- isolate exporter failure to a counter
                 with self._lock:
                     self._log_errors += 1
@@ -396,15 +510,26 @@ class ExportPipeline:
         snapshot = provider()
         if snapshot is None:
             return
-        request = build_metrics_request(
-            snapshot,
-            image=self._image,
-            start_unix_nano=self._metrics_start_ns,
-            now_unix_nano=time.time_ns(),
-            resource_attributes=self._resource,
-        )
+        now_ns = time.time_ns()
+        projected = getattr(self._transport, "export_projected_metrics", None)
         try:
-            self._transport.export_metrics(request)
+            if projected is not None:
+                projected(
+                    snapshot,
+                    image=self._image,
+                    start_unix_nano=self._metrics_start_ns,
+                    now_unix_nano=now_ns,
+                    resource_attributes=self._resource,
+                )
+            else:
+                request = build_metrics_request(
+                    snapshot,
+                    image=self._image,
+                    start_unix_nano=self._metrics_start_ns,
+                    now_unix_nano=now_ns,
+                    resource_attributes=self._resource,
+                )
+                self._transport.export_metrics(request)
         except Exception:  # noqa: BLE001
             with self._lock:
                 self._metric_errors += 1
