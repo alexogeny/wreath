@@ -819,9 +819,9 @@ _http3_available_cache: bool | None = None
 def _http3_available() -> bool:
     """Report whether the optional native HTTP/3 extension can be loaded.
 
-    The extension is only configured when `WREATH_BUILD_HTTP3=1` at build time,
-    so a default install returns `False`. "Available" means *loadable*, not
-    merely discoverable: a partial build where the `.so` exists but a
+    The extension is installed by the `h3`/`http3` extra, so a base install
+    returns `False`. "Available" means *loadable*, not merely discoverable: a
+    partial installation where the `.so` exists but a
     transitive shared library (e.g. `libngtcp2_crypto_ossl`) is missing must
     report `False` so `serve()` raises its actionable "not built" error
     rather than a raw `ImportError` from deep in the import machinery. The
@@ -866,9 +866,9 @@ def _resolve_tls(
         if not _http3_available():
             # Never silently downgrade to a TCP-only server.
             raise RuntimeError(
-                "HTTP/3 (h3) was requested but the native wreath._native._http3 "
-                "extension is not built. Rebuild with WREATH_BUILD_HTTP3=1 and the "
-                "ngtcp2/nghttp3 backend, or remove 'h3' from config.protocols."
+                "HTTP/3 (h3) was requested but wreath._native._http3 is not "
+                "installed. Install 'wreath[h3]', or remove 'h3' from "
+                "config.protocols."
             )
 
     if wants_h2:
