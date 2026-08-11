@@ -66,7 +66,11 @@ class _CleanBuild(build):
 
 profile_build = os.environ.get("WREATH_NATIVE_PROFILE") == "1"
 if sys.platform == "win32":
-    extra_compile_args = ["/O2", "/std:c11"]
+    # `/std:c11` selects the language mode, but MSVC gates the C11 atomic
+    # declarations used by CPython and Wreath behind a separate switch.  A
+    # Windows wheel otherwise reaches vcruntime_c11_stdatomic.h and refuses
+    # with "C atomic support is not enabled" before compiling our sources.
+    extra_compile_args = ["/O2", "/std:c11", "/experimental:c11atomics"]
     hot_compile_args = [*extra_compile_args, "/GL"]
     hot_link_args = ["/LTCG"]
     if profile_build:
