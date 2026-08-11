@@ -40,7 +40,7 @@ class Connection:
 
 def _matching_snapshot(registry: Registry) -> NativeCatalogSnapshot:
     descriptor = migrations._registry_descriptor(registry)
-    image = migrations._metal()._migration_compile_desired(descriptor)
+    image = migrations._postgres._migration_compile_desired(descriptor)
     return NativeCatalogSnapshot(image, descriptor)
 
 
@@ -71,7 +71,7 @@ async def test_generate_baseline_is_a_reviewable_zero_operation_root(monkeypatch
 async def test_generate_baseline_refuses_catalog_drift(monkeypatch) -> None:
     registry = Registry(Database(), [Trail], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    snapshot = NativeCatalogSnapshot(migrations._metal()._migration_compile_desired(empty), empty)
+    snapshot = NativeCatalogSnapshot(migrations._postgres._migration_compile_desired(empty), empty)
 
     async def decode(*args: Any) -> NativeCatalogSnapshot:
         return snapshot

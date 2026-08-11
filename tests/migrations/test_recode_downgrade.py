@@ -182,7 +182,7 @@ def test_an_altered_column_is_touched_even_though_it_is_not_narrowed() -> None:
     """
     artifact_data, _, _ = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     touched = migrations._touched_columns(reverse)
     assert ("app", "treks", "status") in {(s, t, c) for s, t, c, _ in touched}
 
@@ -201,7 +201,7 @@ async def test_a_finished_recode_is_still_a_hazard() -> None:
     """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     connection = RevertConnection(
         artifact=artifact,
         before=before,
@@ -218,7 +218,7 @@ async def test_a_finished_recode_is_still_a_hazard() -> None:
 async def test_a_running_recode_is_a_hazard_too() -> None:
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     connection = RevertConnection(
         artifact=artifact,
         before=before,
@@ -247,7 +247,7 @@ async def test_a_recode_whose_ledger_row_was_purged_is_still_a_hazard() -> None:
     """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     connection = RevertConnection(
         artifact=artifact,
         before=before,
@@ -269,7 +269,7 @@ async def test_a_column_no_recode_touched_is_not_a_hazard() -> None:
     """The load-bearing negative: this must not block ordinary downgrades."""
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     connection = RevertConnection(
         artifact=artifact, before=before, after=after, rewritten=[]
     )
@@ -280,7 +280,7 @@ async def test_a_column_no_recode_touched_is_not_a_hazard() -> None:
 async def test_a_database_that_never_ran_a_pass_has_no_ledger_and_no_hazard() -> None:
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    reverse = migrations._metal()._migration_reverse_plan(artifact.named_plan)
+    reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
     connection = RevertConnection(
         artifact=artifact, before=before, after=after, ledger_exists=False
     )
