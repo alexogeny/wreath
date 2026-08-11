@@ -169,7 +169,7 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
     """Compile `annotation` into the native validator's plan tuples.
 
     Raises :class:`_PlanUnsupported` for shapes the flat plan cannot express
-    (currently recursive dataclasses), signalling a pure-validator fallback.
+    (currently recursive dataclasses), signalling recursive evaluation.
     Semantics mirror :func:`_validate` exactly.
     """
     annotation, field = _field_annotation(annotation)
@@ -916,7 +916,7 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
 
 
 def _compile_response_check(annotation: Any) -> Callable[[Any], Any]:
-    """Compile the response's validation step, natively where the plan allows.
+    """Compile the response's validation step where the plan allows.
 
     The request body has executed a flat native plan since `_body_validator`
     was written; the response side kept walking the annotation in Python for
@@ -924,26 +924,25 @@ def _compile_response_check(annotation: Any) -> Callable[[Any], Any]:
     This closes that gap -- same plan compiler, same validator, same error
     ordering.
     """
-    if _core is not None:
-        try:
-            plan = _compile_plan(annotation, frozenset())
-        except _PlanUnsupported:
-            plan = None
-        if plan is not None:
-            run_validation = _core.run_validation
+    try:
+        plan = _compile_plan(annotation, frozenset())
+    except _PlanUnsupported:
+        plan = None
+    if plan is not None:
+        run_validation = _core.run_validation
 
-            def native_check(value: Any, _plan: Any = plan, _run: Any = run_validation) -> Any:
-                result, errors = _run(_plan, value, _RESPONSE_LOC)
-                if errors:
-                    raise ValidationError(errors)
-                return result
+        def planned_check(value: Any, _plan: Any = plan, _run: Any = run_validation) -> Any:
+            result, errors = _run(_plan, value, _RESPONSE_LOC)
+            if errors:
+                raise ValidationError(errors)
+            return result
 
-            return native_check
+        return planned_check
 
-    def pure_check(value: Any, _annotation: Any = annotation) -> Any:
+    def annotation_check(value: Any, _annotation: Any = annotation) -> Any:
         return validate(_annotation, value, _RESPONSE_LOC)
 
-    return pure_check
+    return annotation_check
 
 
 def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
@@ -986,8 +985,8 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
             return _check(_project(value))
 
     to_json = _compile_jsonable(annotation)
-    native_json: Callable[[Any], tuple[bytes | None, list[dict[str, Any]]]] | None = None
-    if _core is not None and projection_is_identity and typing.get_origin(annotation) is dict:
+    planned_json: Callable[[Any], tuple[bytes | None, list[dict[str, Any]]]] | None = None
+    if projection_is_identity and typing.get_origin(annotation) is dict:
         try:
             response_plan = _compile_plan(annotation, frozenset())
         except _PlanUnsupported:
@@ -995,7 +994,7 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
         else:
             run_validation_json = _core.run_validation_json
 
-            def native_json(  # type: ignore[no-redef]
+            def planned_json(  # type: ignore[no-redef]
                 value: Any,
                 _plan: Any = response_plan,
                 _run: Any = run_validation_json,
@@ -1005,9 +1004,9 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
     def _validated(value: Any) -> Any:
         if isinstance(value, response_types):
             return value
-        if native_json is not None:
+        if planned_json is not None:
             try:
-                body, errors = native_json(value)
+                body, errors = planned_json(value)
             except TypeError:
                 # The validation plan may accept a value the compact encoder
                 # deliberately does not (UUID, Decimal, bytes, sets).  Those
@@ -2074,31 +2073,30 @@ def _body_validator(annotation: Any) -> _BodyValidator:
 
         return _BodyValidator(compile_model_validator(annotation))
 
-    if _core is not None:
-        # Compile the annotation into a flat plan once; the native validator
-        # then checks a whole body in one call. Plans that cannot be flattened
-        # (recursive dataclasses) fall through to the Python validator.
-        try:
-            plan = _compile_plan(annotation, frozenset())
-        except _PlanUnsupported:
-            plan = None
-        if plan is not None:
-            run_validation = _core.run_validation
-            decode_json = _core.decode_json_validation_tape
+    # Compile the annotation into a flat plan once, then check the whole body
+    # in one call. Recursive dataclasses cannot be flattened and retain their
+    # recursive annotation validator.
+    try:
+        plan = _compile_plan(annotation, frozenset())
+    except _PlanUnsupported:
+        plan = None
+    if plan is not None:
+        run_validation = _core.run_validation
+        decode_json = _core.decode_json_validation_tape
 
-            def checked(result_and_errors: tuple[Any, list[Any]]) -> Any:
-                result, errors = result_and_errors
-                if errors:
-                    raise ValidationError(errors)
-                return result
+        def checked(result_and_errors: tuple[Any, list[Any]]) -> Any:
+            result, errors = result_and_errors
+            if errors:
+                raise ValidationError(errors)
+            return result
 
-            def native_validate(payload: Any, loc: tuple[Any, ...]) -> Any:
-                return checked(run_validation(plan, payload, loc))
+        def planned_validate(payload: Any, loc: tuple[Any, ...]) -> Any:
+            return checked(run_validation(plan, payload, loc))
 
-            def native_decode(data: bytes, loc: tuple[Any, ...]) -> Any:
-                return checked(decode_json(data, plan, loc))
+        def planned_decode(data: bytes, loc: tuple[Any, ...]) -> Any:
+            return checked(decode_json(data, plan, loc))
 
-            return _BodyValidator(native_validate, native_decode)
+        return _BodyValidator(planned_validate, planned_decode)
 
     def validate_annotation(payload: Any, loc: tuple[Any, ...]) -> Any:
         return validate(annotation, payload, loc)
@@ -2499,15 +2497,14 @@ def compile_binder(
         return handler
     path_specs = () if spec is None else spec.path_params
     path_opcodes = {str: 0, int: 1, float: 2, bool: 3}
-    native_path_entries = (
+    compiled_path_entries = (
         tuple((name, alias, path_opcodes[annotation]) for name, alias, annotation in path_specs)
-        if _core is not None
-        and all(annotation in path_opcodes for _name, _alias, annotation in path_specs)
+        if all(annotation in path_opcodes for _name, _alias, annotation in path_specs)
         else None
     )
-    native_path_plan = (
-        (native_path_entries, tuple(name for name, _alias, _opcode in native_path_entries))
-        if native_path_entries
+    compiled_path_plan = (
+        (compiled_path_entries, tuple(name for name, _alias, _opcode in compiled_path_entries))
+        if compiled_path_entries
         else None
     )
     query_specs = () if spec is None else spec.query_params
@@ -2818,7 +2815,7 @@ def compile_binder(
                     await generator.aclose()
 
     if (
-        native_path_plan
+        compiled_path_plan
         and not query_specs
         and not header_specs
         and not cookie_specs
@@ -2826,7 +2823,7 @@ def compile_binder(
         and not needs_resources
     ):
 
-        def bound_native_path(request: Request) -> Any:
+        def bound_path(request: Request) -> Any:
             """Convert and call once; the application owns the one necessary await.
 
             ``activate_path_call`` returns the handler's result verbatim.  An
@@ -2836,16 +2833,16 @@ def compile_binder(
             adapter synchronous lets the dispatcher await the user coroutine
             directly; synchronous endpoints remain synchronous too.
             """
-            return _core.activate_path_call(handler, request, native_path_plan, ValidationError)
+            return _core.activate_path_call(handler, request, compiled_path_plan, ValidationError)
 
         # Startup wrappers use this predicate to decide whether their result
         # must be awaited before validation/negotiation.  Preserve the original
         # endpoint's convention even though this adapter deliberately returns
         # its coroutine instead of awaiting it itself.
         selected = (
-            inspect.markcoroutinefunction(bound_native_path)
+            inspect.markcoroutinefunction(bound_path)
             if inspect.iscoroutinefunction(handler)
-            else bound_native_path
+            else bound_path
         )
     else:
         selected = bound if needs_resources else bound_simple
