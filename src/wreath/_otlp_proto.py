@@ -1,12 +1,8 @@
 """The OTLP messages, declared, plus the OTLP/JSON dict -> protobuf bridge.
 
-`_otlp.py` builds OTLP **JSON** dicts, and those are the shape every builder,
-test and reader in this repository already speaks. Rather than fork those
-builders to emit two shapes, this module declares the wire messages once and
-converts the dict it is handed.
-
-That keeps the JSON path exactly as it was -- it is still a supported encoding
-and still selectable -- and puts the whole protobuf question in one place.
+`_otlp.py` builds OTLP JSON-shaped dictionaries. The C projection engine maps
+those dictionaries through these declarations and the protobuf codec writes
+the wire message.
 
 ## The mapping is stated once
 
@@ -21,8 +17,7 @@ thing that is easy to get subtly wrong thirty times if written out per message:
 
 Everything else follows from the compiled plan: a 32-bit int or an enum is a
 JSON number, a double is a number, a message recurses, and a repeated field is
-a list. `_from_json` reads those rules off the plan rather than off a second
-declaration that could drift from it.
+a list.
 
 ## What is declared here
 
@@ -37,87 +32,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._protobuf_plan import (
-    FLAG_REPEATED,
-    KIND_BYTES,
-    KIND_FIXED64,
-    KIND_INT64,
-    KIND_MESSAGE,
-    KIND_SFIXED64,
-    KIND_SINT64,
-    KIND_UINT64,
-)
-from .protobuf import encode as _encode
+from ._native import _core
 from .protobuf import field, message
-
-# -- the JSON representation of each wire kind -------------------------------
-#
-# Read off the compiled plan, so the rule lives next to the kinds it applies to
-# rather than being restated per field.
-
-#: Kinds whose JSON form is a decimal *string* (proto3 JSON, because a JSON
-#: number is a double and cannot hold the whole 64-bit range).
-_STRING_ENCODED = frozenset(
-    {
-        KIND_INT64,
-        KIND_UINT64,
-        KIND_SINT64,
-        KIND_FIXED64,
-        KIND_SFIXED64,
-    }
-)
-
-
-def _camel(name: str) -> str:
-    """`start_time_unix_nano` -> `startTimeUnixNano`, the proto3 JSON name."""
-    head, *rest = name.split("_")
-    return head + "".join(part.title() for part in rest)
-
-
-def _scalar(kind: int, value: Any) -> Any:
-    if kind == KIND_BYTES:
-        # OTLP sends ids as hex, not the base64 proto3 JSON would use.
-        return bytes.fromhex(value) if isinstance(value, str) else bytes(value)
-    if kind in _STRING_ENCODED:
-        return int(value)
-    return value
-
-
-def _from_json(cls: type, data: dict[str, Any]) -> Any:
-    """Build `cls` from an OTLP/JSON dict, driven by the compiled plan.
-
-    A key with no matching field is a **refusal**, not something to skip: it
-    means a builder emitted a field this module has not declared, and silently
-    dropping it would export telemetry that quietly lost data.
-    """
-    # `getattr`, because the plan is attached by `@message` at class creation
-    # and a bare `type` carries no static knowledge of it.
-    plan, names, holders, _oneofs = getattr(cls, "__wreath_protobuf_plan__")  # noqa: B009
-    known = {_camel(name): index for index, name in enumerate(names)}
-    unexpected = set(data) - set(known)
-    if unexpected:
-        raise ValueError(
-            f"{cls.__name__} has no field for OTLP/JSON key(s) "
-            f"{sorted(unexpected)}; declare them in _otlp_proto.py rather than "
-            "exporting a request that drops them"
-        )
-    kwargs: dict[str, Any] = {}
-    for key, value in data.items():
-        index = known[key]
-        _number, kind, flags, _sub = plan[index]
-        name = names[index]
-        nested = holders[index]
-        if flags & FLAG_REPEATED:
-            if kind == KIND_MESSAGE:
-                kwargs[name] = [_from_json(nested, item) for item in value]
-            else:
-                kwargs[name] = [_scalar(kind, item) for item in value]
-        elif kind == KIND_MESSAGE:
-            kwargs[name] = _from_json(nested, value)
-        else:
-            kwargs[name] = _scalar(kind, value)
-    return cls(**kwargs)
-
 
 # -- common.proto ------------------------------------------------------------
 
@@ -295,14 +211,52 @@ class ExportLogsServiceRequest:
 
 def encode_traces(request: dict[str, Any]) -> bytes:
     """An OTLP/JSON trace request dict as `ExportTraceServiceRequest` bytes."""
-    return _encode(_from_json(ExportTraceServiceRequest, request))
+    return _core.protobuf_encode_otlp_json(ExportTraceServiceRequest, request)
+
+
+def encode_projected_traces(
+    traces: Any,
+    *,
+    image: Any = None,
+    resource_attributes: dict[str, str] | None = None,
+) -> bytes:
+    """Projected traces encoded directly as OTLP trace protobuf bytes."""
+    return _core.protobuf_encode_otlp_traces(traces, image, resource_attributes)
 
 
 def encode_metrics(request: dict[str, Any]) -> bytes:
     """An OTLP/JSON metrics request dict as `ExportMetricsServiceRequest` bytes."""
-    return _encode(_from_json(ExportMetricsServiceRequest, request))
+    return _core.protobuf_encode_otlp_json(ExportMetricsServiceRequest, request)
+
+
+def encode_projected_metrics(
+    snapshot: Any,
+    *,
+    image: Any = None,
+    start_unix_nano: int,
+    now_unix_nano: int,
+    resource_attributes: dict[str, str] | None = None,
+) -> bytes:
+    """A projector snapshot encoded directly as OTLP metric protobuf bytes."""
+    return _core.protobuf_encode_otlp_metrics(
+        snapshot,
+        image,
+        start_unix_nano,
+        now_unix_nano,
+        resource_attributes,
+    )
 
 
 def encode_logs(request: dict[str, Any]) -> bytes:
     """An OTLP/JSON logs request dict as `ExportLogsServiceRequest` bytes."""
-    return _encode(_from_json(ExportLogsServiceRequest, request))
+    return _core.protobuf_encode_otlp_json(ExportLogsServiceRequest, request)
+
+
+def encode_projected_logs(
+    records: Any,
+    *,
+    registry: Any,
+    resource_attributes: dict[str, str] | None = None,
+) -> bytes:
+    """Projected log records encoded directly as OTLP protobuf bytes."""
+    return _core.protobuf_encode_otlp_logs(records, registry, resource_attributes)

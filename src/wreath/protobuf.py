@@ -19,9 +19,9 @@ back = decode(Position, raw)
 from declaration order.** Reordering the class must not silently change the
 bytes, which is exactly what a positional scheme would do.
 
-The plan is compiled at class creation and never re-derived, in the same shape
-as compiled route matching and compiled validators: a declaration error is a
-startup error, and the request path walks a flat tuple.
+The declaration is compiled at class creation into an operation-owned C
+descriptor and never re-derived. A declaration error is therefore a startup
+error, and the request path reads fixed C rows rather than Python metadata.
 
 ## What this is, and is not
 
@@ -116,19 +116,13 @@ class ProtobufDeclarationError(TypeError):
     """
 
 
-# The codec is handed the decode exception once, the way json.c is handed the
-# temporal types, so a refusal raised in C is the class declared here and the
-# class a caller catches.
-_core.protobuf_configure(ProtobufDecodeError)
-_encode_values = _core.protobuf_encode
-_decode_values = _core.protobuf_decode
-
 #: Field numbers 19000-19999 are reserved by the specification for the protobuf
 #: implementation itself, and 2^29-1 is the largest expressible number.
 _RESERVED = range(19000, 20000)
 _MAX_FIELD_NUMBER = 536870911
 
 _PLAN = "__wreath_protobuf_plan__"
+_DESCRIPTOR = "__wreath_protobuf_descriptor__"
 _UNKNOWN = "__wreath_protobuf_unknown__"
 
 _KINDS: dict[str, int] = {
@@ -429,39 +423,16 @@ def message[T](cls: type[T]) -> type[T]:
         setattr(cls, name, _zero(kind, flags, holder))
 
     plan = tuple(rows)
-    setattr(cls, _PLAN, (plan, tuple(annotations), tuple(holders), oneofs))
+    names = tuple(annotations)
+    holders_tuple = tuple(holders)
+    setattr(cls, _PLAN, (plan, names, holders_tuple, oneofs))
     built = dataclasses.dataclass(cls)
+    setattr(
+        built,
+        _DESCRIPTOR,
+        _core.protobuf_compile(plan, names, holders_tuple, oneofs),
+    )
     return built
-
-
-def _to_values(msg: Any) -> list:
-    plan, names, holders, _oneofs = getattr(type(msg), _PLAN)
-    values: list = []
-    for index, row in enumerate(plan):
-        _number, kind, flags, _subplan = row
-        value = getattr(msg, names[index])
-        if flags & FLAG_MAP:
-            holder_plan = row[3]
-            if holder_plan[1][1] == KIND_MESSAGE:
-                value = {k: _pair(v) for k, v in value.items()}
-            values.append(value)
-        elif kind == KIND_MESSAGE:
-            if flags & FLAG_REPEATED:
-                values.append([_pair(item) for item in value])
-            else:
-                values.append(None if value is None else _pair(value))
-        elif kind == KIND_ENUM:
-            if flags & FLAG_REPEATED:
-                values.append([int(item) for item in value])
-            else:
-                values.append(None if value is None else int(value))
-        else:
-            values.append(value)
-    return values
-
-
-def _pair(msg: Any) -> tuple[list, bytes]:
-    return _to_values(msg), getattr(msg, _UNKNOWN, b"")
 
 
 def encode(msg: Any) -> bytes:
@@ -473,8 +444,7 @@ def encode(msg: Any) -> bytes:
     Raises:
         ValueError: A value is outside the range its declared kind can hold.
     """
-    plan, _names, _holders, _oneofs = getattr(type(msg), _PLAN)
-    return _encode_values(plan, _to_values(msg), getattr(msg, _UNKNOWN, b""))
+    return _core.protobuf_encode_message(msg)
 
 
 def decode(cls: type, data: bytes) -> Any:
@@ -485,45 +455,7 @@ def decode(cls: type, data: bytes) -> Any:
             past its end, a varint longer than ten bytes, a group wire type, an
             unknown wire type, field number zero, or invalid UTF-8 in a string.
     """
-    plan, _names, _holders, _oneofs = getattr(cls, _PLAN)
-    values, unknown = _decode_values(plan, bytes(data))
-    return _build(cls, values, unknown)
-
-
-def _build(cls: type, values: list, unknown: bytes) -> Any:
-    plan, names, holders, oneofs = getattr(cls, _PLAN)
-    kwargs: dict[str, Any] = {}
-    for index, row in enumerate(plan):
-        _number, kind, flags, _subplan = row
-        value = values[index]
-        if flags & FLAG_MAP:
-            holder_plan = row[3]
-            if holder_plan[1][1] == KIND_MESSAGE:
-                value = {k: _build(holders[index], v[0], v[1]) for k, v in value.items()}
-        elif kind == KIND_MESSAGE:
-            if flags & FLAG_REPEATED:
-                value = [_build(holders[index], v[0], v[1]) for v in value]
-            elif value is not None:
-                value = _build(holders[index], value[0], value[1])
-        elif kind == KIND_ENUM and value is not None:
-            holder = holders[index]
-            if flags & FLAG_REPEATED:
-                value = [holder(v) for v in value]
-            else:
-                # An enum value this build does not know is kept as the int the
-                # peer sent, since proto3 open enums say a decoder must not lose it.
-                value = holder(value) if value in set(holder) else value
-        kwargs[names[index]] = value
-
-    for members in oneofs.values():
-        present = [i for i in members if kwargs[names[i]] is not None]
-        # Last one on the wire wins, which is what the specification requires.
-        for i in present[:-1]:
-            kwargs[names[i]] = None
-
-    built = cls(**kwargs)
-    object.__setattr__(built, _UNKNOWN, unknown)
-    return built
+    return _core.protobuf_decode_message(cls, bytes(data))
 
 
 def is_message(candidate: Any) -> bool:
@@ -534,7 +466,7 @@ def is_message(candidate: Any) -> bool:
     directly and thereby encodes its own second notion of what a message is --
     which then drifts from this one the first time the marker moves.
     """
-    return hasattr(candidate, _PLAN)
+    return hasattr(candidate, _DESCRIPTOR)
 
 
 def unknown_fields(msg: Any) -> bytes:
