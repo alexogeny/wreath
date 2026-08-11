@@ -163,8 +163,9 @@ way down. `wreath._codecs` is the pattern: the signature is written on the
 facade, which is now the only place the C's promise is stated.
 
 **The optional seven are different.** `_client`, `_postgres`, `_server`,
-`_reactor`, `_edge`, `_flight` and `_http3` may genuinely be absent -- `_flight`
-is not built on Windows at all -- so a facade that needs one asks
+`_reactor`, `_flight` and `_http3` may genuinely be absent -- the first and
+last come from explicit install extras, and `_flight` is not built on Windows
+at all -- so a facade that needs one asks
 `wreath._native.extension(...)` and refuses **by name at configuration time**
 when the answer is `None`. Never at request time, and never by quietly doing
 something slower:
