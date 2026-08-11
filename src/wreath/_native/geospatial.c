@@ -25,11 +25,16 @@
  * divergence here is a silent, uniform scaling error in every distance the
  * native build reports, which no unit test of *shape* would catch. */
 #define WREATH_EARTH_RADIUS_M 6371008.8
+/* `M_PI` is a libc extension rather than C11 and is absent under MSVC unless
+ * callers opt into Microsoft's math definitions before including <math.h>.
+ * Own the rounded binary64 input instead of making the build depend on that
+ * platform switch. */
+#define WREATH_PI 3.14159265358979323846264338327950288
 
 static double
 wreath_haversine_metres(double lat1, double lon1, double lat2, double lon2)
 {
-    const double to_rad = M_PI / 180.0;
+    const double to_rad = WREATH_PI / 180.0;
     double phi1 = lat1 * to_rad;
     double phi2 = lat2 * to_rad;
     double half_d_phi = (phi2 - phi1) * 0.5;
