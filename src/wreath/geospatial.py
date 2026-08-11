@@ -42,7 +42,7 @@ saying which model produced the number.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from math import ceil, cos, floor, isfinite, radians
 from typing import Any
 
@@ -53,7 +53,9 @@ from ._native import _core as _core_module
 #
 # The distance is the only thing selected. The radius and the two span
 # conversions above have no C arm -- see `wreath._geodesy` for why.
-_haversine = _core_module.geo_haversine
+#: `geo_haversine(lat1, lon1, lat2, lon2)` -- great-circle metres on the sphere
+#: `wreath._geodesy.EARTH_RADIUS_M` names.
+_haversine: Callable[[float, float, float, float], float] = _core_module.geo_haversine
 
 __all__ = [
     "EARTH_RADIUS_M",

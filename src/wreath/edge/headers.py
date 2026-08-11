@@ -9,6 +9,8 @@ the next hop then strips from someone else's request.
 
 from __future__ import annotations
 
+from wreath._native import _edge
+
 #: RFC 9110 §7.6.1. Never forwarded in either direction.
 HOP_BY_HOP: frozenset[bytes] = frozenset({
     b"connection",
@@ -133,19 +135,6 @@ def append_forwarded(
 #: `content-length` are the client's to write -- see `ReverseProxy._outbound`.
 _REQUEST_DROP: frozenset[bytes] = _ALWAYS_DROP | {b"host", b"content-length"}
 
-
-try:
-    from wreath._native import _edge
-except ImportError:  # pragma: no cover - the module cannot function without it
-    _edge = None
-
-if _edge is None:  # pragma: no cover - see above
-    raise ImportError(
-        "wreath.edge requires the wreath._native._edge extension. The reverse "
-        "proxy is native-only by design: a Python forward path would degrade "
-        "silently by roughly five times in the one component whose purpose is "
-        "to be faster than what it replaces. See AGENTS.md."
-    )
 
 #: The outbound request headers for one forwarded request, in a single pass.
 #:

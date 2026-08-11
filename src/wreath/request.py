@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
+from ._native import _core
 from .exceptions import (
     BadRequest,
     ClientDisconnect,
@@ -436,12 +437,13 @@ async def _stream_multipart(
     chunks: AsyncIterator[bytes], boundary: bytes, limits: RequestLimits
 ) -> FormData:
     """Parse multipart data incrementally, spooling file bytes as they arrive."""
-    opening = b"--" + boundary
-    delimiter = b"\r\n" + opening
-    buffer = bytearray()
-    state = "preamble"
-    closed = False
-    part_count = 0
+    parser = _core.MultipartStreamParser(
+        boundary,
+        limits.max_parts,
+        limits.max_part_header_bytes,
+        limits.max_part_bytes,
+        PayloadTooLarge,
+    )
     retained = 0
     fields: dict[str, str] = {}
     files: dict[str, UploadedFile] = {}
@@ -455,12 +457,6 @@ async def _stream_multipart(
 
     def begin_part(header_block: bytes) -> None:
         nonlocal headers, field_name, filename, part_data, part_spool, part_size
-        nonlocal part_count
-        if part_count >= limits.max_parts:
-            raise PayloadTooLarge(
-                f"multipart form has more than {limits.max_parts} parts"
-            )
-        part_count += 1
         headers = _stream_part_headers(header_block)
         disposition = find_header(headers, b"content-disposition")
         field_name = filename = None
@@ -532,74 +528,14 @@ async def _stream_multipart(
 
     try:
         async for chunk in chunks:
-            if closed:
-                continue
-            buffer.extend(chunk)
-            while True:
-                if state == "preamble":
-                    position = buffer.find(opening)
-                    if position < 0:
-                        keep = max(0, len(buffer) - len(opening) + 1)
-                        if keep:
-                            del buffer[:keep]
-                        break
-                    del buffer[: position + len(opening)]
-                    state = "boundary"
-                elif state == "boundary":
-                    if buffer.startswith(b"--"):
-                        closed = True
-                        state = "epilogue"
-                        buffer.clear()
-                        break
-                    whitespace = 0
-                    while whitespace < len(buffer) and buffer[whitespace] in b" \t":
-                        whitespace += 1
-                    if len(buffer) < whitespace + 2:
-                        break
-                    if buffer[whitespace : whitespace + 2] != b"\r\n":
-                        raise ValueError("malformed multipart boundary line")
-                    del buffer[: whitespace + 2]
-                    state = "headers"
-                elif state == "headers":
-                    if buffer.startswith(b"\r\n"):
-                        header_end = 0
-                        consumed = 2
-                    else:
-                        header_end = buffer.find(b"\r\n\r\n")
-                        if header_end < 0:
-                            if len(buffer) > limits.max_part_header_bytes + 3:
-                                raise PayloadTooLarge(
-                                    "multipart part headers exceed "
-                                    f"{limits.max_part_header_bytes} bytes"
-                                )
-                            break
-                        consumed = header_end + 4
-                    if header_end > limits.max_part_header_bytes:
-                        raise PayloadTooLarge(
-                            "multipart part headers exceed "
-                            f"{limits.max_part_header_bytes} bytes"
-                        )
-                    header_block = bytes(buffer[:header_end])
-                    del buffer[:consumed]
-                    begin_part(header_block)
-                    state = "body"
-                elif state == "body":
-                    position = buffer.find(delimiter)
-                    if position >= 0:
-                        feed_part(buffer[:position])
-                        del buffer[: position + len(delimiter)]
-                        finish_part()
-                        state = "boundary"
-                        continue
-                    safe = len(buffer) - len(delimiter) + 1
-                    if safe > 0:
-                        feed_part(buffer[:safe])
-                        del buffer[:safe]
-                    break
+            for kind, payload in parser.feed(chunk):
+                if kind == 0:
+                    begin_part(payload)
+                elif kind == 1:
+                    feed_part(payload)
                 else:
-                    break
-        if not closed:
-            raise ValueError("unterminated multipart part")
+                    finish_part()
+        parser.finish()
     except BaseException:
         if part_spool is not None:
             part_spool.close()

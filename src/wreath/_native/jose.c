@@ -3,30 +3,20 @@
 
 #include "simd.h"
 
-/* ---- JOSE / JWT native fast paths (see design 02-oidc-jwt-sso-auth) -------
+/* ---- JOSE / JWT operations (see design 02-oidc-jwt-sso-auth) --------------
  *
- * This owns only the hot, allocation-light, *non-crypto-inventing* pieces of
- * JWT verification, in the same spirit as security.c:
+ * This owns the compact-token parsing and verification operations used by the
+ * JWT facade:
  *
  *   - base64url decode of the three compact segments (per token, x3);
  *   - splitting "header.payload.signature" and enforcing hard size caps;
- *   - HS256/384/512 verification, which reuses CPython's already-OpenSSL-backed
- *     `_hashlib.hmac_digest` (the digest is a C routine inside CPython; this owns
- *     the glue and the constant-time compare, exactly like csrf_validate);
+ *   - HS256/384/512 verification through the supplied digest function;
+ *   - RS256/384/512 and PS256/384/512 encoded-message validation;
  *   - registered-claim validation (exp/nbf/iat/iss/aud/required), which is
- *     integer and string comparison, not cryptography.
+ *     integer and string comparison.
  *
- * RSA (RS and PS family) verification is deliberately NOT here. It is a public-key
- * operation whose only risk is *correctness*, not timing, and its PKCS#1-v1.5 /
- * PSS padding checks are error-prone to hand-write in C. The facade does the
- * modexp with CPython's bigint `pow(s, e, n)` (already C-speed) and the padding
- * checks with the stdlib -- keeping the zero-dependency stance without a
- * hand-rolled cipher in an auth path. Linking libcrypto would make the default
- * build depend on OpenSSL, which _core deliberately does not.
- *
- * TODO: a Project Wycheproof + `cryptography` differential-oracle harness is
- * deferred. `tests/compliance/test_jwt_ec.py` carries the RFC 8032 and NIST
- * known-answer vectors in the meantime.
+ * Hash constructors are operation inputs. The implementation therefore owns
+ * no mutable cryptographic process state.
  */
 
 #include <errno.h>
@@ -55,6 +45,210 @@ jose_ct_equal(const unsigned char *a, const unsigned char *b, Py_ssize_t len)
         diff |= (unsigned char)(a[i] ^ b[i]);
     }
     return diff == 0;
+}
+
+/* RSA verification uses CPython's bigint modular exponentiation and hashlib
+ * implementations, and owns every PKCS#1/PSS byte loop here.
+ * The hash constructor is supplied by the facade, so this operation creates no
+ * process-global cache and performs no per-value imports. */
+static PyObject *
+jose_hash(PyObject *constructor, const unsigned char *data, Py_ssize_t length)
+{
+    PyObject *input = PyBytes_FromStringAndSize((const char *)data, length);
+    PyObject *object;
+    PyObject *digest;
+    if (input == NULL) return NULL;
+    object = PyObject_CallOneArg(constructor, input);
+    Py_DECREF(input);
+    if (object == NULL) return NULL;
+    digest = PyObject_CallMethod(object, "digest", NULL);
+    Py_DECREF(object);
+    return digest;
+}
+
+static int
+jose_mgf1(PyObject *constructor, const unsigned char *seed, Py_ssize_t seed_length,
+          unsigned char *output, Py_ssize_t output_length, Py_ssize_t hash_length)
+{
+    unsigned char *input = PyMem_Malloc((size_t)seed_length + 4);
+    Py_ssize_t written = 0;
+    uint32_t counter = 0;
+    if (input == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memcpy(input, seed, (size_t)seed_length);
+    while (written < output_length) {
+        PyObject *digest;
+        Py_ssize_t width;
+        input[seed_length] = (unsigned char)(counter >> 24);
+        input[seed_length + 1] = (unsigned char)(counter >> 16);
+        input[seed_length + 2] = (unsigned char)(counter >> 8);
+        input[seed_length + 3] = (unsigned char)counter;
+        digest = jose_hash(constructor, input, seed_length + 4);
+        if (digest == NULL) {
+            PyMem_Free(input);
+            return -1;
+        }
+        if (!PyBytes_Check(digest) || PyBytes_GET_SIZE(digest) != hash_length) {
+            Py_DECREF(digest);
+            PyMem_Free(input);
+            PyErr_SetString(PyExc_TypeError, "RSA hash constructor returned the wrong digest size");
+            return -1;
+        }
+        width = output_length - written < hash_length
+                    ? output_length - written : hash_length;
+        memcpy(output + written, PyBytes_AS_STRING(digest), (size_t)width);
+        written += width;
+        counter++;
+        Py_DECREF(digest);
+    }
+    PyMem_Free(input);
+    return 0;
+}
+
+PyObject *
+wreath_jose_verify_rsa(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *modulus, *exponent, *constructor, *digest_object, *signature_object;
+    Py_ssize_t key_bytes;
+    int pss;
+    const unsigned char *signature, *digest;
+    Py_ssize_t signature_length, digest_length;
+    PyObject *encoded_integer = NULL, *message_integer = NULL, *encoded = NULL;
+    int answer = 0;
+    static const unsigned char sha256_info[] = {
+        0x30,0x31,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01,
+        0x05,0x00,0x04,0x20,
+    };
+    static const unsigned char sha384_info[] = {
+        0x30,0x41,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02,
+        0x05,0x00,0x04,0x30,
+    };
+    static const unsigned char sha512_info[] = {
+        0x30,0x51,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03,
+        0x05,0x00,0x04,0x40,
+    };
+    if (!PyArg_ParseTuple(args, "OOnOOOp:jose_verify_rsa", &modulus, &exponent,
+                          &key_bytes, &constructor, &digest_object,
+                          &signature_object, &pss)) return NULL;
+    if (!PyLong_Check(modulus) || !PyLong_Check(exponent) || key_bytes <= 0 ||
+        !PyCallable_Check(constructor) ||
+        PyBytes_AsStringAndSize(digest_object, (char **)&digest, &digest_length) < 0 ||
+        PyBytes_AsStringAndSize(signature_object, (char **)&signature,
+                                &signature_length) < 0) return NULL;
+    if (signature_length != key_bytes) Py_RETURN_FALSE;
+    encoded_integer = PyLong_FromUnsignedNativeBytes(
+        signature, (size_t)signature_length,
+        Py_ASNATIVEBYTES_BIG_ENDIAN | Py_ASNATIVEBYTES_UNSIGNED_BUFFER);
+    if (encoded_integer == NULL) goto error;
+    {
+        int outside = PyObject_RichCompareBool(encoded_integer, modulus, Py_GE);
+        if (outside < 0) goto error;
+        if (outside) goto done;
+    }
+    message_integer = PyNumber_Power(encoded_integer, exponent, modulus);
+    if (message_integer == NULL) goto error;
+    if (!pss) {
+        const unsigned char *prefix;
+        Py_ssize_t prefix_length;
+        Py_ssize_t padding;
+        if (digest_length == 32) { prefix = sha256_info; prefix_length = sizeof(sha256_info); }
+        else if (digest_length == 48) { prefix = sha384_info; prefix_length = sizeof(sha384_info); }
+        else if (digest_length == 64) { prefix = sha512_info; prefix_length = sizeof(sha512_info); }
+        else {
+            PyErr_SetString(PyExc_ValueError, "RSA verification needs SHA-256, SHA-384, or SHA-512");
+            goto error;
+        }
+        if (key_bytes < prefix_length + digest_length + 11) goto done;
+        encoded = PyBytes_FromStringAndSize(NULL, key_bytes);
+        if (encoded == NULL) goto error;
+        {
+            Py_ssize_t encoded_size = PyLong_AsNativeBytes(
+                message_integer, PyBytes_AS_STRING(encoded), key_bytes,
+                Py_ASNATIVEBYTES_BIG_ENDIAN | Py_ASNATIVEBYTES_UNSIGNED_BUFFER);
+            if (encoded_size == -1 && PyErr_Occurred()) goto error;
+            if (encoded_size > key_bytes) goto done;
+        }
+        padding = key_bytes - prefix_length - digest_length - 3;
+        const unsigned char *raw = (const unsigned char *)PyBytes_AS_STRING(encoded);
+        if (raw[0] != 0 || raw[1] != 1 || raw[padding + 2] != 0) goto done;
+        for (Py_ssize_t i = 0; i < padding; i++) if (raw[i + 2] != 0xff) goto done;
+        if (!jose_ct_equal(raw + padding + 3, prefix, prefix_length)) goto done;
+        answer = jose_ct_equal(raw + padding + 3 + prefix_length, digest, digest_length);
+    }
+    else {
+        PyObject *bits_object = PyObject_CallMethod(modulus, "bit_length", NULL);
+        Py_ssize_t bits, em_length, db_length, padding;
+        unsigned char *raw, *mask;
+        PyObject *prime = NULL;
+        if (bits_object == NULL) goto error;
+        bits = PyLong_AsSsize_t(bits_object) - 1;
+        Py_DECREF(bits_object);
+        if (bits < 0 || (bits == -1 && PyErr_Occurred())) goto error;
+        em_length = (bits + 7) / 8;
+        if (em_length < digest_length * 2 + 2) goto done;
+        encoded = PyBytes_FromStringAndSize(NULL, em_length);
+        if (encoded == NULL) goto error;
+        {
+            Py_ssize_t encoded_size = PyLong_AsNativeBytes(
+                message_integer, PyBytes_AS_STRING(encoded), em_length,
+                Py_ASNATIVEBYTES_BIG_ENDIAN | Py_ASNATIVEBYTES_UNSIGNED_BUFFER);
+            if (encoded_size == -1 && PyErr_Occurred()) goto error;
+            if (encoded_size > em_length) goto done;
+        }
+        raw = (unsigned char *)PyBytes_AS_STRING(encoded);
+        if (raw[em_length - 1] != 0xbc) goto done;
+        db_length = em_length - digest_length - 1;
+        {
+            int top_bits = (int)(8 * em_length - bits);
+            if (top_bits && (raw[0] & (unsigned char)(0xff << (8 - top_bits)))) goto done;
+        }
+        mask = PyMem_Malloc((size_t)db_length);
+        if (mask == NULL) { PyErr_NoMemory(); goto error; }
+        if (jose_mgf1(constructor, raw + db_length, digest_length,
+                      mask, db_length, digest_length) < 0) {
+            PyMem_Free(mask);
+            goto error;
+        }
+        for (Py_ssize_t i = 0; i < db_length; i++) raw[i] ^= mask[i];
+        PyMem_Free(mask);
+        {
+            int top_bits = (int)(8 * em_length - bits);
+            if (top_bits) raw[0] &= (unsigned char)(0xff >> top_bits);
+        }
+        padding = em_length - digest_length * 2 - 2;
+        for (Py_ssize_t i = 0; i < padding; i++) if (raw[i] != 0) goto done;
+        if (raw[padding] != 1) goto done;
+        {
+            Py_ssize_t prime_length = 8 + digest_length * 2;
+            unsigned char *prime_raw;
+            prime = PyBytes_FromStringAndSize(NULL, prime_length);
+            if (prime == NULL) goto error;
+            prime_raw = (unsigned char *)PyBytes_AS_STRING(prime);
+            memset(prime_raw, 0, 8);
+            memcpy(prime_raw + 8, digest, (size_t)digest_length);
+            memcpy(prime_raw + 8 + digest_length, raw + db_length - digest_length,
+                   (size_t)digest_length);
+            PyObject *hashed = jose_hash(constructor, prime_raw, prime_length);
+            Py_DECREF(prime);
+            if (hashed == NULL) goto error;
+            answer = PyBytes_Check(hashed) && PyBytes_GET_SIZE(hashed) == digest_length &&
+                jose_ct_equal((const unsigned char *)PyBytes_AS_STRING(hashed),
+                              raw + db_length, digest_length);
+            Py_DECREF(hashed);
+        }
+    }
+done:
+    Py_XDECREF(encoded);
+    Py_XDECREF(message_integer);
+    Py_XDECREF(encoded_integer);
+    return PyBool_FromLong(answer);
+error:
+    Py_XDECREF(encoded);
+    Py_XDECREF(message_integer);
+    Py_XDECREF(encoded_integer);
+    return NULL;
 }
 
 /* Decode `len` base64url chars into `out` (caller-sized >= (len/4)*3 + 2).
@@ -308,7 +502,13 @@ claim_as_ll(PyObject *claims, const char *name, long long *out, int *present)
     if (value == NULL) {
         return 0;
     }
-    if (!PyLong_Check(value)) {
+    /* `PyBool_Check` first: `bool` subclasses `int`, so `PyLong_Check` is true
+     * for `True`/`False` and a boolean would read through as the timestamp 1 or
+     * 0. RFC 7519 section 2 makes a NumericDate a JSON *number*, so a boolean
+     * is malformed -- and saying so matters even though both values happen to
+     * land on "expired" today, because that is one comparison change away from
+     * reading `true` as a far-future date. */
+    if (PyBool_Check(value) || !PyLong_Check(value)) {
         return -1;
     }
     long long v = PyLong_AsLongLong(value);

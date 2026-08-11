@@ -31,6 +31,108 @@ typedef struct {
     Py_ssize_t cap;
 } WreathBytesWriter;
 
+/* A private incremental input buffer. Unlike WreathBytesWriter this never
+ * becomes a Python object: one parser owns it, appends received bytes, and
+ * advances `start` as complete frames are consumed. Keeping the offset avoids
+ * a memmove after every feed; reserve compacts only when the unused prefix is
+ * needed for the next append. */
+typedef struct {
+    char *data;
+    Py_ssize_t start;
+    Py_ssize_t end;
+    Py_ssize_t capacity;
+} WreathByteBuffer;
+
+static inline void
+wreath_buffer_init(WreathByteBuffer *buffer)
+{
+    buffer->data = NULL;
+    buffer->start = 0;
+    buffer->end = 0;
+    buffer->capacity = 0;
+}
+
+static inline void
+wreath_buffer_clear(WreathByteBuffer *buffer)
+{
+    PyMem_Free(buffer->data);
+    wreath_buffer_init(buffer);
+}
+
+static inline Py_ssize_t
+wreath_buffer_size(const WreathByteBuffer *buffer)
+{
+    return buffer->end - buffer->start;
+}
+
+static inline char *
+wreath_buffer_data(const WreathByteBuffer *buffer)
+{
+    return buffer->data == NULL ? (char *)"" : buffer->data + buffer->start;
+}
+
+static inline int
+wreath_buffer_reserve(WreathByteBuffer *buffer, Py_ssize_t append)
+{
+    Py_ssize_t length = wreath_buffer_size(buffer);
+    Py_ssize_t needed;
+    Py_ssize_t capacity;
+    char *grown;
+    if (append < 0 || append > PY_SSIZE_T_MAX - length) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    if (buffer->capacity - buffer->end >= append) return 0;
+    needed = length + append;
+    if (buffer->start != 0 && buffer->capacity >= needed) {
+        if (length != 0)
+            memmove(buffer->data, buffer->data + buffer->start, (size_t)length);
+        buffer->start = 0;
+        buffer->end = length;
+        return 0;
+    }
+    capacity = buffer->capacity < 256 ? 256 : buffer->capacity;
+    while (capacity < needed) {
+        Py_ssize_t increment = (capacity >> 1) + 64;
+        if (capacity > PY_SSIZE_T_MAX - increment) {
+            capacity = needed;
+            break;
+        }
+        capacity += increment;
+    }
+    grown = PyMem_Realloc(buffer->data, (size_t)capacity);
+    if (grown == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    buffer->data = grown;
+    buffer->capacity = capacity;
+    if (buffer->start != 0) {
+        if (length != 0)
+            memmove(buffer->data, buffer->data + buffer->start, (size_t)length);
+        buffer->start = 0;
+        buffer->end = length;
+    }
+    return 0;
+}
+
+static inline int
+wreath_buffer_append(WreathByteBuffer *buffer, const char *data, Py_ssize_t length)
+{
+    if (wreath_buffer_reserve(buffer, length) < 0) return -1;
+    if (length != 0)
+        memcpy(buffer->data + buffer->end, data, (size_t)length);
+    buffer->end += length;
+    return 0;
+}
+
+static inline void
+wreath_buffer_consume(WreathByteBuffer *buffer, Py_ssize_t length)
+{
+    buffer->start += length;
+    if (buffer->start == buffer->end) buffer->start = buffer->end = 0;
+}
+
 /* Start with `capacity` bytes of room. Returns -1 with an exception set. */
 static inline int
 wreath_writer_init(WreathBytesWriter *w, Py_ssize_t capacity)
@@ -51,8 +153,17 @@ static inline int
 wreath_writer_grow(WreathBytesWriter *w, Py_ssize_t need)
 {
     Py_ssize_t cap = w->cap;
+    if (need < 0 || w->len > PY_SSIZE_T_MAX - need) {
+        PyErr_NoMemory();
+        return -1;
+    }
     while (cap - w->len < need) {
-        cap += (cap >> 1) + 64;
+        Py_ssize_t increment = (cap >> 1) + 64;
+        if (cap > PY_SSIZE_T_MAX - increment) {
+            cap = w->len + need;
+            break;
+        }
+        cap += increment;
     }
     if (_PyBytes_Resize(&w->bytes, cap) < 0) {
         return -1; /* w->bytes is cleared by _PyBytes_Resize */

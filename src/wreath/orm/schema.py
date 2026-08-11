@@ -171,13 +171,11 @@ class RelationshipSpec:
 
 @dataclass(frozen=True, slots=True)
 class StorageSpec:
-    """How instances of one model hold their values."""
+    """The fixed layout dimensions for one model."""
 
-    kind: Literal["pure", "native"]
     field_count: int
     relation_count: int
-    #: Fixed native struct size, or None for reference storage.
-    basicsize: int | None = None
+    basicsize: int
 
 
 @dataclass(frozen=True, slots=True, eq=False)

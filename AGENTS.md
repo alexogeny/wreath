@@ -168,7 +168,7 @@ while a sibling is running tests produces failures nobody can attribute.
   standard instead. A suppression is a claim that the rule is wrong *here*, and
   that claim belongs in `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml`
   where it is declared, scoped, reviewed, and carries the comment explaining it --
-  the way `src/wreath/_port/rules.py` earns its `E501`. An inline directive on a
+  the way `src/wreath/_port/rules/` earns its `E501`. An inline directive on a
   line you just wrote is the same move as `xfail`: it converts "this does not meet
   the standard" into a third state that passes the gate silently.
 
@@ -679,6 +679,10 @@ say how a written test still manages to assert nothing.
 
 ## Benchmark policy
 
+- Keep reusable scratch scripts under `~/scratch`, organized by task or session,
+  so they survive cleanup and remain available for reproduction. Temporary
+  directories are for generated scratch outputs and artifacts only, never for
+  scripts.
 - Record Python version, platform, server, event loop, concurrency, duration, and scenario.
 - Warm up before recording.
 - Compare equivalent response bodies and route behavior.

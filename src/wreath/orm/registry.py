@@ -302,10 +302,9 @@ class Registry:
             primary_key=primary_key,
             relationships=(),
             storage=StorageSpec(
-                kind=getattr(model, "__wreath_storage_kind__", "pure"),
                 field_count=len(columns),
                 relation_count=len(model.__wreath_relationships__),
-                basicsize=getattr(model, "__wreath_basicsize__", None),
+                basicsize=model.__basicsize__,
             ),
             by_name={item.python_name: item for item in columns},
             by_database_name={item.database_name: item for item in columns},

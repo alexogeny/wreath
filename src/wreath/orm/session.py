@@ -24,6 +24,7 @@ from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_ORM_HYDRATE as _PH_ORM_HYDRATE
 from .._flight_markers import phase_marker as _phase_marker
 from .._locks import _KEYED
+from .._native import _core as _native_core
 from .._nplusone import query_ledger as _query_ledger
 from .._orm_events import has_subscribers as _has_write_subscribers
 from .._orm_events import publish_write as _publish_write
@@ -66,13 +67,10 @@ from .schema import ColumnSpec, ModelSpec, RelationshipSpec
 _WRITE_WORKLOADS = frozenset({"write"})
 
 
-def _native_models() -> Any:
-    """The native hydration module, or None when models are stored in Python."""
-    from .model import _native
+def _model_storage() -> Any:
+    from .model import _storage
 
-    if _native is None or not hasattr(_native, "_compile_hydrate_plan"):
-        return None
-    return _native
+    return _storage
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,9 +259,9 @@ def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, 
 
     Depends only on the compiled projection, so it is resolved once per query
     and reused for every row. It used to be rebuilt inside `_hydrate`, which
-    made hydration O(rows x columns) in pure repetition -- and every joined
+    made hydration O(rows x columns) in repeated setup -- and every joined
     load pays that per row *per join step*, because a joined shape always takes
-    this Record path rather than the native hydrate plan.
+    this decoded-record path rather than the direct decoder plan.
     """
     if _key_map_builds is not None:
         _key_map_builds[0] += 1
@@ -806,15 +804,14 @@ class Session:
         return self._hydrate_rows(compiled, records)
 
     def _hydrate_plan(self, connection: Any, compiled: CompiledQuery) -> Any:
-        """The native plan for this shape, or None to use the Record path.
+        """The direct decoder plan for this shape, or None for decoded records.
 
-        Direct hydration needs both a natively stored model and a connection
-        that can decode into a destination. Anything else -- the reference
-        driver, a test double, a joined load -- takes the Record path, which
-        produces the same objects through the same identity map.
+        Direct hydration needs a connection that can decode into a destination.
+        A test double or joined load instead hands decoded records to the batch
+        hydrator; both write the same fixed model cells and identity map.
         """
-        native = _native_models()
-        if native is None or getattr(connection, "_decode_dest", None) is None:
+        storage = _model_storage()
+        if getattr(connection, "_decode_dest", None) is None:
             return None
         cached = self._registry.cached_plan(compiled.shape_key)
         if cached is None:
@@ -825,7 +822,6 @@ class Session:
         if (
             spec is None
             or compiled.load_plan.joined
-            or spec.storage.kind != "native"
             or len(compiled.selected_columns) != len(compiled.load_plan.columns)
         ):
             # Joined loads span several models per row; that assembly still runs
@@ -833,17 +829,16 @@ class Session:
             cached.hydrate_plan = False
             return None
         try:
-            plan = native._compile_hydrate_plan(
+            plan = storage._compile_hydrate_plan(
                 spec.model_type,
                 spec,
                 tuple(item.index for item in compiled.load_plan.columns),
             )
         except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
-            # The native compiler's whole documented failure set: a shape it
-            # cannot lay out falls back to the Record path, which is what this
-            # cache line records. Anything outside it -- a MemoryError, a bug in
-            # the caller -- would otherwise pin every future fetch to the slower
-            # path with no signal, which is a performance cliff nothing reports.
+            # The plan compiler's whole documented failure set: a shape it
+            # cannot lay out selects decoded-record hydration, which is what
+            # this cache line records. Anything outside it -- a MemoryError or
+            # caller bug -- must remain visible.
             cached.hydrate_plan = False
             return None
         cached.hydrate_plan = plan
@@ -975,39 +970,29 @@ class Session:
 
     def _hydrate_rows(self, compiled: CompiledQuery, rows: list[Any]) -> list[Any]:
         spec = compiled.result_model
-        assert spec is not None
+        if spec is None:
+            raise MappingError("a hydrated query must declare its result model")
         plan = compiled.load_plan
-        objects: list[Any] = []
         if not rows:
             # Resolving offsets here would raise MappingError for a projection
             # missing its primary key even when nothing matched; an empty
             # result has never done that, so stay out of the way.
-            return objects
+            return []
         # Once per *shape*, not once per query and emphatically not once per
         # row -- see `_record_plan`.
         row_plan, cursors = self._record_plan(compiled, spec, plan)
-        seen: set[int] = set()
-        for row in rows:
-            root = self._hydrate(spec, row_plan, row, 0)
-            if root is None:
-                continue
-            if id(root) not in seen:
-                seen.add(id(root))
-                objects.append(root)
-            self._assemble_joins(cursors, root, row)
-        return objects
+        models = _model_storage()
+        return _native_core.orm_hydrate_records(
+            self, spec, row_plan, cursors, rows, models._MODEL_API
+        )
 
     def _assemble_joins(
         self, cursors: tuple[_JoinCursor, ...], parent: Any, row: Any
     ) -> None:
-        for cursor in cursors:
-            step = cursor.step
-            child = self._hydrate(
-                step.relationship.target, cursor.plan, row, step.offset
-            )
-            parent._orm_set_relation(step.relationship.index, child)
-            if child is not None:
-                self._assemble_joins(cursor.nested, child, row)
+        models = _model_storage()
+        _native_core.orm_assemble_joins(
+            self, cursors, parent, row, models._MODEL_API
+        )
 
     def _record_plan(
         self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
@@ -1078,45 +1063,62 @@ class Session:
         local = relationship.local_columns
         remote = relationship.remote_columns
         target = relationship.target
+        storage = _model_storage()
 
         # Deduplicate by key so one identity is fetched once no matter how many
         # parents share it.
-        keys: dict[tuple[Any, ...], list[Any]] = {}
-        for parent in parents:
-            key = _values_of(parent, local)
-            if key is None:
-                # A null foreign key cannot match anything.
-                parent._orm_set_relation(relationship.index, [] if many else None)
-                continue
-            keys.setdefault(key, []).append(parent)
-            parent._orm_set_relation(relationship.index, [] if many else None)
+        keys: dict[tuple[Any, ...], list[Any]] = _native_core.orm_relationship_keys(
+            parents,
+            tuple(column.index for column in local),
+            relationship.index,
+            many,
+            storage._MODEL_API,
+        )
         if not keys:
             return
 
         children: list[Any] = []
         # The projection is the target's own column tuple for every batch and
         # every row, so its key offsets resolve once for the whole load.
-        child_plan = _row_plan(target, target.columns)
+        record_plan = _row_plan(target, target.columns)
+        direct_plan = None
+        try:
+            direct_plan = storage._compile_hydrate_plan(
+                target.model_type,
+                target,
+                tuple(column.index for column in target.columns),
+            )
+        except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
+            direct_plan = None
         batch_limit = _batch_limit(len(remote))
         for batch in _batches(tuple(keys), len(remote)):
             sql, values = _selectin_sql(
                 target, remote, _pad_to_width(batch, batch_limit)
             )
             connection = await self._acquire()
-            rows = await connection.fetch(sql, *values)
-            for row in rows:
-                child = self._hydrate(target, child_plan, row, 0)
-                if child is None:
-                    continue
-                children.append(child)
-                key = _values_of(child, remote)
-                if key is None:
-                    continue
-                for parent in keys.get(key, ()):
-                    if many:
-                        parent._orm_get_relation(relationship.index).append(child)
-                    else:
-                        parent._orm_set_relation(relationship.index, child)
+            if (
+                direct_plan is not None
+                and getattr(connection, "_decode_dest", None) is not None
+            ):
+                batch_children = await connection._fetch_into(
+                    sql, tuple(values), (direct_plan, self._identity, self)
+                )
+            else:
+                rows = await connection.fetch(sql, *values)
+                batch_children = [
+                    child
+                    for row in rows
+                    if (child := self._hydrate(target, record_plan, row, 0)) is not None
+                ]
+            children.extend(batch_children)
+            _native_core.orm_attach_relationships(
+                keys,
+                batch_children,
+                tuple(column.index for column in remote),
+                relationship.index,
+                many,
+                storage._MODEL_API,
+            )
         if nested and children:
             for option in nested:
                 found = target.relationship(option.relationship.python_name)

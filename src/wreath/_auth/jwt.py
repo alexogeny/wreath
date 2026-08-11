@@ -1,13 +1,8 @@
-"""JWT verification: a thin facade over the native `jose` accelerators.
+"""JWT verification and its Python-facing key and policy types.
 
-The hot, non-crypto-inventing pieces (base64url, compact split, HS* HMAC, and
-registered-claim checks) run in `wreath._native._core`, with stdlib fallbacks
-for a build predating `jose.c`. RSA (RS*/PS*)
-verification is done here with CPython's bigint `pow` and the stdlib — RSA
-verify is a public-key operation whose only risk is correctness, not timing, and
-its padding checks are far safer read against the stdlib than hand-written in C.
-ES256 (ECDSA/P-256) and EdDSA (Ed25519) have no CPython path, so they are
-implemented as zero-dependency verify-only primitives in `._ecverify`.
+Compact parsing, registered-claim checks, HMAC verification, and RSA encoded
+message validation are implemented by the JOSE library. The elliptic-curve
+algorithms are provided by the curve library.
 
 Algorithm confusion is prevented structurally: a verifier's algorithm allow-list
 is frozen at construction, the token `alg` may only *select from* that list
@@ -15,9 +10,7 @@ is frozen at construction, the token `alg` may only *select from* that list
 each key is bound to exactly one algorithm *family* (HS / RSA / EC / OKP) — a
 symmetric secret can never satisfy an RS*/PS*/ES256/EdDSA check, and vice versa.
 
-Every family's verifier is differentially tested against the `cryptography`
-oracle plus RFC 8032 / NIST known-answer vectors in
-`tests/compliance/test_jwt_ec.py`.
+The implementations are checked against RFC 8032 and NIST known-answer vectors.
 """
 
 from __future__ import annotations
@@ -74,13 +67,8 @@ _MAX_SEGMENT_BYTES = 16 * 1024
 _MAX_TOKEN_BYTES = 1 << 20
 
 #: The alphabet a compact-serialization segment may contain. RFC 7515 §2 writes
-#: them as base64url **without** padding, and `jose.c` enforces that; the stdlib
-#: fallback below has to as well, because `base64.urlsafe_b64decode` re-pads and
-#: silently discards anything outside its own alphabet. Without this, `<token>=`
-#: decoded to the same bytes as `<token>` and verified -- an unbounded family of
-#: strings authenticating as one token on the stdlib arm and refused on the
-#: `jose.c` one, which is exactly the sort of divergence a deployment that
-#: blocklists a leaked token by its value discovers the hard way.
+#: them as base64url **without** padding. Accepting padding or non-alphabet bytes
+#: would allow multiple compact strings to represent the same signed token.
 #:
 #: `_parse_compact` is the only reader: `_b64url_decode` applies the same set
 #: itself. Both now come from `wreath._b64`, which is where this module's own
@@ -331,79 +319,31 @@ def _verify_hs(alg: str, secret: bytes, signing_input: bytes, signature: bytes) 
     return hmac.compare_digest(expected, signature)
 
 
-# ---- RSA verification (stdlib bigint + hashlib) ---------------------------
-
-
-def _mgf1(seed: bytes, length: int, hash_name: str) -> bytes:
-    out = bytearray()
-    counter = 0
-    while len(out) < length:
-        out += hashlib.new(hash_name, seed + counter.to_bytes(4, "big")).digest()
-        counter += 1
-    return bytes(out[:length])
+# ---- RSA verification (PKCS#1/PSS) ----------------------------------------
 
 
 def _verify_rs(
     key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes
 ) -> bool:
-    k = key.size
-    if len(signature) != k:
-        return False
-    s = int.from_bytes(signature, "big")
-    if s >= key.n:
-        return False
-    m = pow(s, key.e, key.n)
-    em = m.to_bytes(k, "big")
     digest = hashlib.new(hash_name, signing_input).digest()
-    t = _DIGEST_INFO[hash_name] + digest
-    if k < len(t) + 11:
-        return False
-    ps_len = k - len(t) - 3
-    expected = b"\x00\x01" + (b"\xff" * ps_len) + b"\x00" + t
-    return hmac.compare_digest(em, expected)
+    constructor = getattr(hashlib, hash_name)
+    return bool(
+        _core.jose_verify_rsa(
+            key.n, key.e, key.size, constructor, digest, signature, False
+        )
+    )
 
 
 def _verify_ps(
     key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes
 ) -> bool:
-    k = key.size
-    if len(signature) != k:
-        return False
-    s = int.from_bytes(signature, "big")
-    if s >= key.n:
-        return False
-    em_bits = key.n.bit_length() - 1
-    em_len = (em_bits + 7) // 8
-    m = pow(s, key.e, key.n)
-    try:
-        em = m.to_bytes(em_len, "big")
-    except OverflowError:
-        return False
-    h_len = hashlib.new(hash_name).digest_size
-    s_len = h_len  # JWA fixes the PSS salt length to the hash length.
-    m_hash = hashlib.new(hash_name, signing_input).digest()
-    if em_len < h_len + s_len + 2:
-        return False
-    if em[-1] != 0xBC:
-        return False
-    masked_db = em[: em_len - h_len - 1]
-    h = em[em_len - h_len - 1 : em_len - 1]
-    top_bits = 8 * em_len - em_bits
-    if top_bits and (masked_db[0] & (0xFF << (8 - top_bits)) & 0xFF):
-        return False
-    db_mask = _mgf1(h, em_len - h_len - 1, hash_name)
-    db = bytes(a ^ b for a, b in zip(masked_db, db_mask, strict=True))
-    if top_bits:
-        db = bytes([db[0] & (0xFF >> top_bits)]) + db[1:]
-    pad_len = em_len - h_len - s_len - 2
-    if any(db[i] != 0 for i in range(pad_len)):
-        return False
-    if db[pad_len] != 0x01:
-        return False
-    salt = db[-s_len:] if s_len else b""
-    m_prime = (b"\x00" * 8) + m_hash + salt
-    h_prime = hashlib.new(hash_name, m_prime).digest()
-    return hmac.compare_digest(h, h_prime)
+    digest = hashlib.new(hash_name, signing_input).digest()
+    constructor = getattr(hashlib, hash_name)
+    return bool(
+        _core.jose_verify_rsa(
+            key.n, key.e, key.size, constructor, digest, signature, True
+        )
+    )
 
 
 def _verify_signature(
@@ -474,54 +414,6 @@ def _reason_valid(
     return int(
         _native_claims(dict(claims), now, leeway, issuer, audiences, required)
     )
-    # Fallback mirrors jose.c's reason codes (0 == valid).
-    def as_int(name: str) -> int | None:
-        value = claims.get(name)
-        if value is None:
-            return None
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise _Malformed
-        return value
-
-    try:
-        exp = as_int("exp")
-        if exp is not None and now - leeway >= exp:
-            return 1
-        nbf = as_int("nbf")
-        if nbf is not None and nbf > now + leeway:
-            return 2
-        iat = as_int("iat")
-        if iat is not None and iat > now + leeway:
-            return 3
-    except _Malformed:
-        return 7
-    if issuer is not None and claims.get("iss") != issuer:
-        return 4
-    if audiences:
-        aud = claims.get("aud")
-        if isinstance(aud, str):
-            aud_set = {aud}
-        elif isinstance(aud, list):
-            # Only the string members can ever match a configured audience, so
-            # filtering costs nothing -- and it is what keeps `set(aud)` from
-            # raising `TypeError` on an unhashable member (a nested list, an
-            # object). That raise left `verify_jwt` altogether, which is
-            # documented to return None and never raise for an authentication
-            # failure, so a token that should have been a 401 became a 500.
-            # `jose_validate_claims` answers 5 here; so does this now.
-            aud_set = {item for item in aud if isinstance(item, str)}
-        else:
-            aud_set = set()
-        if not aud_set & set(audiences):
-            return 5
-    for name in required:
-        if name not in claims:
-            return 6
-    return 0
-
-
-class _Malformed(Exception):
-    pass
 
 
 class JwtVerifier:

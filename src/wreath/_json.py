@@ -27,13 +27,21 @@ values directly, in `_native/json.c`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from ._native import _core
 
-_dumps = _core.json_dumps
-loads = _core.json_loads
-_configure = _core.json_configure
+#: `json_dumps(obj)` -- compact UTF-8 bytes, separators `,`/`:`, no space.
+_dumps: Callable[[object], bytes] = _core.json_dumps
+
+#: `json_loads(data)` -- `str`, `bytes` or `bytearray` to Python objects. The
+#: return is `Any` on purpose and only here: a decoder's output type is the
+#: caller's claim about the document, not something this can know.
+loads: Callable[[str | bytes | bytearray], Any] = _core.json_loads
+
+#: `json_configure(temporal_types, format_iso)` -- installs the temporal hook.
+_configure: Callable[[tuple[type, ...], Callable[[Any], str]], None] = _core.json_configure
 
 
 def _install_temporal() -> None:

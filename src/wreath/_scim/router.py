@@ -21,7 +21,7 @@ from ..authorization import authorize
 from ..response import JSONResponse, Response
 from ..router import Router
 from . import resources
-from .filters import FilterError, matches
+from .filters import FilterError, select
 from .filters import parse as parse_filter
 from .patch import PatchError
 from .patch import apply as apply_patch
@@ -482,7 +482,7 @@ def scim_router(
         expression = query.get("filter")
         if expression:
             node = parse_filter(expression, attributes=shape.queryable)
-            documents = [item for item in documents if matches(node, item)]
+            documents = select(node, documents)
         start, count = paging(query)
         window = documents[start - 1 : start - 1 + count]
         return ScimResponse(

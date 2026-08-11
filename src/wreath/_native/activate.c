@@ -21,7 +21,7 @@ append_error(PyObject *errors, PyObject *alias, PyObject *raw,
         Py_XDECREF(source);
     }
     if (loc == NULL || msg == NULL || type == NULL) goto done;
-    error = PyDict_New();
+    error = _PyDict_NewPresized(3);
     if (error == NULL) goto done;
     if (PyDict_SetItemString(error, "loc", loc) < 0 ||
         PyDict_SetItemString(error, "msg", msg) < 0 ||
@@ -154,7 +154,7 @@ wreath_activate_path(PyObject *Py_UNUSED(module), PyObject *args)
     PyObject *plan;
     if (!PyArg_ParseTuple(args, "OO!:activate_path", &params,
                           &PyTuple_Type, &plan)) return NULL;
-    PyObject *kwargs = PyDict_New();
+    PyObject *kwargs = _PyDict_NewPresized(PyTuple_GET_SIZE(plan));
     PyObject *errors = PyList_New(0);
     if (kwargs == NULL || errors == NULL ||
         activate_path_into(params, plan, kwargs, &errors) < 0) {

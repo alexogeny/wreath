@@ -1510,8 +1510,8 @@ ascii_string(PyObject *value)
     return result;
 }
 
-/* Text-format date/time output goes through isoformat() so the native and
-   reference backends emit byte-identical parameters. */
+/* Text-format date/time output goes through isoformat() to preserve PostgreSQL's
+   accepted wire spelling for every supported temporal value. */
 static PyObject *
 isoformat_ascii(PyObject *value, int with_separator)
 {

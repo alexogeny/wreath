@@ -22,7 +22,7 @@ import enum
 import os
 import types
 import typing
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -30,8 +30,12 @@ from uuid import UUID
 
 from ._native import _core
 
-parse_dotenv = _core.parse_dotenv
-read_osenv = _core.read_osenv
+#: `parse_dotenv(data)` -- the strict dialect to a mapping. No interpolation,
+#: no `export`, no comments; a malformed line raises `ValueError` naming it.
+parse_dotenv: Callable[[bytes], dict[str, str]] = _core.parse_dotenv
+
+#: `read_osenv()` -- the process environment as one mapping, read once.
+read_osenv: Callable[[], dict[str, str]] = _core.read_osenv
 
 
 _MISSING = dataclasses.MISSING

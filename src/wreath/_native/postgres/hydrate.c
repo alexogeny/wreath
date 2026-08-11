@@ -347,7 +347,7 @@ compile_hydrate_plan(PyObject *module, PyObject *args)
     }
     layout = wreath_pg_model_layout_for_type((PyTypeObject *)model_type);
     if (layout == NULL) {
-        PyErr_SetString(PyExc_TypeError, "model has no native storage layout");
+        PyErr_SetString(PyExc_TypeError, "model has no compiled storage layout");
         return NULL;
     }
     if (!PyTuple_Check(targets)) {

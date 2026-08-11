@@ -9,6 +9,7 @@ rather than testing the newest one and hoping.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
@@ -208,6 +209,63 @@ async def test_a_matching_plan_keeps_the_entitlements() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unrestricted_caller_keeps_what_the_provider_grants_whatever_the_plan() -> None:
+    """The plan check validates a *claim*; it is not a second gate on everyone.
+
+    A caller who claimed no plan has no claim to disagree with, so the
+    provider's answer stands as given. Running the comparison anyway denies
+    every ordinary caller whose provider reports a plan at all -- and the plan
+    the provider reports is the common case, not the exception.
+    """
+    provider = Entitlements({"alice": {"export"}}, plans={"alice": "pro"})
+    assert (
+        await _status(ENTITLEMENT_POLICY, identity=Identity("alice"), entitlements=provider)
+        == 200
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_plan_a_provider_cannot_confirm_yields_nothing() -> None:
+    """Fail closed, and without raising, when the provider has no `plan_for`.
+
+    `on_plan("pro")` is a restriction to the pro plan's entitlements *if the
+    provider agrees*. A provider that cannot be asked cannot agree, so the
+    answer is the empty set -- not the claimed plan's entitlements, and not a
+    `TypeError` out of the authorization path.
+    """
+
+    class PlanBlind:
+        """An entitlement provider with no way to report a caller's plan."""
+
+        def entitlements(self, identity: Any) -> frozenset[str]:
+            return frozenset({"export"})
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    identity = (human(Identity("alice")) | on_plan("pro")).bind()
+    assert (
+        await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=PlanBlind()) == 403
+    )
+
+
+def test_an_anonymous_request_resolves_every_fact_to_nothing() -> None:
+    """`facts_for` is public and takes any request, including one with no caller.
+
+    The manifest tags its answer with these, so they resolve outside
+    `authorize` -- which refuses an anonymous request before any provider is
+    asked. Here there is no such refusal in front, and a provider handed `None`
+    reads attributes off it.
+    """
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(ENTITLEMENT_POLICY),
+        entitlements=Entitlements({"alice": {"export"}}),
+    )
+    facts = authorizer.facts_for(FakeRequest(None))
+    assert facts["entitlements"] == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_an_entitlement_limit_narrows_what_the_provider_grants() -> None:
     provider = Entitlements({"alice": {"export", "api"}})
     identity = (human(Identity("alice")) | with_entitlements("api")).bind()
@@ -314,9 +372,45 @@ def test_a_policy_naming_an_undeclared_entitlement_fails_at_startup() -> None:
 
 
 def test_no_provider_is_not_refused() -> None:
-    """Switching a capability off is a decision, not a misconfiguration."""
-    CedarAuthorizer(engine=CedarPolicies(ROLE_POLICY))
-    CedarAuthorizer(engine=CedarPolicies(ENTITLEMENT_POLICY))
+    """Switching a capability off is a decision, not a misconfiguration.
+
+    Silently, too: the unenumerable-provider warning below is the diagnosis for
+    a provider that cannot answer, and firing it at an application that
+    configured none would train an operator to ignore it.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        CedarAuthorizer(engine=CedarPolicies(ROLE_POLICY))
+        CedarAuthorizer(engine=CedarPolicies(ENTITLEMENT_POLICY))
+
+
+class Unenumerable:
+    """An organisation provider that resolves memberships but declares no roles.
+
+    The shape `_validate_org_roles` cannot check: `names` is what it enumerates
+    against, and a provider without one leaves a misspelled role undetectable
+    until it denies in production.
+    """
+
+    def for_request(self, request: Any) -> tuple[Any, ...]:
+        return ()
+
+
+def test_a_provider_that_cannot_enumerate_its_roles_says_so() -> None:
+    with pytest.warns(RuntimeWarning, match="cannot enumerate its roles"):
+        CedarAuthorizer(engine=CedarPolicies(ROLE_POLICY), organizations=Unenumerable())
+
+
+def test_a_provider_that_cannot_enumerate_is_silent_when_no_policy_names_a_role() -> None:
+    """There is nothing to check, so there is nothing to warn about.
+
+    The warning is about *unverifiable* names, not about the provider: a policy
+    set naming no role has none to verify, and warning anyway would make the
+    diagnosis depend on the provider alone.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        CedarAuthorizer(engine=CedarPolicies(ORG_POLICY), organizations=Unenumerable())
 
 
 # --- the snapshot path -------------------------------------------------------

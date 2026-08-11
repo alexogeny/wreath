@@ -1,16 +1,7 @@
-"""Both AES-128-GCM paths, against answers nobody in this repository wrote.
+"""AES-128-GCM against independent known answers and OpenSSL.
 
-`wreath._webpush` has two AES-128-GCM implementations: one written in Python
-because CPython ships no AES, and one in `src/wreath/_native/aesgcm.c` that runs
-the block cipher on `aesenc` and GHASH on `pclmulqdq`. A machine without those
-instructions runs the first; every other machine runs the second. Both ship.
-
-This file used to assert `native(x) == pure(x)` across the block boundaries.
-That is the wrong instrument for crypto: two implementations written from one
-reading of SP 800-38D agree perfectly while both compute a tag no receiver
-accepts, and the failure is silent -- ciphertext is ciphertext. So every case
-below drives *both* arms and holds each of them, separately, against something
-external:
+The scalar and AES-NI/PCLMULQDQ instruction paths are each held to external
+answers rather than merely compared with one another:
 
 * **NIST known answers**, as constants. A vector cannot be wrong in a way that
   tracks a bug in either arm, and it does not depend on anything being
@@ -37,11 +28,7 @@ and is the place to read for the seam between them; the overlap is deliberate,
 because this file's length sweep is the one that walks the C path's block
 schedule and it would otherwise have no anchor at all.
 
-The lengths are chosen around the block boundaries, because that is where the
-implementations differ structurally: the C path steps four blocks at a time,
-then one, then a zero-padded tail, and the Python path steps sixteen bytes at a
-time throughout. An off-by-one lives at 15/16/17, 31/32/33 and 63/64/65 and
-nowhere else.
+The lengths surround every block boundary used by either instruction path.
 """
 
 from __future__ import annotations
@@ -56,22 +43,21 @@ from wreath._webpush import (
     MAX_GCM_PLAINTEXT_BYTES,
     TAG_BYTES,
     PushError,
-    _aes128gcm_decrypt_pure,
-    _aes128gcm_encrypt_pure,
     aes128gcm_decrypt,
     aes128gcm_encrypt,
 )
 
-#: An empty tuple means this CPU (or this build) has no AES-NI/PCLMULQDQ, so
-#: there is no second implementation to differ from -- a capability of the
-#: machine, not of Wreath.
+_scalar_encrypt = _core._aes128gcm_encrypt_scalar
+_scalar_decrypt = _core._aes128gcm_decrypt_scalar
+
+#: The instruction path selected on this host.
 ARMS: tuple[str, ...] = (
     () if _core is None else tuple(getattr(_core, "aesgcm_arms", tuple)())
 )
 
 needs_hardware = pytest.mark.skipif(
-    not ARMS,
-    reason="no AES-NI/PCLMULQDQ on this CPU or in this build; only the Python arm runs",
+    "aesni" not in ARMS,
+    reason="no AES-NI/PCLMULQDQ on this CPU or in this build",
 )
 
 KEY = bytes(range(16))
@@ -237,11 +223,11 @@ def _openssl(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
     return AESGCM(key).encrypt(nonce, plaintext, aad or None)
 
 
-def _native_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
+def _dispatch_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
     return _core.aes128gcm_encrypt(key, nonce, plaintext, aad)
 
 
-def _native_decrypt(key: bytes, nonce: bytes, message: bytes, aad: bytes) -> bytes | None:
+def _dispatch_decrypt(key: bytes, nonce: bytes, message: bytes, aad: bytes) -> bytes | None:
     return _core.aes128gcm_decrypt(key, nonce, message, aad)
 
 
@@ -253,9 +239,9 @@ def test_both_paths_reproduce_the_published_vectors(vector: tuple[str, ...]) -> 
     """A constant, so it cannot be wrong in a way that tracks a bug in either arm."""
     label, *parts = vector
     key, nonce, plaintext, aad, ciphertext, tag = (bytes.fromhex(part) for part in parts)
-    assert _aes128gcm_encrypt_pure(key, nonce, plaintext, aad) == ciphertext + tag, label
+    assert _scalar_encrypt(key, nonce, plaintext, aad) == ciphertext + tag, label
     if ARMS:
-        assert _native_encrypt(key, nonce, plaintext, aad) == ciphertext + tag, label
+        assert _dispatch_encrypt(key, nonce, plaintext, aad) == ciphertext + tag, label
 
 
 @pytest.mark.parametrize("vector", NIST_VECTORS, ids=lambda vector: vector[0])
@@ -263,9 +249,9 @@ def test_both_paths_recover_the_published_plaintexts(vector: tuple[str, ...]) ->
     """The other direction: decryption is pinned to the same constants."""
     label, *parts = vector
     key, nonce, plaintext, aad, ciphertext, tag = (bytes.fromhex(part) for part in parts)
-    assert _aes128gcm_decrypt_pure(key, nonce, ciphertext + tag, aad) == plaintext, label
+    assert _scalar_decrypt(key, nonce, ciphertext + tag, aad) == plaintext, label
     if ARMS:
-        assert _native_decrypt(key, nonce, ciphertext + tag, aad) == plaintext, label
+        assert _dispatch_decrypt(key, nonce, ciphertext + tag, aad) == plaintext, label
 
 
 @pytest.mark.parametrize("nonce_length", NIST_NON_96_BIT_IV_LENGTHS)
@@ -302,8 +288,8 @@ def test_both_paths_match_openssl_on_every_block_boundary(length: int) -> None:
     """
     plaintext = _body(length)
     expected = _openssl(KEY, NONCE, plaintext, b"")
-    assert _aes128gcm_encrypt_pure(KEY, NONCE, plaintext, b"") == expected
-    assert _native_encrypt(KEY, NONCE, plaintext, b"") == expected
+    assert _scalar_encrypt(KEY, NONCE, plaintext, b"") == expected
+    assert _dispatch_encrypt(KEY, NONCE, plaintext, b"") == expected
 
 
 @needs_hardware
@@ -322,21 +308,16 @@ def test_both_paths_match_openssl_on_additional_data(aad_length: int) -> None:
     for length in (0, 1, 16, 17, 4000):
         plaintext = _body(length)
         expected = _openssl(KEY, NONCE, plaintext, aad)
-        assert _aes128gcm_encrypt_pure(KEY, NONCE, plaintext, aad) == expected
-        assert _native_encrypt(KEY, NONCE, plaintext, aad) == expected
+        assert _scalar_encrypt(KEY, NONCE, plaintext, aad) == expected
+        assert _dispatch_encrypt(KEY, NONCE, plaintext, aad) == expected
 
 
 #: Length ceilings for the fuzz, chosen so the loop's *iterations* pay for the
 #: coverage and its *bytes* do not.
 #:
-#: The Python arm is CPython doing AES, and it was measured at 0.13 MB/s and
-#: 8.1 ms per iteration -- 400 iterations of encrypt-plus-decrypt cost 6.2s,
-#: which the model predicts to within 5% (400 * 8.1ms * 2 = 6.5s). Both halves
-#: of that loop matter, and only one of them buys anything here: what this test
-#: adds over `test_both_paths_match_openssl_on_every_block_boundary` is random
-#: *combinations* of key, nonce, length and AAD, which is the iteration count.
-#:
-#: The lengths are not where the structure lives. The C path steps four blocks
+#: What this test adds over the deterministic boundary sweep is random
+#: combinations of key, nonce, length, and AAD. The lengths are not where the
+#: structure lives. The accelerated path steps four blocks
 #: (64 bytes) at a time, then one, then a zero-padded tail, so 512 bytes runs
 #: eight four-block steps and every remainder class; nothing new happens at
 #: 2000. The sizes that *are* structurally interesting at the top end -- 1000,
@@ -360,12 +341,12 @@ def test_both_paths_match_openssl_under_a_seeded_fuzz() -> None:
         aad = bytes(rng.randrange(256) for _ in range(rng.randrange(0, MAX_FUZZ_AAD)))
         expected = _openssl(key, nonce, plaintext, aad)
         detail = f"{len(plaintext)} bytes with {len(aad)} bytes of AAD"
-        assert _native_encrypt(key, nonce, plaintext, aad) == expected, f"native: {detail}"
-        assert _aes128gcm_encrypt_pure(key, nonce, plaintext, aad) == expected, (
-            f"pure: {detail}"
+        assert _dispatch_encrypt(key, nonce, plaintext, aad) == expected, f"selected: {detail}"
+        assert _scalar_encrypt(key, nonce, plaintext, aad) == expected, (
+            f"scalar: {detail}"
         )
-        assert _native_decrypt(key, nonce, expected, aad) == plaintext
-        assert _aes128gcm_decrypt_pure(key, nonce, expected, aad) == plaintext
+        assert _dispatch_decrypt(key, nonce, expected, aad) == plaintext
+        assert _scalar_decrypt(key, nonce, expected, aad) == plaintext
 
 
 @needs_hardware
@@ -379,7 +360,7 @@ def test_the_tag_is_the_half_that_fails_on_its_own() -> None:
     """
     plaintext = bytes(range(256)) * 4
     expected = _openssl(KEY, NONCE, plaintext, b"aad")
-    for label, encrypt in (("pure", _aes128gcm_encrypt_pure), ("native", _native_encrypt)):
+    for label, encrypt in (("scalar-c", _scalar_encrypt), ("selected", _dispatch_encrypt)):
         message = encrypt(KEY, NONCE, plaintext, b"aad")
         assert message[:-TAG_BYTES] == expected[:-TAG_BYTES], f"{label} counter mode"
         assert message[-TAG_BYTES:] == expected[-TAG_BYTES:], f"{label} GHASH"
@@ -403,8 +384,8 @@ def test_both_refuse_a_tag_altered_in_any_bit(length: int) -> None:
         for bit in (0x01, 0x40, 0x80):
             altered = bytearray(message)
             altered[len(message) - TAG_BYTES + index] ^= bit
-            assert _native_decrypt(KEY, NONCE, bytes(altered), b"") is None
-            assert _aes128gcm_decrypt_pure(KEY, NONCE, bytes(altered), b"") is None
+            assert _dispatch_decrypt(KEY, NONCE, bytes(altered), b"") is None
+            assert _scalar_decrypt(KEY, NONCE, bytes(altered), b"") is None
 
 
 @needs_hardware
@@ -414,23 +395,23 @@ def test_both_refuse_an_altered_ciphertext() -> None:
     for index in range(len(plaintext)):
         altered = bytearray(message)
         altered[index] ^= 0x01
-        assert _native_decrypt(KEY, NONCE, bytes(altered), b"") is None
-        assert _aes128gcm_decrypt_pure(KEY, NONCE, bytes(altered), b"") is None
+        assert _dispatch_decrypt(KEY, NONCE, bytes(altered), b"") is None
+        assert _scalar_decrypt(KEY, NONCE, bytes(altered), b"") is None
 
 
 @needs_hardware
 def test_both_refuse_additional_data_that_changed_in_flight() -> None:
     """AAD is not carried in the message, so this is the only thing binding it."""
     message = _openssl(KEY, NONCE, b"payload", b"origin=a")
-    assert _native_decrypt(KEY, NONCE, message, b"origin=b") is None
-    assert _aes128gcm_decrypt_pure(KEY, NONCE, message, b"origin=b") is None
-    assert _native_decrypt(KEY, NONCE, message, b"") is None
-    assert _aes128gcm_decrypt_pure(KEY, NONCE, message, b"") is None
+    assert _dispatch_decrypt(KEY, NONCE, message, b"origin=b") is None
+    assert _scalar_decrypt(KEY, NONCE, message, b"origin=b") is None
+    assert _dispatch_decrypt(KEY, NONCE, message, b"") is None
+    assert _scalar_decrypt(KEY, NONCE, message, b"") is None
 
 
 @needs_hardware
 @pytest.mark.parametrize("key_length", [0, 15, 17, 32])
-def test_the_native_path_refuses_a_key_that_is_not_128_bits(key_length: int) -> None:
+def test_the_selected_path_refuses_a_key_that_is_not_128_bits(key_length: int) -> None:
     """The facade checks first, so this is the C's own guard being exercised."""
     with pytest.raises(ValueError, match="16-byte key"):
         _core.aes128gcm_encrypt(bytes(key_length), NONCE, b"x", b"")
@@ -438,13 +419,13 @@ def test_the_native_path_refuses_a_key_that_is_not_128_bits(key_length: int) -> 
 
 @needs_hardware
 @pytest.mark.parametrize("nonce_length", [0, 11, 13, 16])
-def test_the_native_path_refuses_a_nonce_that_is_not_96_bits(nonce_length: int) -> None:
+def test_the_selected_path_refuses_a_nonce_that_is_not_96_bits(nonce_length: int) -> None:
     with pytest.raises(ValueError, match="96-bit nonce"):
         _core.aes128gcm_encrypt(KEY, bytes(nonce_length), b"x", b"")
 
 
 @needs_hardware
-def test_the_native_path_refuses_a_message_shorter_than_its_tag() -> None:
+def test_the_selected_path_refuses_a_message_shorter_than_its_tag() -> None:
     with pytest.raises(ValueError, match="at least its 16-byte tag"):
         _core.aes128gcm_decrypt(KEY, NONCE, bytes(15), b"")
 
@@ -452,29 +433,14 @@ def test_the_native_path_refuses_a_message_shorter_than_its_tag() -> None:
 # --- the seam ----------------------------------------------------------------
 
 
-def test_the_facade_binds_the_hardware_path_exactly_when_the_cpu_has_it() -> None:
-    """The one place the two implementations are chosen between."""
-    import wreath._webpush as webpush
-
-    if ARMS:
-        assert webpush._native_gcm_encrypt is not None
-        assert webpush._native_gcm_decrypt is not None
-        assert set(ARMS) == {"aesni", "pclmul"}
-    else:
-        assert webpush._native_gcm_encrypt is None
-        assert webpush._native_gcm_decrypt is None
+def test_dispatch_always_has_a_complete_arm() -> None:
+    assert set(ARMS) in ({"aesni", "pclmul"}, {"scalar"})
 
 
 def test_the_facade_actually_calls_the_bound_implementation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both paths return the same bytes, so agreement cannot prove which ran.
-
-    Without this, deleting the dispatch and always running the Python arm is
-    invisible: every other test in this file still passes, and the 4000x the
-    hardware path is worth is silently gone. So the call is observed rather than
-    inferred.
-    """
+    """Observe the facade call directly; equal bytes cannot prove dispatch."""
     import wreath._webpush as webpush
 
     seen: list[tuple[str, bytes, bytes, bytes, bytes]] = []
@@ -487,29 +453,14 @@ def test_the_facade_actually_calls_the_bound_implementation(
         seen.append(("decrypt", key, nonce, data, aad))
         return b"recovered"
 
-    monkeypatch.setattr(webpush, "_native_gcm_encrypt", encrypt_recorder)
-    monkeypatch.setattr(webpush, "_native_gcm_decrypt", decrypt_recorder)
+    monkeypatch.setattr(webpush._core, "aes128gcm_encrypt", encrypt_recorder)
+    monkeypatch.setattr(webpush._core, "aes128gcm_decrypt", decrypt_recorder)
     assert aes128gcm_encrypt(KEY, NONCE, b"body", b"extra") == b"\x00" * (4 + TAG_BYTES)
     assert aes128gcm_decrypt(KEY, NONCE, bytes(TAG_BYTES + 4), b"extra") == b"recovered"
     assert seen == [
         ("encrypt", KEY, NONCE, b"body", b"extra"),
         ("decrypt", KEY, NONCE, bytes(TAG_BYTES + 4), b"extra"),
     ]
-
-
-def test_the_facade_falls_back_to_the_pure_twin_when_nothing_is_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What a machine without AES-NI runs, exercised on a machine that has it."""
-    import wreath._webpush as webpush
-
-    monkeypatch.setattr(webpush, "_native_gcm_encrypt", None)
-    monkeypatch.setattr(webpush, "_native_gcm_decrypt", None)
-    message = aes128gcm_encrypt(KEY, NONCE, b"body", b"extra")
-    assert message == _openssl(KEY, NONCE, b"body", b"extra")
-    assert aes128gcm_decrypt(KEY, NONCE, message, b"extra") == b"body"
-    with pytest.raises(PushError, match="does not authenticate"):
-        aes128gcm_decrypt(KEY, NONCE, message[:-1] + bytes(1), b"extra")
 
 
 # --- the facade's own contract ------------------------------------------------

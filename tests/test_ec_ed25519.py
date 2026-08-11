@@ -1,24 +1,16 @@
-"""edwards25519, and the one substitution that would have quietly broken it.
-
-Ed25519 verification was already inversion-free -- extended coordinates, no
-`pow(x, -1, p)` in the loop -- so the change here is smaller than the P-256 one:
-`[S]B == R + [h]A` became `[S]B + [h](-A) == R`, which shares one sequence of
-doublings between the two scalar multiplications instead of running two. The
-step count falls; the arithmetic does not change.
+"""edwards25519 verification, group arithmetic, and torsion edge cases.
 
 **The hazard that shaped this file.** The obvious way to write that rewrite is
 `[S]B + [L - h]A`, because `-[h]A == [L - h]A` whenever `A` has order dividing
 `L`. RFC 8032 cofactorless verification *accepts a public key with a torsion
 component*, for which the two are different points, so the substitution would
-silently change which signatures verify -- accepting or rejecting where the
-shipped implementation did the opposite. `ed_negate` is exact for every point,
-and `test_torsion_keys_agree_with_the_two_multiplication_form` is what holds the
-line: it drives small-order and mixed-order keys, where a wrong rewrite differs,
-through both forms.
+silently change which signatures verify. `ed_negate` is exact for every point,
+and the torsion corpus drives small-order and mixed-order keys where the
+substitution differs.
 
-Checked against three things that are not this code: the RFC 8032 §7.1 vectors
-as literal data, the two-multiplication implementation that shipped before,
-and `cryptography` (a dev/test dependency, never importable from `src/wreath`).
+RFC 8032 §7.1 vectors pin exact values, algebraic constructions cover the
+cofactor edge cases, and `cryptography` provides an independent implementation
+without entering Wreath runtime code.
 """
 
 from __future__ import annotations
@@ -34,33 +26,6 @@ from wreath._dkim import _ed25519_sign, ed25519_public_key
 
 P = _curves.ED_P
 L = _curves.ED_L
-
-
-# --- the implementation this replaced, kept as a differential oracle --------
-
-
-def _verify_two_multiplications(public: bytes, message: bytes, signature: bytes) -> bool:
-    """`verify_ed25519` exactly as it read before the interleaved rewrite.
-
-    Two independent scalar multiplications and an equality, transcribed from the
-    pre-rewrite `_ecverify.py`. Everything else in this file compares against it.
-    """
-    if len(public) != 32 or len(signature) != 64:
-        return False
-    a_point = _curves.ed_decode_point(public)
-    if a_point is None:
-        return False
-    r_bytes = signature[:32]
-    r_point = _curves.ed_decode_point(r_bytes)
-    if r_point is None:
-        return False
-    s = int.from_bytes(signature[32:], "little")
-    if s >= L:
-        return False
-    h = int.from_bytes(hashlib.sha512(r_bytes + public + message).digest(), "little") % L
-    sb = _curves.ed_scalarmult_public(s, _curves.ed_base())
-    rha = _curves.ed_add(r_point, _curves.ed_scalarmult_public(h, a_point))
-    return _curves.ed_equal(sb, rha)
 
 
 # --- 1. known answers from RFC 8032 §7.1 ------------------------------------
@@ -112,7 +77,7 @@ def test_rfc8032_vectors_verify(
 def test_rfc8032_vectors_are_reproduced_by_the_signer(
     seed: str, public: str, message: str, signature: str
 ) -> None:
-    """`_dkim` signs with `ed_scalarmult_secret`, so this pins the ladder too.
+    """The signing known answers pin the complete native fixed-base operation.
 
     A signing known-answer test is strictly stronger than a verifying one: it
     fixes every intermediate, so a scalar multiplication that is wrong anywhere
@@ -134,7 +99,7 @@ def test_rfc8032_vectors_reject_a_tampered_message(
     )
 
 
-# --- 2. differential against the two-multiplication form --------------------
+# --- seeded valid and malformed corpora -------------------------------------
 
 
 def _corpus(seed: int, count: int) -> list[tuple[bytes, bytes, bytes]]:
@@ -147,9 +112,8 @@ def _corpus(seed: int, count: int) -> list[tuple[bytes, bytes, bytes]]:
     return out
 
 
-def test_valid_corpus_agrees_with_the_two_multiplication_form() -> None:
+def test_valid_seeded_corpus_verifies() -> None:
     for public, message, signature in _corpus(0xE0FEED, 10):
-        assert _verify_two_multiplications(public, message, signature)
         assert verify_ed25519(public, message, signature)
 
 
@@ -196,12 +160,11 @@ def _flip(rng: random.Random, data: bytes) -> bytes:
     return data[:index] + bytes([data[index] ^ (1 << rng.randrange(8))]) + data[index + 1 :]
 
 
-def test_every_mutation_is_refused_by_both_implementations() -> None:
+def test_every_seeded_mutation_is_refused() -> None:
     rng = random.Random(0xFEEDBEE)
     checked = 0
     for public, message, signature in _corpus(0xE0FEED, 4):
         for mp, mm, ms in _mutations(rng, public, message, signature):
-            assert not _verify_two_multiplications(mp, mm, ms), (mp, mm, ms)
             assert not verify_ed25519(mp, mm, ms), (mp, mm, ms)
             checked += 1
     assert checked == 72, "the mutation table changed size; update this count"
@@ -261,7 +224,6 @@ def test_a_31_byte_public_key_is_refused_by_length_and_not_by_the_maths() -> Non
         _curves.ed_decode_point(forged[:32]),
     ), "the forgery no longer satisfies the equation, so this proves nothing"
     assert not verify_ed25519(short, message, forged)
-    assert not _verify_two_multiplications(short, message, forged)
 
 
 def _small_order_points() -> list[bytes]:
@@ -335,8 +297,7 @@ def _verify_with_the_unsafe_shortcut(
 ) -> bool:
     """`[S]B + [L - h]A == R` -- the tempting rewrite, which is wrong.
 
-    Present so the test below can show it differs, rather than only asserting
-    that the shipped code agrees with itself. Never called by anything shipped.
+    Present only so the algebraic torsion test can demonstrate the difference.
     """
     a_point = _curves.ed_decode_point(public)
     r_point = _curves.ed_decode_point(signature[:32])
@@ -354,8 +315,8 @@ def _verify_with_the_unsafe_shortcut(
     return _curves.ed_equal(left, r_point)
 
 
-def test_torsion_keys_agree_with_the_two_multiplication_form() -> None:
-    """The test this file exists for, on inputs where a wrong rewrite differs.
+def test_torsion_keys_use_exact_negation_not_the_order_shortcut() -> None:
+    """Construct accepted inputs on which the order shortcut differs.
 
     A public key of small order has `[L]A != identity`, so `[L - h]A` and
     `-[h]A` are different points. RFC 8032 cofactorless verification accepts such
@@ -363,10 +324,8 @@ def test_torsion_keys_agree_with_the_two_multiplication_form() -> None:
     decode -- so a rewrite reaching for the first would change the verdict on
     attacker-chosen input.
 
-    The assertion is *agreement with what shipped*, not acceptance: whether
-    cofactorless Ed25519 ought to accept these is RFC 8032's decision and this
-    work does not touch it. What must not change is which side of it wreath
-    lands on.
+    Cofactorless acceptance is RFC 8032's rule; the assertions pin Wreath to
+    that rule and prove the tempting substitution would change its result.
     """
     distinguished = 0
     for public in _small_order_points():
@@ -374,7 +333,6 @@ def test_torsion_keys_agree_with_the_two_multiplication_form() -> None:
         if forged is None:
             continue
         message, signature = forged
-        assert _verify_two_multiplications(public, message, signature)
         assert verify_ed25519(public, message, signature)
         if not _verify_with_the_unsafe_shortcut(public, message, signature):
             distinguished += 1
@@ -384,8 +342,8 @@ def test_torsion_keys_agree_with_the_two_multiplication_form() -> None:
     )
 
 
-def test_torsion_keys_agree_on_signatures_that_are_simply_wrong() -> None:
-    """The same keys with random signatures: both must refuse, in step."""
+def test_torsion_keys_refuse_signatures_that_are_simply_wrong() -> None:
+    """The same keys with random signatures must refuse."""
     rng = random.Random(0x717D)
     checked = 0
     for public in _small_order_points():
@@ -393,7 +351,6 @@ def test_torsion_keys_agree_on_signatures_that_are_simply_wrong() -> None:
             message = f"torsion {index}".encode()
             signature = rng.randbytes(32) + rng.randrange(0, L).to_bytes(32, "little")
             assert not verify_ed25519(public, message, signature)
-            assert not _verify_two_multiplications(public, message, signature)
             checked += 1
     assert checked == 24
 
@@ -419,14 +376,12 @@ def test_a_genuine_signature_does_not_verify_under_a_torsion_shifted_key() -> No
             message = f"substituted {index}".encode()
             signature = _ed25519_sign(seed, message)
             assert verify_ed25519(genuine, message, signature)
-            expected = _verify_two_multiplications(shifted, message, signature)
-            assert verify_ed25519(shifted, message, signature) == expected
-            assert expected == (shifted == genuine)
+            assert verify_ed25519(shifted, message, signature) == (shifted == genuine)
             checked += 1
     assert checked == 24
 
 
-# --- 3. cross-check against `cryptography` ----------------------------------
+# --- cross-check against `cryptography` -------------------------------------
 
 cryptography = pytest.importorskip(
     "cryptography",
@@ -576,69 +531,3 @@ def test_the_addition_law_is_complete() -> None:
     assert _curves.ed_equal(
         _curves.ed_add(_curves.ED_NEUTRAL, _curves.ED_NEUTRAL), _curves.ED_NEUTRAL
     )
-
-
-def test_base_point_failure_is_a_raise_and_not_an_assert() -> None:
-    """`python -O` strips `assert`, and this invariant used to depend on one.
-
-    `_ED_B()` in the old `_ecverify` read `assert bx is not None`. Under `-O`
-    that vanishes and a `None` propagates into the arithmetic as a `TypeError`
-    somewhere else entirely. Driving the real failure means breaking the curve
-    constant, so the check is that the guard is a `raise` reached through a
-    poisoned `ed_recover_x`.
-    """
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(_curves, "_ED_BASE", None)
-        patch.setattr(_curves, "ed_recover_x", lambda y, sign: None)
-        with pytest.raises(ValueError, match="base point has no x coordinate"):
-            _curves.ed_base()
-    assert _curves.ed_base() is not None  # and the cache is intact afterwards
-
-
-# --- the shape of the secret path -------------------------------------------
-
-
-def _addition_trace(run) -> int:
-    """How many `ed_add` calls `run()` makes, in its own patch context."""
-    calls = 0
-    with pytest.MonkeyPatch.context() as patch:
-        original = _curves.ed_add
-
-        def counted(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return original(*args, **kwargs)
-
-        patch.setattr(_curves, "ed_add", counted)
-        run()
-    return calls
-
-
-def test_the_secret_ladder_adds_the_same_number_of_times_for_every_scalar() -> None:
-    """No branch on a secret bit, so no Hamming-weight leak.
-
-    `_dkim` multiplies two secrets per signature -- the clamped key and the
-    per-message nonce -- and the old `while k: if k & 1:` leaked the weight of
-    both. Not a constant-time claim: see `wreath._curves`'s module docstring.
-    """
-    base = _curves.ed_base()
-    counts = {
-        k: _addition_trace(lambda k=k: _curves.ed_scalarmult_secret(k, base))
-        for k in (0, 1, 2, (1 << 253) - 1, L - 1, 0xDEADBEEF)
-    }
-    assert set(counts.values()) == {2 * _curves._ED_SECRET_BITS}
-
-
-def test_verification_is_one_interleaved_multiplication_not_two() -> None:
-    """The step count, asserted rather than benchmarked.
-
-    Two independent multiplications over 253-bit scalars cost about 760
-    additions; interleaving them shares the doublings and costs about 440. This
-    pins the shape so a later edit cannot quietly put the second loop back.
-    """
-    public, message, signature = _corpus(0xE0FEED, 1)[0]
-    interleaved = _addition_trace(lambda: verify_ed25519(public, message, signature))
-    separate = _addition_trace(
-        lambda: _verify_two_multiplications(public, message, signature)
-    )
-    assert interleaved < separate * 0.65

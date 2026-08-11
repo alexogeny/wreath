@@ -356,7 +356,7 @@ def run(args: argparse.Namespace) -> int:
         "metadata": {
             "python": sys.version,
             "platform": platform.platform(),
-            "storage": Intern.__wreath_storage_kind__,
+            "model_basicsize": Intern.__basicsize__,
             "pydantic": getattr(pydantic, "VERSION", None),
             "bodies": args.bodies,
             "columns": 4,

@@ -1466,23 +1466,17 @@ def _orm_hydrate_key_maps(rows: int):
     plan). Fitted on the deterministic build counter rather than wall time, so
     the contract holds regardless of machine noise; the timing column still
     shows the linear per-row hydration underneath it."""
-    from wreath.orm.session import _count_key_map_builds
+    from wreath.orm.session import _count_key_map_builds, _row_plan
 
     spec, columns, session, make_row = _orm_hydrate_fixture()
     batch = [make_row(index) for index in range(rows)]
     with _count_key_map_builds() as counter:
         start = time.perf_counter()
-        offsets = _orm_pk_offsets(spec, columns)
+        plan = _row_plan(spec, columns)
         for row in batch:
-            session._hydrate(spec, columns, row, 0, offsets)
+            session._hydrate(spec, plan, row, 0)
         elapsed = time.perf_counter() - start
     return elapsed, {"key_map_builds": counter[0]}
-
-
-def _orm_pk_offsets(spec: Any, columns: Any) -> Any:
-    from wreath.orm.session import _pk_offsets
-
-    return _pk_offsets(spec, columns)
 
 
 _ORM_HYDRATE_FIXTURE: Any = None

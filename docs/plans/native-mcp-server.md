@@ -111,9 +111,9 @@ introspection". The stage-1 optimization is therefore Python: **serialize the
 `tools/list` payload to bytes once at startup and serve the cached bytes**, the
 way the router compiles at startup.
 
-Remember also that C here is not one implementation but two: every native module
-in this tree has a pure twin in `_pure/` that must agree (`WREATH_PURE=1`), and
-`tests/test_sse_frame_parity.py` is the standing example of what that costs.
+Wire-format code is authoritative C and is held to independent RFC vectors;
+`tests/test_sse_frame.py` is the standing example. A second implementation of
+our own would only prove that both copies agree.
 
 **What would change this answer, and how to find out.** Run
 `uv run wreath-request-trace` against an app with a registered tool and read

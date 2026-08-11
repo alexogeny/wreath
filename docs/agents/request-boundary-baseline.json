@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 129,
+        "c": 115,
         "python": 2
       },
       "pre_activation": {
@@ -21,7 +21,7 @@
           "python": 0
         },
         "handler": {
-          "c": 61,
+          "c": 47,
           "python": 1
         },
         "egress": {
@@ -30,13 +30,10 @@
         }
       },
       "c_calls": {
-        "dict.get": 39,
+        "dict.get": 38,
         "builtins.isinstance": 10,
         "builtins.getattr": 6,
         "builtins.len": 4,
-        "list.append": 4,
-        "TracedUser._orm_is_dirty": 4,
-        "TracedUser._orm_set_loaded": 4,
         "str.encode": 4,
         "bytes.decode": 3,
         "str.lower": 2,
@@ -45,7 +42,8 @@
         "lock.__enter__": 2,
         "KV.get": 2,
         "lock.__exit__": 2,
-        "builtins.id": 2,
+        "str.rpartition": 2,
+        "list.append": 2,
         "dict.clear": 2,
         "wreath._native._core.replace_response_header": 2,
         "TrustedNetworks.contains": 1,
@@ -63,10 +61,7 @@
         "str.partition": 1,
         "BitsetRouteTable.resolve_identity": 1,
         "wreath._native._core.orm_shape": 1,
-        "str.rpartition": 1,
-        "builtins.hasattr": 1,
-        "TracedUser._orm_new": 1,
-        "set.add": 1,
+        "wreath._native._core.orm_hydrate_records": 1,
         "dict.values": 1,
         "list.clear": 1,
         "set.clear": 1,

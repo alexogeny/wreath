@@ -35,7 +35,6 @@ from __future__ import annotations  # noqa: I001 -- Ruff misorders the local cod
 
 import asyncio
 import ipaddress
-import os
 import socket
 import ssl
 from collections.abc import Coroutine
@@ -75,15 +74,8 @@ from ._flight_markers import (
 # the outbound client throttle shares the exact same primitive.
 _TokenBucket: Any = _native_core.TokenBucket
 
-# Accelerated transport-facing stream; optional like every native piece. Resolved
-# through the `_native` loader rather than imported straight from the compiled
-# submodule, so it takes the same Any-typed, None-on-absence path as `_core`: a
-# direct import names a module that need not have been built.
-_NativeClientStream = (
-    None if _native_client is None else getattr(_native_client, "Http1ClientStream", None)
-)
-if os.environ.get("WREATH_CLIENT_NATIVE_STREAM") == "0":
-    _NativeClientStream = None
+# Transport-facing stream type, bound once from the compiled wheel.
+_ClientStream = _native_client.Http1ClientStream
 
 type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
 
@@ -108,11 +100,10 @@ async def _timed(pending: Any, deadline_seconds: float) -> bytes:
     """Await a stream read under a timeout, skipping wait_for entirely when
     the read already resolved.
 
-    The native client stream returns buffered reads synchronously as `bytes`
+    The client stream returns buffered reads synchronously as `bytes`
     (no future, no await) and only allocates a loop future when it must wait;
     a timeout that cannot fire is not worth wait_for's Timeout context, timer
-    handle, and cancellation bookkeeping per read. The asyncio-streams
-    fallback always passes coroutines through to wait_for unchanged.
+    handle, and cancellation bookkeeping per read.
     """
     if type(pending) is bytes:
         return pending
@@ -850,8 +841,8 @@ class ClientResponse:
             raise ClientError(f"HTTP response status {self.status}")
 
 
-class _NativeStreamWriter:
-    """StreamWriter surface over a transport + native client stream.
+class _TransportStreamWriter:
+    """StreamWriter surface over a transport and the client stream.
 
     The native stream protocol owns backpressure futures (`_drain`,
     `_wait_closed`); writes go straight to the transport, which on the metal
@@ -887,7 +878,7 @@ class _NativeStreamWriter:
 @dataclass(slots=True, eq=False)
 class _Connection:
     reader: Any  # asyncio.StreamReader or native Http1ClientStream
-    writer: Any  # asyncio.StreamWriter or _NativeStreamWriter
+    writer: _TransportStreamWriter
 
 
 _IDEMPOTENT = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PUT", "TRACE"})
@@ -1700,40 +1691,24 @@ class HTTPClient:
         timeout = self._timeout.connect + (
             self._timeout.tls if ssl_context is not None else 0
         )
-        if _NativeClientStream is not None:
-            # Native stream: C-owned receive buffer, StreamReader-shaped
-            # awaitable reads, and the stream-fusion C API -- on a metal loop
-            # wire bytes never cross into Python per read.
-            protocol = _NativeClientStream(limit=self._limits.read_high_water)
-            loop = asyncio.get_running_loop()
-            transport, _ = await asyncio.wait_for(
-                loop.create_connection(
-                    lambda: protocol,
-                    self._address(family, sockaddr),
-                    self._port,
-                    family=family,
-                    flags=0,
-                    ssl=ssl_context,
-                    server_hostname=(
-                        self._host if ssl_context is not None else None
-                    ),
-                ),
-                timeout,
-            )
-            return _Connection(protocol, _NativeStreamWriter(transport, protocol))
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
+        # The stream owns its receive buffer and exposes StreamReader-shaped
+        # awaitable reads. On the metal loop wire bytes never cross into Python
+        # per read.
+        protocol = _ClientStream(limit=self._limits.read_high_water)
+        loop = asyncio.get_running_loop()
+        transport, _ = await asyncio.wait_for(
+            loop.create_connection(
+                lambda: protocol,
                 self._address(family, sockaddr),
                 self._port,
                 family=family,
                 flags=0,
-                limit=self._limits.read_high_water,
                 ssl=ssl_context,
                 server_hostname=self._host if ssl_context is not None else None,
             ),
             timeout,
         )
-        return _Connection(reader, writer)
+        return _Connection(protocol, _TransportStreamWriter(transport, protocol))
 
     def _build_ssl_context(self) -> ssl.SSLContext:
         """The outbound context, native when the reactor can provide one.

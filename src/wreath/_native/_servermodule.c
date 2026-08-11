@@ -135,8 +135,8 @@ PyInit__server(void)
     /* Http1Protocol is the canonical name; HttpProtocol is retained as an
      * alias for backward compatibility. Http2Protocol and
      * NegotiatingHttpProtocol arrive in later checkpoints. */
-    /* `wreath.server` registers this with `collections.abc.Coroutine` so
-     * `create_task` will accept it; see `_StartedCoroutine` there. */
+    /* Its await/send/throw/close surface makes asyncio accept it as a
+     * coroutine without a Python adapter. */
     if (PyModule_AddObjectRef(module, "StartedCoroutine",
                               (PyObject *)&StartedCoroutineType) < 0) {
         Py_DECREF(module);

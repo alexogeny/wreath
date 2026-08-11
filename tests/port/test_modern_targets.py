@@ -456,6 +456,39 @@ def test_a_dependency_override_points_at_acting_as(tmp_path) -> None:
     assert "app.state" not in message
 
 
+def test_clearing_the_override_map_is_neither_an_identity_nor_an_adapter(
+    tmp_path,
+) -> None:
+    """`app.dependency_overrides = {}` overrides nothing; it resets everything.
+
+    The verdict was read off the *subscript key*, and this statement has none --
+    so it fell to the `else` and was reported as "this overrides an application
+    adapter", advice about a construct that is not on the line. The generic rule
+    was written for exactly this and was reachable from nowhere.
+    """
+    source = "app.dependency_overrides = {}\n"
+    message = _message(tmp_path, source, "test.dependency_override")
+    assert "no dependency_overrides in wreath" in message
+
+
+def test_a_reset_does_not_swallow_the_auth_override_after_it(tmp_path) -> None:
+    """One finding per *kind*, not one per module.
+
+    A suite that clears the map in its first check and swaps the auth dependency
+    in the next reported only the clear: the module's single slot had been taken
+    by the least informative of the two.
+    """
+    source = (
+        "app.dependency_overrides = {}\n"
+        "app.dependency_overrides[authenticate] = lambda: rider\n"
+        "app.dependency_overrides[weather] = lambda: forecast\n"
+    )
+    rules = _rule_ids(tmp_path, source)
+    assert rules.count("test.dependency_override") == 1
+    assert rules.count("test.dependency_override_auth") == 1
+    assert rules.count("test.dependency_override_adapter") == 1
+
+
 # --- libraries to keep -----------------------------------------------------------
 
 

@@ -35,7 +35,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .filters import Filter, FilterError, matches, parse
+from .filters import Filter, FilterError, parse, select
 from .resources import Shape
 
 __all__ = [
@@ -293,12 +293,12 @@ def _multi_valued(
             return
         # A filter that matches nothing removes nothing, deliberately: see the
         # module docstring. The state the client asked for already holds.
-        draft[key] = [item for item in existing if not matches(path.predicate, item)]
+        draft[key] = select(path.predicate, existing, invert=True)
         return
     if path.predicate is None:
         draft[key] = _elements(value)
         return
-    selected = [item for item in existing if matches(path.predicate, item)]
+    selected = select(path.predicate, existing)
     if not selected:
         raise PatchError(
             "noTarget",

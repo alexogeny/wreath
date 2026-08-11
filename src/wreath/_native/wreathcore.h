@@ -7,6 +7,7 @@
 #include "activate.h"
 #include "header_block.h"
 #include "record_api.h"
+#include "bytes_writer.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -54,13 +55,57 @@ int wreath_security_ready(void);
 PyObject *wreath_jose_b64url_decode(PyObject *self, PyObject *arg);
 PyObject *wreath_jose_parse(PyObject *self, PyObject *args);
 PyObject *wreath_jose_verify_hs(PyObject *self, PyObject *args);
+PyObject *wreath_jose_verify_rsa(PyObject *self, PyObject *args);
 PyObject *wreath_jose_validate_claims(PyObject *self, PyObject *args);
 /* Resolves _hashlib.hmac_digest once; returns -1 on failure. */
 int wreath_jose_ready(void);
 
+/* grpc.c: incremental five-byte gRPC message deframing. */
+int wreath_register_grpc(PyObject *module);
+
+/* graphql.c: bulk row projection and relationship layout. */
+PyObject *wreath_graphql_new_results(PyObject *self, PyObject *instances);
+PyObject *wreath_graphql_finish_results(PyObject *self, PyObject *builder);
+PyObject *wreath_graphql_project_plain(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_project_json(PyObject *self, PyObject *args);
+int wreath_graphql_write_projection(WreathBytesWriter *writer, PyObject *capsule,
+                                    int depth);
+PyObject *wreath_graphql_project_constant(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_project_attribute(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_project_values(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_flatten_values(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_flatten_relationship(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_restore_layout(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_restore_values(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_parse(PyObject *self, PyObject *args);
+PyObject *wreath_flight_project_cells(PyObject *self, PyObject *args);
+PyObject *wreath_flight_settle(PyObject *self, PyObject *args);
+PyObject *wreath_flight_evict_pending(PyObject *self, PyObject *args);
+int wreath_register_flight_project(PyObject *module);
+PyObject *wreath_signature_parse_dictionary(PyObject *self, PyObject *args);
+PyObject *wreath_signature_parse_string(PyObject *self, PyObject *args);
+PyObject *wreath_signature_base(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_add(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_negate(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_equal(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_scalar(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_double_scalar(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_recover_x(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_decode(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_encode(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_verify(PyObject *self, PyObject *args);
+PyObject *wreath_curve_ed_public_key(PyObject *self, PyObject *arg);
+PyObject *wreath_curve_ed_sign(PyObject *self, PyObject *args);
+PyObject *wreath_curve_p256_on_curve(PyObject *self, PyObject *args);
+PyObject *wreath_curve_p256_double_scalar(PyObject *self, PyObject *args);
+PyObject *wreath_curve_p256_scalar(PyObject *self, PyObject *args);
+PyObject *wreath_curve_p256_verify(PyObject *self, PyObject *args);
+PyObject *wreath_curve_p256_sign(PyObject *self, PyObject *args);
+
 /* observability.c */
 PyObject *wreath_request_id_valid(PyObject *self, PyObject *args);
 PyObject *wreath_format_server_timing(PyObject *self, PyObject *args);
+PyObject *wreath_prometheus_route_blocks(PyObject *self, PyObject *args);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
 int wreath_register_proxy(PyObject *module);
@@ -93,12 +138,31 @@ PyObject *wreath_run_validation_json(PyObject *self, PyObject *args);
 /* orm_shape.c */
 PyObject *wreath_orm_shape(PyObject *self, PyObject *args);
 PyObject *wreath_orm_shape_configure(PyObject *self, PyObject *args);
+PyObject *wreath_orm_relationship_keys(PyObject *self, PyObject *args);
+PyObject *wreath_orm_attach_relationships(PyObject *self, PyObject *args);
+PyObject *wreath_orm_hydrate_records(PyObject *self, PyObject *args);
+PyObject *wreath_orm_assemble_joins(PyObject *self, PyObject *args);
 PyObject *wreath_orm_collect_values(PyObject *self, PyObject *args);
 
 /* codecs.c */
 PyObject *wreath_percent_decode(PyObject *self, PyObject *args, PyObject *kwargs);
 PyObject *wreath_parse_qs(PyObject *self, PyObject *args);
 PyObject *wreath_parse_cookies(PyObject *self, PyObject *args);
+
+/* sql.c */
+PyObject *wreath_sql_renumber(PyObject *self, PyObject *args);
+
+/* dkim.c */
+PyObject *wreath_dkim_canonicalize_body(PyObject *self, PyObject *body);
+
+/* recording.c */
+PyObject *wreath_recording_event_cells(PyObject *self, PyObject *args);
+
+/* scim.c */
+PyObject *wreath_scim_parse(PyObject *self, PyObject *args);
+PyObject *wreath_scim_values_at(PyObject *self, PyObject *args);
+PyObject *wreath_scim_matches(PyObject *self, PyObject *args);
+PyObject *wreath_scim_filter(PyObject *self, PyObject *args);
 
 /* ws.c */
 PyObject *wreath_ws_mask(PyObject *self, PyObject *args);
@@ -138,29 +202,40 @@ void wreath_ws_unmask_raw(uint8_t *dst, const uint8_t *src, Py_ssize_t len,
 
 /* multipart.c */
 PyObject *wreath_multipart_parse(PyObject *self, PyObject *args, PyObject *kwds);
+int wreath_register_multipart(PyObject *module);
 
 /* json.c */
 PyObject *wreath_json_dumps(PyObject *self, PyObject *arg);
 PyObject *wreath_json_loads(PyObject *self, PyObject *arg);
 PyObject *wreath_json_configure(PyObject *self, PyObject *args);
+int wreath_json_write_string(WreathBytesWriter *writer, PyObject *value);
+int wreath_json_write_value(WreathBytesWriter *writer, PyObject *value, int depth);
 
 /* msgpack.c */
 PyObject *wreath_msgpack_dumps(PyObject *self, PyObject *arg);
 
-/* aesgcm.c: AES-128-GCM on AES-NI/PCLMULQDQ. `wreath_aesgcm_arms` returns an
- * empty tuple when the CPU or the build has neither, which is what
- * `wreath._webpush` reads to decide between this and its Python arm. */
+/* aesgcm.c: scalar AES-128-GCM, dispatched to AES-NI/PCLMULQDQ where
+ * available. Explicit scalar entries keep both native kernels testable. */
 PyObject *wreath_aesgcm_arms(PyObject *self, PyObject *ignored);
 PyObject *wreath_aes128gcm_encrypt(PyObject *self, PyObject *args);
 PyObject *wreath_aes128gcm_decrypt(PyObject *self, PyObject *args);
+PyObject *wreath_aes128gcm_encrypt_scalar(PyObject *self, PyObject *args);
+PyObject *wreath_aes128gcm_decrypt_scalar(PyObject *self, PyObject *args);
 
 /* geospatial.c */
 PyObject *wreath_geo_haversine(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
 
 /* protobuf.c */
-PyObject *wreath_protobuf_configure(PyObject *self, PyObject *arg);
+PyObject *wreath_protobuf_compile(PyObject *self, PyObject *args);
 PyObject *wreath_protobuf_encode(PyObject *self, PyObject *args);
 PyObject *wreath_protobuf_decode(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_encode_message(PyObject *self, PyObject *message);
+PyObject *wreath_protobuf_decode_message(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_otlp_from_json(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_encode_otlp_json(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_encode_otlp_metrics(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_encode_otlp_traces(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_encode_otlp_logs(PyObject *self, PyObject *args);
 
 /* sse.c */
 PyObject *wreath_sse_frame(PyObject *self, PyObject *args);

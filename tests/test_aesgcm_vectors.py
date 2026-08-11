@@ -1,10 +1,6 @@
-"""Both AES-GCM paths, against answers nobody in this repository wrote.
+"""AES-GCM against answers nobody in this repository wrote.
 
-`tests/test_aesgcm_parity.py` proves the hardware and Python arms agree.
-Agreement is not correctness: two implementations written from the same reading
-of NIST SP 800-38D can be wrong in the same place, and a differential test is
-exactly the wrong instrument for that. So this file checks both of them against
-two external references:
+This file checks every instruction path against two external references:
 
 * the **SP 800-38D known-answer vectors** (McGrew and Viega's test cases 1-4,
   the AES-128 ones with a 96-bit IV), transcribed as literals. A vector is worth
@@ -31,10 +27,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from wreath._native import _core
 from wreath._webpush import (
     TAG_BYTES,
-    _aes128gcm_decrypt_pure,
-    _aes128gcm_encrypt_pure,
     aes128gcm_encrypt,
 )
+
+_scalar_encrypt = _core._aes128gcm_encrypt_scalar
+_scalar_decrypt = _core._aes128gcm_decrypt_scalar
 
 ARMS: tuple[str, ...] = (
     () if _core is None else tuple(getattr(_core, "aesgcm_arms", tuple)())
@@ -81,18 +78,11 @@ SP800_38D_VECTORS = [
     ),
 ]
 
-#: The paths that exist on this machine. The pure one always does; the native
-#: one is a capability of the CPU, so its absence is a real skip rather than a
-#: parked test.
+#: The scalar kernel is addressed explicitly so an x86 test host cannot hide
+#: a non-x86 regression behind the hardware dispatcher.
 PATHS = [
-    pytest.param(_aes128gcm_encrypt_pure, id="pure"),
-    pytest.param(
-        None if not ARMS else _core.aes128gcm_encrypt,
-        id="native",
-        marks=pytest.mark.skipif(
-            not ARMS, reason="no AES-NI/PCLMULQDQ on this CPU or in this build"
-        ),
-    ),
+    pytest.param(_scalar_encrypt, id="scalar-c"),
+    pytest.param(_core.aes128gcm_encrypt, id="selected"),
 ]
 
 
@@ -132,7 +122,7 @@ def test_both_paths_decrypt_what_openssl_encrypted(size: int) -> None:
     key, nonce = os.urandom(16), os.urandom(12)
     plaintext, aad = os.urandom(size), os.urandom(11)
     message = AESGCM(key).encrypt(nonce, plaintext, aad or None)
-    assert _aes128gcm_decrypt_pure(key, nonce, message, aad) == plaintext
+    assert _scalar_decrypt(key, nonce, message, aad) == plaintext
     if ARMS:
         assert _core.aes128gcm_decrypt(key, nonce, message, aad) == plaintext
 

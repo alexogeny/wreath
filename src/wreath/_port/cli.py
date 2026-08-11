@@ -37,11 +37,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import TypedDict
 
-from .analyzer import analyze_all
+from .analyzer import analyze_all, detect_roots
 from .emit import port_tree
 from .ir import TRANSLATED, Finding, Report
 
@@ -260,6 +261,12 @@ def execute(namespace) -> int:
 
     # Emit mode (Phase 1): --output <dir> or --in-place. Otherwise report-only.
     if in_place or output:
+        # Before writing anything: say what this tree is. Emit runs no rules, so
+        # without this it will happily produce a complete "ported" copy of an
+        # application it has not translated a line of.
+        emit_detection = detect_roots(roots)
+        for warning in (emit_detection.warnings() if emit_detection else ()):
+            print(f"wreath port: {warning}", file=sys.stderr)
         total = 0
         touched = 0
         failed = []
@@ -305,6 +312,8 @@ def execute(namespace) -> int:
     else:
         print(report.to_markdown())
 
+    _warn_about_stack(report)
+
     # Nothing analyzed is the one case that is about the *run* rather than the
     # code: no Python file was read, so there is no report to have an opinion
     # about. Recognizing nothing across files that were read is different — that
@@ -313,4 +322,26 @@ def execute(namespace) -> int:
         return EXIT_NOT_RUN
     if report.counts()["unsupported"] or report.skipped:
         return EXIT_WORK_REMAINS
+    # A framework this tool does not translate is work remaining, not a clean
+    # run. Exiting 0 there is how a Django tree and an already-ported tree came
+    # to look identical to CI. Absence of evidence stays clean, though: a tree
+    # with no web framework at all may simply be the ported one, so only a
+    # *positively identified* foreign framework or monkeypatch flips this.
+    detection = report.detection
+    if detection is not None and (detection.foreign or detection.monkeypatched):
+        return EXIT_WORK_REMAINS
     return EXIT_OK
+
+
+def _warn_about_stack(report) -> None:
+    """Put the detection verdict on stderr, whatever the chosen rendering.
+
+    stderr so `--json` stays a clean pipe, and unconditionally so the `--by-rule`
+    and `--rule` views — which render findings only — cannot show a coverage
+    number without the sentence that qualifies it.
+    """
+    detection = getattr(report, "detection", None)
+    if detection is None:
+        return
+    for warning in detection.warnings():
+        print(f"wreath port: {warning}", file=sys.stderr)

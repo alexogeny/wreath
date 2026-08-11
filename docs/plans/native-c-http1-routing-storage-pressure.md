@@ -317,7 +317,7 @@ src/neo/_native/postgres/tape.c
 src/neo/_native/postgres/decode.c
 src/neo/_native/postgres/hydrate.c
 tests/postgres/test_batch_decode.py
-tests/orm/test_native_hydration.py
+tests/orm/test_model_hydration.py
 ```
 
 Add logical cursors:
@@ -563,7 +563,7 @@ tests/test_routing_modes.py
 tests/postgres/test_receive_buffer.py
 tests/postgres/test_batch_decode.py
 tests/postgres/test_codecs.py
-tests/orm/test_native_hydration.py
+tests/orm/test_model_hydration.py
 tests/test_native_parity.py
 tests/test_native_perf.py
 tests/test_request.py
@@ -584,7 +584,7 @@ uv run pytest tests/test_server_protocol.py tests/test_server_fuzz.py
 uv run pytest tests/test_server_websocket.py
 uv run pytest tests/test_routing_parity.py tests/test_routing_modes.py
 uv run pytest tests/postgres/test_receive_buffer.py tests/postgres/test_batch_decode.py tests/postgres/test_codecs.py
-uv run pytest tests/orm/test_native_hydration.py
+uv run pytest tests/orm/test_model_hydration.py
 uv run pytest tests/test_native_parity.py tests/test_native_perf.py
 uv run pytest tests/test_request.py tests/test_client_sessions_forms.py
 ```

@@ -405,7 +405,7 @@ rt_match(RouteTable *self, PyObject *args)
     if (name_count == 0) {
         return PyTuple_Pack(2, handler, Py_None);
     }
-    PyObject *params = PyDict_New();
+    PyObject *params = _PyDict_NewPresized(name_count);
     if (params == NULL) {
         return NULL;
     }

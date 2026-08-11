@@ -42,8 +42,8 @@ static const char HEX[] = "0123456789abcdef";
  * `setup.py` passes `-mavx2`, so the wheel and every local build ran the SWAR
  * fallback and the vector code was never compiled at all. */
 
-static int
-write_json_string(WreathBytesWriter *w, PyObject *str)
+int
+wreath_json_write_string(WreathBytesWriter *w, PyObject *str)
 {
     Py_ssize_t len;
     const char *utf8 = PyUnicode_AsUTF8AndSize(str, &len);
@@ -231,8 +231,8 @@ write_double(WreathBytesWriter *w, double value)
 static PyObject *temporal_types = NULL;  /* tuple of date/time/datetime/timedelta */
 static PyObject *format_iso = NULL;      /* wreath.temporal.format_iso */
 
-static int
-encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
+int
+wreath_json_write_value(WreathBytesWriter *w, PyObject *obj, int depth)
 {
     if (obj == Py_None) {
         return wreath_writer_write(w, "null", 4);
@@ -246,7 +246,7 @@ encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
 
     PyTypeObject *type = Py_TYPE(obj);
     if (type == &PyUnicode_Type || PyUnicode_Check(obj)) {
-        return write_json_string(w, obj);
+        return wreath_json_write_string(w, obj);
     }
     if (type == &PyLong_Type || PyLong_Check(obj)) {
         return write_long(w, obj);
@@ -277,8 +277,8 @@ encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
                 return -1;
             }
             first = 0;
-            if (write_json_string(w, key) < 0 || write_char(w, ':') < 0 ||
-                encode_value(w, value, depth + 1) < 0) {
+            if (wreath_json_write_string(w, key) < 0 || write_char(w, ':') < 0 ||
+                wreath_json_write_value(w, value, depth + 1) < 0) {
                 return -1;
             }
         }
@@ -293,7 +293,7 @@ encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
             if (i > 0 && write_char(w, ',') < 0) {
                 return -1;
             }
-            if (encode_value(w, PyList_GET_ITEM(obj, i), depth + 1) < 0) {
+            if (wreath_json_write_value(w, PyList_GET_ITEM(obj, i), depth + 1) < 0) {
                 return -1;
             }
         }
@@ -309,11 +309,15 @@ encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
             if (i > 0 && write_char(w, ',') < 0) {
                 return -1;
             }
-            if (encode_value(w, PyTuple_GET_ITEM(obj, i), depth + 1) < 0) {
+            if (wreath_json_write_value(w, PyTuple_GET_ITEM(obj, i), depth + 1) < 0) {
                 return -1;
             }
         }
         return write_char(w, ']');
+    }
+
+    if (PyCapsule_IsValid(obj, "wreath.graphql.projection")) {
+        return wreath_graphql_write_projection(w, obj, depth);
     }
 
     /* Temporal values are rendered inline rather than by rewriting the document.
@@ -349,7 +353,7 @@ encode_value(WreathBytesWriter *w, PyObject *obj, int depth)
                                 "format_iso must return str");
                 return -1;
             }
-            int rc = write_json_string(w, text);
+            int rc = wreath_json_write_string(w, text);
             Py_DECREF(text);
             return rc;
         }
@@ -386,7 +390,7 @@ wreath_json_dumps(PyObject *Py_UNUSED(self), PyObject *obj)
     if (wreath_writer_init(&w, 256) < 0) {
         return NULL;
     }
-    if (encode_value(&w, obj, 0) < 0) {
+    if (wreath_json_write_value(&w, obj, 0) < 0) {
         Py_XDECREF(w.bytes);
         return NULL;
     }

@@ -53,6 +53,8 @@ from __future__ import annotations
 from string.templatelib import Interpolation, Template
 from typing import Any
 
+from ._native import _core
+
 __all__ = ["Fragment", "Identifier", "Statement"]
 
 
@@ -238,32 +240,4 @@ def _check_plain(item: Interpolation, what: str) -> None:
         )
 
 
-def _renumber(text: str, offset: int) -> str:
-    """Shift every `$n` in `text` up by `offset`.
-
-    A nested `Statement` was compiled on its own, so its parameters start at
-    `$1`; spliced into an outer statement they have to continue the outer
-    numbering. A nested `Template` needs none of this because it is rendered
-    inline and never had its own numbering.
-    """
-    if offset == 0:
-        return text
-    out: list[str] = []
-    index = 0
-    length = len(text)
-    while index < length:
-        char = text[index]
-        if char != "$":
-            out.append(char)
-            index += 1
-            continue
-        digits = index + 1
-        while digits < length and text[digits].isdigit():
-            digits += 1
-        if digits == index + 1:
-            out.append(char)
-            index += 1
-            continue
-        out.append(f"${int(text[index + 1 : digits]) + offset}")
-        index = digits
-    return "".join(out)
+_renumber = _core.sql_renumber

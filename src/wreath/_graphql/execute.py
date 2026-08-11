@@ -34,11 +34,12 @@ from .._auth.requirements import PolicyRequirement
 from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_RESOLVER as _PH_RESOLVER
 from .._flight_markers import phase_marker as _phase_marker
+from .._native import _core
 from .ast import Document, Field, FragmentSpread, InlineFragment, Operation, Variable
 from .resolvers import ResolverInfo, order_fields
 from .schema import ObjectType, Schema, policy_resource
 
-__all__ = ["ExecutionError", "execute"]
+__all__ = ["ExecutionError", "execute", "execute_json"]
 
 #: Returned instead of a value when a field is denied under `on_denied="null"`.
 _DENIED = object()
@@ -195,8 +196,14 @@ class _Run:
         path: tuple[str, ...],
     ) -> list[dict[str, Any]]:
         """Project one level, batching every field and honouring `requires`."""
-        results: list[dict[str, Any]] = [{} for _ in instances]
         marker = _phase_marker.get(None)
+        if self._authorizer is None and marker is None:
+            projected = _core.graphql_project_plain(
+                instances, object_type.fields, fields
+            )
+            if projected is not None:
+                return projected
+        results = _core.graphql_new_results(instances)
         # Values a `requires` produced but the client did not select: computed
         # once, readable by dependents, and never emitted.
         hidden: dict[str, list[Any]] = {}
@@ -236,8 +243,7 @@ class _Run:
                 )
             field_path = (*path, field.name)
             if not await self._allowed(schema_field.policy, field_path):
-                for row in results:
-                    row[field.key] = None
+                _core.graphql_project_constant(results, field.key, None)
                 continue
             started = _monotonic_ns() if marker is not None else 0
 
@@ -252,8 +258,7 @@ class _Run:
                     values = await self._project_children(
                         values, schema_field, field, field_path
                     )
-                for index, value in enumerate(values):
-                    results[index][field.key] = value
+                _core.graphql_project_values(results, field.key, values)
                 if marker is not None:
                     marker(
                         _PH_RESOLVER, len(instances), _COV_PYTHON,
@@ -267,8 +272,9 @@ class _Run:
             else:
                 attribute = schema_field.attribute
             if attribute is not None:
-                for index, instance in enumerate(instances):
-                    results[index][field.key] = getattr(instance, attribute, None)
+                _core.graphql_project_attribute(
+                    results, instances, field.key, attribute
+                )
                 if marker is not None:
                     marker(_PH_RESOLVER, 0, _COV_PYTHON, _monotonic_ns() - started)
                 continue
@@ -297,27 +303,15 @@ class _Run:
             child_fields = _flatten(
                 field.selection_set.selections, self._document, target_type.name
             )
-            children: list[Any] = []
-            layout: list[Any] = []
-            for instance in instances:
-                value = instance._orm_get_relation(relationship.index)
-                if schema_field.is_list:
-                    value = list(value or ())
-                    layout.append((len(children), len(value)))
-                    children.extend(value)
-                else:
-                    layout.append(len(children) if value is not None else None)
-                    if value is not None:
-                        children.append(value)
+            children, layout = _core.graphql_flatten_relationship(
+                instances, relationship.index, schema_field.is_list
+            )
             projected = await self._project(children, target_type, child_fields, field_path)
-            for index, slot in enumerate(layout):
-                if schema_field.is_list:
-                    start, count = slot
-                    results[index][field.key] = projected[start : start + count]
-                else:
-                    results[index][field.key] = None if slot is None else projected[slot]
+            _core.graphql_restore_layout(
+                results, field.key, projected, layout, schema_field.is_list
+            )
 
-        return results
+        return _core.graphql_finish_results(results)
 
     async def _project_children(
         self, values: list[Any], schema_field: Any, field: Field,
@@ -330,26 +324,13 @@ class _Run:
         child_fields = _flatten(
             field.selection_set.selections, self._document, target_type.name
         )
-        flat: list[Any] = []
-        layout: list[Any] = []
-        for value in values:
-            if schema_field.resolver.is_list:
-                items = list(value or ())
-                layout.append((len(flat), len(items)))
-                flat.extend(items)
-            else:
-                layout.append(len(flat) if value is not None else None)
-                if value is not None:
-                    flat.append(value)
+        flat, layout = _core.graphql_flatten_values(
+            values, schema_field.resolver.is_list
+        )
         projected = await self._project(flat, target_type, child_fields, path)
-        out: list[Any] = []
-        for slot in layout:
-            if schema_field.resolver.is_list:
-                start, count = slot
-                out.append(projected[start : start + count])
-            else:
-                out.append(None if slot is None else projected[slot])
-        return out
+        return _core.graphql_restore_values(
+            projected, layout, schema_field.resolver.is_list
+        )
 
     async def _root_instances(self, root: Any, field: Field) -> list[Any]:
         """Fetch the objects one root field selects."""
@@ -399,7 +380,7 @@ class _Run:
         )
         return await self._session.fetch(query.where(column == coerced))
 
-    async def run(self, operation: Operation) -> dict[str, Any]:
+    async def run(self, operation: Operation, *, json_output: bool = False) -> dict[str, Any]:
         is_mutation = operation.operation == "mutation"
         lookup = self._schema.mutation if is_mutation else self._schema.root
         kind = "mutation" if is_mutation else "root"
@@ -427,6 +408,13 @@ class _Run:
             child_fields = _flatten(
                 field.selection_set.selections, self._document, object_type.name
             )
+            if json_output and self._authorizer is None and _phase_marker.get(None) is None:
+                projection = _core.graphql_project_json(
+                    instances, object_type.fields, child_fields, root.is_list
+                )
+                if projection is not None:
+                    data[field.key] = projection
+                    continue
             projected = await self._project(
                 instances, object_type, child_fields, (field.name,)
             )
@@ -467,3 +455,39 @@ async def execute(
         variables=supplied, authorizer=authorizer, request=request,
         max_page_size=max_page_size, on_denied=on_denied, action=action,
     ).run(operation)
+
+
+async def execute_json(
+    schema: Schema,
+    document: Document,
+    session: Any,
+    *,
+    operation_name: str | None = None,
+    variables: dict[str, Any] | None = None,
+    authorizer: Any = None,
+    request: Any = None,
+    max_page_size: int = 100,
+    on_denied: str = "error",
+    action: str = "read",
+) -> bytes:
+    """Run one operation and encode its GraphQL data envelope."""
+    from .._json import dumps
+
+    operation: Operation = document.operation(operation_name)
+    if operation.operation not in ("query", "mutation"):
+        raise ExecutionError("only query and mutation operations are served")
+
+    supplied = dict(variables or {})
+    for definition in operation.variables:
+        if definition.name not in supplied:
+            if definition.has_default:
+                supplied[definition.name] = definition.default
+            elif definition.non_null:
+                raise ExecutionError(f"variable ${definition.name} is required")
+
+    data = await _Run(
+        schema, document, session,
+        variables=supplied, authorizer=authorizer, request=request,
+        max_page_size=max_page_size, on_denied=on_denied, action=action,
+    ).run(operation, json_output=True)
+    return dumps({"data": data})

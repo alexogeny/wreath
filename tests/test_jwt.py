@@ -14,6 +14,7 @@ Ed25519.
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import time
@@ -81,9 +82,9 @@ def test_a_token_past_the_absolute_ceiling_is_refused_before_parsing() -> None:
         jwt_module._parse_compact("a" * (jwt_module._MAX_TOKEN_BYTES + 1))
 
 
-def _reason_for(value: object) -> int:
+def _reason_for(value: object, claim: str = "exp") -> int:
     return jwt_module._reason_valid(
-        {"exp": value},
+        {claim: value},
         now=int(time.time()),
         leeway=0,
         issuer=None,
@@ -92,28 +93,38 @@ def _reason_for(value: object) -> int:
     )
 
 
+@pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
 @pytest.mark.parametrize("value", ["soon", 1.5])
-def test_a_non_integer_exp_is_malformed(value: object) -> None:
-    """RFC 7519 §2: a NumericDate is a JSON *number* of seconds, and `exp` is
-    one. A string or a fraction is not a date this can compare against."""
-    assert _reason_for(value) == 7
+def test_a_non_integer_date_claim_is_malformed(value: object, claim: str) -> None:
+    """RFC 7519 §2: a NumericDate is a JSON *number* of seconds, and `exp`,
+    `nbf` and `iat` are all one. A string or a fraction is not a date this can
+    compare against, and all three go through the same helper."""
+    assert _reason_for(value, claim) == 7
 
 
-def test_a_boolean_exp_is_rejected_but_diagnosed_as_expired() -> None:
-    """**A finding, pinned rather than blessed.**
+@pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
+@pytest.mark.parametrize("value", [True, False])
+def test_a_boolean_date_claim_is_malformed_not_a_timestamp(
+    value: bool, claim: str
+) -> None:
+    """`bool` subclasses `int`, and a NumericDate is a *number*.
 
-    RFC 7519 §2 makes a NumericDate a JSON number, and `true` is not one -- so
-    the right answer is 7 (malformed), which is what the other non-integers
-    above get. `jose.c` instead reads `true` through as the integer 1 and
-    compares it, landing on 1 (expired).
+    RFC 7519 §2 makes `exp` a JSON number; `true` is not one. `PyLong_Check` is
+    true for a `bool`, so a claim validator that checks only that reads `true`
+    through as the integer 1 and `false` as 0 -- diagnosing "expired" for a
+    value that is malformed.
 
-    The token is refused either way, so this is not a live bypass, and the fix
-    is a change to claim validation in C rather than something to paper over
-    here. It is written down so the next person finds a decision rather than a
-    surprise -- and so that if the comparison ever changes shape, this test is
-    what notices that `"exp": true` has become a far-future date.
+    All three date claims go through one helper, so all three are covered here:
+    a guard on `exp` alone would leave `nbf` reading `true` as "not valid until
+    1970", which admits rather than refuses.
+
+    `false` is the one that shows why the diagnosis matters rather than just the
+    verdict: as the integer 0 it is an epoch timestamp, so it lands on expired
+    too, and both are refused today. But a claim validator that silently accepts
+    a boolean where a date belongs is one comparison change away from reading
+    `true` as a *far-future* date, and nothing would have noticed.
     """
-    assert _reason_for(True) == 1
+    assert _reason_for(value) == 7
 
 
 # ---- happy path -----------------------------------------------------------
@@ -525,15 +536,18 @@ def test_pss_refuses_structurally_invalid_signatures(rsa_keypair, alg, filler):
 def _pss_forgery(private, perturb) -> tuple[str, bytes]:
     """A PS256 token whose encoded message is `perturb(em, parts)`.
 
-    `_mgf1` is imported from the module under test rather than reimplemented. That is
-    deliberate and narrow: the mask is not what is being tested here -- the guards
-    reading the unmasked DB are -- and it is already proven by every passing
-    signature above. Reimplementing it would be testing a copy against itself.
+    This construction helper is independent of the native verifier. Its answer
+    is still checked by cryptography before any mutation is applied.
     """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    from wreath._auth.jwt import _mgf1
+    def mgf1(seed: bytes, length: int) -> bytes:
+        blocks = (length + 31) // 32
+        return b"".join(
+            hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+            for counter in range(blocks)
+        )[:length]
 
     numbers = private.public_key().public_numbers()
     n, e, d = numbers.n, numbers.e, private.private_numbers().d
@@ -554,7 +568,7 @@ def _pss_forgery(private, perturb) -> tuple[str, bytes]:
     em = pow(int.from_bytes(genuine, "big"), e, n).to_bytes(em_len, "big")
 
     h = em[em_len - h_len - 1 : em_len - 1]
-    db_mask = _mgf1(h, em_len - h_len - 1, "sha256")
+    db_mask = mgf1(h, em_len - h_len - 1)
     db = bytes(a ^ b for a, b in zip(em[: em_len - h_len - 1], db_mask, strict=True))
     db = bytes([db[0] & 0x7F]) + db[1:]
 

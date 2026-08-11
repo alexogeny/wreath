@@ -6,8 +6,8 @@ scoped to HTTP/1.1 in this first cut:
 
 - **Transport replay** feeds recorded inbound byte segments, their virtual
   arrival schedule, and connection-lifecycle events (peer half-close / reset)
-  into the *existing* native (or pure) HTTP/1 protocol driver over a fake
-  transport, and reproduces the owned parser / framing / response-encoding
+  into the HTTP/1 protocol driver over a fake transport, and reproduces the
+  owned parser / framing / response-encoding
   behavior. Explicitly variable response fields (`Date`) are normalized before
   comparison. See `replay_transport`.
 
@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, cast
 
-from ._native import extension as _extension
+from ._native import _server
 from ._recording_format import AttemptRecord, _build_id
 from ._replay_adapters import (
     AdapterFault,
@@ -668,7 +668,7 @@ async def replay_transport(
     disposition. An optional `FaultSchedule` perturbs the inbound stream
     along transport seams before it reaches the parser. For HTTP/2 use
     `replay_transport_h2`, which decodes the frames it wrote back.
-    A supplied native Flight `recorder` receives the same completion and phase
+    A supplied Flight `recorder` receives the same completion and phase
     cells as this protocol would emit under a live server.
     """
     if protocol_cls is None:
@@ -699,11 +699,9 @@ async def replay_transport_h2(
     DATA frames); byte-level faults apply exactly as for HTTP/1. The frames the
     server wrote back are decoded into per-stream owned responses so two builds
     can be compared without depending on HPACK byte layout or the `date` value.
-    A supplied native Flight `recorder` is passed to the protocol unchanged.
+    A supplied Flight `recorder` is passed to the protocol unchanged.
     """
     protocol_cls = _default_h2_protocol_cls()
-    if protocol_cls is None:
-        raise ReplayError("the native HTTP/2 protocol is not built")
     h2_config = config or ServerConfig(protocols=("h2",))
     response, terminal, write_count, segments_fed = await _drive_connection(
         app, recording, protocol_cls, h2_config, faults, recorder
@@ -720,8 +718,8 @@ async def replay_transport_h2(
     )
 
 
-def _default_h2_protocol_cls() -> type | None:
-    return getattr(_extension("_server"), "Http2Protocol", None)
+def _default_h2_protocol_cls() -> type:
+    return cast(type, _server.Http2Protocol)
 
 
 def _fire_timeout(protocol: Any) -> None:
@@ -759,24 +757,14 @@ def _deliver_close(protocol: Any, kind: int) -> None:
 
 
 def _default_protocol_cls() -> type:
-    """The native HTTP/1 protocol, or a named refusal when it is not built.
+    """The compiled HTTP/1 protocol.
 
     Replay drives the *shipped* driver: a recording replayed through anything
     else reports the timings and the framing decisions of that other thing, and
     the whole point of a recording is that it is what actually happened.
 
-    This used to be the *absence* of a gate rather than the presence of a
-    decision, which is how it went unnoticed. `tests/test_native_loader.py` pins
-    both halves; flip either and it says so.
     """
-    native = _extension("_server")
-    if native is None:
-        raise RuntimeError(
-            "wreath._native._server is not built, so there is no HTTP/1 driver "
-            "to replay a recording through. Build it with "
-            "`python setup.py build_ext --inplace`."
-        )
-    return cast(type, native.Http1Protocol)
+    return cast(type, _server.Http1Protocol)
 
 
 # --- fault injection ---------------------------------------------------------

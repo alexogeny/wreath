@@ -1,19 +1,13 @@
-"""Model declaration, object state, and storage selection.
+"""Model declaration, object state, and fixed model storage.
 
 `ModelMeta` compiles a class body into an ordered column layout once, at
 class creation. Registries later resolve relationships against that layout; no
 part of the request path inspects annotations or class bodies again.
 
-Every concrete model gets a *storage base* holding its values:
-
-* the native backend generates one C type per model whose `tp_basicsize` is
-  fixed, with unboxed inline cells for scalars and C descriptors for access;
-* `ListModel` is the portable one, over a list and integer bitmaps, used when
-  this build has no `_postgres`.
-
-Both implement the same storage protocol with the same observable behavior.
-Assignment validates through the column's `PgType.coerce` in both, so the
-type rules have one implementation rather than two that can drift.
+Every concrete model gets a generated C storage type whose `tp_basicsize` is
+fixed, with unboxed inline scalar cells, compact bitmaps, and C descriptors.
+Assignment validates through the column's `PgType.coerce`, so declaration and
+request validation share one type rule.
 """
 
 from __future__ import annotations
@@ -21,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any, ClassVar
 
-from .._native import extension as _extension
+from .._native import _postgres as _storage
 from .constraints import (
     CheckViolation,
     Narrow,
@@ -41,26 +35,12 @@ from .relations import Relationship
 from .schema import SchemaRef
 from .table import Facet, Index, Unique
 
-
-def _load_native() -> Any:
-    _postgres = _extension("_postgres")
-    if _postgres is None:
-        return None
-    if not hasattr(_postgres, "_compile_model_layout"):
-        # An older compiled extension without model storage; the reference
-        # implementation still gives correct behavior.
-        return None
-    # The C module cannot import these itself: wreath.orm imports wreath.postgres,
-    # which imports this extension, so the import would be circular.
-    _postgres._configure_model_errors(
-        UnloadedAttributeError, UnloadedRelationshipError, DeclarationError
-    )
-    if hasattr(_postgres, "_configure_hydrate_errors"):
-        _postgres._configure_hydrate_errors(MappingError)
-    return _postgres
-
-
-_native = _load_native()
+# The C module cannot import these itself: wreath.orm imports wreath.postgres,
+# which imports this extension, so the import would be circular.
+_storage._configure_model_errors(
+    UnloadedAttributeError, UnloadedRelationshipError, DeclarationError
+)
+_storage._configure_hydrate_errors(MappingError)
 
 # Object states. A model is exactly one of these at any time.
 TRANSIENT = 0  #: constructed, not present in an identity map
@@ -74,8 +54,6 @@ STATE_NAMES = {
     DELETED: "deleted",
     DETACHED: "detached",
 }
-
-_UNLOADED: Any = object()
 
 # Unquoted PostgreSQL identifiers fold to lower case, so an upper-case name in
 # a declaration would silently disagree with the catalog. Matched with
@@ -96,11 +74,11 @@ def validate_identifier(value: str, kind: str) -> str:
     return value
 
 
-#: ModelMeta derives from the native metatype when it is available, so every
+#: ModelMeta derives from the storage metatype, so every
 #: model class is allocated with room for its compiled layout. That is what lets
 #: a class be created by Python while its storage base is generated in C without
 #: a metaclass conflict.
-_MetaBase: Any = type if _native is None else _native._ModelType
+_MetaBase: Any = _storage._ModelType
 
 
 class ModelMeta(_MetaBase):
@@ -286,7 +264,6 @@ class ModelMeta(_MetaBase):
         namespace["__wreath_primary_key__"] = tuple(
             item for item in bound_columns if item.primary_key
         )
-        namespace["__wreath_storage_kind__"] = "pure" if _native is None else "native"
         cls = super().__new__(mcls, name, bases, namespace, **kwargs)
         for item in (*bound_columns, *bound_relations):
             item.owner = cls
@@ -327,13 +304,11 @@ def _storage_base(
 ) -> type:
     """The class that will hold this model's values.
 
-    Native storage is generated per model, so its `tp_basicsize` is fixed and
+    Storage is generated per model, so its `tp_basicsize` is fixed and
     scalar cells are unboxed. It is rooted at `object` rather than `Model`:
     rooting it at `Model` would make its metatype conflict with `ModelMeta`.
     """
-    if _native is None:
-        return ListModel
-    return _native._compile_model_layout(
+    return _storage._compile_model_layout(
         tuple(
             (item.pg_type.oid, item.primary_key, item.nullable) for item in columns
         ),
@@ -352,16 +327,13 @@ def rebind_storage_oid(model_type: type, index: int, oid: int) -> None:
 
     So startup writes the answer back, once per such column, after
     `wreath.orm.introspection.resolve_extension_types` has read it and before
-    any query runs. Only the recorded OID changes; the native side refuses a
+    any query runs. Only the recorded OID changes; storage refuses a
     rebind that would alter the cell's kind, because a rebind that moved a cell
     would corrupt every instance already allocated against the old layout.
 
-    A no-op on `_pgdriver`, which stores values as Python objects and reads
-    the OID from the column spec rather than from a layout.
+    The resolved OID changes metadata only; it never changes the cell shape.
     """
-    if _native is None or not hasattr(_native, "_rebind_field_oid"):
-        return
-    _native._rebind_field_oid(model_type, index, oid)
+    _storage._rebind_field_oid(model_type, index, oid)
 
 
 def _install_descriptors(
@@ -370,22 +342,17 @@ def _install_descriptors(
     columns: list[Column],
     relations: list[Relationship],
 ) -> None:
-    if _native is None:
-        # The Column and Relationship objects are themselves the descriptors.
-        for item in (*columns, *relations):
-            setattr(cls, item.python_name, item)
-        return
     for index, column in enumerate(columns):
         setattr(
             cls,
             column.python_name,
-            _native._make_column_descriptor(storage, index, column),
+            _storage._make_column_descriptor(storage, index, column),
         )
     for index, relation in enumerate(relations):
         setattr(
             cls,
             relation.python_name,
-            _native._make_relation_descriptor(storage, index, relation),
+            _storage._make_relation_descriptor(storage, index, relation),
         )
 
 
@@ -498,11 +465,8 @@ class Model(metaclass=ModelMeta):
 
     # -- storage protocol ---------------------------------------------------
     #
-    # The contract every storage base implements. ModelMeta prepends one to the
-    # bases of each concrete model, so these stubs are always overridden; they
-    # are declared here to state the protocol in one place. `ListModel` is the
-    # readable one, and the generated type must match its behaviour -- not its
-    # representation.
+    # ModelMeta prepends the generated storage base to every concrete model, so
+    # these declarations state the protocol while the C type supplies it.
 
     _orm_state: int
     _orm_owner: Any
@@ -572,158 +536,6 @@ class Model(metaclass=ModelMeta):
         return f"<{cls.__name__} {STATE_NAMES[self._orm_state]} {body}>"
 
 
-class ListModel(Model):
-    """Storage as a value list plus integer bitmaps.
-
-    The behaviour the generated per-model C layout must match. Used directly
-    when this build has no `_postgres` extension to generate one.
-    """
-
-    __slots__ = (
-        "__weakref__",
-        "_orm_dirty",
-        "_orm_loaded",
-        "_orm_null",
-        "_orm_owner",
-        "_orm_relations",
-        "_orm_state",
-        "_orm_values",
-    )
-
-    def __init__(self, **values: Any) -> None:
-        self._orm_values = [None] * len(type(self).__wreath_columns__)
-        self._orm_relations = [_UNLOADED] * len(type(self).__wreath_relationships__)
-        self._orm_loaded = 0
-        self._orm_null = 0
-        self._orm_dirty = 0
-        self._orm_state = TRANSIENT
-        self._orm_owner: Any = None
-        super().__init__(**values)
-
-    @classmethod
-    def _orm_new(cls) -> Any:
-        """Allocate an empty instance, bypassing `__init__`.
-
-        The hydrator fills cells directly; running the constructor would apply
-        defaults over values the database just returned.
-        """
-        instance = cls.__new__(cls)
-        instance._orm_values = [None] * len(cls.__wreath_columns__)
-        instance._orm_relations = [_UNLOADED] * len(cls.__wreath_relationships__)
-        instance._orm_loaded = 0
-        instance._orm_null = 0
-        instance._orm_dirty = 0
-        instance._orm_state = TRANSIENT
-        instance._orm_owner = None
-        return instance
-
-    def _orm_get(self, index: int) -> Any:
-        bit = 1 << index
-        if not self._orm_loaded & bit:
-            spec = type(self).__wreath_columns__[index]
-            raise UnloadedAttributeError(
-                f"{type(self).__name__}.{spec.python_name} was not loaded; "
-                "select it or reload the object"
-            )
-        if self._orm_null & bit:
-            return None
-        return self._orm_values[index]
-
-    def _orm_set(self, index: int, value: Any) -> None:
-        spec = type(self).__wreath_columns__[index]
-        if spec.primary_key and self._orm_state == PERSISTENT:
-            raise DeclarationError(
-                f"cannot change primary key {type(self).__name__}.{spec.python_name} "
-                "on a persistent object"
-            )
-        bit = 1 << index
-        if value is None:
-            if not spec.nullable:
-                raise ValueError(
-                    f"{type(self).__name__}.{spec.python_name} is not nullable"
-                )
-            changed = not (self._orm_loaded & bit) or not self._orm_null & bit
-            self._orm_values[index] = None
-            self._orm_null |= bit
-        else:
-            # The column's fused validator: its type, then its business rules.
-            # This is the same callable the body validator runs and the native
-            # descriptor calls, so assignment cannot accept what a request body
-            # would be refused for.
-            value = spec.validate(value)
-            changed = (
-                not (self._orm_loaded & bit)
-                or bool(self._orm_null & bit)
-                or not _same_value(self._orm_values[index], value)
-            )
-            self._orm_values[index] = value
-            self._orm_null &= ~bit
-        self._orm_loaded |= bit
-        if changed and self._orm_state in (PERSISTENT, DELETED):
-            self._orm_dirty |= bit
-
-    def _orm_set_loaded(self, index: int, value: Any) -> None:
-        """Record a value read from the database without marking it dirty."""
-        bit = 1 << index
-        if value is None:
-            self._orm_values[index] = None
-            self._orm_null |= bit
-        else:
-            self._orm_values[index] = value
-            self._orm_null &= ~bit
-        self._orm_loaded |= bit
-
-    def _orm_get_relation(self, index: int) -> Any:
-        value = self._orm_relations[index]
-        if value is _UNLOADED:
-            spec = type(self).__wreath_relationships__[index]
-            raise UnloadedRelationshipError(
-                f"{type(self).__name__}.{spec.python_name} was not loaded; "
-                f"include it in the query or call await session.load(obj, "
-                f"{type(self).__name__}.{spec.python_name})"
-            )
-        return value
-
-    def _orm_set_relation(self, index: int, value: Any) -> None:
-        self._orm_relations[index] = value
-
-    def _orm_relation_loaded(self, index: int) -> bool:
-        return self._orm_relations[index] is not _UNLOADED
-
-    def _orm_is_loaded(self, index: int) -> bool:
-        return bool(self._orm_loaded & (1 << index))
-
-    def _orm_is_dirty(self, index: int) -> bool:
-        return bool(self._orm_dirty & (1 << index))
-
-    def _orm_has_changes(self) -> bool:
-        return self._orm_dirty != 0
-
-    def _orm_clear_dirty(self) -> None:
-        self._orm_dirty = 0
-
-    def _orm_is_null(self, index: int) -> bool:
-        return bool(self._orm_null & (1 << index))
-
-
-def _same_value(current: Any, value: Any) -> bool:
-    # Compare by value, but never let a custom __eq__ result masquerade as a
-    # bool; identical objects short-circuit for the common case.
-    if current is value:
-        return True
-    try:
-        return bool(current == value)
-    except Exception:  # noqa: BLE001 -- a user's __eq__/__bool__ may raise anything
-        # Both operands are application values, so the failure set belongs to
-        # the caller and cannot be enumerated: a custom `__eq__` raises whatever
-        # it likes, and `__bool__` on the result does too (a numpy array raises
-        # ValueError, a Decimal NaN raises InvalidOperation). Not counted -- this
-        # runs per field per flush, and the answer is already the safe one:
-        # "not the same" marks the field dirty, so an unanswerable comparison
-        # costs a redundant write rather than a lost one.
-        return False
-
-
 __all__ = [
     "DELETED",
     "DETACHED",
@@ -732,7 +544,6 @@ __all__ = [
     "TRANSIENT",
     "Model",
     "ModelMeta",
-    "ListModel",
     "enforce_rules",
     "validate_identifier",
 ]

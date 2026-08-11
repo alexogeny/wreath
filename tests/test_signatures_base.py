@@ -76,6 +76,24 @@ def test_base_matches_the_rfc_byte_for_byte():
     assert signature_base(rfc_message(), RFC_COMPONENTS, RFC_PARAMS) == RFC_EXPECTED_BASE
 
 
+def test_native_base_serializes_every_supported_parameter_shape():
+    """The native writer agrees with the remaining structured-field helper."""
+    from wreath.signatures import _serialize_params
+
+    params = {
+        "flag": True,
+        "off": False,
+        "quoted": 'a "quote" and \\ slash',
+        "opaque": b"\x00\xff",
+        "count": -17,
+    }
+    base = signature_base(rfc_message(), (("@method", {}),), params)
+    expected = b'"@signature-params": ("@method")' + _serialize_params(
+        params
+    ).encode()
+    assert base.splitlines()[-1] == expected
+
+
 def test_rfc_signature_verifies_against_the_rfc_key():
     """The published signature over the published base with the published key.
 

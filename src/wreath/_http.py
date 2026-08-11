@@ -16,11 +16,17 @@ connection on garbage or reject a head that had merely not finished arriving.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 from ._native import _core
 
-_parse = _core.http_parse_request
+#: `http_parse_request(data)` -- the 5-tuple `RequestHead` wraps, or `None`
+#: while the head is incomplete. Annotated because a compiled function is `Any`,
+#: and `parse_request`'s own return type is only as good as this.
+_parse: Callable[[bytes], tuple[str, bytes, int, list[tuple[bytes, bytes]], int] | None] = (
+    _core.http_parse_request
+)
 
 
 class RequestHead(NamedTuple):

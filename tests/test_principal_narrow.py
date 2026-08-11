@@ -39,7 +39,7 @@ from wreath._auth.principal import (
     with_entitlements,
 )
 from wreath.auth import BearerTokenBackend, Identity
-from wreath.authorization import CedarAuthorizer, authorize
+from wreath.authorization import AuthorizationDecision, CedarAuthorizer, authorize
 from wreath.testing import TestClient
 
 # --- the algebra itself ------------------------------------------------------
@@ -525,3 +525,144 @@ def test_an_unlimited_side_never_widens_a_limited_one() -> None:
     limited = Limits(entitlements=frozenset({"api"}))
     assert limited.merge(Limits()).entitlements == frozenset({"api"})
     assert Limits().merge(limited).entitlements == frozenset({"api"})
+
+
+# --- the second pass, which only the denials had reached ---------------------
+#
+# Every delegated case above ends in a refusal, so `if delegated.allowed` and
+# the reason it carries were never read on the arm that matters. These call the
+# authorizer directly rather than through a client, because a `403` cannot
+# distinguish which of the two passes produced it.
+
+
+class _FakeState:
+    def get(self, key: str, default: Any = None) -> Any:
+        return default
+
+
+class _FakeRequest:
+    method = "GET"
+    path = "/x"
+
+    def __init__(self, identity: Any) -> None:
+        self.identity = identity
+        self.state = _FakeState()
+
+
+async def _authorize(engine: Any, identity: Any, action: str = "read") -> Any:
+    from wreath._auth.requirements import PolicyRequirement
+
+    return await CedarAuthorizer(engine=engine).authorize(
+        _FakeRequest(identity), PolicyRequirement(action=action, resource='Doc::"r"')
+    )
+
+
+_AGENT = Narrowing(actor="agent", scope=None, on_behalf_of="alice")
+
+
+@pytest.mark.asyncio
+async def test_an_anonymous_request_is_denied_without_consulting_the_engine() -> None:
+    """The documented second line, for a caller invoking the authorizer directly.
+
+    The route pipeline refuses an anonymous request before this, so nothing
+    reached the guard -- and without it the mappers run against `None` and the
+    denial arrives as an `AttributeError` from `_default_principal` instead.
+    """
+    asked = []
+
+    class RecordingEngine(CedarPolicies):
+        def is_authorized(self, **kwargs: Any) -> Any:
+            asked.append(kwargs)
+            return super().is_authorized(**kwargs)
+
+    decision = await _authorize(
+        RecordingEngine("permit(principal, action, resource);"), None
+    )
+    assert decision.allowed is False
+    assert decision.reason == "anonymous"
+    assert asked == [], "an anonymous request was put to the engine"
+
+
+@pytest.mark.asyncio
+async def test_a_delegate_the_second_pass_permits_is_allowed() -> None:
+    """The delegation happy path: pass two allows, and its answer is returned.
+
+    Every other delegated test ends in a refusal, which the fallthrough below
+    also produces -- so deleting `if delegated.allowed` denied every delegated
+    request that a delegation-aware policy set was written to permit, and no
+    test said so.
+    """
+    source = (
+        "permit(principal, action, resource);\n"
+        'permit(principal, action, resource)\nwhen { context.delegated };'
+    )
+    decision = await _authorize(CedarPolicies(source), Identity("alice", narrowing=_AGENT))
+    assert decision.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_refusal_carries_the_reason_the_engine_gave() -> None:
+    """`explicit forbid` and `no permit policy matched` are different diagnoses."""
+    forbidden = await _authorize(
+        CedarPolicies(
+            "permit(principal, action, resource);\n"
+            'forbid(principal, action, resource)\nwhen { context.delegated };'
+        ),
+        Identity("alice", narrowing=_AGENT),
+    )
+    assert forbidden.reason == "explicit forbid"
+
+    unmatched = await _authorize(
+        CedarPolicies("permit(principal, action, resource) unless { context.delegated };"),
+        Identity("alice", narrowing=_AGENT),
+    )
+    assert unmatched.reason == "no permit policy matched"
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_refusal_with_no_reason_gets_one() -> None:
+    """The fallback, which `CedarPolicies` can never reach.
+
+    Its normalizer supplies a reason for every shape it accepts, so only an
+    outside engine returning a bare `AuthorizationDecision(False)` gets here --
+    and a refusal whose reason is `None` is one an operator cannot act on. The
+    diagnostics assertion is the other half: pass two's value is rebuilt rather
+    than returned, so a trace naming the delegating principal's evaluation does
+    not travel out under the delegate's refusal.
+    """
+
+    class BareEngine:
+        def reads_context(self, key: str) -> bool:
+            return key == "delegated"
+
+        def is_authorized(self, **kwargs: Any) -> AuthorizationDecision:
+            if kwargs["context"]["delegated"]:
+                return AuthorizationDecision(False, None, ("policy-7",))
+            return AuthorizationDecision(True, "ok")
+
+    decision = await _authorize(BareEngine(), Identity("alice", narrowing=_AGENT))
+    assert decision.allowed is False
+    assert decision.reason == "denied to the delegated actor"
+    assert decision.diagnostics == ()
+
+
+@pytest.mark.asyncio
+async def test_a_forbid_that_names_only_the_actor_is_not_escaped() -> None:
+    """`context.actor` alone makes the delegation visible, exactly as `delegated` does.
+
+    Pass two is skipped when no policy can tell a delegate from a human. A
+    policy set that names the actor and never the flag can, so treating only
+    `delegated` as the signal lets an agent walk past a forbid written for it
+    with pass one's answer.
+    """
+    source = (
+        "permit(principal, action, resource);\n"
+        'forbid(principal, action, resource)\nwhen { context.actor == "agent" };'
+    )
+    assert "delegated" not in source
+
+    decision = await _authorize(CedarPolicies(source), Identity("alice", narrowing=_AGENT))
+    assert decision.allowed is False, "the agent escaped a forbid that named it"
+
+    direct = await _authorize(CedarPolicies(source), Identity("alice"))
+    assert direct.allowed is True, "the human the forbid does not name was caught by it"

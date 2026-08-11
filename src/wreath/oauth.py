@@ -33,15 +33,9 @@ So: **the moment anything outside this deployment verifies your tokens, pass
 `signer=Es256Signer.generate()`**, keep the private scalar in configuration, and
 `jwks()` becomes a real key set.
 
-The cost, measured here over three warm runs rather than assumed:
-
-    HS256   11.5-13.2 us per token
-    ES256    2.91-3.01 ms per token
-
-That is ~230x, and it is the right trade at a login and the wrong one on a path
-minting thousands of tokens a second -- P-256 scalar multiplication is pure
-Python here, because it is `_webpush`'s and that path signs one VAPID token per
-push batch. A deployment that needs both public verifiability and volume should
+The asymmetric signer does substantially more arithmetic than HMAC. It is the
+right trade at a login and the wrong operation to repeat on every application
+request. A deployment that needs both public verifiability and volume should
 issue long-lived tokens and refresh them rarely, which is what the shape is for
 anyway.
 
@@ -645,20 +639,11 @@ class AuthorizationServer:
         `wreath.metrics.collect` gathers by asking anything that offers
         `counters()`, so these reach a dashboard with no second registration.
 
-        They exist because ES256 signing is CPU-bound pure Python and therefore
-        holds the loop. Measured here, the median request is unaffected at every
-        rate and the request *behind a signature* waits the full signature:
-
-            ES256 at  10/s   p50 lag 0.01 ms   p99 0.89 ms
-            ES256 at  50/s   p50 lag 0.01 ms   p99 3.00 ms
-            ES256 at 200/s   p50 lag 0.01 ms   p99 3.15 ms
-            HS256 at 200/s   p50 lag 0.01 ms   p99 0.01 ms
-
-        So it is a **tail** problem, not a throughput one, until roughly 330
-        signatures a second saturates a core. `signing_seconds` divided by wall
-        time is the fraction of a core this is spending, which is the number to
-        alert on -- a threshold baked in here would be one guess applied to every
-        deployment's latency budget.
+        ES256 signing is synchronous CPU work, so the request issuing a token
+        waits for it even when unrelated requests do not. `signing_seconds`
+        divided by wall time is the fraction of a core this issuer is spending,
+        which is the number to alert on; a threshold baked in here would be one
+        guess applied to every deployment's latency budget.
         """
         return {
             "tokens_issued": float(self._issued),

@@ -478,3 +478,68 @@ def test_a_limit_that_admits_nobody_is_refused() -> None:
     for limit in (0, -1):
         with pytest.raises(ValueError, match="limit must be positive"):
             RateLimitPolicy(limit=limit, window=60.0)
+
+# --- three more controls `wreath mutant` walked past -------------------------
+#
+# Each was covered by a test that could not tell the clause was there: the
+# exemption test only ever passed a predicate that says *yes*, and the keying
+# test only ever passed a request with nobody to identify. A control needs the
+# case where it answers the other way.
+
+
+def test_an_exemption_that_says_no_still_limits() -> None:
+    """`exempt is not None and exempt(request)` -- both halves.
+
+    Dropping the *call* leaves "an exempt callable was configured", which
+    exempts every request the moment anyone passes one. The existing test hands
+    it `lambda request: True`, so it bypasses either way and cannot see the
+    difference. This one says no.
+    """
+    from wreath.policy import RateLimitPolicy
+    from wreath.request import Request
+
+    policy = RateLimitPolicy(limit=1, window=60.0, exempt=lambda request: False)
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+    # Not `None`: `None` is the "do not limit" answer, so a predicate that
+    # declined the exemption must produce a real key. The default key is the
+    # client address, unprefixed.
+    assert policy._identify(request) == "203.0.113.7"
+
+
+def test_principal_key_names_the_caller_rather_than_the_address() -> None:
+    """An identified caller keys by principal; only an anonymous one falls to IP.
+
+    If the identity branch never fires, every authenticated caller behind one
+    address shares a bucket -- so a single tenant on a corporate NAT throttles
+    its colleagues, and the limit stops being per-account at all.
+    """
+    from wreath.policy import principal_key
+    from wreath.request import Request
+
+    class _Identity:
+        type = "user"
+        id = "alice"
+
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+    # Through the private slot the `identity` stage hook writes: the property is
+    # read-only on purpose, and going around it here is the point -- the test
+    # needs an identified request without standing up authentication.
+    request._identity = _Identity()  # type: ignore[assignment]
+    assert principal_key(request) == "user:alice"
+    # And the fallback still answers for an anonymous one, so this pins the
+    # branch rather than replacing it.
+    assert principal_key(Request(_scope(("203.0.113.7", 5000)), _receive_body)) == (
+        "ip:203.0.113.7"
+    )
+
+
+def test_clearing_a_store_that_was_never_configured_is_a_no_op() -> None:
+    """`clear()` is documented as safe as a reset between tests.
+
+    A store built and never handed to an application has no bucket, and the
+    guard is what keeps `clear()` from raising `AttributeError` on `None` in
+    exactly the fixture teardown it exists for.
+    """
+    from wreath.policy import MemoryRateLimitStore
+
+    MemoryRateLimitStore().clear()  # must not raise

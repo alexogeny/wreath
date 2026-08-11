@@ -72,20 +72,49 @@ def test_a_type_with_no_wire_mapping_is_refused_naming_the_field() -> None:
     assert "when" in str(caught.value)
 
 
-def test_a_kind_that_does_not_exist_is_refused() -> None:
-    with pytest.raises(ProtobufDeclarationError):
+def test_a_kind_that_does_not_exist_is_refused_as_unknown_not_as_incompatible() -> None:
+    """Both refusals are `ProtobufDeclarationError`, so the type proves nothing.
+
+    A misspelled kind falls through to the compatibility check as `None`, which
+    is not in any compatible set, so it refuses either way -- and the message
+    the author reads would name a compatibility problem their annotation does
+    not have, with no list of the kinds they could have meant.
+    """
+    with pytest.raises(ProtobufDeclarationError) as caught:
 
         @message
         class BadKind:
             n: int = field(1, kind="int24")
 
+    text = str(caught.value)
+    assert "unknown kind" in text
+    assert "sint32" in text, "the refusal must name the kinds that do exist"
 
-def test_a_kind_incompatible_with_the_annotation_is_refused() -> None:
-    with pytest.raises(ProtobufDeclarationError):
+
+def test_a_kind_incompatible_with_the_annotation_says_so() -> None:
+    with pytest.raises(ProtobufDeclarationError) as caught:
 
         @message
         class Mismatch:
             text: str = field(1, kind="sint32")
+
+    assert "not compatible" in str(caught.value)
+
+
+def test_a_kind_on_a_type_with_no_compatible_kinds_at_all_is_refused() -> None:
+    """`_COMPATIBLE` has no entry for the annotation, rather than an entry
+    without this kind in it. The distinction is invisible in the outcome and
+    total in the mechanism: without the `is None` arm, membership is tested
+    against `None` and the author gets `TypeError: argument of type 'NoneType'
+    is not iterable` instead of a refusal naming their field.
+    """
+    with pytest.raises(ProtobufDeclarationError) as caught:
+
+        @message
+        class Unmappable:
+            n: complex = field(1, kind="double")
+
+    assert "not compatible" in str(caught.value)
 
 
 class NoZero(enum.IntEnum):

@@ -577,9 +577,7 @@ def test_lifespan_runs() -> None:
 def test_protocol_selection_survives_a_fresh_interpreter() -> None:
     """In a subprocess, so it is the real import path rather than this session's.
 
-    `_select_protocol` runs at import of `wreath.server`, which is where a
-    missing extension has to be found -- a test in this process would only
-    re-read a module `conftest` already imported successfully.
+    This proves a fresh process imports the protocol from the compiled wheel.
     """
     code = (
         "from wreath.server import _select_protocol;"
@@ -643,8 +641,7 @@ def _free_port() -> int:  # pragma: no cover - helper
 # --- Step 1: protocol config and module-boundary freeze ---------------------
 
 def test_http_protocol_alias_remains_http1() -> None:
-    # The selected implementation (native when built, else pure) must expose
-    # HttpProtocol as an alias of Http1Protocol.
+    # HttpProtocol remains an alias of Http1Protocol.
     selected = _select_protocol()
     module = sys.modules[selected.__module__]
     assert hasattr(module, "Http1Protocol")
@@ -986,14 +983,7 @@ def test_prearm_rejects_a_negative_count() -> None:
 
 
 def test_protocol_class_is_resolved_once_not_per_connection() -> None:
-    """`_protocol_factory` runs per accepted connection, so it must not re-derive.
-
-    `_select_tcp_protocol` reads `os.environ` (two KeyErrors raised and caught
-    inside `os._Environ.get`) and calls `importlib.import_module`; it measured
-    at 1.82us to recompute a constant, paid on every connection. Resolution is
-    still lazy so a `Server` built by hand with an unservable protocol set fails
-    where it always did -- what is pinned here is that it happens once.
-    """
+    """Construction selects once; accepted connections only instantiate it."""
     import asyncio
 
     from wreath.server import Server
@@ -1003,9 +993,6 @@ def test_protocol_class_is_resolved_once_not_per_connection() -> None:
 
     loop = asyncio.new_event_loop()
     try:
-        server = Server(app, ServerConfig(lifespan="off"), loop)
-        assert server._protocol_cls is None, "resolution must stay lazy"
-
         calls = 0
         real = wreath.server._select_tcp_protocol
 
@@ -1016,6 +1003,7 @@ def test_protocol_class_is_resolved_once_not_per_connection() -> None:
 
         wreath.server._select_tcp_protocol = counting
         try:
+            server = Server(app, ServerConfig(lifespan="off"), loop)
             first = server._protocol_factory()
             second = server._protocol_factory()
         finally:

@@ -67,6 +67,7 @@ from typing import Any
 from . import protobuf as _protobuf
 from ._auth import requirements as _requirements
 from ._auth.decorators import authorize as _authorize
+from ._native import _core
 from .compression import gzip_compress as _gzip_compress
 from .compression import gzip_decompress as _gzip_decompress
 from .exceptions import HTTPException
@@ -287,45 +288,20 @@ class Unframer:
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         encoding: str = "identity",
     ) -> None:
-        self._buffer = bytearray()
         self._max = max_message_bytes
         self._encoding = encoding
+        self._native = _core.GrpcUnframer(
+            max_message_bytes,
+            encoding,
+            self._decode,
+            GrpcError,
+            Status.RESOURCE_EXHAUSTED,
+            Status.INTERNAL,
+        )
 
     def feed(self, chunk: bytes) -> list[bytes]:
         """Add bytes; return every message that completed."""
-        self._buffer.extend(chunk)
-        out: list[bytes] = []
-        while True:
-            if len(self._buffer) < _PREFIX_BYTES:
-                return out
-            compressed = self._buffer[0]
-            length = int.from_bytes(self._buffer[1:5], "big")
-            if length > self._max:
-                raise GrpcError(
-                    Status.RESOURCE_EXHAUSTED,
-                    f"message of {length} bytes exceeds the {self._max}-byte limit",
-                )
-            if compressed not in (0, 1):
-                raise GrpcError(
-                    Status.INTERNAL,
-                    f"compressed flag must be 0 or 1, not {compressed}",
-                )
-            if compressed and self._encoding == "identity":
-                # The specification calls this "Compressed-Flag set but no
-                # grpc-encoding", and it is INTERNAL rather than UNIMPLEMENTED:
-                # the peer is not asking for something unsupported, it is
-                # contradicting its own header. Named separately from the
-                # header-level refusal so a log can tell the two apart.
-                raise GrpcError(
-                    Status.INTERNAL,
-                    "a message is flagged compressed but this call declared "
-                    "grpc-encoding: identity",
-                )
-            if len(self._buffer) < _PREFIX_BYTES + length:
-                return out
-            payload = bytes(self._buffer[_PREFIX_BYTES : _PREFIX_BYTES + length])
-            del self._buffer[: _PREFIX_BYTES + length]
-            out.append(self._decode(payload) if compressed else payload)
+        return self._native.feed(chunk)
 
     def _decode(self, payload: bytes) -> bytes:
         """Decompress one message, bounded by the same ceiling the prefix has."""
@@ -342,11 +318,7 @@ class Unframer:
 
     def finish(self) -> None:
         """Refuse a trailing partial message rather than dropping it."""
-        if self._buffer:
-            raise GrpcError(
-                Status.INTERNAL,
-                f"stream ended mid-message with {len(self._buffer)} bytes buffered",
-            )
+        self._native.finish()
 
 
 # --- deadlines --------------------------------------------------------------

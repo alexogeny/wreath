@@ -200,6 +200,39 @@ def test_every_finding_needing_a_person_reaches_the_ported_file(tmp_path) -> Non
         assert f"[{rule_id}])" in emitted, rule_id
 
 
+def test_a_foreign_key_with_no_annotation_is_rewritten_like_any_other(tmp_path) -> None:
+    """`ranch = ormar.ForeignKey(Ranch)` is the same key as `ranch: Ranch = ...`.
+
+    The annotated spelling was routed to the foreign-key rewrite and the plain
+    one was not, so it fell through to the column path, asked the column type
+    table for "ForeignKey", got nothing, and wrote a `[translated]` note saying
+    wreath has no type that stores it -- above a line left exactly as it was.
+    Both halves are wrong: wreath spells this key perfectly well, and a verdict
+    of translated on an untouched line is the one thing the tag may not mean.
+    """
+    source = (
+        "import ormar\n\nbase = None\n\n\n"
+        "class Ranch(ormar.Model):\n"
+        '    ormar_config = base.copy(tablename="ranches")\n'
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "\n\n"
+        "class Llama(ormar.Model):\n"
+        '    ormar_config = base.copy(tablename="llamas")\n'
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "    ranch = ormar.ForeignKey(Ranch, index=True)\n"
+    )
+    path = tmp_path / "m.py"
+    path.write_text(source, encoding="utf-8")
+    assert "orm.fk_typed" in _rules(port.analyze(path).findings)
+
+    emitted = port.emit_module(source)
+
+    assert "ranch_id: Mapped[int] = column(Int64, references=Ranch.id, index=True)" in emitted
+    assert 'ranch = relationship(Ranch, load="raise")' in emitted
+    assert "ormar.ForeignKey" not in emitted
+    assert "no column type matching" not in emitted
+
+
 def test_a_boto3_service_is_billed_once_per_module_and_split_by_service(tmp_path) -> None:
     """The emitter used to say "keep the library" for S3, per call, both wrong."""
     source = (

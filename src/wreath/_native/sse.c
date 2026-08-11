@@ -1,29 +1,21 @@
 /* Server-Sent Event framing.
  *
- * Held to the `text/event-stream` grammar by tests/test_sse_frame_parity.py.
- * `_sse_frame_fields` in src/wreath/response.py is the readable statement of the
- * same framing.
- *
- * Why this is in C at all: the Python version normalises line endings with
- * `value.replace("\r\n", "\n").replace("\r", "\n").split("\n")`, which copies
- * the whole payload twice and then allocates a list of substrings, before an
- * f-string per line, a join, and an encode -- about five passes over the data
- * and O(lines) allocations. That is structural rather than constant-factor, and
- * it is paid once per event *per subscriber*, so a fan-out stream multiplies it.
- * This walks the payload once, straight into the output buffer.
+ * Held to the `text/event-stream` grammar by direct wire vectors in
+ * tests/test_sse_frame.py. This walks the payload once, straight into the
+ * output buffer, because framing is paid once per event per subscriber.
  *
  * The caller has already resolved the event's shape and coerced its fields to
  * str; only the framing lives here. `name` and `ident` are refused rather than
- * normalised when they contain CR or LF, matching `_sse_single_line`: a newline
- * there would let caller text append arbitrary frames to the stream.
+ * normalised when they contain CR or LF: a newline there would let caller text
+ * append arbitrary frames to the stream.
  */
 #include "wreathcore.h"
 #include "bytes_writer.h"
 
 /* Emit `text` as one `field: segment` line per line of text, normalising CRLF
  * and bare CR to LF on the fly. An empty segment emits `field:` with no space,
- * matching the Python encoder. Each line is terminated with LF here; the caller
- * appends the final blank line.
+ * as required by the wire format. Each line is terminated with LF here; the
+ * caller appends the final blank line.
  *
  * CR and LF cannot occur inside a multi-byte UTF-8 sequence, so scanning bytes
  * is safe on UTF-8 input. */
@@ -61,7 +53,7 @@ sse_emit_lines(WreathBytesWriter *w, const char *field, Py_ssize_t field_len,
         if (at_end) {
             return 0;
         }
-        /* CRLF counts as one break, matching the replace() chain. */
+        /* CRLF counts as one line break. */
         if (c == '\r' && i + 1 < text_len && text[i + 1] == '\n') {
             i++;
         }

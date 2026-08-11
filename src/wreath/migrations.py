@@ -15,7 +15,7 @@ from ._migrations.scan import (
     transitional_read,
     waive_transitional,
 )
-from ._native import extension as _extension
+from ._native import _postgres
 from .orm.fields import _IMPLICIT_OPCLASS_METHODS
 from .orm.types import BIT_OID, ExtensionType
 
@@ -751,17 +751,6 @@ class MigrationBaseline:
     object_count: int
 
 
-def _metal() -> Any:
-    # The planner, the diff and the SQL emitter are C. `_postgres` is optional --
-    # a build for an application that talks to no database does not need it --
-    # so its absence is refused here by name rather than surfacing somewhere
-    # inside a migration.
-    module = _extension("_postgres")
-    if module is None:
-        raise RuntimeError("wreath.migrations requires the Wreath-metal PostgreSQL extension")
-    return module
-
-
 def _resolve_managed_snapshot(
     snapshot: object,
     *,
@@ -775,7 +764,7 @@ def _resolve_managed_snapshot(
     benchmark fixtures. Applications use the migration runner rather than build
     snapshots themselves.
     """
-    counts = _metal()._migration_resolve_managed(
+    counts = _postgres._migration_resolve_managed(
         snapshot,
         target_migration,
         target_checksum,
@@ -977,7 +966,7 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
 def _compile_registry_image(registry: Any) -> bytes:
     """Compile immutable ORM intent into one native desired image."""
     descriptor = _registry_descriptor(registry)
-    module = _metal()
+    module = _postgres
     return module._migration_compile_desired(descriptor)
 
 
@@ -987,7 +976,7 @@ async def _decode_catalog_snapshot(
     args: tuple[object, ...] = (),
 ) -> NativeCatalogSnapshot:
     """Decode catalog rows directly without allocating Python records."""
-    module = _metal()
+    module = _postgres
     builder = module._migration_catalog_builder()
     await connection._fetch_into(sql, args, builder)
     descriptor = builder.descriptor()
@@ -1000,7 +989,7 @@ async def _decode_catalog_image(
     args: tuple[object, ...] = (),
 ) -> bytes:
     """Run one catalog query directly into a native image destination."""
-    module = _metal()
+    module = _postgres
     builder = module._migration_catalog_builder()
     await connection._fetch_into(sql, args, builder)
     return builder.finish()
@@ -1012,18 +1001,18 @@ async def _read_single_catalog(connection: Any, schema: str) -> bytes:
 
 
 def _fingerprint_image(image: bytes) -> bytes:
-    module = _metal()
+    module = _postgres
     return module._migration_image_fingerprint(image)
 
 
 def _plan_descriptors(desired: bytes, actual: bytes) -> NativeMigrationPlan:
-    module = _metal()
+    module = _postgres
     tape = module._migration_plan_descriptors(desired, actual)
     return NativeMigrationPlan(int.from_bytes(tape[8:12], "little"), tape)
 
 
 def _render_sql_plan(plan: NativeMigrationPlan) -> NativeMigrationSql:
-    module = _metal()
+    module = _postgres
     tape = module._migration_render_sql(plan.tape)
     if len(tape) < 12 or tape[:4] != b"WMS1" or int.from_bytes(tape[4:8], "little") != 1:
         raise RuntimeError("Wreath-metal returned an invalid SQL tape")
@@ -1048,7 +1037,7 @@ def _render_sql_plan(plan: NativeMigrationPlan) -> NativeMigrationSql:
 
 def _diff_packed_images(desired: object, actual: object) -> NativeMigrationDiff:
     """Diff two canonical native schema images without materializing operations."""
-    module = _metal()
+    module = _postgres
     tape = module._migration_diff_images(desired, actual)
     operation_count = int.from_bytes(tape[8:12], "little")
     return NativeMigrationDiff(operation_count, tape)
@@ -1103,7 +1092,7 @@ async def generate_single_plan(
     """
     await _resolve_default_opclasses(registry, connection)
     desired_descriptor = _registry_descriptor(registry, fleet=fleet)
-    desired = _metal()._migration_compile_desired(desired_descriptor)
+    desired = _postgres._migration_compile_desired(desired_descriptor)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
         raise ValueError("generate_single_plan requires exactly one resolved physical schema")
@@ -1116,7 +1105,7 @@ async def generate_single_plan(
     plan = _plan_descriptors(desired_descriptor, actual.descriptor)
     if plan.operation_count != diff.operation_count:
         raise RuntimeError("native named plan and image diff disagree")
-    derived_operations = _metal()._migration_operations_from_plan(plan.tape)
+    derived_operations = _postgres._migration_operations_from_plan(plan.tape)
     if derived_operations != diff.tape:
         raise RuntimeError("native named plan describes different operations than the image diff")
     sql = _render_sql_plan(plan)
@@ -1236,7 +1225,7 @@ async def generate_single_baseline(
 
 async def connect_migration(dsn: str) -> Any:
     """Open a dedicated Wreath-metal migration connection."""
-    return await _metal().connect(dsn)
+    return await _postgres.connect(dsn)
 
 
 def _qualified_history_table() -> str:
@@ -1415,7 +1404,7 @@ async def _apply_artifact_to_schema(
     would otherwise reject every tenant that already succeeded -- turning a
     resumed run into a wall of errors that all mean "this one is fine".
     """
-    module = _metal()
+    module = _postgres
     ddl_block = module._migration_build_ddl_block(artifact.sql_tape, allow_destructive)
     history = _qualified_history_table()
     zero_checksum = bytes(32)
@@ -1893,7 +1882,7 @@ async def _recoded_column_hazards(
 
 def _downgrade_hazards(registry: Any, reverse_plan: bytes) -> tuple[DowngradeHazard, ...]:
     """Scan the reverse plan against live ORM intent for stranded references."""
-    module = _metal()
+    module = _postgres
     desired_image = _compile_registry_image(registry)
     raw = module._migration_downgrade_hazards(reverse_plan, desired_image)
     return tuple(
@@ -1936,7 +1925,7 @@ async def revert_single_artifact(
     if len(schemas) != 1:
         raise ValueError("revert_single_artifact requires exactly one resolved physical schema")
     schema = next(iter(schemas))
-    module = _metal()
+    module = _postgres
     reverse_plan = module._migration_reverse_plan(artifact.named_plan)
     reverse_sql = module._migration_render_sql(reverse_plan)
     if not force:
@@ -2030,7 +2019,7 @@ def _build_native_artifact(
     sql_tape: bytes,
 ) -> NativeMigrationArtifact:
     """Build and immediately verify one deterministic artifact in metal."""
-    module = _metal()
+    module = _postgres
     data = module._migration_build_artifact(
         migration_id,
         parent_checksum,
@@ -2054,7 +2043,7 @@ def _verify_native_chain(
         if len(artifact) > 0xFFFFFFFF:
             raise ValueError("migration artifact exceeds WMC1 length limit")
         payload += struct.pack("<I", len(artifact)) + artifact
-    module = _metal()
+    module = _postgres
     checksum, target, count = module._migration_verify_chain(
         bytes(payload), expected_parent, expected_source
     )
@@ -2063,7 +2052,7 @@ def _verify_native_chain(
 
 def _load_native_artifact(data: bytes) -> NativeMigrationArtifact:
     """Verify checksum, format, lengths, and operation tape before publication."""
-    module = _metal()
+    module = _postgres
     migration_id, parent, source, target, tape, plan, sql = module._migration_verify_artifact(data)
     return NativeMigrationArtifact(
         data=data,

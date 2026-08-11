@@ -14,11 +14,9 @@ One plan row is `(number, kind, flags, subplan)`, all plain ints except
     flags    FLAG_* bits
     subplan  a nested plan tuple for KIND_MESSAGE / map fields, else None
 
-`ProtobufDecodeError` is here for the ordinary reason one exception class is
-shared: `wreath.protobuf` hands it to `_core.protobuf_configure` so a refusal
-raised in C is the class a caller catches from the pure path, and
-`_native/protobuf.c` imports it from this module by name on the error path
-should it ever raise before being configured.
+`ProtobufDecodeError` lives here so the declaration facade and wire codec name
+the same refusal without keeping mutable interpreter objects in native global
+state.
 """
 
 from __future__ import annotations

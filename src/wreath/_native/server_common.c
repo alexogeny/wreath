@@ -374,9 +374,8 @@ completed_value(PyObject *value)
  *
  * It replaces a Python `async def` that re-awaited each value itself, which cost
  * a coroutine frame per resumption -- measured at ~7,000 instructions a
- * suspending request against the ~15,000 the Task itself costs. The readable
- * twin is `wreath.server._StartedCoroutine` and the two are pinned against each
- * other by tests/test_server_continuation.py.
+ * suspending request against the ~15,000 the Task itself costs. Its direct
+ * coroutine contract is pinned by tests/test_server_continuation.py.
  *
  * Every exception is forwarded *into* the coroutine, `CancelledError` included.
  * Anything narrower silently strips cancellation from a request in flight: the

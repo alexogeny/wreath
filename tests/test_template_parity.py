@@ -180,22 +180,92 @@ def test_plain_strings_are_untrusted() -> None:
 
 
 @pytest.mark.parametrize(
-    "source",
+    ("source", "message"),
     [
-        "{% if x %}no end",
-        "{% for x in xs %}no end",
-        "{% endif %}",
-        "{% endfor %}",
-        "{% else %}",
-        "{{ }}",
-        "{{ a b }}",
-        "{% bogus %}",
-        "{% include x %}",
+        ("{% if x %}no end", "unclosed 'if' block"),
+        ("{% for x in xs %}no end", "unclosed 'for' block"),
+        ("{% endif %}", "'endif' without 'if'"),
+        ("{% endfor %}", "'endfor' without 'for'"),
+        ("{% else %}", "'else' outside of 'if'"),
+        ("{{ }}", "empty expression"),
+        ("{{ a b }}", "invalid lookup path 'a b'"),
+        ("{% bogus %}", "unknown tag 'bogus'"),
+        ("{% include x %}", "include target must be a quoted string"),
+        # Below: refusals no source reached. Each is a *different* branch that
+        # the closest existing case above never entered -- `{% else %}` alone
+        # leaves `blocks` empty, so it refuses one tag earlier than a second
+        # `else` inside an `if` does, and the two say different things.
+        ("{% %}", "empty tag"),
+        ("{% if a %}{% else %}{% else %}{% endif %}", "duplicate 'else'"),
+        ("{% for x in y %}{% else %}{% endfor %}", "'else' outside of 'if'"),
+        ("{% for x in y %}{% endif %}", "'endif' without 'if'"),
+        ("{% if a %}{% endfor %}", "'endfor' without 'for'"),
+        ("{% for 1x in items %}{% endfor %}", "invalid loop variable '1x'"),
+        ('{% include "x.html" %}', "include requires a TemplateDirectory"),
+        ("{{ name", "unterminated tag"),
+        ("{% if a", "unterminated tag"),
     ],
 )
-def test_syntax_errors(source: str) -> None:
-    with pytest.raises(TemplateSyntaxError):
+def test_syntax_errors(source: str, message: str) -> None:
+    """The message, not just the type.
+
+    Every refusal in the compiler raises `TemplateSyntaxError`, so asserting
+    the type alone passes on whichever branch fired -- including the one this
+    case was written to reach. Five of these refusals could be deleted outright
+    with the suite still green, because a later guard caught the same source
+    and said something else about it.
+    """
+    with pytest.raises(TemplateSyntaxError) as caught:
         Template.from_string(source)
+    assert message in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("no braces here", "no braces here"),
+        ("a { b", "a { b"),
+        ("trailing brace {", "trailing brace {"),
+        ("{", "{"),
+        ("50% off {but not a tag}", "50% off {but not a tag}"),
+    ],
+)
+def test_a_brace_that_opens_no_tag_is_literal_text(source: str, expected: str) -> None:
+    """A `{` is only special followed by `{` or `%`, and only if there is a
+    next character at all -- a template ending in a brace has neither a tag nor
+    an index to read past the end with.
+    """
+    assert render(compile_tape(source), {}) == expected.encode()
+
+
+def test_text_on_both_sides_of_a_tag_survives() -> None:
+    assert render(compile_tape("before {{ a }} after"), {"a": "X"}) == b"before X after"
+
+
+def test_a_lone_brace_does_not_swallow_a_later_tag() -> None:
+    """Scanning resumes past a `{` that opened nothing.
+
+    The two arms of that guard are "there are no more tags" and "this brace is
+    not one", and only the first may stop the scan. Treating a lone brace as
+    the end of the template makes every tag after it literal -- so a page with
+    a CSS block or a `{` in prose renders its variables as source, which looks
+    like a data problem rather than a tokenizer one.
+    """
+    tape = compile_tape("style { color: red } and {{ name }}")
+    assert render(tape, {"name": "Andie"}) == b"style { color: red } and Andie"
+
+
+def test_a_false_condition_with_an_else_renders_the_else_body() -> None:
+    """The backpatch that only an unmatched `if` gets.
+
+    An `if` without an `else` sends its false path to the `endif`; one *with*
+    an else has already been pointed at the else body, and doing it again jumps
+    past both bodies -- so the false branch renders nothing at all and only a
+    test that takes the else branch can see it.
+    """
+    tape = compile_tape("{% if flag %}yes{% else %}no{% endif %}")
+    assert render(tape, {"flag": False}) == b"no"
+    assert render(tape, {"flag": True}) == b"yes"
 
 
 def test_directory_include_resolved_at_compile(tmp_path) -> None:

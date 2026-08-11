@@ -1,4 +1,4 @@
-"""Browser policy helpers with optional native acceleration."""
+"""Browser policy helpers: origin normalisation, and the header primitives in C."""
 
 from __future__ import annotations
 
