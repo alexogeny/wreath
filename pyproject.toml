@@ -253,7 +253,15 @@ line-length = 100
 # same reason). Linting them reports style findings in someone else's dialect,
 # and "fixing" one would delete the pattern the analyzer exists to recognize:
 # UP045 would rewrite the `Optional[X]` that tests/port/golden asserts on.
-extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus"]
+#
+# `tests/port/foreign` is the same tree in another dialect: Flask, aiohttp,
+# Tornado, Pyramid, Bottle and Django applications, read as source, never
+# imported, excluded from collection by the same `collect_ignore_glob`. The
+# argument is sharper here than for `corpus`, because the finding ruff reports is
+# usually the construct under test: E402 on the imports below `monkey.patch_all()`
+# is not a style slip, it is *why* a gevent tree is refused rather than scored,
+# and moving those imports up would delete the fixture's subject.
+extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus", "tests/port/foreign"]
 
 [tool.ruff.lint]
 # BLE enforces AGENTS.md's "a broad `except` is the exception, not the rule":
@@ -290,7 +298,7 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # reviewer can grep a worklist, which only works while a rule stays on one line
 # -- wrapping the 50 entries to fit would cost the property the file exists for.
 # Scoped deliberately: E501 only, and only here.
-"src/wreath/_port/rules.py" = ["E501"]
+"src/wreath/_port/rules/*.py" = ["E501"]
 # The admin's pages are HTML templates held as string literals, and a template's
 # line breaks are part of its output. Wrapping an element whose attributes carry
 # `{% if %}` clauses either inserts whitespace where the markup is significant
