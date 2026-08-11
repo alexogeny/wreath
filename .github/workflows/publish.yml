@@ -30,17 +30,27 @@ name: publish
 #                docs/release_notes/<version>.md file, then cut the
 #                `release/vX.Y.Z` branch from the release commit, push the
 #                `vX.Y.Z` tag, and create the GitHub Release from the notes.
-#   4. wheels  - Build the manylinux wheels (x86_64 and aarch64) with
-#                cibuildwheel, so `pip install wreath` needs no C toolchain.
-#                `release` needs it too: a wheel that will not build should stop
-#                the tag, not leave one pointing at a release nobody can install.
-#   5. pypi    - (environment: publish) Build the sdist, collect the wheels, and
-#                publish both to PyPI via Trusted Publishing (OIDC, no stored
-#                token).
+#   4. wheels  - Build and smoke-test the portable wheel on native Linux,
+#                macOS and Windows runners. Then build the Linux io_uring and
+#                HTTP/3 companion wheels selected by extras. `release` needs all
+#                three jobs: a wheel that will not run must stop the tag, not
+#                leave one pointing at a release nobody can install.
+#   5. pypi-*  - Publish one distribution per Trusted Publishing identity. The
+#                companion projects go first; the base project becomes visible
+#                only after both extras are installable.
 #
-# The `publish` environment gates steps 2 and 3: configure it in the repo
-# settings with whatever reviewers/branch restrictions you want, and register a
-# matching PyPI Trusted Publisher (environment name `publish`).
+# Configure all three GitHub environments with the same reviewer/branch policy,
+# then register these exact PyPI Trusted Publishers (owner `alexogeny`, repository
+# `wreath`, workflow `publish.yml`):
+#
+#   wreath        -> environment `publish`
+#   wreath-linux  -> environment `publish-linux`
+#   wreath-http3  -> environment `publish-http3`
+#
+# The distinct environments are required while the companion projects are
+# pending. PyPI refuses a second pending project with the same owner/repository/
+# workflow/environment identity because an incoming OIDC token would not name
+# which pending project it is meant to create.
 
 on:
   push:
@@ -217,6 +227,11 @@ jobs:
           enable-cache: true
       - name: Sync (default 'dev' group; builds the native extension)
         run: uv sync --frozen
+      - name: Build Linux development capabilities in place
+        # The published base wheel deliberately excludes io_uring. An editable
+        # checkout cannot be overlaid by the companion wheel's `wreath/`
+        # directory, so source development uses the explicit build switch.
+        run: WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace
       - name: Ruff
         run: uv run ruff check .
       - name: Ty
@@ -233,10 +248,8 @@ jobs:
         run: uv run --no-sync wreath docs check
 
   wheels:
-    # Binary wheels, so an install does not compile four C extensions -- and, on
-    # a machine with no compiler, does not simply fail. Linux only: the reactor
-    # extension includes `<linux/io_uring.h>` unguarded, so there is no macOS or
-    # Windows wheel to build and an sdist install there fails identically.
+    # The base distribution is the portable native implementation. Each wheel
+    # is compiled and served on the target OS before the release tag exists.
     needs: [detect, verify]
     if: needs.detect.outputs.bumped == 'true'
     strategy:
@@ -244,12 +257,20 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-latest
+            platform: linux
             arch: x86_64
-          # GitHub's own arm64 runner, so aarch64 is built natively rather than
-          # under QEMU -- emulated builds of this much C take tens of minutes and
-          # time out more often than they finish.
           - runner: ubuntu-24.04-arm
+            platform: linux
             arch: aarch64
+          - runner: macos-15-intel
+            platform: macos
+            arch: x86_64
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+          - runner: windows-2025
+            platform: windows
+            arch: AMD64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -258,15 +279,87 @@ jobs:
       # is the same locally as it is here.
       - uses: pypa/cibuildwheel@v3.2.0
         env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-base-${{ matrix.platform }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  linux-wheels:
+    # `wreath[linux]`: only the io_uring extension. It overlays the installed
+    # base wheel's `wreath._native` directory; the smoke test proves the two
+    # separately built distributions import and serve together.
+    needs: [detect, verify, wheels]
+    if: needs.detect.outputs.bumped == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-base-linux-${{ matrix.arch }}
+          path: wheel-deps
+      - name: Stage a self-contained companion build
+        run: >-
+          python tools/stage_companion_wheel.py linux
+          packages/.wheel-staging/wreath-linux-wheel
+      - uses: pypa/cibuildwheel@v3.2.0
+        with:
+          package-dir: packages/.wheel-staging/wreath-linux-wheel
+        env:
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.arch }}
+          name: wheels-linux-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  http3-wheels:
+    # `wreath[h3]` / `wreath[http3]`. The pinned MIT/Apache-licensed QUIC/TLS
+    # stack is built inside manylinux and bundled by auditwheel, so opting in
+    # does not require system packages on the deployment host.
+    needs: [detect, verify, wheels]
+    if: needs.detect.outputs.bumped == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-base-linux-${{ matrix.arch }}
+          path: wheel-deps
+      - name: Stage a self-contained companion build
+        run: >-
+          python tools/stage_companion_wheel.py http3
+          packages/.wheel-staging/wreath-http3-wheel
+      - uses: pypa/cibuildwheel@v3.2.0
+        with:
+          package-dir: packages/.wheel-staging/wreath-http3-wheel
+        env:
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-http3-${{ matrix.arch }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   release:
-    needs: [detect, verify, wheels]
+    needs: [detect, verify, wheels, linux-wheels, http3-wheels]
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
@@ -370,11 +463,58 @@ jobs:
           fi
           gh release create "$tag" "${args[@]}"
 
-  pypi:
-    needs: [detect, verify, wheels, release]
+  pypi-linux:
+    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release]
     # Explicit, though a skipped `release` would skip this anyway: without it,
     # adding any future `if:` to `release` silently changes what publishes.
     # `verify` is named here as well as on `release` for the same reason.
+    if: needs.detect.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    environment: publish-linux
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC); no stored token needed
+    steps:
+      - name: Collect the Linux companion wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Show what will be published
+        run: ls -l dist
+      - name: Publish wreath-linux to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  pypi-http3:
+    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release]
+    if: needs.detect.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    environment: publish-http3
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC); no stored token needed
+    steps:
+      - name: Collect the HTTP/3 companion wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-http3-*
+          path: dist
+          merge-multiple: true
+      - name: Show what will be published
+        run: ls -l dist
+      - name: Publish wreath-http3 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  pypi:
+    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release, pypi-linux, pypi-http3]
+    # Publish the public base project last: `uv add wreath[linux]` and
+    # `uv add wreath[h3]` cannot observe a base release whose exact-version
+    # companions have not reached the index yet.
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
@@ -389,17 +529,18 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build --sdist
-      - name: Collect the wheels
+      - name: Collect the portable wheels
         uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
+          pattern: wheels-base-*
           path: dist
           merge-multiple: true
       - name: Show what will be published
         # The upload is irreversible -- PyPI does not accept a re-upload of a
         # version -- so the manifest goes in the log before it happens.
         run: ls -l dist
-      - name: Publish to PyPI
+      - name: Publish wreath to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
