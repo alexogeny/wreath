@@ -805,37 +805,13 @@ class ServerSentEvent:
         self.comment = comment
 
 
-def _sse_single_line(field: str, value: str) -> str:
-    """One single-line SSE field, refusing a value that would inject a frame.
-
-    `data` and `comment` are multi-line by construction and are re-framed
-    per line by `_sse_lines`. `event` and `id` are not: a CR or LF in
-    either ends the field -- and a blank line ends the *event* -- so a caller
-    passing user text through one could append arbitrary frames to the stream.
-    Refused rather than stripped, because silently sending a different event
-    name than the caller asked for is its own bug.
-    """
-    if "\r" in value or "\n" in value:
-        raise ValueError(f"SSE {field} must not contain a newline")
-    return f"{field}: {value}"
-
-
-def _sse_lines(field: str, value: str, out: list[str]) -> None:
-    # An SSE field value cannot contain CR or LF, so a multi-line value becomes
-    # one repeated field per line (normalising CRLF/CR to LF first).
-    for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        out.append(f"{field}: {line}" if line else f"{field}:")
-
-
 def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> bytes:
     """Frame one event to the `text/event-stream` wire format.
 
     Accepts a `ServerSentEvent`, a `str`/`bytes` (treated as `data`), or a
     mapping with `data`/`event`/`id`/`retry`/`comment` keys; anything else is a
-    `TypeError`. Shape dispatch and coercion stay here, in Python; only the
-    framing itself goes through `_core.sse_frame`, and
-    `tests/test_sse_frame_parity.py` holds it to the `text/event-stream`
-    grammar.
+    `TypeError`. Shape dispatch and coercion happen once here;
+    `_core.sse_frame` owns the `text/event-stream` wire format.
     """
     if isinstance(event, ServerSentEvent):
         comment, name, ident, retry, data = (
@@ -865,39 +841,7 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
     )
 
 
-def _sse_frame_fields(
-    comment: str | None,
-    name: str | None,
-    ident: str | None,
-    retry: int | None,
-    data: str | None,
-) -> bytes:
-    """Frame already-resolved SSE fields.
-
-    Split from `_encode_sse` so `sse.c` has a narrow boundary: shape dispatch
-    and coercion stay in Python, and only the framing -- the part that walks the
-    payload -- crosses.
-    """
-    lines: list[str] = []
-    if comment is not None:
-        _sse_lines("", comment, lines)
-    if name is not None:
-        lines.append(_sse_single_line("event", name))
-    if ident is not None:
-        lines.append(_sse_single_line("id", ident))
-    if retry is not None:
-        lines.append(f"retry: {retry}")
-    if data is not None:
-        _sse_lines("data", data, lines)
-    if not lines:
-        lines.append(":")  # bare keep-alive comment
-    return ("\n".join(lines) + "\n\n").encode("utf-8")
-
-
-if _core is not None and hasattr(_core, "sse_frame"):
-    _frame_fields = _core.sse_frame
-else:
-    _frame_fields = _sse_frame_fields
+_frame_fields = _core.sse_frame
 
 
 class SSEResponse(StreamingResponse):
