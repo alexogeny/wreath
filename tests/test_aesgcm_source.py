@@ -2,9 +2,8 @@
 
 The AES-NI and PCLMULQDQ kernels sit behind `#if defined(WREATH_HAVE_AESGCM)`,
 which is true on exactly one family of targets. Everywhere else -- aarch64,
-MSVC, a compiler without per-function `target` selection -- the preprocessor
-deletes the whole block, and nothing that runs on *this* machine can then say
-whether what is left compiles, links, or does anything sensible.
+MSVC, or a compiler without per-function `target` selection -- the scalar
+kernel remains, and an x86 runtime test cannot prove that translation unit.
 
 `AGENTS.md` records what that costs: `simd.h`'s NEON arms called their SWAR
 tails before those were declared, C assumed `int`, the declaration conflicted
@@ -14,13 +13,12 @@ ever will. `tests/test_native_simd.py` reads that header as text for the same
 reason; this file does it for the AES kernels, and adds the checks specific to a
 file whose entire body is optional:
 
-* every intrinsic is inside the guard, so the fallback arm has nothing to
+* every intrinsic is inside the guard, so the scalar kernel has nothing to
   compile that its target lacks;
 * every function that uses one carries `WREATH_TARGET_AESGCM`, because a
   `target` attribute is what lets a non-AES build emit these instructions at
   all, and a missing one is a SIGILL on an older CPU rather than a build error;
-* the entry points `_coremodule.c` names exist on *both* arms, so the extension
-  links either way;
+* the public entry points sit outside the feature guard, so every target links;
 * and both build files list the source -- `setup.py` and the sanitizer's own
   list, the second of which fails silently. `wreath-map-lint`'s MAP008 checks
   that from the other direction; this is cheap and catches it at the same time
@@ -50,8 +48,7 @@ def _guard_state() -> list[tuple[int, frozenset[str]]]:
     """Each line paired with the set of preprocessor conditions holding on it.
 
     A condition is recorded as its text, with `!` prepended once the `#else`
-    arm is entered, so "inside the AES guard" and "inside its fallback" are
-    distinguishable -- which is the whole question this file asks.
+    arm is entered, so guarded and unguarded code are distinguishable.
     """
     states: list[tuple[int, frozenset[str]]] = []
     stack: list[str] = []
@@ -92,7 +89,7 @@ FUNCTIONS = _functions()
 
 
 def test_every_intrinsic_is_inside_the_feature_guard() -> None:
-    """The fallback arm must not name an instruction its target lacks.
+    """The scalar kernel must not name an instruction its target lacks.
 
     An `__m128i` left outside the guard is invisible here and fatal on aarch64:
     the type does not exist, and the translation unit fails before anything
@@ -129,13 +126,8 @@ def test_every_function_using_an_intrinsic_declares_its_target() -> None:
     )
 
 
-def test_the_entry_points_exist_on_both_arms_of_the_guard() -> None:
-    """`_coremodule.c` names three functions; a build without AES still links.
-
-    `wreath_aesgcm_dispatch` is the one with two definitions -- the real kernel
-    and a refusal -- and forgetting the second is a link error only on the
-    architecture that cannot be built here.
-    """
+def test_the_entry_points_exist_outside_the_feature_guard() -> None:
+    """`_coremodule.c` names functions that every target must link."""
     exported = ("wreath_aesgcm_arms", "wreath_aes128gcm_encrypt", "wreath_aes128gcm_decrypt")
     for name in exported:
         lines = [
@@ -154,11 +146,9 @@ def test_the_entry_points_exist_on_both_arms_of_the_guard() -> None:
         for number, _ in GUARDS
         if re.match(r"^wreath_aesgcm_dispatch\s*\(", TEXT.splitlines()[number - 1])
     ]
-    assert len(dispatch) == 2, (
-        "wreath_aesgcm_dispatch needs one definition per arm of the feature "
-        f"guard; found {len(dispatch)}"
-    )
-    assert [_inside_aes_guard(number) for number in dispatch] == [True, False]
+    assert len(dispatch) == 1
+    assert _inside_aes_guard(dispatch[0])
+    assert "wreath_aesgcm_dispatch_scalar" in TEXT
 
 
 def test_no_function_calls_a_helper_defined_below_it() -> None:
