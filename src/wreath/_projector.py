@@ -10,11 +10,10 @@ traces, keeps a bounded window of recent completions (and failures) for the
 Inspector, and offers each finished trace to an optional export hook whose
 failures are isolated to a counter.
 
-Everything here is pure Python and reads only through the recorder's public
-`drain` / `loss` / `histogram` accessors, so it works identically over the
-native `Recorder` and the reference recorder. The OTLP mapping (Stage 4b) and the
-server lifespan wiring (Stage 4c) build on the export hook and snapshot API
-exposed here; nothing in this file imports an exporter SDK.
+Cell decoding and dispatch run as one bounded C operation over each drained
+buffer. Assembly state remains owned by this projector instance. The OTLP
+mapping and server lifespan wiring build on the export hook and snapshot API;
+nothing in this file imports an exporter SDK.
 
 **Assembly ordering.** `context_end` publishes a request's cells in the fixed
 order completion, then correlation, then phase batches, so a completion is seen
@@ -35,26 +34,30 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Final
+from typing import Any, Final
 from typing import Protocol as _Protocol
 
 from ._drainthread import DrainThread
 from ._flight_schema import (
-    CELL_SIZE,
     FLAG_ERROR_PROMOTED,
     FLAG_SLOW_PROMOTED,
     CompletionCell,
     CorrelationCell,
-    EventKind,
+    LogArg,
+    LogArgType,
     LogCell,
     LossReason,
     PhaseBatchCell,
+    PhaseCoverage,
+    PhaseKind,
     PhaseRecord,
     Protocol,
     SchemaError,
+    Severity,
     TerminalStatus,
     histogram_bucket,
 )
+from ._native import _core
 
 __all__ = [
     "ProjectedLog",
@@ -66,8 +69,7 @@ __all__ = [
 ]
 
 class _RecorderLike(_Protocol):
-    """The recorder surface the projector reads: the native `Recorder` and the
-    pure oracle both satisfy it structurally."""
+    """The recorder surface the projector reads, also implemented by test doubles."""
 
     def drain(self, max_cells: int = ..., /) -> bytes: ...
     def loss(self, reason: int, /) -> int: ...
@@ -222,19 +224,6 @@ class ProjectorSnapshot:
     pending: int
 
 
-@dataclass(slots=True)
-class _Assembly:
-    """A completion accumulating its trailing correlation/phase cells until it
-    settles. `cycle` is the last drain cycle in which any cell for this request
-    arrived; a completion settles once a later cycle passes without one."""
-
-    completion: CompletionCell | None = None
-    correlation: CorrelationCell | None = None
-    phases: list[PhaseRecord] = field(default_factory=list)
-    logs: list[LogCell] = field(default_factory=list)
-    cycle: int = -1
-
-
 class Projector:
     """Drains a recorder's ring on a background thread and reassembles traces.
 
@@ -262,6 +251,7 @@ class Projector:
         "_loss",
         "_assembled",
         "_cycle",
+        "_cell_config",
         "_drain",
     )
 
@@ -301,7 +291,7 @@ class Projector:
         # Guards every mutable buffer below: the drain thread writes under it,
         # snapshot()/metrics() read under it. Held only for O(batch) work.
         self._lock = threading.Lock()
-        self._pending: dict[int, _Assembly] = {}
+        self._pending: dict[int, Any] = {}
         self._max_pending = pending
         self._recent: deque[ProjectedTrace] = deque(maxlen=recent)
         self._failures: deque[ProjectedTrace] = deque(maxlen=failures)
@@ -309,6 +299,22 @@ class Projector:
         self._loss = ProjectorLoss()
         self._assembled = 0
         self._cycle = 0
+        self._cell_config = (
+            CompletionCell,
+            CorrelationCell,
+            PhaseBatchCell,
+            LogCell,
+            SchemaError,
+            _core.FlightAssembly,
+            Protocol,
+            TerminalStatus,
+            PhaseRecord,
+            PhaseKind,
+            PhaseCoverage,
+            LogArg,
+            LogArgType,
+            Severity,
+        )
         self._drain = DrainThread(
             "wreath-flight-projector", interval, self.poll, self._flush
         )
@@ -354,106 +360,36 @@ class Projector:
         """Decode a drained buffer and fold each cell into the pending table.
         Nothing finalizes here -- a completion settles only after a quiet cycle
         (see `_settle`), so its whole tail has a chance to arrive first."""
-        for offset in range(0, len(raw) - CELL_SIZE + 1, CELL_SIZE):
-            cell = raw[offset : offset + CELL_SIZE]
-            kind = cell[1]
-            try:
-                if kind == EventKind.COMPLETION:
-                    self._ingest_completion(CompletionCell.decode(cell))
-                elif kind == EventKind.CORRELATION:
-                    self._ingest_correlation(CorrelationCell.decode(cell))
-                elif kind == EventKind.PHASE:
-                    self._ingest_phase(PhaseBatchCell.decode(cell))
-                elif kind == EventKind.LOG:
-                    self._ingest_log(LogCell.decode(cell))
-                else:
-                    # CONTROL/INVALID carry no trace payload for the projector.
-                    continue
-            except SchemaError:
-                self._loss.decode_error += 1
+        self._loss.decode_error += _core.flight_project_cells(
+            self, raw, self._cell_config
+        )
 
-    def _slot(self, request_id: int) -> _Assembly:
-        entry = self._pending.get(request_id)
-        if entry is None:
-            if len(self._pending) >= self._max_pending:
-                self._evict_oldest_pending()
-            entry = _Assembly()
-            self._pending[request_id] = entry
-        # `cycle` tracks the last cycle a cell for this request arrived, so a
-        # completion settles only after a full quiet cycle -- however many cycles
-        # its correlation/phase tail is spread across.
-        entry.cycle = self._cycle
-        return entry
-
-    def _ingest_completion(self, cell: CompletionCell) -> None:
-        # Record the completion and let the quiet-cycle rule settle it. We never
-        # finalize on the spot even when a correlation/phase already arrived
-        # (reordered ahead of it): the rest of the tail may still be split across
-        # this drain and the next, and settling early would orphan it. In
-        # production the ring publishes completion first anyway, so the tail
-        # always follows.
-        self._slot(cell.request_id).completion = cell
-
-    def _ingest_correlation(self, cell: CorrelationCell) -> None:
-        self._slot(cell.request_id).correlation = cell
-
-    def _ingest_phase(self, cell: PhaseBatchCell) -> None:
-        self._slot(cell.request_id).phases.extend(cell.records)
-
-    def _ingest_log(self, cell: LogCell) -> None:
-        """Attach a record to its request, or deliver it now if it has none.
-
-        A record with request_id 0 -- startup, shutdown, a background job -- can
-        never be joined to a completion, so holding it in the pending table
-        would only delay it until the slot was evicted as an orphan.
-        """
-        if cell.request_id == 0:
-            self._emit_log(ProjectedLog(cell=cell, observed_unix_nano=time.time_ns()))
-            return
-        self._slot(cell.request_id).logs.append(cell)
+    def _emit_standalone_log(self, cell: LogCell) -> None:
+        """Deliver a non-request log immediately after native decoding."""
+        if cell.request_id != 0:
+            raise ValueError(
+                "standalone flight log must have request_id 0; "
+                f"received {cell.request_id}"
+            )
+        self._emit_log(ProjectedLog(cell=cell, observed_unix_nano=time.time_ns()))
 
     def _settle(self) -> int:
         """Finalize completions first seen in an earlier cycle (their tail has
         had a full cycle to arrive) and retire stale partials as orphans."""
-        emitted = 0
-        for request_id in list(self._pending):
-            entry = self._pending.get(request_id)
-            if entry is None or entry.cycle >= self._cycle:
-                continue  # first seen this cycle: give the tail one more cycle
-            if entry.completion is not None:
-                self._finalize(request_id, entry)
-                emitted += 1
-            else:
-                # A correlation/phase cell whose completion never came: the ring
-                # dropped its head. Count it and stop holding the slot.
-                if entry.correlation is not None:
-                    self._loss.orphan_correlation += 1
-                if entry.phases:
-                    self._loss.orphan_phase += 1
-                if entry.logs:
-                    self._loss.orphan_log += 1
-                del self._pending[request_id]
-        return emitted
+        return _core.flight_settle(self, self._pending, self._loss, self._cycle)
 
     def _evict_oldest_pending(self) -> None:
         """Drop the pending entry seen longest ago to bound the table. A
         completion evicted this way is a lost trace; a headless partial is an
         orphan. Either way it is categorized, never silent."""
-        oldest_id = min(self._pending, key=lambda rid: self._pending[rid].cycle)
-        entry = self._pending.pop(oldest_id)
-        if entry.completion is not None:
-            self._loss.pending_evicted += 1
-        else:
-            if entry.correlation is not None:
-                self._loss.orphan_correlation += 1
-            if entry.phases:
-                self._loss.orphan_phase += 1
-            if entry.logs:
-                self._loss.orphan_log += 1
+        _core.flight_evict_pending(self._pending, self._loss)
 
-    def _finalize(self, request_id: int, entry: _Assembly) -> None:
+    def _finalize(self, request_id: int, entry: Any) -> None:
         completion = entry.completion
-        assert completion is not None
+        if completion is None:
+            raise ValueError(
+                f"flight assembly {request_id} has no completion cell to finalize"
+            )
         del self._pending[request_id]
         corr = entry.correlation
         phases = tuple(sorted(entry.phases, key=lambda p: p.sequence))
