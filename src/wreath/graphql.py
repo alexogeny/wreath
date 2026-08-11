@@ -41,7 +41,7 @@ from typing import Any
 
 from ._auth.permissions import SURFACE_ACTIONS
 from ._graphql.cost import weigh
-from ._graphql.execute import ExecutionError, execute
+from ._graphql.execute import ExecutionError, execute, execute_json
 from ._graphql.parser import GraphQLSyntaxError, Limits, parse
 from ._graphql.resolvers import (
     ResolverError,
@@ -53,7 +53,7 @@ from ._graphql.resolvers import (
 from ._graphql.schema import RootField, Schema, SchemaField, build_schema, policy_resource
 from .cache import BoundedCache
 from .request import Request
-from .response import JSONResponse
+from .response import JSONResponse, Response
 from .router import Router
 
 __all__ = [
@@ -404,23 +404,31 @@ class GraphQL:
             return
         weigh(self._schema, document, operation, max_complexity=self._limits.max_complexity)
 
-    async def run(
+    async def _run(
         self,
         source: str,
         session: Any,
         *,
-        operation_name: str | None = None,
-        variables: dict[str, Any] | None = None,
-        request: Any = None,
-    ) -> dict[str, Any]:
-        """Parse and execute `source`, returning a GraphQL response body."""
+        operation_name: str | None,
+        variables: dict[str, Any] | None,
+        request: Any,
+        json_output: bool,
+    ) -> dict[str, Any] | bytes:
+        from ._json import dumps
+
+        def result(body: dict[str, Any]) -> dict[str, Any] | bytes:
+            return dumps(body) if json_output else body
+
         try:
             document = self.parse(source)
             self._weigh(document, operation_name)
         except GraphQLSyntaxError as error:
-            return {"errors": [{"message": str(error), "extensions": {"code": error.code}}]}
+            return result({
+                "errors": [{"message": str(error), "extensions": {"code": error.code}}]
+            })
         try:
-            data = await execute(
+            executor = execute_json if json_output else execute
+            data = await executor(
                 self._schema,
                 document,
                 session,
@@ -436,7 +444,7 @@ class GraphQL:
             body: dict[str, Any] = {"message": str(error)}
             if error.path:
                 body["path"] = list(error.path)
-            return {"data": None, "errors": [body]}
+            return result({"data": None, "errors": [body]})
         except Exception:  # noqa: BLE001 - a resolver, not the transport
             # A resolver raising something that is not an `ExecutionError` used
             # to escape into the ASGI layer and answer 500, which every GraphQL
@@ -444,13 +452,37 @@ class GraphQL:
             # message is deliberately generic: a resolver's exception text is
             # server-side detail (see `wreath.crud._unprocessable`).
             self.resolver_errors += 1
-            return {
+            return result({
                 "data": None,
                 "errors": [{"message": "the resolver failed", "extensions": {
                     "code": "RESOLVER_ERROR",
                 }}],
-            }
+            })
+        if json_output:
+            return data
         return {"data": data}
+
+    async def run(
+        self,
+        source: str,
+        session: Any,
+        *,
+        operation_name: str | None = None,
+        variables: dict[str, Any] | None = None,
+        request: Any = None,
+    ) -> dict[str, Any]:
+        """Parse and execute `source`, returning a GraphQL response body."""
+        body = await self._run(
+            source,
+            session,
+            operation_name=operation_name,
+            variables=variables,
+            request=request,
+            json_output=False,
+        )
+        if not isinstance(body, dict):
+            raise TypeError("GraphQL.run() must produce a response object")
+        return body
 
     def router(
         self,
@@ -468,7 +500,7 @@ class GraphQL:
         graphql = self
 
         @router.post(path)
-        async def _run(request: Request) -> JSONResponse:
+        async def _run(request: Request) -> Response:
             # A GraphQL POST must be JSON. Accepting any body that happens to
             # parse made this endpoint reachable by a cross-origin <form>: a
             # `text/plain` POST is a "simple request", so the browser sends it
@@ -511,19 +543,22 @@ class GraphQL:
                 request, session_factory, mutating=graphql._is_mutation(payload["query"])
             )
             try:
-                body = await graphql.run(
+                body = await graphql._run(
                     payload["query"],
                     session,
                     operation_name=operation_name if isinstance(operation_name, str) else None,
                     variables=variables,
                     request=request,
+                    json_output=True,
                 )
             finally:
                 if close is not None:
                     await close()
             # GraphQL answers 200 with an `errors` array; a transport status
             # would be read as a network failure by every client library.
-            return JSONResponse(body)
+            if not isinstance(body, bytes):
+                raise TypeError("GraphQL HTTP execution must produce JSON bytes")
+            return Response(body, media_type=b"application/json")
 
         # One route fronts every field in the schema, so the route's own
         # requirement says nothing about what this endpoint enforces.

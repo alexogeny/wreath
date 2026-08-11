@@ -304,6 +304,34 @@ async def test_aliases_land_under_their_response_key(
 
 
 @pytest.mark.asyncio
+async def test_http_execution_writes_compiled_rows_directly_to_json(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    from wreath._json import loads
+
+    database.connection.script("users", [
+        user_row(1, "one@example.test", "One"),
+        user_row(2, "two@example.test", "Two"),
+    ])
+    api = GraphQL(registry, models=[User, Post])
+
+    body = await api._run(
+        "{ users { identifier: id address: email name } }",
+        Session(registry, "read"),
+        operation_name=None,
+        variables=None,
+        request=None,
+        json_output=True,
+    )
+
+    assert isinstance(body, bytes)
+    assert loads(body) == {"data": {"users": [
+        {"identifier": 1, "address": "one@example.test", "name": "One"},
+        {"identifier": 2, "address": "two@example.test", "name": "Two"},
+    ]}}
+
+
+@pytest.mark.asyncio
 async def test_a_list_root_is_always_bounded(
     registry: Registry, database: FakeDatabase
 ) -> None:
