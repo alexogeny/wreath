@@ -35,7 +35,8 @@ from .protobuf import is_message as _is_message
 from .request import Request
 from .response import ProblemResponse, Response
 
-_msgpack = _core.msgpack_dumps
+#: `msgpack_dumps(obj)` -- MessagePack bytes for the JSON-shaped subset.
+_msgpack: Callable[[object], bytes] = _core.msgpack_dumps
 
 __all__ = [
     "JSON",
