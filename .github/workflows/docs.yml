@@ -9,16 +9,15 @@ name: docs
 # docstrings statically) because the `:::` reference directive imports the
 # modules it documents.
 
+# Every push to main, with no `paths:` filter. This is now the only strict docs
+# build on main -- `ci`'s `docs-build` job was deleted as a duplicate of this
+# one (identical output on every sampled push, and this job is the superset: it
+# sets GITHUB_TOKEN and uploads the Pages artifact). A filter would reopen the
+# gap that deletion closed: a push touching only `tests/**`, `README.md`,
+# `setup.py` or `.github/workflows/ci.yml` would then build no docs at all.
 on:
   push:
     branches: [main]
-    paths:
-      - docs/**
-      - src/**
-      - wreath_docs.py
-      - pyproject.toml
-      - uv.lock
-      - .github/workflows/docs.yml
   workflow_dispatch:
 
 # Least privilege: only the deploy job's OIDC token and Pages write are granted.

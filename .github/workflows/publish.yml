@@ -222,7 +222,13 @@ jobs:
       - name: Ty
         run: uv run ty check
       - name: Tests
-        run: uv run pytest
+        # `wreath test`, not a bare `pytest`: the marker deselection lives in
+        # `pyproject.toml`'s `addopts`, so both select the same tests, but the
+        # runner picks min(8, cpu_count) workers where `pytest` alone runs one.
+        # `--mutant off --no-history` match `ci`'s `checks` job -- the mutation
+        # sample and the timing history belong on a maintainer's machine, not
+        # in front of a release.
+        run: uv run --no-sync wreath test --mutant off --no-history
       - name: Build site (strict)
         run: uv run --no-sync wreath docs check
 

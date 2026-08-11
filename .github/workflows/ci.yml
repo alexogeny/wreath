@@ -129,25 +129,3 @@ jobs:
         # the history-weighted scheduler stays unregistered and this is xdist
         # `--dist loadgroup` with a timing report on top.
         run: uv run --no-sync wreath test --mutant off --no-history
-
-  docs-build:
-    # Main only. On a pull request this is 4s of work behind a 30s sync, and
-    # the docs are not unguarded by skipping it here: `publish.yml`'s `verify`
-    # job runs `wreath docs check` too, and `release` depends on it — so a
-    # broken docs build still cannot reach PyPI. It costs finding out at merge
-    # rather than at review, which is the trade being made.
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: Install wreath
-        # No docs group exists: wreath's own generator builds the site. The
-        # project is installed because the `:::` reference directive imports
-        # the modules it documents.
-        run: uv sync --frozen
-      - name: Build site (strict)
-        # Fails on an orphan page, a dead internal link, or a broken anchor.
-        run: uv run --no-sync wreath docs check
