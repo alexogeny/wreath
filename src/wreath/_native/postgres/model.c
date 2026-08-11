@@ -1,4 +1,4 @@
-/* Fixed-size native storage for wreath.orm models.
+/* Fixed-size storage for wreath.orm models.
 
    Each compiled model gets one generated heap type whose tp_basicsize is fixed
    for that model: scalar columns live in unboxed inline cells, so hydrating an
@@ -9,11 +9,12 @@
 
    Validation on assignment deliberately calls the column's Python validator
    (Column.validate: the type's coercion with any business rules fused into it)
-   rather than reimplementing the checks here. That keeps one implementation of
-   the rules shared with the reference backend, and costs a Python call only
+   rather than reimplementing the checks here. That keeps one authoritative
+   implementation of the rules and costs a Python call only
    on assignment -- never on hydration, which writes cells directly. */
 
 #include "model.h"
+#include "../model_api.h"
 
 #include "codec.h"
 
@@ -336,8 +337,7 @@ cell_store(char *cell, const WreathPgModelField *field, PyObject *value, int *ch
         if (previous != NULL) {
             int equal = previous == value ? 1 : PyObject_RichCompareBool(previous, value, Py_EQ);
             if (equal < 0) {
-                /* A comparison that raises is not evidence of equality; the
-                   reference backend treats it as a change too. */
+                /* A comparison that raises is not evidence of equality. */
                 PyErr_Clear();
                 equal = 0;
             }
@@ -770,6 +770,8 @@ storage_orm_get(PyObject *self, PyObject *arg)
     return cell_load((const char *)self + field->offset, field);
 }
 
+static int model_set_loaded(PyObject *self, Py_ssize_t index, PyObject *value);
+
 /* Record a value read from the database: no coercion, no dirty bit.
 
    METH_FASTCALL, not METH_VARARGS: this is called once per column for every row
@@ -778,11 +780,8 @@ storage_orm_get(PyObject *self, PyObject *arg)
 static PyObject *
 storage_orm_set_loaded(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    WreathPgModelLayout *layout;
     Py_ssize_t index;
     PyObject *value;
-    const WreathPgModelField *field;
-    int changed;
 
     if (nargs != 2) {
         PyErr_Format(PyExc_TypeError,
@@ -792,19 +791,29 @@ storage_orm_set_loaded(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     index = PyLong_AsSsize_t(args[0]);
     if (index == -1 && PyErr_Occurred()) return NULL;
     value = args[1];
+    if (model_set_loaded(self, index, value) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static int
+model_set_loaded(PyObject *self, Py_ssize_t index, PyObject *value)
+{
+    WreathPgModelLayout *layout;
+    const WreathPgModelField *field;
+    int changed;
     field = field_at(self, &layout, index);
-    if (field == NULL) return NULL;
+    if (field == NULL) return -1;
     if (value == Py_None) {
         cell_release((char *)self + field->offset, field);
         bit_set(self, layout, BITMAP_NULL, field->bit, 1);
     } else {
         if (cell_store((char *)self + field->offset, field, value, &changed) < 0) {
-            return NULL;
+            return -1;
         }
         bit_set(self, layout, BITMAP_NULL, field->bit, 0);
     }
     bit_set(self, layout, BITMAP_LOADED, field->bit, 1);
-    Py_RETURN_NONE;
+    return 0;
 }
 
 static PyObject *
@@ -1016,6 +1025,98 @@ storage_set_owner(PyObject *self, PyObject *value, void *closure)
     Py_XSETREF(model->identity_owner, Py_NewRef(value));
     return 0;
 }
+
+static int
+model_api_bit(PyObject *instance, Py_ssize_t index, int which)
+{
+    WreathPgModelLayout *layout;
+    const WreathPgModelField *field = field_at(instance, &layout, index);
+    if (field == NULL) return -1;
+    return bit_get(instance, layout, which, field->bit);
+}
+
+static PyObject *
+model_api_get(PyObject *instance, Py_ssize_t index)
+{
+    WreathPgModelLayout *layout;
+    const WreathPgModelField *field = field_at(instance, &layout, index);
+    if (field == NULL) return NULL;
+    if (!bit_get(instance, layout, BITMAP_LOADED, field->bit)) {
+        PyObject *name = column_name_at(instance, index);
+        if (name == NULL) return NULL;
+        raise_unloaded_attribute(instance, name);
+        Py_DECREF(name);
+        return NULL;
+    }
+    if (bit_get(instance, layout, BITMAP_NULL, field->bit)) return Py_NewRef(Py_None);
+    return cell_load((const char *)instance + field->offset, field);
+}
+
+static PyObject *
+model_api_get_relation(PyObject *instance, Py_ssize_t index)
+{
+    PyObject **slot = relation_slot(instance, index, NULL);
+    if (slot == NULL) return NULL;
+    if (*slot == NULL) {
+        PyErr_Format(error_unloaded_relationship == NULL ? PyExc_AttributeError
+                                                         : error_unloaded_relationship,
+                     "%.200s relationship %zd was not loaded",
+                     Py_TYPE(instance)->tp_name, index);
+        return NULL;
+    }
+    return Py_NewRef(*slot);
+}
+
+static int
+model_api_is_loaded(PyObject *instance, Py_ssize_t index)
+{
+    return model_api_bit(instance, index, BITMAP_LOADED);
+}
+
+static int
+model_api_is_null(PyObject *instance, Py_ssize_t index)
+{
+    return model_api_bit(instance, index, BITMAP_NULL);
+}
+
+static int
+model_api_is_dirty(PyObject *instance, Py_ssize_t index)
+{
+    return model_api_bit(instance, index, BITMAP_DIRTY);
+}
+
+static int
+model_api_set_relation(PyObject *instance, Py_ssize_t index, PyObject *value)
+{
+    PyObject **slot = relation_slot(instance, index, NULL);
+    if (slot == NULL) return -1;
+    Py_XSETREF(*slot, Py_NewRef(value));
+    return 0;
+}
+
+static int
+model_api_make_persistent(PyObject *instance, PyObject *owner)
+{
+    WreathPgModel *model;
+    if (require_layout(instance) == NULL) return -1;
+    model = (WreathPgModel *)instance;
+    model->state_flags = STATE_PERSISTENT;
+    Py_XSETREF(model->identity_owner, Py_NewRef(owner));
+    return 0;
+}
+
+static const WreathModelAPI model_api = {
+    .version = WREATH_MODEL_API_VERSION,
+    .alloc = wreath_pg_model_alloc,
+    .get = model_api_get,
+    .is_loaded = model_api_is_loaded,
+    .is_null = model_api_is_null,
+    .is_dirty = model_api_is_dirty,
+    .get_relation = model_api_get_relation,
+    .set_loaded = model_set_loaded,
+    .set_relation = model_api_set_relation,
+    .make_persistent = model_api_make_persistent,
+};
 
 /* A test-only description of the compiled layout. Reports sizes and offsets,
    never addresses. */
@@ -1250,8 +1351,7 @@ compile_model_layout(PyObject *module, PyObject *args)
     memset(&spec, 0, sizeof(spec));
     spec.name = "wreath._native._postgres._ModelStorage";
     spec.basicsize = (int)offset;
-    /* Managed weakrefs keep parity with the reference storage, which lists
-       __weakref__ in its __slots__. */
+    /* Model instances support weak references without adding an inline slot. */
     spec.flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC |
                  Py_TPFLAGS_MANAGED_WEAKREF;
     spec.slots = storage_slots;
@@ -1322,8 +1422,7 @@ make_column_descriptor(PyObject *module, PyObject *args)
     descriptor->name = PyObject_GetAttrString(column, "python_name");
     /* Column.validate, not PgType.coerce: the column has already fused its type
        with its business rules, and taking coerce here would silently skip them
-       on every native assignment while the reference backend still enforced
-       them. Python compiles this before the descriptor is made. */
+       on assignment. Python compiles this before the descriptor is made. */
     descriptor->validate = PyObject_GetAttrString(column, "validate");
     if (descriptor->expression == NULL || descriptor->name == NULL ||
         descriptor->validate == NULL) {
@@ -1429,7 +1528,7 @@ rebind_field_oid(PyObject *module, PyObject *args)
     }
     layout = wreath_pg_model_layout_for_type((PyTypeObject *)storage_type);
     if (layout == NULL) {
-        PyErr_SetString(PyExc_TypeError, "model has no native storage layout");
+        PyErr_SetString(PyExc_TypeError, "model has no compiled storage layout");
         return NULL;
     }
     if (index < 0 || index >= layout->field_count) {
@@ -1509,6 +1608,7 @@ static PyGetSetDef model_type_getset[] = {
 int
 wreath_pg_model_init(PyObject *module)
 {
+    PyObject *api_capsule;
     WreathPgModelTypeType = (PyTypeObject *)PyType_FromSpecWithBases(
         &model_type_spec, (PyObject *)&PyType_Type
     );
@@ -1535,6 +1635,12 @@ wreath_pg_model_init(PyObject *module)
     Py_DECREF(WreathPgRelationDescriptorType);
 
     if (PyModule_AddFunctions(module, model_methods) < 0) return -1;
+    api_capsule = PyCapsule_New((void *)&model_api, WREATH_MODEL_API_NAME, NULL);
+    if (api_capsule == NULL) return -1;
+    if (PyModule_AddObject(module, "_MODEL_API", api_capsule) < 0) {
+        Py_DECREF(api_capsule);
+        return -1;
+    }
 
     /* __layout__ is exposed on the metatype so both the storage base and the
        model class created from it answer it. */
