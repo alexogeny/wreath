@@ -165,6 +165,21 @@ def test_route_labels_and_escaping():
     _parse(text)  # still structurally valid
 
 
+def test_native_default_route_rendering_matches_labelled_definition():
+    routes = [
+        _Route('a"b\\c\nd', 5, 1, 1234, 63, _bkts(**{"1": 3, "5": 2})),
+        _Route(9, True, False, 0, 0, _bkts()),
+        _Route(10, 1 << 100, 0, 9_876_543, 1_234, [1 << 80] + [0] * 63),
+    ]
+    snap = _Snap(7, 0, routes, _Loss())
+    native = prom.render_exposition(snap)
+    defined = prom.render_exposition(
+        snap,
+        route_labels=lambda route_id: {"route_id": str(route_id)},
+    )
+    assert native == defined
+
+
 def test_name_sanitization():
     snap = _Snap(0, 0, [], _Loss())
     text = prom.render_exposition(snap, namespace="my app-1")

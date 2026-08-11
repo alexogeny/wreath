@@ -24,6 +24,8 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
+from ._native import _core
+
 __all__ = [
     "render_exposition",
     "PrometheusBridge",
@@ -137,6 +139,10 @@ class _Writer:
     def sample(self, name: str, labels: Mapping[str, str], value: float | int) -> None:
         self._lines.append(f"{name}{_render_labels(labels)} {_format_value(value)}")
 
+    def block(self, text: str) -> None:
+        if text:
+            self._lines.append(text)
+
     def text(self) -> str:
         return "\n".join(self._lines) + "\n"
 
@@ -201,44 +207,61 @@ def render_exposition(
         return name[:-6] if openmetrics and name.endswith("_total") else name
 
     routes: Sequence[Any] = tuple(getattr(snapshot, "routes", ()) or ())
+    requests = f"{ns}_http_requests_total"
+    errors = f"{ns}_http_request_errors_total"
+    hist = f"{ns}_http_request_duration_seconds"
+    dmax = f"{ns}_http_request_duration_max_seconds"
+    route_blocks = (
+        _core.prometheus_route_blocks(routes, (requests, errors, hist, dmax))
+        if route_labels is None
+        else None
+    )
 
     # --- per-route counters --------------------------------------------------
-    requests = f"{ns}_http_requests_total"
     w.family(_cfam(requests), "counter", "Requests finalized by the flight projector, by route.")
-    for route in routes:
-        w.sample(requests, _resolve_route_labels(route_labels, route.route_id), route.count)
+    if route_blocks is not None:
+        w.block(route_blocks[0])
+    else:
+        for route in routes:
+            w.sample(requests, _resolve_route_labels(route_labels, route.route_id), route.count)
 
-    errors = f"{ns}_http_request_errors_total"
     w.family(_cfam(errors), "counter",
              "Failed requests (non-OK terminal, 5xx, or promoted), by route.")
-    for route in routes:
-        w.sample(errors, _resolve_route_labels(route_labels, route.route_id), route.errors)
+    if route_blocks is not None:
+        w.block(route_blocks[1])
+    else:
+        for route in routes:
+            w.sample(errors, _resolve_route_labels(route_labels, route.route_id), route.errors)
 
     # --- per-route duration histogram ---------------------------------------
-    hist = f"{ns}_http_request_duration_seconds"
     w.family(hist, "histogram", "Request duration in seconds (base-2 log buckets), by route.")
-    for route in routes:
-        base = _resolve_route_labels(route_labels, route.route_id)
-        buckets = list(route.buckets)
-        total = 0
-        cumulative = 0
-        # Emit a cumulative le boundary only where a bucket saw observations, then
-        # the mandatory +Inf bucket equal to the total count. Monotonic in le.
-        for i in range(min(len(buckets), HISTOGRAM_BUCKETS)):
-            cumulative += buckets[i]
-            total += buckets[i]
-            if buckets[i]:
-                w.sample(hist + "_bucket",
-                         {**base, "le": _format_value(_le_seconds(i))}, cumulative)
-        w.sample(hist + "_bucket", {**base, "le": "+Inf"}, total)
-        w.sample(hist + "_sum", base, route.duration_us_sum / 1_000_000.0)
-        w.sample(hist + "_count", base, total)
+    if route_blocks is not None:
+        w.block(route_blocks[2])
+    else:
+        for route in routes:
+            base = _resolve_route_labels(route_labels, route.route_id)
+            buckets = list(route.buckets)
+            total = 0
+            cumulative = 0
+            # Emit a cumulative le boundary only where a bucket saw observations, then
+            # the mandatory +Inf bucket equal to the total count. Monotonic in le.
+            for i in range(min(len(buckets), HISTOGRAM_BUCKETS)):
+                cumulative += buckets[i]
+                total += buckets[i]
+                if buckets[i]:
+                    w.sample(hist + "_bucket",
+                             {**base, "le": _format_value(_le_seconds(i))}, cumulative)
+            w.sample(hist + "_bucket", {**base, "le": "+Inf"}, total)
+            w.sample(hist + "_sum", base, route.duration_us_sum / 1_000_000.0)
+            w.sample(hist + "_count", base, total)
 
-    dmax = f"{ns}_http_request_duration_max_seconds"
     w.family(dmax, "gauge", "Maximum observed request duration in seconds, by route.")
-    for route in routes:
-        w.sample(dmax, _resolve_route_labels(route_labels, route.route_id),
-                 route.duration_us_max / 1_000_000.0)
+    if route_blocks is not None:
+        w.block(route_blocks[3])
+    else:
+        for route in routes:
+            w.sample(dmax, _resolve_route_labels(route_labels, route.route_id),
+                     route.duration_us_max / 1_000_000.0)
 
     # --- global projector state ---------------------------------------------
     assembled = f"{ns}_flight_traces_assembled_total"
