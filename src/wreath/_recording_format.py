@@ -45,6 +45,7 @@ from ._flight_schema import (
     SchemaError,
     decode_metadata_image,
 )
+from ._native import _core
 
 __all__ = [
     "MAGIC",
@@ -788,13 +789,12 @@ def read_recording(data: bytes) -> DecodedRecording:
         elif tag == _TAG_CAPTURE:
             _split_slabs(payload, slabs)
         elif tag == _TAG_EVENT:
-            if len(payload) % CELL_SIZE != 0:
+            decoded_events = _core.recording_event_cells(
+                payload, CELL_SIZE, SCHEMA_VERSION, SchemaError
+            )
+            if decoded_events is None:
                 break
-            for i in range(0, len(payload), CELL_SIZE):
-                cell = bytes(payload[i : i + CELL_SIZE])
-                if cell[0] != SCHEMA_VERSION:
-                    raise SchemaError("event cell has an unsupported schema version")
-                events.append(cell)
+            events.extend(decoded_events)
         elif tag == _TAG_ATTEMPT:
             # Refused rather than skipped: an `ATMP` chunk this reader cannot
             # decode is the whole recording, not one slab out of many.
