@@ -93,7 +93,7 @@ async def test_requesting_unbuilt_h3_raises_without_downgrade(
     monkeypatch.setattr("wreath.server._http3_available", lambda: False)
     cert, key = _self_signed()
     tls = TLSConfig(certfile=cert, keyfile=key)
-    with pytest.raises(RuntimeError, match="HTTP/3"):
+    with pytest.raises(RuntimeError, match=r"Install 'wreath\[h3\]'"):
         await serve(
             _noop_app,
             ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",)),
