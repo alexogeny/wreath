@@ -22,19 +22,13 @@ import asyncio
 
 import pytest
 
-from wreath.server import _native_started_coroutine, _StartedCoroutine
-
-#: Both implementations, pinned by the same contract. The native one is the twin
-#: the server actually uses; the Python class is what it has to agree with.
-IMPLEMENTATIONS = [pytest.param(_StartedCoroutine, id="pure")]
-if _native_started_coroutine is not None:
-    IMPLEMENTATIONS.append(pytest.param(_native_started_coroutine, id="native"))
+from wreath._native import _server
 
 
-@pytest.fixture(params=IMPLEMENTATIONS)
-def continuation(request):
+@pytest.fixture
+def continuation():
     """The factory under test: `(coroutine, first_yield) -> continuation`."""
-    return request.param
+    return _server.StartedCoroutine
 
 
 async def _drive(continuation, coroutine):

@@ -1,4 +1,4 @@
-"""Wreath's optional native HTTP/1.1 server facade.
+"""Wreath's HTTP server facade.
 
 Wreath remains a normal ASGI framework: it runs behind Uvicorn or any other
 conforming server without importing this module. `wreath.server` is an
@@ -6,10 +6,9 @@ conforming server without importing this module. `wreath.server` is an
 Wreath-owned protocol implementation that runs on top of an asyncio (or uvloop)
 transport.
 
-The protocol is `wreath._native._server`, resolved at import. A build without
-that extension cannot serve here and is refused by name at startup; it is
-independent of `_core`, so a missing `_server` never disables JSON, routing,
-codec or parser acceleration -- it only means this module cannot serve.
+The protocol is `wreath._native._server`, resolved once at import from the
+compiled wheel. Wreath remains usable behind any conforming ASGI server because
+framework applications do not import this module.
 
 This server is **experimental** until fuzzing, sanitizer, soak, and security
 review work is complete.
@@ -28,6 +27,7 @@ from dataclasses import dataclass, field
 from email.utils import formatdate
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from ._native import _server
 from ._native import extension as _extension
 from .config import read_osenv
 from .inspector import InspectorConfig, InspectorServer, serve_inspector
@@ -36,96 +36,9 @@ from .telemetry import Mode, TelemetryConfig
 if TYPE_CHECKING:
     from ssl import SSLContext
 
-
-def _load_native_started_coroutine() -> Any | None:
-    """The native continuation type, or None when this build has no extension.
-
-    Resolved once at import rather than per request.
-    """
-    return getattr(_extension("_server"), "StartedCoroutine", None)
-
-
-class _StartedCoroutine:
-    """A coroutine the native HTTP driver already stepped once, made adoptable.
-
-    `spawn_app_task` calls the application and steps the coroutine straight away,
-    so a handler that never waits returns on that first step and the request owns
-    no asyncio Task at all. When it *does* suspend, the half-run coroutine has to
-    reach the loop -- and `Task` cannot take it, because its own first step sends
-    `None` into a coroutine that is waiting for a future's result.
-
-    This is what it takes instead: re-yield the value the native step already
-    received, then be the coroutine underneath for every step after. The Task
-    then does exactly what it would have done had it driven the handler from the
-    start -- it is the *same* value reaching the same scheduler, one step later.
-
-    Registering with `collections.abc.Coroutine` is what makes `create_task`
-    accept it; `asyncio.iscoroutine` is an isinstance check against that ABC.
-
-    The previous version of this was an `async def` that re-awaited each value
-    itself. That cost a Python coroutine frame per resumption -- measured at
-    ~7,000 instructions a suspending request, against ~15,000 for the Task the
-    loop needs regardless -- which is why the C version below exists and why
-    this shape (an object that delegates) is what both implement.
-
-    **Every exception goes into the coroutine, `CancelledError` included.** This
-    stands in for the event loop, and narrowing that would silently strip
-    cancellation from a request in flight: the task would die and the query it
-    was waiting on would run to completion with nobody to receive it.
-    `tests/test_server_continuation.py` pins each half of that.
-    """
-
-    __slots__ = ("_coroutine", "_pending", "_started")
-
-    def __init__(self, coroutine: Any, awaited: Any) -> None:
-        self._coroutine = coroutine
-        self._pending = awaited
-        self._started = False
-
-    def send(self, value: Any) -> Any:
-        if self._started:
-            return self._coroutine.send(value)
-        # The first step's value, handed on untouched: the flag asyncio's
-        # `Future.__await__` set is exactly the one the Task expects to see.
-        self._started = True
-        pending, self._pending = self._pending, None
-        return pending
-
-    def throw(self, *arguments: Any) -> Any:
-        self._started = True
-        self._pending = None
-        return self._coroutine.throw(*arguments)
-
-    def close(self) -> Any:
-        self._pending = None
-        return self._coroutine.close()
-
-    def __await__(self) -> Any:
-        return self
-
-    def __iter__(self) -> Any:
-        return self
-
-    def __next__(self) -> Any:
-        return self.send(None)
-
-
-#: Neither implementation registers with `collections.abc.Coroutine`, and
-#: neither needs to: that ABC's `__subclasshook__` accepts anything carrying `__await__`,
-#: `send`, `throw` and `close`, which is exactly what `asyncio.iscoroutine` --
-#: and therefore `loop.create_task` -- tests for. Renaming one of those four
-#: would make the loop refuse the continuation, so
-#: `tests/test_server_continuation.py` asserts `iscoroutine` on both.
-
-#: The C version, when this build has one. `None` selects the class above.
-_native_started_coroutine = _load_native_started_coroutine()
-
-
-def _started_coroutine_continuation(coroutine: Any, awaited: Any) -> Any:
-    """The continuation for an already-stepped coroutine, native where built."""
-    if _native_started_coroutine is not None:
-        return _native_started_coroutine(coroutine, awaited)
-    return _StartedCoroutine(coroutine, awaited)
+_SERVER_PROTOCOL = _server.HttpProtocol
+_HTTP1_PROTOCOL = _server.Http1Protocol
+_HTTP2_PROTOCOL = _server.Http2Protocol
 
 
 def _create_recorder(config: ServerConfig) -> Any:
@@ -789,59 +702,22 @@ def configure_from_env(
 
 
 def _select_protocol() -> type:
-    """The HTTP protocol class, or a named refusal when `_server` is not built.
-
-    Refused here rather than degraded: there is no Python protocol to fall back
-    to any more, and the framework itself is unaffected -- `wreath.server` is an
-    *additional* way to serve an app, and every conforming ASGI server still
-    runs one without importing this module.
-    """
-    server_ext = _extension("_server")
-    if server_ext is None:
-        raise RuntimeError(
-            "wreath._native._server is not built, so wreath.server cannot serve. "
-            "Build it with `python setup.py build_ext --inplace`, or run the "
-            "application on any conforming ASGI server instead."
-        )
-    return cast(type, server_ext.HttpProtocol)
-
-
-def _native_server_module() -> Any | None:
-    return _extension("_server")
-
-
-def _require_native_h2() -> Any:
-    """The native server extension, or `RuntimeError` naming what is missing.
-
-    Called from `_resolve_tls` at startup, so an `h2` listener that could never
-    serve a request is refused before anything binds. Called again from
-    `_select_tcp_protocol`, which is the only other way to reach a protocol
-    class -- constructing a `Server` directly bypasses `serve`.
-    """
-    ext = _native_server_module()
-    if ext is None or not hasattr(ext, "Http2Protocol"):
-        raise RuntimeError(
-            "HTTP/2 (h2) requires the native wreath._native._server extension; "
-            "build it, or remove 'h2' from config.protocols."
-        )
-    return ext
+    """The compiled HTTP protocol class."""
+    return cast(type, _SERVER_PROTOCOL)
 
 
 def _select_tcp_protocol(config: ServerConfig) -> type:
     """Choose the TCP protocol class for the configured protocol set.
 
-    `h2` requires the native extension, which `serve` has already insisted on;
-    the check is repeated here because a `Server` built by hand never went
-    through it. A combined `http/1.1`+`h2` listener negotiates via TLS ALPN
-    through `NegotiatingHttpProtocol`.
+    A combined `http/1.1`+`h2` listener negotiates via TLS ALPN through
+    `NegotiatingHttpProtocol`.
     """
     protocols = config.protocols
     wants_h1 = "http/1.1" in protocols
     wants_h2 = "h2" in protocols
     if wants_h2:
-        ext = _require_native_h2()
         if not wants_h1:
-            return cast(type, ext.Http2Protocol)
+            return cast(type, _HTTP2_PROTOCOL)
         return NegotiatingHttpProtocol
     return _select_protocol()
 
@@ -851,7 +727,7 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
 
     A single TLS listener can serve both protocols: `connection_made` reads the
     negotiated ALPN protocol and delegates every subsequent `asyncio.Protocol`
-    callback to the matching native protocol.
+    callback to the matching protocol.
 
     The mapping is exact and closed. `h2` selects HTTP/2; `http/1.1` and *no
     ALPN at all* select HTTP/1.1, the latter because a client too old to offer
@@ -860,10 +736,8 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
     inspected to guess a protocol, so a client cannot reach a protocol it did not
     negotiate.
 
-    Selected only for a combined `http/1.1` + `h2` listener, and only when the
-    native server extension is present -- a single-protocol listener instantiates
-    its protocol directly. If the extension turns out to be missing at connection
-    time the transport is closed rather than downgraded.
+    Selected only for a combined `http/1.1` + `h2` listener; a single-protocol
+    listener instantiates its compiled protocol directly.
 
     Args:
         registry: The server's live-protocol set; the delegate registers itself in it.
@@ -895,15 +769,11 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
         """
         ssl_object = transport.get_extra_info("ssl_object")
         alpn = ssl_object.selected_alpn_protocol() if ssl_object is not None else None
-        ext = _native_server_module()
-        if ext is None:
-            transport.close()
-            return
         if alpn == "h2":
-            protocol_cls = ext.Http2Protocol
+            protocol_cls = _HTTP2_PROTOCOL
         elif alpn in ("http/1.1", None):
             # No ALPN (older/plain client) falls back to HTTP/1.1.
-            protocol_cls = ext.Http1Protocol
+            protocol_cls = _HTTP1_PROTOCOL
         else:
             transport.close()  # unknown ALPN: never reach ASGI
             return
@@ -980,14 +850,8 @@ def _resolve_tls(
     """Validate the requested protocol/TLS combination and return the TCP context.
 
     Enforces the plan's startup rules: no silent downgrade for an unavailable
-    `h2` or `h3` build, `h3` requires a `TLSConfig`, network `h2`/`h3`
-    require TLS, and `ssl=`/`tls=` are mutually exclusive.
-
-    Both extension checks live here rather than where the protocol object is
-    built, because a missing extension is a deployment fact and not a property
-    of one connection: checked per connection it starts a server that refuses
-    every request it is ever offered, which is the failure a startup check
-    exists to turn into a refusal to start.
+    `h3` build, `h3` requires a `TLSConfig`, network `h2`/`h3` require TLS, and
+    `ssl=`/`tls=` are mutually exclusive.
     """
     if ssl is not None and tls is not None:
         raise ValueError("pass either ssl= or tls=, not both")
@@ -1008,7 +872,6 @@ def _resolve_tls(
             )
 
     if wants_h2:
-        _require_native_h2()
         if ssl is None and tls is None:
             raise ValueError(
                 "HTTP/2 (h2) network serving requires TLS with ALPN; pass tls= or ssl="
@@ -1056,8 +919,8 @@ class Server:
         self._recording_sink: Any = None
         self._arm_registry: Any = None
         self._inspector: InspectorServer | None = None
-        #: The TCP protocol class, resolved once by `_protocol_factory`.
-        self._protocol_cls: type | None = None
+        #: The TCP protocol class selected for every accepted connection.
+        self._protocol_cls: type = _select_tcp_protocol(config)
         self._protocols: set[Any] = set()
         self._asyncio_server: asyncio.AbstractServer | None = None
         self._datagram_transport: asyncio.DatagramTransport | None = None
@@ -1112,17 +975,7 @@ class Server:
         return self._recorder
 
     def _protocol_factory(self) -> Any:
-        # Resolved on the first connection and kept: `_select_tcp_protocol`
-        # reads `os.environ` (two KeyErrors raised and caught inside
-        # `os._Environ.get`) and calls `importlib.import_module`, and it
-        # measured at 1.82us to re-derive a constant -- paid on every accepted
-        # connection, on the one path metal otherwise keeps entirely in C.
-        # Cached lazily rather than in `__init__` so a `Server` built by hand
-        # with an unservable protocol set still fails where it always did.
-        protocol_cls = self._protocol_cls
-        if protocol_cls is None:
-            protocol_cls = self._protocol_cls = _select_tcp_protocol(self._config)
-        return protocol_cls(
+        return self._protocol_cls(
             self._app,
             self._config,
             self._loop,
@@ -1575,10 +1428,8 @@ async def serve(
     `ssl` and `tls` are alternatives, not layers: `tls` builds the context
     *and* supplies the certificate paths HTTP/3 needs, so `h3` requires it.
 
-    A missing extension for any requested protocol is refused here rather than
-    silently downgrading: `h3` without `wreath._native._http3` and `h2` without
-    `wreath._native._server` both raise before anything binds. Neither can start
-    a server that would refuse every connection it is offered.
+    An unavailable HTTP/3 capability is refused here rather than silently
+    downgrading, before anything binds.
 
     Args:
         config: Defaults to a plain `ServerConfig`; the environment is not read here.
@@ -1590,7 +1441,7 @@ async def serve(
 
     Raises:
         ValueError: Both `ssl` and `tls` were passed, or `h3`/`h2` lacks the TLS it needs.
-        RuntimeError: `h2` or `h3` was requested and its native extension is not built.
+        RuntimeError: `h3` was requested but its compiled capability is not built.
     """
     config = config or ServerConfig()
     ssl_context = _resolve_tls(config, ssl, tls)

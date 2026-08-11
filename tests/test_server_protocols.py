@@ -208,69 +208,6 @@ async def test_h3_without_tls_is_error():
         await serve(_app, ServerConfig(port=0, lifespan="off", protocols=("h3",)))
 
 
-async def test_unbuilt_h2_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """h2 without the extension must fail at boot, exactly as h3 does.
-
-    Proving "refused to start" rather than "every connection fails": the ASGI
-    lifespan never runs and `Server._start` -- which is what binds a listener --
-    is never entered, so there is no server and nothing bound.
-    """
-    import wreath.server as server_module
-
-    monkeypatch.setattr(server_module, "_native_server_module", lambda: None)
-
-    scopes: list[str] = []
-
-    async def recording_app(scope, receive, send):
-        scopes.append(scope["type"])
-        if scope["type"] == "lifespan":
-            # Answered properly so that a *failure* of this test is an assertion
-            # rather than a hang: a server that did start must still come up.
-            while True:
-                message = await receive()
-                if message["type"] == "lifespan.startup":
-                    await send({"type": "lifespan.startup.complete"})
-                elif message["type"] == "lifespan.shutdown":
-                    await send({"type": "lifespan.shutdown.complete"})
-                    return
-
-    starts: list[object] = []
-    original_start = server_module.Server._start
-
-    async def spy(self, *args, **kwargs):
-        starts.append(self)
-        return await original_start(self, *args, **kwargs)
-
-    monkeypatch.setattr(server_module.Server, "_start", spy)
-
-    cert, key = _cert()
-    with pytest.raises(RuntimeError, match=r"wreath\._native\._server"):
-        await serve(
-            recording_app,
-            ServerConfig(port=0, lifespan="on", protocols=("h2",)),
-            tls=TLSConfig(cert, key),
-        )
-
-    assert starts == []   # nothing was ever bound
-    assert scopes == []   # and the application was never started
-
-
-async def test_unbuilt_h2_refuses_to_start_when_combined_with_http11(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A combined listener is refused too; it would negotiate a protocol it lacks."""
-    import wreath.server as server_module
-
-    monkeypatch.setattr(server_module, "_native_server_module", lambda: None)
-    cert, key = _cert()
-    with pytest.raises(RuntimeError, match=r"HTTP/2"):
-        await serve(
-            _app,
-            ServerConfig(port=0, lifespan="off", protocols=("http/1.1", "h2")),
-            tls=TLSConfig(cert, key),
-        )
-
-
 async def test_unbuilt_h3_fails_without_downgrade(
     monkeypatch: pytest.MonkeyPatch,
 ):
