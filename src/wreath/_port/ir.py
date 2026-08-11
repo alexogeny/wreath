@@ -80,7 +80,7 @@ class Report:
     `files_analyzed`/`skipped` say how much of the tree that sentence covers.
     """
 
-    __slots__ = ("findings", "roots", "skipped", "files_analyzed")
+    __slots__ = ("findings", "roots", "skipped", "files_analyzed", "detection")
 
     def __init__(
         self,
@@ -88,7 +88,12 @@ class Report:
         roots: list[str] | None = None,
         skipped: list[SkippedFile] | None = None,
         files_analyzed: int = 0,
+        detection=None,
     ) -> None:
+        # What framework the tree turned out to be. Optional so a Report built by
+        # hand (tests, merges of older reports) still constructs; absent means
+        # "not asked", which the renderings say rather than guess at.
+        self.detection = detection
         # Deterministic ordering: by file, then line, then rule — so re-runs and
         # merged reports are byte-stable (idempotency, design 07 §3).
         self.findings = sorted(findings, key=lambda f: (f.file, f.line, f.rule_id, f.construct))
@@ -165,6 +170,10 @@ class Report:
         return {
             "roots": self.roots,
             "files_analyzed": self.files_analyzed,
+            # First key a reader should see after the roots: a coverage number
+            # means nothing until you know whether the tree is even the kind of
+            # application this tool ports.
+            "detection": None if self.detection is None else self.detection.as_dict(),
             "counts": self.counts(),
             # `null` when nothing was recognized. A consumer that formats this
             # blindly gets "None"/"null" in its output, which is loud; the old
@@ -183,6 +192,12 @@ class Report:
         lines = [
             "# wreath port — analysis report",
             "",
+        ]
+        if self.detection is not None:
+            lines.append(f"- stack detected: **{self.detection.headline()}**")
+            for warning in self.detection.warnings():
+                lines += ["", f"> **{warning}**", ""]
+        lines += [
             f"- files analyzed: **{self.files_analyzed}**  ·  "
             f"skipped: **{len(self.skipped)}**",
             f"- recognized constructs: **{self.recognized_constructs}**",
@@ -240,7 +255,12 @@ class Report:
             roots.extend(r.roots)
             skipped.extend(r.skipped)
             analyzed += r.files_analyzed
-        return cls(findings, roots, skipped, analyzed)
+        from .detect import Detection
+
+        return cls(
+            findings, roots, skipped, analyzed,
+            detection=Detection.merge([r.detection for r in reports]),
+        )
 
 
 def _percent(value: float | None) -> str:

@@ -20,6 +20,17 @@ def _by_rule(findings, rule_id):
     return [f for f in findings if f.rule_id == rule_id]
 
 
+def _celery(findings):
+    """Every Celery finding, whichever half of the split it landed on.
+
+    The family is what these tests are about -- whether the *decorator* was seen
+    at all -- and it is billed under `bg.celery.task` where the rewrite is
+    determined and `bg.celery` where a keyword, a `self.retry()` or a sync
+    caller still needs a person.
+    """
+    return [f for f in findings if f.rule_id.startswith("bg.celery")]
+
+
 # --- boto3 is not one verdict ----------------------------------------------------
 
 
@@ -146,9 +157,72 @@ def test_both_spellings_of_a_celery_task_are_billed(tmp_path, decorator, why) ->
         "def work() -> None:\n"
         "    pass\n"
     )
-    (finding,) = _by_rule(_analyze(tmp_path, source), "bg.celery")
-    assert finding.tag == port.NEEDS_REVIEW, why
-    assert "jobs" in finding.message
+    (finding,) = _celery(_analyze(tmp_path, source))
+    # Both spellings land on the *written-out* half of the split: neither
+    # carries a keyword without a `JobRunner.task` equivalent, and neither body
+    # calls `self.retry()`.
+    assert finding.rule_id == "bg.celery.task", why
+    assert finding.tag == port.TRANSLATED, why
+    assert "JobRunner" in finding.message
+
+
+@pytest.mark.parametrize("runner", ["relay", "app", "worker", "queue"])
+def test_a_celery_app_is_recognized_by_its_binding_not_its_name(tmp_path, runner) -> None:
+    """`@relay.task` was invisible because the gate read the *variable's* name.
+
+    `origin()` resolves imports, and a Celery application is a local bound to a
+    call, so the resolved origin of `@relay.task` is the literal text
+    `relay.task` -- and the gate asked whether it contained "celery". Every app
+    that did not name its runner after the library reported nothing at all,
+    while the emitter (which tracks the assignment) rewrote the same decorator.
+    The binding is the fact; the name is a coincidence.
+    """
+    source = (
+        "from celery import Celery\n"
+        f"{runner} = Celery('x')\n"
+        f"@{runner}.task\n"
+        "def work() -> None:\n"
+        "    pass\n"
+    )
+    (finding,) = _celery(_analyze(tmp_path, source))
+    assert finding.rule_id.startswith("bg.celery")
+    assert finding.line == 3
+
+
+def test_a_runner_built_by_a_factory_still_bills_its_tasks(tmp_path) -> None:
+    """`worker = make_celery(app)` binds no `Celery(...)` this file can see.
+
+    The factory spelling is what a Flask-era codebase carries into FastAPI, and
+    the assignment says nothing. The module importing celery at all is the
+    discriminator that is left -- the same loose, module-level question
+    `serves_asgi` asks about a route decorator, and for the same reason.
+    """
+    source = (
+        "from celery import Celery\n"
+        "from .factory import make_celery\n"
+        "worker = make_celery('x')\n"
+        "@worker.task\n"
+        "def work() -> None:\n"
+        "    pass\n"
+    )
+    (finding,) = _celery(_analyze(tmp_path, source))
+    assert finding.rule_id.startswith("bg.celery")
+
+
+def test_a_task_decorator_in_a_module_with_no_celery_is_not_billed(tmp_path) -> None:
+    """`@scheduler.task` from some other library must not become a Celery finding.
+
+    The catch-all above is scoped to a module that imports celery. Without that
+    scope it is not a catch-all, it is a match on the word "task".
+    """
+    source = (
+        "from apscheduler.schedulers.asyncio import AsyncIOScheduler\n"
+        "scheduler = AsyncIOScheduler()\n"
+        "@scheduler.task\n"
+        "def work() -> None:\n"
+        "    pass\n"
+    )
+    assert not _celery(_analyze(tmp_path, source))
 
 
 def test_a_multiprocessing_worker_names_jobs_and_progress(tmp_path) -> None:

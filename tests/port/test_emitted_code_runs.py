@@ -334,3 +334,79 @@ def test_a_handler_with_no_parameters_gets_one() -> None:
         "    return {}\n"
     )
     assert "async def home(request: Request):" in emitted
+
+def test_a_settings_init_that_only_calls_super_leaves_no_empty_body() -> None:
+    """The rewrite renames `__init__` and deletes the `super()` call it contains.
+
+    When that call is the *whole* body there is nothing left, and a `def` with
+    no body is a syntax error -- which the emitter's own round-trip guard turned
+    into `EmitError` on a four-line input. The method exists only to do what the
+    dataclass already does, so it goes entirely rather than being renamed to an
+    empty `__post_init__`.
+    """
+    emitted = _emit(
+        "from pydantic_settings import BaseSettings\n"
+        "\n"
+        "\n"
+        "class Settings(BaseSettings):\n"
+        "    host: str = 'localhost'\n"
+        "\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__()\n"
+    )
+    assert "__post_init__" not in emitted, (
+        "an empty __post_init__ is the bug, not the fix"
+    )
+    assert "def __init__" not in emitted, "the method only called super; it should go"
+    assert "host: str = 'localhost'" in emitted, "the field must survive"
+
+
+def test_a_settings_init_that_only_forwards_kwargs_is_dropped() -> None:
+    """It compiled, and then raised the moment anyone constructed it.
+
+    `def __init__(self, **kwargs): super().__init__(**kwargs)` is the shape
+    pydantic-settings users write to keep the base's signature. Ported onto a
+    `@dataclass` with no base, `super().__init__(**kwargs)` is
+    `object.__init__(host=...)` -- a `TypeError` at construction, from a module
+    that parsed and compiled clean. That is the second failure mode this file's
+    docstring names, and only executing the class finds it.
+
+    The method is pure forwarding, and the generated `__init__` a `@dataclass`
+    already writes accepts exactly those keywords, so it goes.
+    """
+    emitted = _emit(
+        "from pydantic_settings import BaseSettings\n"
+        "\n"
+        "\n"
+        "class Settings(BaseSettings):\n"
+        "    host: str = 'localhost'\n"
+        "\n"
+        "    def __init__(self, **kwargs) -> None:\n"
+        "        super().__init__(**kwargs)\n"
+    )
+    namespace: dict = {}
+    exec(compile(emitted, "<ported>", "exec"), namespace)  # noqa: S102 -- the point
+    assert namespace["Settings"](host="example.test").host == "example.test"
+
+
+
+def test_a_model_whose_only_body_is_model_config_keeps_a_body() -> None:
+    """Dropping the redundant config must not empty the class it was the body of.
+
+    `model_config = ConfigDict(from_attributes=True)` carries no contract wreath
+    needs, so the emitter removes it. When it was the class's *only* statement,
+    removal left `class Row(BaseModel):` with nothing under it — a file that does
+    not parse, from a rule that was right about the config and wrong about the
+    class. It aborted the whole tree: `port_tree` raises on the first invalid
+    module, so one two-line model stopped 34 of 46 files from ever being written.
+    """
+    emitted = _emit(
+        "from pydantic import BaseModel, ConfigDict\n"
+        "\n"
+        "\n"
+        "class Row(BaseModel):\n"
+        "    model_config = ConfigDict(from_attributes=True)\n"
+    )
+    namespace: dict = {}
+    exec(compile(emitted, "<ported>", "exec"), namespace)  # noqa: S102 -- the point
+    assert "Row" in namespace
