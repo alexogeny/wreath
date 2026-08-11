@@ -133,11 +133,10 @@ should have inherited tomorrow's.
 The HTTP/2 and HTTP/3 window sizes are deliberately code-only: they are tuning
 an operator has no way to choose well from outside.
 
-Two more are read outside `ServerConfig`. `WREATH_BUILD_HTTP3` and
-`WREATH_NATIVE_PROFILE` are read by `setup.py` during `pip install`/`uv sync`
-and must be exactly `1` — the first
-builds the optional HTTP/3 extension (it needs the from-source nghttp3/ngtcp2
-toolchain), the second produces a profiling build.
+Two source-development switches are read outside `ServerConfig`.
+`WREATH_BUILD_HTTP3=1` builds HTTP/3 against a locally installed nghttp3/ngtcp2
+toolchain, and `WREATH_NATIVE_PROFILE=1` produces a profiling build. Installed
+applications should select the prebuilt `wreath[h3]` extra instead.
 
 **Reference:** [`wreath.config`](../reference/config.md),
 [`wreath.state`](../reference/state.md).
