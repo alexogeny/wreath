@@ -20,10 +20,20 @@ masking outbound ones share one implementation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ._native import _core
 
-mask = _core.ws_mask
-parse_frame = _core.ws_parse_frame
-build_frame = _core.ws_build_frame
+#: `ws_mask(data, key)` -- XOR with the 4-byte key, which both applies and
+#: removes it.
+mask: Callable[[bytes, bytes], bytes] = _core.ws_mask
+
+#: `ws_parse_frame(data, offset)` -- `(fin, opcode, payload, consumed)`, or
+#: `None` while the frame is incomplete. Raises `ValueError` on a malformed one.
+parse_frame: Callable[..., tuple[bool, int, bytes, int] | None] = _core.ws_parse_frame
+
+#: `ws_build_frame(opcode, payload, fin=True, mask_key=None)` -- one frame on
+#: the wire.
+build_frame: Callable[..., bytes] = _core.ws_build_frame
 
 __all__ = ["build_frame", "mask", "parse_frame"]
