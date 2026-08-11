@@ -1,15 +1,14 @@
-"""Direct model hydration: field tape straight into model cells, no Record.
+"""Direct model hydration: field tape straight into model cells.
 
 These drive the real decoder plan and field tape, so they exercise the same C
-path a live query takes. Values, nulls, identity, and failure cleanup must match
-the Record path exactly; only the allocations differ.
+path a live query takes. Values, nulls, identity, and failure cleanup are
+asserted at the model boundary.
 """
 
 from __future__ import annotations
 
 import datetime
 import gc
-import importlib
 import struct
 import uuid
 from typing import Any
@@ -18,20 +17,11 @@ import pytest
 
 from wreath.orm import Mapped, Model, column
 from wreath.orm.errors import MappingError
-from wreath.orm.model import PERSISTENT, _native
+from wreath.orm.model import PERSISTENT, _storage
 from wreath.orm.registry import Registry
 from wreath.orm.types import Bool, Float64, Int64, Text, Timestamp, Uuid
 
-native: Any = None
-try:
-    native = importlib.import_module("wreath._native._postgres")
-except ImportError:
-    pass
-
-requires_native = pytest.mark.skipif(
-    _native is None or native is None or not hasattr(native, "_compile_hydrate_plan"),
-    reason="native model hydration not built",
-)
+storage: Any = _storage
 
 
 class Row(Model, table="hydrate_rows"):
@@ -84,7 +74,7 @@ def encode(
     moment: datetime.datetime | None = MOMENT,
     key: uuid.UUID | None = KEY,
 ) -> bytes:
-    from wreath import _pgdriver as pure
+    from wreath import _pgdriver as driver
 
     return data_row(
         (
@@ -92,7 +82,7 @@ def encode(
             None if label is None else label.encode(),
             None if ratio is None else struct.pack("!d", ratio),
             None if flag is None else (b"\x01" if flag else b"\x00"),
-            None if moment is None else pure._encode_binary(moment, Timestamp.oid),
+            None if moment is None else driver._encode_binary(moment, Timestamp.oid),
             None if key is None else key.bytes,
         )
     )
@@ -108,21 +98,20 @@ def hydrate(
     formats: tuple[int, ...] | None = None,
 ) -> tuple[list[Any], Any]:
     """Run payloads through a real tape and decoder plan into models."""
-    tape = native._FieldTape(len(oids))
+    tape = storage._FieldTape(len(oids))
     for payload in payloads:
         tape.append(payload, len(oids))
-    decoder = native._compile_decoder_plan(
+    decoder = storage._compile_decoder_plan(
         oids, formats or (1,) * len(oids), NAMES[: len(oids)]
     )
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), targets)
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), targets)
     rows: list[Any] = []
-    native._decode_models(
+    storage._decode_models(
         decoder, tape, (plan, session._identity, session), 256, rows
     )
     return rows, plan
 
 
-@requires_native
 def test_values_round_trip_through_inline_cells(
     session: Any, registry: Registry
 ) -> None:
@@ -142,7 +131,6 @@ def test_values_round_trip_through_inline_cells(
     assert plan.counters == {"allocated": 1, "reused": 0}
 
 
-@requires_native
 def test_hydrated_objects_are_persistent_and_owned(
     session: Any, registry: Registry
 ) -> None:
@@ -152,7 +140,6 @@ def test_hydrated_objects_are_persistent_and_owned(
     assert not rows[0]._orm_has_changes()
 
 
-@requires_native
 def test_nulls_set_the_null_bit_rather_than_a_value(
     session: Any, registry: Registry
 ) -> None:
@@ -170,22 +157,20 @@ def test_nulls_set_the_null_bit_rather_than_a_value(
     assert row.id == 1
 
 
-@requires_native
 def test_no_record_is_allocated_on_the_direct_path(
     session: Any, registry: Registry
 ) -> None:
     # The Record type must never be instantiated: that is the whole point of
     # the direct path.
     gc.collect()
-    before = len([o for o in gc.get_objects() if type(o) is native.Record])
+    before = len([o for o in gc.get_objects() if type(o) is storage.Record])
     rows, _ = hydrate(session, registry, [encode(i) for i in range(50)])
     gc.collect()
-    after = len([o for o in gc.get_objects() if type(o) is native.Record])
+    after = len([o for o in gc.get_objects() if type(o) is storage.Record])
     assert len(rows) == 50
     assert after == before
 
 
-@requires_native
 def test_identity_is_reused_across_batches(session: Any, registry: Registry) -> None:
     first, plan_one = hydrate(session, registry, [encode(3, "a")])
     second, plan_two = hydrate(session, registry, [encode(3, "b")])
@@ -195,7 +180,6 @@ def test_identity_is_reused_across_batches(session: Any, registry: Registry) -> 
     assert second[0].label == "b"
 
 
-@requires_native
 def test_repeated_rows_for_one_key_hydrate_one_object(
     session: Any, registry: Registry
 ) -> None:
@@ -204,7 +188,6 @@ def test_repeated_rows_for_one_key_hydrate_one_object(
     assert plan.counters == {"allocated": 1, "reused": 2}
 
 
-@requires_native
 def test_a_dirty_field_survives_rehydration(session: Any, registry: Registry) -> None:
     rows, _ = hydrate(session, registry, [encode(9, "original")])
     rows[0].label = "pending"
@@ -214,7 +197,6 @@ def test_a_dirty_field_survives_rehydration(session: Any, registry: Registry) ->
     assert again[0].label == "pending"
 
 
-@requires_native
 def test_a_null_primary_key_yields_no_object(session: Any, registry: Registry) -> None:
     payload = data_row((None, b"x", struct.pack("!d", 1.0), b"\x01", None, None))
     rows, plan = hydrate(session, registry, [payload])
@@ -222,31 +204,29 @@ def test_a_null_primary_key_yields_no_object(session: Any, registry: Registry) -
     assert plan.counters["allocated"] == 0
 
 
-@requires_native
 def test_a_projection_hydrates_only_its_columns(
     session: Any, registry: Registry
 ) -> None:
-    tape = native._FieldTape(2)
+    tape = storage._FieldTape(2)
     tape.append(data_row((struct.pack("!q", 4), b"only")), 2)
-    decoder = native._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    decoder = storage._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
     rows: list[Any] = []
-    native._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
+    storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     assert rows[0].id == 4 and rows[0].label == "only"
     assert not rows[0]._orm_is_loaded(2)
 
 
-@requires_native
 def test_text_format_falls_back_to_the_boxed_decoder(
     session: Any, registry: Registry
 ) -> None:
     # A statement's first execution returns text; the same plan must handle it.
-    tape = native._FieldTape(2)
+    tape = storage._FieldTape(2)
     tape.append(data_row((b"11", b"text-mode")), 2)
-    decoder = native._compile_decoder_plan((Int64.oid, Text.oid), (0, 0), ("id", "label"))
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    decoder = storage._compile_decoder_plan((Int64.oid, Text.oid), (0, 0), ("id", "label"))
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
     rows: list[Any] = []
-    native._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
+    storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     assert rows[0].id == 11
     assert rows[0].label == "text-mode"
 
@@ -254,39 +234,35 @@ def test_text_format_falls_back_to_the_boxed_decoder(
 # -- validation and failure ----------------------------------------------------
 
 
-@requires_native
 def test_a_column_count_mismatch_is_rejected_before_the_first_row(
     session: Any, registry: Registry
 ) -> None:
-    tape = native._FieldTape(1)
+    tape = storage._FieldTape(1)
     tape.append(data_row((struct.pack("!q", 1),)), 1)
-    decoder = native._compile_decoder_plan((Int64.oid,), (1,), ("id",))
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    decoder = storage._compile_decoder_plan((Int64.oid,), (1,), ("id",))
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
     with pytest.raises(MappingError, match="expects"):
-        native._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
     assert session._identity == {}
 
 
-@requires_native
 def test_an_oid_mismatch_is_rejected_before_the_first_row(
     session: Any, registry: Registry
 ) -> None:
-    tape = native._FieldTape(2)
+    tape = storage._FieldTape(2)
     tape.append(data_row((struct.pack("!q", 1), b"x")), 2)
-    decoder = native._compile_decoder_plan((Int64.oid, Int64.oid), (1, 1), ("id", "label"))
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    decoder = storage._compile_decoder_plan((Int64.oid, Int64.oid), (1, 1), ("id", "label"))
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
     with pytest.raises(MappingError, match="OID"):
-        native._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
     assert session._identity == {}
 
 
-@requires_native
 def test_a_model_result_without_its_primary_key_is_rejected(registry: Registry) -> None:
     with pytest.raises(MappingError, match="primary key"):
-        native._compile_hydrate_plan(Row, registry.spec_for(Row), (1, 2))
+        storage._compile_hydrate_plan(Row, registry.spec_for(Row), (1, 2))
 
 
-@requires_native
 def test_malformed_data_leaves_no_partially_visible_object(
     session: Any, registry: Registry
 ) -> None:
@@ -302,12 +278,12 @@ def test_malformed_data_leaves_no_partially_visible_object(
         )
     )
     rows: list[Any] = []
-    tape = native._FieldTape(len(OIDS))
+    tape = storage._FieldTape(len(OIDS))
     tape.append(payload, len(OIDS))
-    decoder = native._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
+    decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError):
-        native._decode_models(
+        storage._decode_models(
             decoder, tape, (plan, session._identity, session), 256, rows
         )
     # Nothing half-built escapes: no object in the list, none in the identity map.
@@ -316,7 +292,6 @@ def test_malformed_data_leaves_no_partially_visible_object(
     gc.collect()
 
 
-@requires_native
 def test_a_failure_partway_through_a_batch_publishes_no_rows(
     session: Any, registry: Registry
 ) -> None:
@@ -325,13 +300,13 @@ def test_a_failure_partway_through_a_batch_publishes_no_rows(
         (struct.pack("!q", 2), b"x", struct.pack("!d", 1.0), b"\x01\x02", None, None)
     )
     rows: list[Any] = []
-    tape = native._FieldTape(len(OIDS))
+    tape = storage._FieldTape(len(OIDS))
     tape.append(good, len(OIDS))
     tape.append(bad, len(OIDS))
-    decoder = native._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
+    decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError):
-        native._decode_models(
+        storage._decode_models(
             decoder, tape, (plan, session._identity, session), 256, rows
         )
     # The batch is all-or-nothing for the caller's list.
@@ -339,7 +314,6 @@ def test_a_failure_partway_through_a_batch_publishes_no_rows(
     gc.collect()
 
 
-@requires_native
 def test_infinity_timestamps_are_rejected_not_wrapped(
     session: Any, registry: Registry
 ) -> None:
@@ -353,15 +327,14 @@ def test_infinity_timestamps_are_rejected_not_wrapped(
             None,
         )
     )
-    tape = native._FieldTape(len(OIDS))
+    tape = storage._FieldTape(len(OIDS))
     tape.append(payload, len(OIDS))
-    decoder = native._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
+    decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError, match="infinity"):
-        native._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, [])
 
 
-@requires_native
 def test_hydrated_objects_survive_collection(session: Any, registry: Registry) -> None:
     rows, _ = hydrate(session, registry, [encode(i, "x" * i) for i in range(200)])
     gc.collect()
@@ -372,24 +345,23 @@ def test_hydrated_objects_survive_collection(session: Any, registry: Registry) -
     gc.collect()
 
 
-@requires_native
 @pytest.mark.asyncio
 async def test_every_batch_reaches_the_model_destination_not_only_the_last(
     session: Any, registry: Registry
 ) -> None:
     """Results larger than one batch must be models throughout.
 
-    The native parser decodes a batch as soon as the tape reaches 256 rows,
+    The storage parser decodes a batch as soon as the tape reaches 256 rows,
     without returning to Python. That in-C flush has to honour the operation's
     destination: when it did not, each full batch decoded to Records and only
     the trailing partial batch was hydrated, so any result over 256 rows came
     back as a mixture. Unit-testing _decode_models directly cannot see this --
     it takes the parser out of the picture -- so this drives the parser.
     """
-    protocol = native.BufferedProtocol()
-    plan = native._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
-    tape = native._FieldTape(2)
-    decoder = native._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
+    protocol = storage.BufferedProtocol()
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    tape = storage._FieldTape(2)
+    decoder = storage._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
     rows: list[Any] = []
 
     class _Operation:

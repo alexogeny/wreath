@@ -1,10 +1,10 @@
-"""Compare ORM hydration paths: Record-to-model versus direct native hydration.
+"""Compare ORM hydration paths: Record-to-model versus direct hydration.
 
 Three paths over the same rows and the same models:
 
-* ``record_to_native_model`` -- Records decoded natively, then copied into
-  native model storage;
-* ``direct_native``          -- the field tape decoded straight into native
+* ``record_to_model``        -- Records decoded by the driver, then copied into
+  model storage;
+* ``direct``                 -- the field tape decoded straight into model
   model cells, with no Record in between;
 * ``driver_records``         -- the driver's own fetch(), as a floor.
 

@@ -114,7 +114,7 @@ async def run(args: argparse.Namespace) -> int:
                 "python": sys.version,
                 "platform": platform.platform(),
                 "implementation": native._implementation,
-                "storage": Entity.__wreath_storage_kind__,
+                "model_basicsize": Entity.__basicsize__,
                 "rows": args.rows,
                 "warmup": args.warmup,
                 "trials": args.trials,

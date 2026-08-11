@@ -150,7 +150,7 @@ def run(args: argparse.Namespace) -> int:
         "metadata": {
             "python": sys.version,
             "platform": platform.platform(),
-            "storage": Item.__wreath_storage_kind__,
+            "model_basicsize": Item.__basicsize__,
             "bodies": args.bodies,
             "columns": 5,
             "warmup": args.warmup,

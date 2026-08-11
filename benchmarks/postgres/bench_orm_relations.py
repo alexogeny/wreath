@@ -189,7 +189,7 @@ async def run(args: argparse.Namespace) -> int:
                 "python": sys.version,
                 "platform": platform.platform(),
                 "implementation": native._implementation,
-                "storage": Author.__wreath_storage_kind__,
+                "model_basicsize": Author.__basicsize__,
                 "parents": args.parents,
                 "fanout": args.fanout,
                 "children": books,

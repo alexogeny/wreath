@@ -1,8 +1,8 @@
-"""Fixed-size native model storage: layout, bitmaps, GC, and pure parity.
+"""Fixed-size model storage: layout, bitmaps, protocol, and GC.
 
 These tests assert the *shape* of the generated C types. Behavior is covered by
 the shared suite, which runs against whichever storage is active; what is
-specific here is that the native layout is fixed, aligned, non-overlapping, and
+specific here is that the layout is fixed, aligned, non-overlapping, and
 collectable.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime
 import gc
-import importlib
 import sys
 import uuid
 from typing import Any
@@ -18,7 +17,7 @@ from typing import Any
 import pytest
 
 from wreath.orm import Mapped, Model, column, relationship
-from wreath.orm.model import _native
+from wreath.orm.model import _storage
 from wreath.orm.types import (
     Bool,
     Bytea,
@@ -35,15 +34,7 @@ from wreath.orm.types import (
     Uuid,
 )
 
-native: Any = None
-try:
-    native = importlib.import_module("wreath._native._postgres")
-except ImportError:
-    pass
-
-requires_native = pytest.mark.skipif(
-    _native is None, reason="native PostgreSQL model storage not built"
-)
+storage: Any = _storage
 
 # Inline (unboxed) cell kinds, mirroring WreathPgCellKind in model.h.
 CELL_OBJECT = 0
@@ -67,24 +58,20 @@ class Wide(Model, table="wide"):
     doc: Mapped[object] = column(Json)
 
 
-@requires_native
 def test_the_storage_base_is_generated_and_prepended() -> None:
-    assert Wide.__wreath_storage_kind__ == "native"
-    storage = Wide.__mro__[1]
-    assert type(storage) is native._ModelType
+    base = Wide.__mro__[1]
+    assert type(base) is storage._ModelType
     assert Wide.__mro__[2] is Model
 
 
-@requires_native
-def test_class_access_yields_expressions_through_native_descriptors() -> None:
+def test_class_access_yields_expressions_through_storage_descriptors() -> None:
     from wreath.orm.expressions import ColumnExpr
 
-    assert type(Wide.__dict__["id"]) is native._ColumnDescriptor
+    assert type(Wide.__dict__["id"]) is storage._ColumnDescriptor
     assert isinstance(Wide.id, ColumnExpr)
     assert Wide.id.column is Wide.__wreath_column_map__["id"]
 
 
-@requires_native
 def test_scalar_columns_are_stored_inline_and_only_payloads_are_boxed() -> None:
     layout = Wide.__layout__
     kinds = {
@@ -96,7 +83,6 @@ def test_scalar_columns_are_stored_inline_and_only_payloads_are_boxed() -> None:
     assert boxed == {"label", "blob", "doc"}
 
 
-@requires_native
 def test_cells_are_aligned_and_never_overlap() -> None:
     layout = Wide.__layout__
     spans = sorted(
@@ -112,7 +98,6 @@ def test_cells_are_aligned_and_never_overlap() -> None:
             assert field["offset"] % field["size"] == 0, field
 
 
-@requires_native
 def test_bitmaps_sit_after_the_header_and_cover_every_column() -> None:
     layout = Wide.__layout__
     assert layout["bitmap_offset"] >= 32
@@ -122,7 +107,6 @@ def test_bitmaps_sit_after_the_header_and_cover_every_column() -> None:
     assert layout["bitmap_offset"] + layout["bitmap_words"] * 8 * 3 <= first_cell
 
 
-@requires_native
 def test_pointer_offsets_cover_object_cells_and_relationships() -> None:
     class Parent(Model, table="np_parents"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -141,7 +125,6 @@ def test_pointer_offsets_cover_object_cells_and_relationships() -> None:
     assert set(object_cells) <= set(layout["pointer_offsets"])
 
 
-@requires_native
 def test_instances_of_one_model_have_one_fixed_size() -> None:
     short = Wide._orm_new()
     long = Wide._orm_new()
@@ -151,7 +134,6 @@ def test_instances_of_one_model_have_one_fixed_size() -> None:
     assert Wide.__basicsize__ == Wide.__layout__["basicsize"]
 
 
-@requires_native
 def test_two_models_get_independent_layouts() -> None:
     class Narrow(Model, table="narrow"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -160,7 +142,6 @@ def test_two_models_get_independent_layouts() -> None:
     assert Narrow.__mro__[1] is not Wide.__mro__[1]
 
 
-@requires_native
 def test_a_model_has_no_instance_dict() -> None:
     instance = Wide._orm_new()
     with pytest.raises(AttributeError):
@@ -169,7 +150,6 @@ def test_a_model_has_no_instance_dict() -> None:
         instance.not_a_column = 1
 
 
-@requires_native
 def test_every_inline_type_round_trips_through_its_cell() -> None:
     values = {
         "id": 2**40,
@@ -191,7 +171,6 @@ def test_every_inline_type_round_trips_through_its_cell() -> None:
         assert getattr(instance, name) == value, name
 
 
-@requires_native
 def test_loaded_null_and_dirty_bits_are_independent_across_columns() -> None:
     class Bits(Model, table="bits"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -214,7 +193,6 @@ def test_loaded_null_and_dirty_bits_are_independent_across_columns() -> None:
     assert not instance._orm_has_changes()
 
 
-@requires_native
 def test_a_model_with_more_than_64_columns_uses_multiple_bitmap_words() -> None:
     body: dict[str, Any] = {"id": column(Int64, primary_key=True)}
     for index in range(100):
@@ -231,7 +209,6 @@ def test_a_model_with_more_than_64_columns_uses_multiple_bitmap_words() -> None:
 # -- garbage collection --------------------------------------------------------
 
 
-@requires_native
 def test_instances_are_collectable_through_reference_cycles() -> None:
     class Node(Model, table="gc_nodes"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -248,7 +225,6 @@ def test_instances_are_collectable_through_reference_cycles() -> None:
     assert reference() is None
 
 
-@requires_native
 def test_a_model_class_and_its_storage_are_collectable() -> None:
     import weakref
 
@@ -269,7 +245,6 @@ def test_a_model_class_and_its_storage_are_collectable() -> None:
     assert storage_reference() is None
 
 
-@requires_native
 def test_many_instances_survive_repeated_collection() -> None:
     for _ in range(3):
         batch = [Wide(id=i, flag=True, small=1, label="x" * i, medium=1, ratio=1.0,
@@ -284,7 +259,6 @@ def test_many_instances_survive_repeated_collection() -> None:
         gc.collect()
 
 
-@requires_native
 def test_a_failed_constructor_leaves_no_half_built_object() -> None:
     gc.collect()
     with pytest.raises(TypeError):
@@ -294,7 +268,6 @@ def test_a_failed_constructor_leaves_no_half_built_object() -> None:
     gc.collect()
 
 
-@requires_native
 def test_replacing_an_object_cell_releases_the_previous_value() -> None:
     import weakref
 
@@ -314,24 +287,14 @@ def test_replacing_an_object_cell_releases_the_previous_value() -> None:
     assert reference() is None
 
 
-# -- parity with the reference storage -----------------------------------------
-
-
-def test_the_storage_kind_matches_the_active_backend() -> None:
-    expected = "pure" if _native is None else "native"
-    assert Wide.__wreath_storage_kind__ == expected
-
-
-def test_both_storages_expose_the_same_protocol() -> None:
-    from wreath.orm.model import ListModel
-
+def test_generated_storage_exposes_the_declared_protocol() -> None:
     protocol = [
         name
-        for name in dir(ListModel)
-        if name.startswith("_orm_") and callable(getattr(ListModel, name, None))
+        for name in dir(Model)
+        if name.startswith("_orm_") and callable(getattr(Model, name, None))
     ]
     for name in protocol:
-        assert hasattr(Wide, name), f"{Wide.__wreath_storage_kind__} storage lacks {name}"
+        assert hasattr(Wide, name), f"generated storage lacks {name}"
     for name in ("_orm_state", "_orm_owner"):
         instance = Wide._orm_new()
         assert hasattr(instance, name)
