@@ -1,41 +1,30 @@
 name: publish
 
-# Cut a versioned release when a commit on main bumps the version in
-# pyproject.toml.
+# Cut a versioned release from the exact main commit that passed `ci`.
 #
-#   1. detect  - Is the pyproject version a valid PEP 440 version, greater than
-#                the last published one, and does it have release notes?
-#                Emits `bumped` + `version`.
-#
-#                The baseline is `github.event.before`, not `HEAD~1`. A push
-#                carrying several commits that bumps the version in any but the
-#                last leaves HEAD~1 already holding the new version, so the diff
-#                is empty and no release is cut -- with a green tick, because
-#                "no bump" is a success.
+#   1. detect  - Is the pyproject version a valid PEP 440 version, newer than
+#                the last version tag, and does it have release notes?
+#                Emits `bumped`, `version`, and the validated commit SHA. The
+#                last PEP 440 tag is the baseline, so a follow-up fix can resume
+#                an unpublished version without touching pyproject.toml again.
 #
 #                When no release is cut, the reason is written to the run
 #                summary. A skipped `release` job otherwise looks identical to
 #                a broken one.
-#   2. verify  - Lint, types, the test suite, and a strict docs build, against
-#                the exact commit being released. `release` and `pypi` both need
-#                it, so a red suite cannot cut a tag or reach the index.
-#
-#                Run *here* rather than depended on from `ci`. `ci` and
-#                `publish` are separate workflows triggered by the same push, so
-#                a `workflow_run` link would publish on whatever `ci` last
-#                reported -- including a run of a different commit, or none at
-#                all when `ci`'s own filters skipped it. A job in this workflow
-#                is unambiguously this commit.
-#   3. release - (environment: publish) Guard against a duplicate tag, require a
+#                `workflow_run.head_sha`, rather than the default-branch SHA of
+#                this second workflow, is checked out by every source-consuming
+#                job. The event is accepted only from this repository's
+#                successful push run on main.
+#   2. release - (environment: publish) Guard against a duplicate tag, require a
 #                docs/release_notes/<version>.md file, then cut the
 #                `release/vX.Y.Z` branch from the release commit, push the
 #                `vX.Y.Z` tag, and create the GitHub Release from the notes.
-#   4. wheels  - Build and smoke-test the portable wheel on native Linux,
+#   3. wheels  - Build and smoke-test the portable wheel on native Linux,
 #                macOS and Windows runners. Then build the Linux io_uring and
 #                HTTP/3 companion wheels selected by extras. `release` needs all
 #                three jobs: a wheel that will not run must stop the tag, not
 #                leave one pointing at a release nobody can install.
-#   5. pypi-*  - Publish one distribution per Trusted Publishing identity. The
+#   4. pypi-*  - Publish one distribution per Trusted Publishing identity. The
 #                companion projects go first; the base project becomes visible
 #                only after both extras are installable.
 #
@@ -53,10 +42,10 @@ name: publish
 # which pending project it is meant to create.
 
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
-    paths:
-      - pyproject.toml
   workflow_dispatch:
     inputs:
       force:
@@ -69,22 +58,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-${{ github.ref }}
+  group: publish-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
   detect:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     outputs:
       bumped: ${{ steps.check.outputs.bumped }}
       version: ${{ steps.check.outputs.version }}
       prerelease: ${{ steps.check.outputs.prerelease }}
+      sha: ${{ steps.check.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history, not `2`. The baseline is the commit this push STARTED
-          # from (`github.event.before`), which can be many commits back, and a
-          # shallow clone cannot read pyproject.toml out of it.
+          # On workflow_run, github.sha is the tip of the default branch when
+          # this workflow starts, which may already be newer than the commit CI
+          # tested. Pin the triggering run's immutable SHA instead.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -100,15 +96,15 @@ jobs:
       - id: check
         env:
           FORCED: ${{ inputs.force }}
-          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Reads stdin, so the same helper works on a file and on `git show`.
           extract() { grep -m1 -E '^version[[:space:]]*=' \
             | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'; }
 
           version="$(extract < pyproject.toml)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
           # Emitted here because this is the only job with `packaging`, and a
           # GitHub release that does not say it is a prerelease takes the
@@ -135,29 +131,6 @@ jobs:
             exit 1
           fi
 
-          # The baseline must be where the push started, NOT HEAD~1. A push of
-          # several commits that bumps the version in any but the last leaves
-          # HEAD~1 already carrying the new version, so the diff comes out empty
-          # and the release never happens -- silently, because "no bump" is a
-          # success.
-          #
-          # `before` is all-zeros when the branch is newly created, and absent
-          # entirely on workflow_dispatch. Both fall back to HEAD~1, which is
-          # deliberately the conservative reading: treating "no previous state"
-          # as a bump would cut a release the first time main is ever pushed.
-          zero="0000000000000000000000000000000000000000"
-          base=""
-          if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "$zero" ] \
-            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            base="$BEFORE"
-          elif git cat-file -e 'HEAD~1^{commit}' 2>/dev/null; then
-            base="HEAD~1"   # workflow_dispatch carries no `before`
-          fi
-          prev=""
-          if [ -n "$base" ]; then
-            prev="$(git show "$base:pyproject.toml" 2>/dev/null | extract || true)"
-          fi
-
           note() { printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
 
           if [ "${FORCED:-false}" = "true" ]; then
@@ -166,37 +139,47 @@ jobs:
             exit 0
           fi
 
-          if [ "$version" = "$prev" ]; then
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-            # Say so loudly. A skipped `release` under a green tick is
-            # indistinguishable from a broken one without reading the log, and
-            # that ambiguity has already cost one round of investigation.
-            note "### No release cut"
-            note ""
-            note "\`pyproject.toml\` is still at **$version**, unchanged since \`${base:-<none>}\`,"
-            note "so \`release\` and \`pypi\` were skipped. **This is the designed outcome, not a"
-            note "failure.** Bump the version (and add its release notes) to cut a release."
-            exit 0
-          fi
-
-          # Compare against the last *published* version, not against whatever
-          # pyproject said a commit ago. Those differ exactly once, and it is
-          # now: pyproject carried `0.1.0` from the first commit without a
-          # release ever being cut, so the first prerelease of it -- `0.1.0a1`,
-          # which PEP 440 correctly orders BELOW `0.1.0` -- would be rejected as
-          # a downgrade from a version nobody can install. You cannot go
-          # backwards from something that was never published.
-          released="$(git tag --list 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')"
-          if [ -z "$released" ]; then
-            note "No \`v*\` tag exists, so **$version** is the first release; the"
-            note "increase check is skipped (no published version to regress from)."
-          elif ! python -c '
+          # Tags are the durable publication baseline. Unlike comparing with a
+          # push's `before` commit, this also sees an unchanged version after a
+          # compiler-fix commit. Select with `packaging`, not git's version sort,
+          # because the tag namespace follows PEP 440 rather than semver.
+          latest_tag="$(git tag --list 'v*' | python -c '
           import sys
-          from packaging.version import Version
-          sys.exit(0 if Version(sys.argv[2]) > Version(sys.argv[1]) else 1)
-          ' "$released" "$version"; then
-            echo "::error::version '$version' does not increase last released '$released'"
-            exit 1
+          from packaging.version import InvalidVersion, Version
+          parsed = []
+          for raw_tag in sys.stdin:
+              tag = raw_tag.strip()
+              try:
+                  parsed.append((Version(tag.removeprefix("v")), tag))
+              except InvalidVersion:
+                  pass
+          print(max(parsed, default=(None, ""), key=lambda item: item[0])[1])
+          ')"
+
+          if [ -z "$latest_tag" ]; then
+            note "No \`v*\` tag exists, so **$version** is the first release."
+          else
+            latest="${latest_tag#v}"
+            comparison="$(python -c '
+            import sys
+            from packaging.version import Version
+            current, latest = map(Version, sys.argv[1:])
+            print((current > latest) - (current < latest))
+            ' "$version" "$latest")"
+            if [ "$comparison" -lt 0 ]; then
+              echo "::error::version '$version' is older than latest tag '$latest_tag'"
+              exit 1
+            fi
+            if [ "$comparison" -eq 0 ] && gh release view "$latest_tag" >/dev/null 2>&1; then
+              echo "bumped=false" >> "$GITHUB_OUTPUT"
+              note "### No release cut"
+              note ""
+              note "**$version** is already published as \`$latest_tag\`; release jobs were skipped."
+              exit 0
+            fi
+            if [ "$comparison" -eq 0 ]; then
+              note "\`$latest_tag\` exists without a GitHub Release; resuming **$version** at this CI-tested commit."
+            fi
           fi
 
           # Checked here as well as in `release`, because `release` sits behind
@@ -210,50 +193,17 @@ jobs:
           fi
 
           echo "bumped=true" >> "$GITHUB_OUTPUT"
-          note "Version bump: **${prev:-<none>} -> $version**. Cutting a release."
-
-  verify:
-    # The gate that was missing. `publish` triggers on a push to main touching
-    # pyproject.toml and used to depend on nothing, so a red suite still cut a
-    # tag and pushed to PyPI -- and PyPI does not accept a re-upload of a
-    # version, so a bad release is permanent.
-    needs: detect
-    if: needs.detect.outputs.bumped == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: Sync (default 'dev' group; builds the native extension)
-        run: uv sync --frozen
-      - name: Build Linux development capabilities in place
-        # The published base wheel deliberately excludes io_uring. An editable
-        # checkout cannot be overlaid by the companion wheel's `wreath/`
-        # directory, so source development uses the explicit build switch.
-        run: WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace
-      - name: Ruff
-        run: uv run ruff check .
-      - name: Ty
-        run: uv run ty check
-      - name: Tests
-        # `wreath test`, not a bare `pytest`: the marker deselection lives in
-        # `pyproject.toml`'s `addopts`, so both select the same tests, but the
-        # runner picks min(8, cpu_count) workers where `pytest` alone runs one.
-        # `--mutant off --no-history` match `ci`'s `checks` job -- the mutation
-        # sample and the timing history belong on a maintainer's machine, not
-        # in front of a release.
-        run: uv run --no-sync wreath test --mutant off --no-history
-      - name: Build site (strict)
-        run: uv run --no-sync wreath docs check
+          note "**$version** is not published. Cutting a release from \`$(git rev-parse --short HEAD)\`."
 
   wheels:
     # The base distribution is the portable native implementation. Each wheel
     # is compiled and served on the target OS before the release tag exists.
-    needs: [detect, verify]
+    needs: detect
     if: needs.detect.outputs.bumped == 'true'
     strategy:
-      fail-fast: true
+      # Finish every target so one compiler failure does not erase the evidence
+      # from runners that were already building.
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -274,6 +224,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
       # Everything else -- interpreter, image, skips, and the import smoke test
       # each wheel must pass -- is `[tool.cibuildwheel]` in pyproject.toml, so it
       # is the same locally as it is here.
@@ -290,10 +242,10 @@ jobs:
     # `wreath[linux]`: only the io_uring extension. It overlays the installed
     # base wheel's `wreath._native` directory; the smoke test proves the two
     # separately built distributions import and serve together.
-    needs: [detect, verify, wheels]
+    needs: [detect, wheels]
     if: needs.detect.outputs.bumped == 'true'
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -303,6 +255,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: wheels-base-linux-${{ matrix.arch }}
@@ -326,10 +280,10 @@ jobs:
     # `wreath[h3]` / `wreath[http3]`. The pinned MIT/Apache-licensed QUIC/TLS
     # stack is built inside manylinux and bundled by auditwheel, so opting in
     # does not require system packages on the deployment host.
-    needs: [detect, verify, wheels]
+    needs: [detect, wheels]
     if: needs.detect.outputs.bumped == 'true'
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -339,6 +293,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: wheels-base-linux-${{ matrix.arch }}
@@ -359,7 +315,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, verify, wheels, linux-wheels, http3-wheels]
+    needs: [detect, wheels, linux-wheels, http3-wheels]
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
@@ -367,10 +323,12 @@ jobs:
       contents: write # push the release branch/tag and create the release
     env:
       VERSION: ${{ needs.detect.outputs.version }}
+      RELEASE_SHA: ${{ needs.detect.outputs.sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.detect.outputs.sha }}
           fetch-depth: 0 # full history so the tag and branch are complete
 
       - name: Guard against a tag that means something else
@@ -386,7 +344,7 @@ jobs:
             exit 0
           fi
           existing="$(git rev-list -n1 "$tag")"
-          if [ "$existing" = "$GITHUB_SHA" ]; then
+          if [ "$existing" = "$RELEASE_SHA" ]; then
             echo "Tag $tag already at this commit; resuming a partial release."
             exit 0
           fi
@@ -403,7 +361,7 @@ jobs:
           # in CI and the fix is another commit. Moving it is correct: the sdist
           # is built from HEAD, so a tag left behind would name a tree the
           # published artifact does not match.
-          echo "::warning::$tag exists at $existing but was never released; moving it to $GITHUB_SHA"
+          echo "::warning::$tag exists at $existing but was never released; moving it to $RELEASE_SHA"
           echo "RETAG=1" >> "$GITHUB_ENV"
 
       - name: Require release notes
@@ -464,10 +422,9 @@ jobs:
           gh release create "$tag" "${args[@]}"
 
   pypi-linux:
-    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release]
+    needs: [detect, wheels, linux-wheels, http3-wheels, release]
     # Explicit, though a skipped `release` would skip this anyway: without it,
     # adding any future `if:` to `release` silently changes what publishes.
-    # `verify` is named here as well as on `release` for the same reason.
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish-linux
@@ -489,7 +446,7 @@ jobs:
           skip-existing: true
 
   pypi-http3:
-    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release]
+    needs: [detect, wheels, linux-wheels, http3-wheels, release]
     if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish-http3
@@ -511,7 +468,7 @@ jobs:
           skip-existing: true
 
   pypi:
-    needs: [detect, verify, wheels, linux-wheels, http3-wheels, release, pypi-linux, pypi-http3]
+    needs: [detect, wheels, linux-wheels, http3-wheels, release, pypi-linux, pypi-http3]
     # Publish the public base project last: `uv add wreath[linux]` and
     # `uv add wreath[h3]` cannot observe a base release whose exact-version
     # companions have not reached the index yet.
@@ -522,6 +479,8 @@ jobs:
       id-token: write # PyPI Trusted Publishing (OIDC); no stored token needed
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
