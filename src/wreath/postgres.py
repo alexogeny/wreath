@@ -10,7 +10,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from time import monotonic_ns as _monotonic_ns
-from types import ModuleType
 from typing import Any, Literal, cast
 
 from ._flight_markers import (
@@ -39,7 +38,8 @@ from ._flight_markers import (
 )
 from ._locks import AdvisoryLock, AdvisoryTryLock, SingletonRunner
 from ._native import _core
-from ._native import extension as _extension
+from ._native import _postgres as _backend
+from ._pgdriver import _infer_oid as _infer_oid
 from ._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 
 Workload = Literal["security_read", "read", "write"]
@@ -47,25 +47,8 @@ _READ_ONLY = frozenset({"security_read", "read"})
 _WORKLOADS = frozenset({"security_read", "read", "write"})
 
 
-def _select_backend() -> ModuleType:
-    backend = _extension("_postgres")
-    if backend is not None:
-        return cast(ModuleType, backend)
-
-    from . import _pgdriver as postgres
-
-    return postgres
-
-
-_backend = _select_backend()
 _implementation: str = _backend._implementation
-_NATIVE_STATEMENT_SUBMIT = _implementation == "native"
-_NATIVE_STATEMENT_AWAIT = _NATIVE_STATEMENT_SUBMIT and hasattr(
-    _backend, "_statement_call"
-)
-
-if _NATIVE_STATEMENT_SUBMIT:
-    _core.template_record_configure(_backend._RECORD_C_API)
+_core.template_record_configure(_backend._RECORD_C_API)
 
 Connection = _backend.Connection
 InterfaceError = _backend.InterfaceError
@@ -79,25 +62,7 @@ connect = _backend.connect
 _DEFAULT_CONNECTOR = connect
 
 
-def _driver_infer_oid() -> Callable[[object], int]:
-    """The parameter-OID inference the driver actually performs.
-
-    There is no C `_infer_oid`. `_native/postgres/pipeline.c` reads this very
-    function out of `wreath._pgdriver` at module init and calls it per parameter
-    of a cold operation, so the Python one *is* what the driver runs. The
-    `getattr` comes first anyway: the day a C `_infer_oid` lands, every derived
-    caller picks it up without an edit.
-    """
-    inference = getattr(_backend, "_infer_oid", None)
-    if inference is not None:
-        return cast(Callable[[object], int], inference)
-
-    from ._pgdriver import _infer_oid
-
-    return _infer_oid
-
-
-#: What the shipped driver does, resolved once against whichever backend loaded.
+#: What the shipped driver does, resolved once against its installed code.
 #: Doubles and probes derive their behaviour from these rather than restating a
 #: table, so a codec landing changes them with nobody editing them.
 #:
@@ -108,8 +73,6 @@ def _driver_infer_oid() -> Callable[[object], int]:
 #: it.
 _decode_value: Callable[[int, int, bytes | None], Any] = _backend._decode_value
 _is_transaction_sql: Callable[[str], bool] = _backend._is_transaction_sql
-_infer_oid = _driver_infer_oid()
-
 Connector = Callable[[str], Awaitable[Any]]
 
 #: `Statement._call` reaches the driver's result methods with
@@ -852,7 +815,7 @@ class Statement:
             if connection is None:
                 connection = await pool.acquire(shared=True)
             try:
-                if _NATIVE_STATEMENT_SUBMIT and type(connection) is Connection:
+                if type(connection) is Connection:
                     # This coroutine is already running, so native submission
                     # can happen now without changing Connection.fetch()'s
                     # lazy call-site contract. Awaiting the Future here removes
@@ -928,9 +891,7 @@ class Statement:
         `"UPDATE 3"` — so it is where a row count comes from when there are no
         rows to fetch. Rows the statement does produce are discarded.
         """
-        if _NATIVE_STATEMENT_AWAIT:
-            return _backend._statement_call(self, "execute", args)
-        return self._call("execute", args)
+        return _backend._statement_call(self, "execute", args)
 
     def fetch(self, *args: object) -> Awaitable[list[Any]]:
         """Run the statement and return every row, as a list of `Record`.
@@ -938,21 +899,17 @@ class Statement:
         The whole result is materialized; there is no cursor here. A statement
         that can match an unbounded number of rows should carry its own `LIMIT`.
         """
-        if _NATIVE_STATEMENT_AWAIT:
-            return _backend._statement_call(self, "fetch", args)
-        return self._call("fetch", args)
+        return _backend._statement_call(self, "fetch", args)
 
     def fetch_batch(self, *args: object) -> Awaitable[Any]:
-        """Run the statement into a native row collection.
+        """Run the statement into a compact row collection.
 
         The batch keeps the familiar sequence and `append` surface while
         exposing `sort_by(column)` so sorting does not allocate a Python key
         callable or dispatch it once per row.  Individual rows remain ordinary
         `Record` values when Python observes them.
         """
-        if _NATIVE_STATEMENT_AWAIT:
-            return _backend._statement_call(self, "fetch_batch", args)
-        return self._call("fetch_batch", args)
+        return _backend._statement_call(self, "fetch_batch", args)
 
     def fetchrow(self, *args: object) -> Awaitable[Any]:
         """Run the statement and return its first row, or `None` for no rows.
@@ -961,9 +918,7 @@ class Statement:
         statement whose first column can itself be null is better read with
         this than with `fetchval`, which cannot tell the two apart.
         """
-        if _NATIVE_STATEMENT_AWAIT:
-            return _backend._statement_call(self, "fetchrow", args)
-        return self._call("fetchrow", args)
+        return _backend._statement_call(self, "fetchrow", args)
 
     def fetchval(self, *args: object) -> Awaitable[Any]:
         """Run the statement and return the first column of the first row.
@@ -971,9 +926,7 @@ class Statement:
         `None` for no rows *and* for a first column that is null — the two are
         indistinguishable here, which is what `fetchrow` is for.
         """
-        if _NATIVE_STATEMENT_AWAIT:
-            return _backend._statement_call(self, "fetchval", args)
-        return self._call("fetchval", args)
+        return _backend._statement_call(self, "fetchval", args)
 
     async def map(
         self,
@@ -1426,8 +1379,7 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
     return value if isinstance(value, PoolConfig) else PoolConfig(**value)
 
 
-if _NATIVE_STATEMENT_AWAIT:
-    _backend._statement_configure(Statement, Pool, PoolConfig, _phase_marker)
+_backend._statement_configure(Statement, Pool, PoolConfig, _phase_marker)
 
 
 __all__ = [
