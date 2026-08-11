@@ -21,14 +21,10 @@ to accept, and every signature is verified with the public exponent before it is
 returned -- one cheap modexp that turns a corrupted signing key, a bit flip, or a
 CRT fault into a raised error instead of mail that arrives pre-condemned.
 
-No signing primitive existed in the tree before this, because
-`wreath._auth._ecverify` is verify-only by design and kept its curve arithmetic
-private, so the edwards25519 scalar multiplication here started as a second
-copy. It no longer is: the group law moved to `wreath._curves`, which both files
-now share, and what stayed here is the part that is specific to *signing* --
-clamping and the deterministic nonce. The scalars this module multiplies are
-secret, so it calls `ed_scalarmult_secret`, whose shape does not depend on
-them, rather than the variable-time form a verifier uses.
+Ed25519 key derivation and signing are complete fixed-width native operations.
+Their portable C implementation owns SHA-512, scalar reduction and the
+constant-shape fixed-base multiplication; no Python integer holds secret field
+or scalar material.
 """
 
 from __future__ import annotations
@@ -41,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Final
 
-from ._curves import ED_L, ed_base, ed_encode_point, ed_scalarmult_secret
+from ._native import _core
 
 __all__ = [
     "DkimError",
@@ -104,21 +100,7 @@ def canonicalize_header_relaxed(name: str, value: str) -> bytes:
     return name.strip().lower().encode("ascii") + b":" + collapsed.strip() + b"\r\n"
 
 
-def canonicalize_body_relaxed(body: bytes) -> bytes:
-    """The message body in `relaxed` form.
-
-    RFC 6376 §3.4.4: collapse whitespace runs within a line, drop whitespace at
-    the end of every line, and drop empty lines at the end of the body. A body
-    that is empty once canonicalised hashes as the empty input; a body that is
-    not ends with exactly one CRLF.
-    """
-    normalised = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    lines = [_WSP_RUN.sub(b" ", line).rstrip(b" \t") for line in normalised.split(b"\n")]
-    while lines and not lines[-1]:
-        lines.pop()
-    if not lines:
-        return b""
-    return b"\r\n".join(lines) + b"\r\n"
+canonicalize_body_relaxed = _core.dkim_canonicalize_body
 
 
 # --- keys -------------------------------------------------------------------
@@ -277,40 +259,19 @@ def _rsa_sign(key: RsaKey, message: bytes) -> bytes:
 
 
 # --- Ed25519 signing (RFC 8032 §5.1.6) --------------------------------------
-#
-# The group arithmetic lives in `wreath._curves`, shared with `_auth/_ecverify`
-# and `_webpush`; this file keeps only what is specific to *signing*, which is
-# the clamping and the deterministic nonce below. `ed_scalarmult_secret` is the
-# one to call here and not `ed_scalarmult_public`: both scalars multiplied below
-# -- the clamped key `a` and the per-message nonce `r` -- are secrets whose
-# disclosure is total, so the shape of the multiplication must not depend on
-# them. See `_curves`'s module docstring for what that does and does not buy in
-# pure Python.
 
 
 def _ed25519_sign(seed: bytes, message: bytes) -> bytes:
     if len(seed) != 32:
         raise DkimError("an Ed25519 seed is 32 bytes")
-    h = hashlib.sha512(seed).digest()
-    a = int.from_bytes(h[:32], "little")
-    a &= (1 << 254) - 8  # clamp: clear the low 3 bits and the high bit
-    a |= 1 << 254
-    prefix = h[32:]
-    public = ed_encode_point(ed_scalarmult_secret(a, ed_base()))
-    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % ED_L
-    r_point = ed_encode_point(ed_scalarmult_secret(r, ed_base()))
-    k = int.from_bytes(hashlib.sha512(r_point + public + message).digest(), "little") % ED_L
-    s = (r + k * a) % ED_L
-    return r_point + s.to_bytes(32, "little")
+    return _core.curve_ed_sign(seed, message)
 
 
 def ed25519_public_key(seed: bytes) -> bytes:
     """The 32-byte public key for an Ed25519 `seed`, for publishing in DNS."""
     if len(seed) != 32:
         raise DkimError("an Ed25519 seed is 32 bytes")
-    h = hashlib.sha512(seed).digest()
-    a = (int.from_bytes(h[:32], "little") & ((1 << 254) - 8)) | (1 << 254)
-    return ed_encode_point(ed_scalarmult_secret(a, ed_base()))
+    return _core.curve_ed_public_key(seed)
 
 
 # --- the signer -------------------------------------------------------------
