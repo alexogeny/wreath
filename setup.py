@@ -1,12 +1,12 @@
 """Build configuration for the wreath._native C extensions.
 
-`_core` is required: routing, HTTP parsing, the JSON and msgpack codecs, header
-handling, validation and Cedar evaluation are C, and `wreath._native` refuses at
-import without it. A default build needs only a C compiler and CPython headers.
+Every wheel contains `_core`, `_client`, `_edge`, `_server`, and `_postgres`.
+Routing, protocols, database access and codecs therefore have one installed
+implementation. A default build needs only a C compiler and CPython headers.
 
-The rest are optional and each facade refuses by name when asked for something
-this build has not got -- `_reactor` needs io_uring (Linux), `_flight` needs
-mmap (POSIX), and `_http3` is opt-in behind WREATH_BUILD_HTTP3=1.
+Three components are capability-gated: `_reactor` needs io_uring (Linux),
+`_flight` needs mmap (POSIX), and `_http3` is opt-in behind
+WREATH_BUILD_HTTP3=1.
 """
 
 from __future__ import annotations
@@ -165,9 +165,10 @@ def _http3_extension() -> Extension:
             "src/wreath/_native/http3_connection.c",
             "src/wreath/_native/http3_asgi.c",
             "src/wreath/_native/server_policy.c",
-            "src/wreath/_native/header_block.c",
+            "src/wreath/_native/http3_header_block.c",
         ],
         depends=[
+            "src/wreath/_native/header_block.c",
             "src/wreath/_native/http3.h",
             "src/wreath/_native/ascii.h",
             "src/wreath/_native/server_policy.h",
@@ -189,8 +190,14 @@ ext_modules = [
                 "src/wreath/_native/env.c",
                 "src/wreath/_native/headers.c",
                 "src/wreath/_native/codecs.c",
+                "src/wreath/_native/sql.c",
+                "src/wreath/_native/dkim.c",
+                "src/wreath/_native/recording.c",
+                "src/wreath/_native/scim.c",
+                "src/wreath/_native/curves.c",
                 "src/wreath/_native/validate.c",
                 "src/wreath/_native/orm_shape.c",
+                "src/wreath/_native/orm_relationship.c",
                 "src/wreath/_native/ws.c",
                 "src/wreath/_native/multipart.c",
                 "src/wreath/_native/json.c",
@@ -203,14 +210,19 @@ ext_modules = [
                 "src/wreath/_native/xml.c",
                 "src/wreath/_native/templates.c",
                 "src/wreath/_native/response.c",
-                "src/wreath/_native/http.c",
-                "src/wreath/_native/header_block.c",
+                "src/wreath/_native/core_http.c",
+                "src/wreath/_native/core_header_block.c",
                 "src/wreath/_native/router.c",
                 "src/wreath/_native/dtrouter.c",
                 "src/wreath/_native/dtbitset.c",
                 "src/wreath/_native/security.c",
+                "src/wreath/_native/signatures.c",
                 "src/wreath/_native/hmac_sha256.c",
                 "src/wreath/_native/jose.c",
+                "src/wreath/_native/grpc.c",
+                "src/wreath/_native/graphql.c",
+                "src/wreath/_native/graphql_parser.c",
+                "src/wreath/_native/flight_project.c",
                 "src/wreath/_native/webpolicy.c",
                 "src/wreath/_native/observability.c",
                 "src/wreath/_native/proxy.c",
@@ -220,6 +232,8 @@ ext_modules = [
                 "src/wreath/_native/scheduler.c",
             ],
             depends=[
+                "src/wreath/_native/http.c",
+                "src/wreath/_native/header_block.c",
                 "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/record_api.h",
                 "src/wreath/_native/activate.h",
@@ -237,10 +251,12 @@ ext_modules = [
             sources=[
                 "src/wreath/_native/_clientmodule.c",
                 "src/wreath/_native/client_http1.c",
-                "src/wreath/_native/http.c",
-                "src/wreath/_native/header_block.c",
+                "src/wreath/_native/client_http.c",
+                "src/wreath/_native/client_header_block.c",
             ],
             depends=[
+                "src/wreath/_native/http.c",
+                "src/wreath/_native/header_block.c",
                 "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/header_block.h",
                 "src/wreath/_native/byteorder.h",
@@ -277,8 +293,8 @@ ext_modules = [
             sources=[
                 "src/wreath/_native/_servermodule.c",
                 "src/wreath/_native/server_common.c",
-                "src/wreath/_native/http.c",
-                "src/wreath/_native/header_block.c",
+                "src/wreath/_native/server_http.c",
+                "src/wreath/_native/server_header_block.c",
                 "src/wreath/_native/server_request.c",
                 "src/wreath/_native/server_policy.c",
                 "src/wreath/_native/server_http1.c",
@@ -286,6 +302,8 @@ ext_modules = [
                 "src/wreath/_native/server_hpack.c",
             ],
             depends=[
+                "src/wreath/_native/http.c",
+                "src/wreath/_native/header_block.c",
                 "src/wreath/_native/server.h",
                 "src/wreath/_native/server_policy.h",
                 "src/wreath/_native/header_block.h",
@@ -361,10 +379,8 @@ ext_modules = [
 # These two do not, and gating them is what lets macOS and Windows have the rest
 # of the accelerators instead of failing the install at the first `#include`.
 #
-# The Python side was already built for their absence, which is why this is a
-# packaging change and not a port: `wreath._native.__init__` resolves each
-# through `try: import ... except ImportError: None`, `wreath.reactor` raises a
-# named error only when `timers="wheel"` is explicitly asked for, and
+# The Python side declares their absence: `wreath.reactor` raises a named error
+# only when `timers="wheel"` is explicitly asked for, and
 # `wreath.server._create_recorder` returns None on a missing `_flight`, leaving
 # every recorder hook a not-taken branch.
 
