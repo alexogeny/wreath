@@ -115,6 +115,7 @@ from typing import Any, Final
 from urllib.parse import parse_qsl, quote
 
 from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
+from ._native import _core
 from ._reqcache import resolve_once
 from .exceptions import HTTPException
 from .kv import KV
@@ -215,108 +216,8 @@ class SignatureError(Exception):
 # one the sender signed.
 
 
-def _skip_ws(text: str, index: int) -> int:
-    while index < len(text) and text[index] in " \t":
-        index += 1
-    return index
-
-
 def _parse_string(text: str, index: int) -> tuple[str, int]:
-    if index >= len(text) or text[index] != '"':
-        raise SignatureError("structured field: expected a quoted string")
-    index += 1
-    out: list[str] = []
-    while index < len(text):
-        char = text[index]
-        if char == "\\":
-            index += 1
-            if index >= len(text) or text[index] not in '"\\':
-                raise SignatureError("structured field: bad escape")
-            out.append(text[index])
-            index += 1
-            continue
-        if char == '"':
-            return "".join(out), index + 1
-        if not (" " <= char <= "~"):
-            raise SignatureError("structured field: bad character in string")
-        out.append(char)
-        index += 1
-    raise SignatureError("structured field: unterminated string")
-
-
-def _parse_token(text: str, index: int) -> tuple[str, int]:
-    start = index
-    while index < len(text) and (
-        text[index].isalnum() or text[index] in "_-.:%*/@"
-    ):
-        index += 1
-    if index == start:
-        raise SignatureError("structured field: expected a token")
-    return text[start:index], index
-
-
-def _parse_bare_item(text: str, index: int) -> tuple[Any, int]:
-    if index >= len(text):
-        raise SignatureError("structured field: expected an item")
-    char = text[index]
-    if char == '"':
-        return _parse_string(text, index)
-    if char == ":":
-        end = text.find(":", index + 1)
-        if end < 0:
-            raise SignatureError("structured field: unterminated byte sequence")
-        raw = text[index + 1 : end]
-        try:
-            return base64.b64decode(raw, validate=True), end + 1
-        except (ValueError, TypeError) as error:
-            raise SignatureError("structured field: bad base64") from error
-    if char == "?":
-        if index + 1 >= len(text) or text[index + 1] not in "01":
-            raise SignatureError("structured field: bad boolean")
-        return text[index + 1] == "1", index + 2
-    if char == "-" or char.isdigit():
-        start = index
-        index += 1
-        while index < len(text) and (text[index].isdigit() or text[index] == "."):
-            index += 1
-        raw = text[start:index]
-        try:
-            return (float(raw) if "." in raw else int(raw)), index
-        except ValueError as error:
-            raise SignatureError("structured field: bad number") from error
-    return _parse_token(text, index)
-
-
-def _parse_params(text: str, index: int) -> tuple[dict[str, Any], int]:
-    params: dict[str, Any] = {}
-    while index < len(text) and text[index] == ";":
-        index = _skip_ws(text, index + 1)
-        key, index = _parse_token(text, index)
-        if index < len(text) and text[index] == "=":
-            value, index = _parse_bare_item(text, index + 1)
-        else:
-            value = True
-        # Last wins is RFC 8941's rule for a repeated parameter key.
-        params[key] = value
-        index = _skip_ws(text, index)
-    return params, index
-
-
-def _parse_inner_list(text: str, index: int) -> tuple[tuple[Any, ...], int]:
-    if index >= len(text) or text[index] != "(":
-        raise SignatureError("structured field: expected an inner list")
-    index = _skip_ws(text, index + 1)
-    items: list[tuple[str, dict[str, Any]]] = []
-    while index < len(text) and text[index] != ")":
-        if len(items) >= _MAX_COMPONENTS:
-            raise SignatureError("signature covers too many components")
-        value, index = _parse_string(text, index)
-        params, index = _parse_params(text, index)
-        items.append((value, params))
-        index = _skip_ws(text, index)
-    if index >= len(text):
-        raise SignatureError("structured field: unterminated inner list")
-    return tuple(items), index + 1
+    return _core.signature_parse_string(text, index, SignatureError)
 
 
 def _parse_dictionary(text: str, *, inner_list: bool) -> dict[str, Any]:
@@ -326,33 +227,9 @@ def _parse_dictionary(text: str, *, inner_list: bool) -> dict[str, Any]:
     the two must be read with the same key set -- which is why one parser serves
     both and the labels are compared rather than assumed.
     """
-    if len(text) > _MAX_HEADER_BYTES:
-        raise SignatureError("signature header is too large")
-    out: dict[str, Any] = {}
-    index = _skip_ws(text, 0)
-    while index < len(text):
-        key, index = _parse_token(text, index)
-        if index < len(text) and text[index] == "=":
-            index += 1
-            if inner_list:
-                items, index = _parse_inner_list(text, index)
-                params, index = _parse_params(text, index)
-                out[key] = (items, params)
-            else:
-                value, index = _parse_bare_item(text, index)
-                params, index = _parse_params(text, index)
-                out[key] = (value, params)
-        else:
-            params, index = _parse_params(text, index)
-            out[key] = ((True, params) if not inner_list else ((), params))
-        index = _skip_ws(text, index)
-        if index < len(text):
-            if text[index] != ",":
-                raise SignatureError("structured field: expected a comma")
-            index = _skip_ws(text, index + 1)
-            if index >= len(text):
-                raise SignatureError("structured field: trailing comma")
-    return out
+    return _core.signature_parse_dictionary(
+        text, inner_list, SignatureError, _MAX_HEADER_BYTES, _MAX_COMPONENTS
+    )
 
 
 def _serialize_string(value: str) -> str:
@@ -388,14 +265,6 @@ def _serialize_component(name: str, params: Mapping[str, Any]) -> str:
 # --------------------------------------------------------------------------
 # The signature base -- written once, called by both directions
 # --------------------------------------------------------------------------
-
-#: Component parameters this module understands. An identifier carrying anything
-#: else is **refused**, never ignored: `;sf` and `;bs` change what a header's
-#: value canonicalizes to, so treating an unknown one as decoration means
-#: verifying a different string from the one that was signed. Refusing is the
-#: only reading that cannot silently accept a forgery.
-_KNOWN_COMPONENT_PARAMS: Final = frozenset({"name", "req"})
-
 
 @dataclass(frozen=True, slots=True)
 class RequestMessage:
@@ -487,49 +356,14 @@ def signature_base(
         SignatureError: An unknown component, an unknown component parameter, a
             covered header the message does not carry, or a duplicated component.
     """
-    if not components:
-        raise SignatureError("signature covers no components")
-    if len(components) > _MAX_COMPONENTS:
-        raise SignatureError("signature covers too many components")
-    lines: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for raw_name, component_params in components:
-        name = raw_name.lower()
-        if name != raw_name:
-            # RFC 9421 §2.1: component identifiers are lowercase. A mixed-case
-            # identifier is a different string in the base, so accepting it
-            # would make two spellings of one component verify differently.
-            raise SignatureError("component identifiers must be lowercase")
-        unknown = set(component_params) - _KNOWN_COMPONENT_PARAMS
-        if unknown:
-            raise SignatureError(
-                f"unsupported component parameter {sorted(unknown)[0]!r}"
-            )
-        if component_params.get("req"):
-            raise SignatureError("request-response binding is not supported")
-        key = (name, _serialize_params(component_params))
-        if key in seen:
-            raise SignatureError(f"component {name!r} is covered twice")
-        seen.add(key)
-        if name.startswith("@"):
-            value = _derived(name, component_params, message)
-        else:
-            raw = message.header(name)
-            if raw is None:
-                raise SignatureError(f"covered header {name!r} is not present")
-            # RFC 9421 §2.1: obs-fold is removed and surrounding whitespace
-            # trimmed; a multi-valued header arrives already comma-joined in
-            # every backing this module reads.
-            value = " ".join(raw.split())
-        lines.append(f"{_serialize_component(name, component_params)}: {value}")
-    covered = " ".join(
-        _serialize_component(name.lower(), component_params)
-        for name, component_params in components
+    return _core.signature_base(
+        message,
+        components,
+        params,
+        SignatureError,
+        _derived,
+        _MAX_COMPONENTS,
     )
-    lines.append(
-        f'"@signature-params": ({covered}){_serialize_params(params)}'
-    )
-    return "\n".join(lines).encode("utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -1079,20 +913,13 @@ class Signatures:
         # Everything above this line is cheap; everything below is not, and the
         # ordering is load-bearing rather than stylistic.
         #
-        # Measured on this machine, per request: parsing both headers 9.7us,
-        # building the base 7.1us, `verify_ed25519` **2459us**. The signature
-        # check is ~147x the cost of all the parsing put together, because
-        # wreath's Ed25519 is pure Python (no runtime dependency) and each
-        # verification is two 253-step double-and-adds over big integers.
-        #
-        # So an unauthenticated caller who can reach the verify costs the
-        # server ~2.5ms of CPU per request for the price of one header. Every
-        # check that can refuse *without* it -- covered components, the created
+        # Curve verification is the expensive operation an unauthenticated
+        # caller can trigger for the price of one header. Every check that can
+        # refuse *without* it -- covered components, the created
         # window, expiry, the algorithm, an unknown keyid, a replayed nonce --
-        # is therefore placed above, and a caller who fails any of them costs
-        # ~17us instead. Moving `verify_ed25519` earlier would not fail a test
-        # about correctness, so `test_a_bad_keyid_never_reaches_the_verify`
-        # exists to fail about this.
+        # is therefore placed above. Moving `verify_ed25519` earlier would not
+        # fail a test about correctness, so
+        # `test_a_bad_keyid_never_reaches_the_verify` exists to fail about this.
         #
         # Rate limiting is still the deployment's job: the ordering shrinks the
         # cost of a *rejected* request, not of an accepted one.
