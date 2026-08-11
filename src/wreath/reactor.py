@@ -68,7 +68,7 @@ else:
         _register_task,
     )
 
-#: The timing-wheel/poller extension, or None when it was not built. Resolved
+#: The timing-wheel/poller extension, or None without `wreath[linux]`. Resolved
 #: through the `_native` loader so it is Any-typed like `_core`; a direct import
 #: of the compiled submodule is invisible to static analysis.
 from ._native import _reactor as _wheel_ext
@@ -135,8 +135,7 @@ def metal_tls_client_context(
     """
     if _wheel_ext is None or not hasattr(_wheel_ext, "TLSClientContext"):
         raise RuntimeError(
-            "native TLS needs wreath._native._reactor built with OpenSSL; "
-            "the metal tier is Linux-only"
+            "native TLS needs 'wreath[linux]'; the metal tier is Linux-only"
         )
     context = _MetalTLSContext(ssl.PROTOCOL_TLS_CLIENT)
     if verify:
@@ -196,8 +195,7 @@ def metal_tls_context(
     """
     if _wheel_ext is None or not hasattr(_wheel_ext, "TLSContext"):
         raise RuntimeError(
-            "native TLS needs wreath._native._reactor built with OpenSSL; "
-            "the metal tier is Linux-only"
+            "native TLS needs 'wreath[linux]'; the metal tier is Linux-only"
         )
     context = _MetalTLSContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile, keyfile, password)
@@ -678,7 +676,7 @@ class EventLoop(_LoopBase):
                 "loop does not compact cancelled heap timers")
         if timers == "wheel":
             if _wheel_ext is None:
-                raise RuntimeError("timers='wheel' needs wreath._native._reactor")
+                raise RuntimeError("timers='wheel' needs 'wreath[linux]'")
             self._wheel = _wheel_ext.TimingWheel(
                 resolution=wheel_resolution, slots=wheel_slots, base=self.time())
             self._wheel_schedule = self._wheel.schedule_call

@@ -35,7 +35,6 @@
 
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
 
 
 /* Per-read receive target handed to the transport, matching the server's. */
@@ -316,9 +315,9 @@ sink_clear(EdgeSink *sink)
 static double
 edge_now(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    PyTime_t now = 0;
+    (void)PyTime_MonotonicRaw(&now);
+    return (double)now * 1e-9;
 }
 
 

@@ -34,6 +34,36 @@
  */
 #include "wreathcore.h"
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
+static inline int
+route_popcount64(uint64_t value)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(value);
+#else
+    value = value - ((value >> 1) & UINT64_C(0x5555555555555555));
+    value = (value & UINT64_C(0x3333333333333333)) +
+            ((value >> 2) & UINT64_C(0x3333333333333333));
+    value = (value + (value >> 4)) & UINT64_C(0x0f0f0f0f0f0f0f0f);
+    return (int)((value * UINT64_C(0x0101010101010101)) >> 56);
+#endif
+}
+
+static inline int
+route_ctz64(uint64_t value)
+{
+#if defined(_MSC_VER)
+    unsigned long index;
+    _BitScanForward64(&index, value);
+    return (int)index;
+#else
+    return __builtin_ctzll(value);
+#endif
+}
+
 #define BRT_MAX_SEGMENTS 64
 #define BRT_DISC_OFFS 4
 
@@ -771,14 +801,14 @@ position_survival(BGroup *g, int p)
     if (m->count == 0) return 1.0;
     Py_ssize_t params = 0;
     for (Py_ssize_t w = 0; w < g->nwords; w++) {
-        params += __builtin_popcountll(g->param[(Py_ssize_t)p * g->nwords + w]);
+        params += route_popcount64(g->param[(Py_ssize_t)p * g->nwords + w]);
     }
     double total = 0.0, sq = 0.0;
     for (Py_ssize_t i = 0; i < m->cap; i++) {
         if (m->slots[i] < 0) continue;
         Py_ssize_t n = 0;
         for (Py_ssize_t w = 0; w < g->nwords; w++) {
-            n += __builtin_popcountll(g->pool[m->slots[i] + w]);
+            n += route_popcount64(g->pool[m->slots[i] + w]);
         }
         double size = (double)(n + params);
         total += size;
@@ -1457,7 +1487,7 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
         for (Py_ssize_t w = 0; w < nw; w++) {
             uint64_t m = (slot >= 0 ? g->pool[slot + w] : 0ULL) | pm[w];
             survivors[w] &= m;
-            live += __builtin_popcountll(survivors[w]);
+            live += route_popcount64(survivors[w]);
         }
         if (live <= 1) break;
     }
@@ -1470,7 +1500,7 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
     for (Py_ssize_t w = 0; w < nw; w++) {
         uint64_t bits = survivors[w];
         while (bits) {
-            Py_ssize_t i = w * 64 + __builtin_ctzll(bits);
+            Py_ssize_t i = w * 64 + route_ctz64(bits);
             bits &= bits - 1;
             BRoute *r = g->routes[i];
             int matches = 1;

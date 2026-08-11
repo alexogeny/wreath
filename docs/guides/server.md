@@ -380,15 +380,26 @@ see [the PostgreSQL guide](postgres.md#a-client-that-goes-away-stops-the-query).
 
 ## Choosing protocols
 
-HTTP/2 and HTTP/3 need the native extension. A listener that offers both
+HTTP/2 is in the base wheel; HTTP/3 is an explicit install extra. A listener that offers both
 `http/1.1` and `h2` negotiates between them over TLS ALPN, so a client gets the
 best protocol it supports and older clients still work. HTTP/3 is compiled in
-only when the extension is built with `WREATH_BUILD_HTTP3=1`, because it pulls in
-a QUIC stack you shouldn't pay for unless you want it.
+only when you request it, because it pulls in a QUIC stack you should not pay
+for unless you use it.
 
-### Building the HTTP/3 extension
+### Installing HTTP/3
 
-`WREATH_BUILD_HTTP3=1` needs `pkg-config`, nghttp3, and ngtcp2 built against a
+```bash
+uv add 'wreath[h3]'
+# `wreath[http3]` is exactly the same extra under a longer name.
+```
+
+The release wheel bundles pinned OpenSSL, ngtcp2 and nghttp3 builds. It neither
+uses a distribution's potentially incompatible QUIC stack nor adds a Python
+runtime dependency to Wreath.
+
+### Building the HTTP/3 extension from source
+
+Contributors using `WREATH_BUILD_HTTP3=1` need `pkg-config`, nghttp3, and ngtcp2 built against a
 QUIC-capable TLS backend. Wreath accepts either ngtcp2 crypto backend —
 `libngtcp2_crypto_ossl` (vanilla OpenSSL 3.5 or newer, which is where the QUIC
 TLS API landed) or `libngtcp2_crypto_quictls`.

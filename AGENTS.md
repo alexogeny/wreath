@@ -497,7 +497,7 @@ None is discoverable by reading the code you are changing.
   declared regressions and reverted this way, and all three turned out to be
   8-39% wins once actually compiled. Rebuild with
 
-      uv run python setup.py build_ext --inplace
+      WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace
 
   and **prove it landed** rather than assuming: `uv run wreath-build-lint`
   reports BUILD001 for any artifact older than its sources, and the surest
@@ -507,6 +507,12 @@ None is discoverable by reading the code you are changing.
   a stale one left over from an earlier `WREATH_BUILD_HTTP3=1` build is not a
   finding about the change you are making. So nothing runs it for you. Run it
   yourself before believing any native measurement.
+
+  The Linux switch is part of that command because the release base wheel is
+  deliberately portable and the io_uring reactor ships in `wreath[linux]`.
+  Source development still needs the reactor rebuilt in place; omitting the
+  switch can leave an older `_reactor.so` importable while every portable
+  extension is fresh.
 
   **`_http3` is buildable wherever its libraries are.** This paragraph used to
   say it "cannot be rebuilt here", which was read as a property of the

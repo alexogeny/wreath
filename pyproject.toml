@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wreath"
-version = "0.1.0a3"
+version = "0.2.0"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -15,15 +15,21 @@ dependencies = []
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Framework :: AsyncIO",
-  # Linux is the platform wreath is built and tested on, and the only one that
-  # gets a wheel. macOS and Windows are no longer *refused* -- `setup.py` gates
-  # the two platform-bound extensions, so an sdist install there builds the rest
-  # -- but neither has been run, and a classifier is a claim. They go in when a
-  # suite run on each says they can.
+  "Operating System :: MacOS :: MacOS X",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
+
+[project.optional-dependencies]
+# Extras select Wreath-owned companion wheels; they do not pull another runtime
+# implementation into the framework. The base wheel always carries the
+# portable native core. `linux` adds the io_uring reactor, while `h3` and
+# `http3` are aliases for the same HTTP/3 extension and its bundled QUIC stack.
+linux = ["wreath-linux==0.2.0; sys_platform == 'linux'"]
+h3 = ["wreath-http3==0.2.0; sys_platform == 'linux'"]
+http3 = ["wreath-http3==0.2.0; sys_platform == 'linux'"]
 
 # PyPI renders these as the project's sidebar links. Without them the listing
 # has no way back to the source or the documentation, and every relative link
@@ -69,7 +75,8 @@ dev = [
   "ruff>=0.12",
   # `[build-system] requires` only populates uv's isolated build environment,
   # never this venv. Rebuilding the extensions in place
-  # (`python setup.py build_ext --inplace`, `tools/sanitizers/build_*.py`)
+  # (`WREATH_BUILD_LINUX=1 python setup.py build_ext --inplace`,
+  # `tools/sanitizers/build_*.py`)
   # imports setuptools from the venv, so it has to be a dev dependency too --
   # otherwise a sync prunes it and the next build fails with
   # ModuleNotFoundError while the stale .so stays in place.
@@ -200,6 +207,13 @@ wreath-bench-report = "wreath._devtools.bench_report:main"
 # `uv run --group docs`/`--group benchmark`, so working on one group cannot
 # quietly uninstall the toolchain the tests and native builds need.
 default-groups = ["dev"]
+
+[tool.uv.workspace]
+members = ["packages/wreath-linux", "packages/wreath-http3"]
+
+[tool.uv.sources]
+wreath-linux = { workspace = true }
+wreath-http3 = { workspace = true }
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -341,16 +355,10 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # rather than built untested: `AGENTS.md` treats free-threading as a separately
 # *tested* execution mode, and nothing here tests one yet.
 build = "cp314-*"
-# Linux wheels only, for now. The *code* is no longer Linux-only: `setup.py`
-# gates `_reactor` (io_uring, eventfd, raw `syscall()`) on Linux and `_flight`
-# (mmap) on POSIX, so macOS and Windows compile `_core`, `_server`, `_postgres`
-# and `_client` -- none of which carries a platform header or a POSIX-only call
-# -- instead of failing at the first `#include`. What is missing is not a port
-# but *evidence*: nobody has built or run the suite on either, and a wheel is a
-# claim that it works. An sdist install on those platforms should now succeed,
-# which is the change; adding them here is the follow-up, once a run on each
-# says so.
-skip = ["*-musllinux_*", "*_i686", "pp*"]
+# The base wheel is portable. Platform-bound extensions are separate companion
+# distributions, so selecting another runner here never changes what `wreath`
+# itself contains.
+skip = ["*-musllinux_*", "*_i686"]
 # **Delete `build/` first.** setuptools reuses object files it finds there, and
 # cibuildwheel mounts the project into the container -- so a `build/` left by a
 # host `setup.py build_ext --inplace` is silently linked into the wheel. The
@@ -358,12 +366,12 @@ skip = ["*-musllinux_*", "*_i686", "pp*"]
 # refuses it for "too-recent versioned symbols", naming a glibc the container
 # never had. CI checks out fresh and never sees this; a maintainer running
 # cibuildwheel locally sees it every time, which is the worse way round.
-before-build = "rm -rf build"
+before-build = "python -c \"import shutil; shutil.rmtree('build', ignore_errors=True)\""
 
 # Every wheel is imported before it ships. A wheel that builds and cannot load
 # its own extensions is the failure this catches, and it is invisible to the
 # build step.
-test-command = "python -c \"from wreath._native import _core, _server, _reactor, _postgres; assert all(m is not None for m in (_core, _server, _reactor, _postgres)); import wreath; wreath.Wreath()\""
+test-command = "python {project}/tools/wheel_smoke.py --base"
 
 # **`manylinux_2_34`, not the `manylinux_2_28` default.** Measured, not guessed:
 # 2_28 (AlmaLinux 8) *has* `linux/io_uring.h`, but its 4.18 kernel headers

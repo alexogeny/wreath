@@ -28,6 +28,53 @@ typedef struct {
 
 static PyObject *cedar_eval(cedar_ctx *ctx, PyObject *node, int depth);
 
+static int
+cedar_add_i64(int64_t left, int64_t right, int64_t *result)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_add_overflow(left, right, result);
+#else
+    if ((right > 0 && left > INT64_MAX - right) ||
+        (right < 0 && left < INT64_MIN - right)) return 1;
+    *result = left + right;
+    return 0;
+#endif
+}
+
+static int
+cedar_sub_i64(int64_t left, int64_t right, int64_t *result)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_sub_overflow(left, right, result);
+#else
+    if ((right > 0 && left < INT64_MIN + right) ||
+        (right < 0 && left > INT64_MAX + right)) return 1;
+    *result = left - right;
+    return 0;
+#endif
+}
+
+static int
+cedar_mul_i64(int64_t left, int64_t right, int64_t *result)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_mul_overflow(left, right, result);
+#else
+    if (left == 0 || right == 0) {
+        *result = 0;
+        return 0;
+    }
+    if ((left == -1 && right == INT64_MIN) ||
+        (right == -1 && left == INT64_MIN)) return 1;
+    if ((left > 0 && right > 0 && left > INT64_MAX / right) ||
+        (left > 0 && right < 0 && right < INT64_MIN / left) ||
+        (left < 0 && right > 0 && left < INT64_MIN / right) ||
+        (left < 0 && right < 0 && left < INT64_MAX / right)) return 1;
+    *result = left * right;
+    return 0;
+#endif
+}
+
 /* Opcodes, operator kinds, variable indexes, and effect/unless flags are
  * small non-negative ints emitted by the compiler in cedar_engine.py; the
  * -1 sentinel cannot collide with a legitimate value. */
@@ -371,13 +418,13 @@ cedar_eval_arith(cedar_ctx *ctx, PyObject *node, int depth)
     int64_t result;
     int overflowed;
     if (kind == 0) {
-        overflowed = __builtin_add_overflow(left, right, &result);
+        overflowed = cedar_add_i64(left, right, &result);
     }
     else if (kind == 1) {
-        overflowed = __builtin_sub_overflow(left, right, &result);
+        overflowed = cedar_sub_i64(left, right, &result);
     }
     else {
-        overflowed = __builtin_mul_overflow(left, right, &result);
+        overflowed = cedar_mul_i64(left, right, &result);
     }
     if (overflowed) {
         return cedar_fail(ctx, PyUnicode_FromString("arithmetic overflowed i64"));

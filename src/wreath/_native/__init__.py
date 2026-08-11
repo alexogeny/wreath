@@ -1,7 +1,8 @@
 """The one place that loads compiled extensions for Python facades.
 
-The five extensions built into every wheel are required. Platform-gated
-extensions return ``None`` when the current wheel cannot contain them.
+The five extensions built into every base wheel are required. Capability
+extensions return ``None`` when their companion wheel is not installed or the
+platform cannot contain them.
 
 **``_core`` is mandatory, and its absence is refused here, at import.** Not per
 call, not per request, and not by degrading to something slower -- there is
@@ -24,7 +25,8 @@ from typing import Any
 #: build without it.
 #:
 #: `_core`, `_client`, `_edge`, `_server`, and `_postgres` are present in every
-#: wheel. `_reactor` and `_flight` are platform-gated; `_http3` is opt-in.
+#: base wheel. `_reactor` is installed by `wreath[linux]`, `_http3` by
+#: `wreath[h3]`/`wreath[http3]`, and `_flight` is platform-gated.
 _EXTENSIONS: frozenset[str] = frozenset(
     {"_core", "_client", "_postgres", "_server", "_reactor", "_edge", "_flight", "_http3"}
 )

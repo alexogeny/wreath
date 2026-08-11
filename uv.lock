@@ -2,6 +2,13 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[manifest]
+members = [
+    "wreath",
+    "wreath-http3",
+    "wreath-linux",
+]
+
 [[package]]
 name = "aiofiles"
 version = "25.1.0"
@@ -1616,8 +1623,19 @@ wheels = [
 
 [[package]]
 name = "wreath"
-version = "0.1.0a3"
+version = "0.2.0"
 source = { editable = "." }
+
+[package.optional-dependencies]
+h3 = [
+    { name = "wreath-http3", marker = "sys_platform == 'linux'" },
+]
+http3 = [
+    { name = "wreath-http3", marker = "sys_platform == 'linux'" },
+]
+linux = [
+    { name = "wreath-linux", marker = "sys_platform == 'linux'" },
+]
 
 [package.dev-dependencies]
 benchmark = [
@@ -1658,6 +1676,12 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "wreath-http3", marker = "sys_platform == 'linux' and extra == 'h3'", editable = "packages/wreath-http3" },
+    { name = "wreath-http3", marker = "sys_platform == 'linux' and extra == 'http3'", editable = "packages/wreath-http3" },
+    { name = "wreath-linux", marker = "sys_platform == 'linux' and extra == 'linux'", editable = "packages/wreath-linux" },
+]
+provides-extras = ["linux", "h3", "http3"]
 
 [package.metadata.requires-dev]
 benchmark = [
@@ -1694,3 +1718,13 @@ dev = [
     { name = "setuptools", specifier = ">=77" },
     { name = "ty" },
 ]
+
+[[package]]
+name = "wreath-http3"
+version = "0.2.0"
+source = { editable = "packages/wreath-http3" }
+
+[[package]]
+name = "wreath-linux"
+version = "0.2.0"
+source = { editable = "packages/wreath-linux" }

@@ -141,10 +141,18 @@ Wreath targets Python 3.14 and newer.
 pip install wreath
 # or
 uv add wreath
+
+# Linux io_uring event loop and native TLS transport
+uv add 'wreath[linux]'
+
+# HTTP/3 (the h3 and http3 names are aliases)
+uv add 'wreath[h3]'
 ```
 
-A wheel ships the C extensions prebuilt, so this needs no compiler. Installing
-from source builds them, which needs a C compiler and the CPython headers.
+The base wheel always ships Wreath's portable C implementation and needs no
+compiler or runtime package. The `linux` extra adds Wreath's io_uring reactor;
+`h3`/`http3` adds the HTTP/3 extension with its pinned QUIC/TLS libraries
+bundled into the wheel. Neither extra changes the framework API.
 
 ## Your first few minutes
 

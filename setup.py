@@ -5,8 +5,10 @@ Routing, protocols, database access and codecs therefore have one installed
 implementation. A default build needs only a C compiler and CPython headers.
 
 Three components are capability-gated: `_reactor` needs io_uring (Linux),
-`_flight` needs mmap (POSIX), and `_http3` is opt-in behind
-WREATH_BUILD_HTTP3=1.
+`_flight` needs mmap (POSIX), and `_http3` needs the QUIC libraries. Release
+wheels ship `_reactor` and `_http3` in the `wreath-linux` and `wreath-http3`
+companion distributions selected by extras. `WREATH_BUILD_LINUX=1` and
+`WREATH_BUILD_HTTP3=1` remain source-development switches.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import subprocess
 import sys
 
 from setuptools import Extension, setup
+from setuptools.command.build import build
 from setuptools.command.build_ext import build_ext
 
 
@@ -46,9 +49,24 @@ class _ParallelBuildExt(build_ext):
             self.parallel = os.cpu_count() or 1
 
 
+class _CleanBuild(build):
+    """Never let a previous capability build leak into a wheel.
+
+    Setuptools updates ``build/lib`` in place. If an earlier source build
+    enabled HTTP/3 or the Linux reactor, an ordinary later ``uv build`` copied
+    those old shared objects -- and even files deleted from ``src`` -- into the
+    base wheel. cibuildwheel already starts clean; making the build command own
+    the invariant keeps local and other PEP 517 builds equally safe.
+    """
+
+    def run(self) -> None:
+        shutil.rmtree(self.build_lib, ignore_errors=True)
+        super().run()
+
+
 profile_build = os.environ.get("WREATH_NATIVE_PROFILE") == "1"
 if sys.platform == "win32":
-    extra_compile_args = ["/O2"]
+    extra_compile_args = ["/O2", "/std:c11"]
     hot_compile_args = [*extra_compile_args, "/GL"]
     hot_link_args = ["/LTCG"]
     if profile_build:
@@ -384,10 +402,12 @@ ext_modules = [
 # `wreath.server._create_recorder` returns None on a missing `_flight`, leaving
 # every recorder hook a not-taken branch.
 
-# io_uring, eventfd and raw `syscall()`: Linux and nowhere else. Without it the
-# metal tier is unavailable and asyncio's own loop serves, which is the
-# documented default anyway.
-if sys.platform.startswith("linux"):
+# io_uring, eventfd and raw `syscall()`: Linux and nowhere else. Published
+# installs get this from `wreath[linux]`; the switch exists for in-place source
+# builds, where a companion wheel cannot add files to the editable package.
+if os.environ.get("WREATH_BUILD_LINUX") == "1":
+    if not sys.platform.startswith("linux"):
+        raise SystemExit("WREATH_BUILD_LINUX=1 requires Linux and io_uring headers")
     ext_modules.append(
         Extension(
             "wreath._native._reactor",
@@ -441,4 +461,7 @@ if os.environ.get("WREATH_BUILD_HTTP3") == "1":
 # Experiments never participate in production backend selection. Building them
 # is explicit so unfinished kernel requirements cannot affect normal installs.
 
-setup(ext_modules=ext_modules, cmdclass={"build_ext": _ParallelBuildExt})
+setup(
+    ext_modules=ext_modules,
+    cmdclass={"build": _CleanBuild, "build_ext": _ParallelBuildExt},
+)
