@@ -19,13 +19,8 @@ import re
 import socket
 from typing import Any
 
-from ._metricdelta import DeltaTracker
-from ._prometheus import (
-    _PROJECTOR_LOSS_FIELDS,
-    RouteLabels,
-    _loss_reason_name,
-    _resolve_route_labels,
-)
+from ._native import _core
+from ._prometheus import RouteLabels
 
 __all__ = ["StatsDBridge", "activate_statsd"]
 
@@ -91,11 +86,7 @@ class StatsDBridge:
         self._route_labels = route_labels
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
-        self._deltas = DeltaTracker()
-
-    # -- delta bookkeeping (StatsD counters are increments) ------------------
-    def _delta(self, key: tuple, value: float) -> float:
-        return self._deltas.delta(key, value)
+        self._deltas = _core.metric_delta_state()
 
     # -- line building (pure; testable without a socket) ---------------------
     def _emit(self, out: list[str], name: str, value: float, kind: str,
@@ -115,35 +106,15 @@ class StatsDBridge:
             out.append(f"{full}:{_fmt(value)}|{kind}")
 
     def _lines(self, snapshot: Any, recorder_loss: dict | None = None) -> list[str]:
-        out: list[str] = []
-        for r in tuple(getattr(snapshot, "routes", ()) or ()):
-            lbl = _resolve_route_labels(self._route_labels, r.route_id)
-            self._emit(out, "http.requests",
-                       self._delta(("req", r.route_id), int(r.count)), "c", lbl)
-            self._emit(out, "http.errors",
-                       self._delta(("err", r.route_id), int(r.errors)), "c", lbl)
-            self._emit(out, "http.duration.sum_ms",
-                       self._delta(("dsum", r.route_id), r.duration_us_sum / 1000.0),
-                       "c", lbl)
-            self._emit(out, "http.duration.max_ms",
-                       r.duration_us_max / 1000.0, "g", lbl)
-        self._emit(out, "flight.assembled",
-                   self._delta(("assembled",), int(getattr(snapshot, "assembled", 0))),
-                   "c", {})
-        self._emit(out, "flight.pending",
-                   int(getattr(snapshot, "pending", 0)), "g", {})
-        loss = getattr(snapshot, "loss", None)
-        for field in _PROJECTOR_LOSS_FIELDS:
-            self._emit(out, "flight.projector_loss",
-                       self._delta(("ploss", field), int(getattr(loss, field, 0))),
-                       "c", {"reason": field})
-        if recorder_loss:
-            for reason, count in recorder_loss.items():
-                name = _loss_reason_name(reason)
-                self._emit(out, "flight.recorder_loss",
-                           self._delta(("rloss", name), int(count)),
-                           "c", {"reason": name})
-        return out
+        return _core.statsd_lines(
+            snapshot,
+            recorder_loss,
+            self._prefix,
+            self._dogstatsd,
+            self._tags,
+            self._route_labels,
+            self._deltas,
+        )
 
     # -- sending -------------------------------------------------------------
     def _counter_lines(self, out: list[str]) -> None:

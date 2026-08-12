@@ -5,7 +5,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sysconfig
 from pathlib import Path
+
+if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    raise RuntimeError(
+        "wreath-http3 supports regular CPython 3.14; free-threaded CPython "
+        "3.14t is not supported. Use a regular CPython 3.14 interpreter."
+    )
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -71,6 +78,12 @@ setup(
         Extension(
             "wreath._native._http3",
             sources=sources,
+            depends=[
+                str(NATIVE / "header_block.c"),
+                str(NATIVE / "header_block.h"),
+                str(NATIVE / "server_request_capi.h"),
+                str(NATIVE / "server_policy.h"),
+            ],
             extra_compile_args=["-O2", "-std=c11", "-fvisibility=hidden", *cflags],
             extra_link_args=libs,
         )

@@ -500,6 +500,25 @@ class TestTieredRead:
         )
         assert result.zone == "Europe/London"
 
+    async def test_a_runtime_zone_owns_a_tiered_view_with_no_stored_zone(
+        self, session, database
+    ):
+        """A declaration may defer its zone; tier planning must use the run's zone."""
+        database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
+        declared = (
+            Series(Trek, at=Trek.started_at, bucket=Day)
+            .measure(n=count())
+            .seal(after="2h")
+            .retain(raw="3 days", day=None)
+        )
+        result = await declared.run(
+            session,
+            range=Range(utc(2026, 3, 3), utc(2026, 3, 4)),
+            zone="Europe/London",
+            now=utc(2026, 3, 4),
+        )
+        assert result.zone == "Europe/London"
+
 
 # -- rollup -------------------------------------------------------------------
 

@@ -1,8 +1,8 @@
 /* Incremental HTTP/1 response protocol used by the outbound client.
  *
- * The protocol owns its receive buffer and emits one parsed response head at a
- * time.  Keeping framing state in C avoids rescanning previously received bytes;
- * body framing remains with the Python connection until it migrates here.
+ * The protocol owns its receive buffer and emits one complete response at a
+ * time. Framing state lives with the request that created it: Python sees the
+ * final ClientResponse only after the wire transaction is complete.
  *
  * Http1ClientStream (below) is the transport-facing side: a C-owned stream
  * reader/protocol replacing asyncio streams for client connections, and the
@@ -156,16 +156,25 @@ static PyType_Spec client_protocol_spec = {
 /* shaped awaitable reads (readuntil/readexactly/read, asyncio semantics    */
 /* for IncompleteReadError/LimitOverrunError/at_eof), writer backpressure   */
 /* (_drain/_wait_closed), and the stream-fusion C API so metal transports   */
-/* deliver wire bytes with no Python calling convention per read. The       */
-/* Python connection keeps all framing logic; only byte transport moves.    */
+/* deliver wire bytes with no Python calling convention per read. Buffered  */
+/* response framing and phase deadlines remain in this request-owned object */
+/* until a complete ClientResponse crosses back to Python.                  */
 /* ======================================================================== */
 
 #define CS_READ_NONE 0
 #define CS_READ_UNTIL 1
 #define CS_READ_EXACTLY 2
 #define CS_READ_SOME 3
+#define CS_READ_RESPONSE 4
 #define CS_SEP_MAX 16
 #define CS_OFFER_SIZE 65536
+
+#define CS_RESPONSE_HEAD 0
+#define CS_RESPONSE_LENGTH 1
+#define CS_RESPONSE_CHUNK_SIZE 2
+#define CS_RESPONSE_CHUNK_DATA 3
+#define CS_RESPONSE_TRAILERS 4
+#define CS_RESPONSE_CLOSE 5
 
 typedef struct {
     PyObject_HEAD
@@ -182,6 +191,7 @@ typedef struct {
     PyObject *exc;              /* stored connection exception, or NULL */
     PyObject *transport;
     PyObject *create_future;    /* bound loop.create_future */
+    PyObject *call_later;       /* bound loop.call_later */
     PyObject *drain_waiter;
     PyObject *closed_future;
     PyObject *offer_obj;        /* bytearray for the Python get_buffer path */
@@ -192,6 +202,26 @@ typedef struct {
     Py_ssize_t pending_count;
     Py_ssize_t pending_scan;    /* readuntil progress, relative to head */
     PyObject *pending_future;
+    /* A buffered response is one operation-owned state machine. None of this
+     * survives the read that created it, so free-threaded interpreters never
+     * share framing or timeout state through the extension module. */
+    PyObject *response_method;
+    PyObject *response_type;
+    PyObject *response_protocol_error;
+    PyObject *response_too_large;
+    PyObject *response_timeout_error;
+    PyObject *response_head;
+    PyObject *response_body;
+    PyObject *response_header_timeout;
+    PyObject *response_body_timeout;
+    PyObject *response_timer;
+    Py_ssize_t response_max_header;
+    Py_ssize_t response_max_body;
+    Py_ssize_t response_length;
+    Py_ssize_t response_trailers;
+    int response_phase;
+    int response_timer_phase;
+    int response_framed;
 } WreathClientStream;
 
 static PyTypeObject *client_stream_type = NULL;
@@ -200,6 +230,7 @@ static PyObject *cs_limit_overrun_error = NULL;
 static PyObject *cs_str_done = NULL;
 static PyObject *cs_str_set_result = NULL;
 static PyObject *cs_str_set_exception = NULL;
+static PyObject *cs_str_cancel = NULL;
 
 static Py_ssize_t
 cs_avail(WreathClientStream *self)
@@ -292,13 +323,488 @@ cs_resolve(PyObject *future, PyObject *value, int is_exception)
 }
 
 static void
+cs_cancel_response_timer(WreathClientStream *self)
+{
+    if (self->response_timer != NULL) {
+        PyObject *cancelled = PyObject_CallMethodNoArgs(
+            self->response_timer, cs_str_cancel);
+        if (cancelled == NULL) {
+            /* Timer cancellation is best-effort cleanup. A cancelled or
+             * already-fired asyncio handle is harmless; never replace the
+             * response result with a cleanup error. */
+            PyErr_Clear();
+        } else {
+            Py_DECREF(cancelled);
+        }
+        Py_CLEAR(self->response_timer);
+    }
+    self->response_timer_phase = -1;
+}
+
+static void
+cs_clear_response(WreathClientStream *self)
+{
+    cs_cancel_response_timer(self);
+    Py_CLEAR(self->response_method);
+    Py_CLEAR(self->response_type);
+    Py_CLEAR(self->response_protocol_error);
+    Py_CLEAR(self->response_too_large);
+    Py_CLEAR(self->response_timeout_error);
+    Py_CLEAR(self->response_head);
+    Py_CLEAR(self->response_body);
+    Py_CLEAR(self->response_header_timeout);
+    Py_CLEAR(self->response_body_timeout);
+    self->response_max_header = 0;
+    self->response_max_body = 0;
+    self->response_length = 0;
+    self->response_trailers = 0;
+    self->response_phase = CS_RESPONSE_HEAD;
+    self->response_framed = 0;
+}
+
+static void
 cs_clear_pending(WreathClientStream *self)
 {
+    if (self->pending_kind == CS_READ_RESPONSE) {
+        cs_clear_response(self);
+    }
     self->pending_kind = CS_READ_NONE;
     self->pending_sep_len = 0;
     self->pending_count = 0;
     self->pending_scan = 0;
     Py_CLEAR(self->pending_future);
+}
+
+static int
+cs_raise_response(PyObject *type, const char *message)
+{
+    PyErr_SetString(type != NULL ? type : PyExc_ValueError, message);
+    return -1;
+}
+
+static int
+cs_response_consume(WreathClientStream *self, Py_ssize_t count)
+{
+    if (count < 0 || count > cs_avail(self)) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid response buffer consumption");
+        return -1;
+    }
+    self->head += count;
+    if (self->head == self->len) {
+        self->head = 0;
+        self->len = 0;
+    }
+    return 0;
+}
+
+static Py_ssize_t
+cs_find_crlf(WreathClientStream *self, Py_ssize_t start, const char *needle,
+             Py_ssize_t needle_size)
+{
+    Py_ssize_t available = cs_avail(self);
+    if (start < 0 || start > available || available - start < needle_size) {
+        return -1;
+    }
+    const uint8_t *base = (const uint8_t *)self->data + self->head;
+    const uint8_t *found = wreath_memmem(
+        base + start, available - start,
+        (const uint8_t *)needle, needle_size);
+    return found == NULL ? -1 : (Py_ssize_t)(found - base);
+}
+
+static int
+cs_response_append(WreathClientStream *self, const char *data, Py_ssize_t size)
+{
+    Py_ssize_t old_size = PyByteArray_GET_SIZE(self->response_body);
+    if (size < 0 || old_size > self->response_max_body - size) {
+        return cs_raise_response(
+            self->response_too_large,
+            "response body exceeds configured limit");
+    }
+    if (PyByteArray_Resize(self->response_body, old_size + size) < 0) return -1;
+    memcpy(PyByteArray_AS_STRING(self->response_body) + old_size, data,
+           (size_t)size);
+    return 0;
+}
+
+static PyObject *
+cs_finish_response(WreathClientStream *self, PyObject *body)
+{
+    PyObject *minor = PyTuple_GET_ITEM(self->response_head, 0);
+    PyObject *status = PyTuple_GET_ITEM(self->response_head, 1);
+    PyObject *reason = PyTuple_GET_ITEM(self->response_head, 2);
+    PyObject *headers_list = PyTuple_GET_ITEM(self->response_head, 3);
+    PyObject *headers = PySequence_Tuple(headers_list);
+    PyObject *version = NULL;
+    PyObject *response = NULL;
+    PyObject *framed = NULL;
+    PyObject *keep_args = NULL;
+    PyObject *reusable = NULL;
+    PyObject *result = NULL;
+    long minor_value;
+
+    if (headers == NULL) goto done;
+    minor_value = PyLong_AsLong(minor);
+    if (minor_value == -1 && PyErr_Occurred()) goto done;
+    version = PyUnicode_FromFormat("1.%ld", minor_value);
+    if (version == NULL) goto done;
+    response = PyObject_CallFunctionObjArgs(
+        self->response_type, status, headers, body, version, reason, NULL);
+    if (response == NULL) goto done;
+    framed = PyBool_FromLong(self->response_framed);
+    keep_args = framed != NULL ? PyTuple_Pack(3, minor, headers_list, framed) : NULL;
+    if (keep_args == NULL) goto done;
+    reusable = wreath_http_response_keeps_alive(NULL, keep_args);
+    if (reusable == NULL) goto done;
+    result = PyTuple_Pack(2, response, reusable);
+
+done:
+    Py_XDECREF(headers);
+    Py_XDECREF(version);
+    Py_XDECREF(response);
+    Py_XDECREF(framed);
+    Py_XDECREF(keep_args);
+    Py_XDECREF(reusable);
+    return result;
+}
+
+/* Advance one complete buffered response. The return convention mirrors
+ * cs_take_ready: a new result when complete, NULL plus would_block when more
+ * wire bytes are required, or NULL with an exception on refusal. */
+static PyObject *
+cs_take_response(WreathClientStream *self, int *would_block)
+{
+    *would_block = 0;
+    for (;;) {
+        Py_ssize_t available = cs_avail(self);
+        if (self->response_phase == CS_RESPONSE_HEAD) {
+            Py_ssize_t end = cs_find_crlf(self, 0, "\r\n\r\n", 4);
+            if (end < 0) {
+                if (available > self->response_max_header) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "response headers exceed configured limit");
+                    return NULL;
+                }
+                if (self->eof) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "upstream closed before response headers completed");
+                    return NULL;
+                }
+                *would_block = 1;
+                return NULL;
+            }
+            end += 4;
+            if (end > self->response_max_header) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "response headers exceed configured limit");
+                return NULL;
+            }
+            PyObject *head = PyBytes_FromStringAndSize(
+                self->data + self->head, end);
+            PyObject *parsed = head != NULL
+                ? wreath_http_parse_response(NULL, head) : NULL;
+            Py_XDECREF(head);
+            if (parsed == NULL) return NULL;
+            if (parsed == Py_None) {
+                Py_DECREF(parsed);
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "complete response head was not parsed");
+                return NULL;
+            }
+            long status = PyLong_AsLong(PyTuple_GET_ITEM(parsed, 1));
+            if (status == -1 && PyErr_Occurred()) {
+                Py_DECREF(parsed);
+                return NULL;
+            }
+            if (cs_response_consume(self, end) < 0) {
+                Py_DECREF(parsed);
+                return NULL;
+            }
+            if (status == 101) {
+                Py_DECREF(parsed);
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "protocol switching is not supported");
+                return NULL;
+            }
+            if (status < 200) {
+                Py_DECREF(parsed);
+                continue;
+            }
+            self->response_head = parsed;
+            PyObject *frame_args = PyTuple_Pack(
+                3, self->response_method, PyTuple_GET_ITEM(parsed, 1),
+                PyTuple_GET_ITEM(parsed, 3));
+            PyObject *framing = frame_args != NULL
+                ? wreath_http_response_framing(NULL, frame_args) : NULL;
+            Py_XDECREF(frame_args);
+            if (framing == NULL) return NULL;
+            PyObject *mode = PyTuple_GET_ITEM(framing, 0);
+            PyObject *length = PyTuple_GET_ITEM(framing, 1);
+            int is_none = PyUnicode_CompareWithASCIIString(mode, "none") == 0;
+            int is_chunked = !is_none &&
+                PyUnicode_CompareWithASCIIString(mode, "chunked") == 0;
+            int is_length = !is_none && !is_chunked &&
+                PyUnicode_CompareWithASCIIString(mode, "length") == 0;
+            if (PyErr_Occurred()) {
+                Py_DECREF(framing);
+                return NULL;
+            }
+            if (is_none) {
+                self->response_framed = 1;
+                Py_DECREF(framing);
+                if (cs_avail(self) != 0) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "unsolicited bytes follow the framed response body");
+                    return NULL;
+                }
+                PyObject *empty = PyBytes_FromStringAndSize(NULL, 0);
+                PyObject *result = empty != NULL
+                    ? cs_finish_response(self, empty) : NULL;
+                Py_XDECREF(empty);
+                return result;
+            }
+            if (is_length) {
+                self->response_length = PyLong_AsSsize_t(length);
+                if (self->response_length == -1 && PyErr_Occurred()) {
+                    Py_DECREF(framing);
+                    return NULL;
+                }
+                if (self->response_length > self->response_max_body) {
+                    Py_DECREF(framing);
+                    cs_raise_response(
+                        self->response_too_large,
+                        "response body exceeds configured limit");
+                    return NULL;
+                }
+                self->response_phase = CS_RESPONSE_LENGTH;
+                self->response_framed = 1;
+            } else if (is_chunked) {
+                self->response_phase = CS_RESPONSE_CHUNK_SIZE;
+                self->response_framed = 1;
+                self->response_body = PyByteArray_FromStringAndSize(NULL, 0);
+                if (self->response_body == NULL) {
+                    Py_DECREF(framing);
+                    return NULL;
+                }
+            } else {
+                self->response_phase = CS_RESPONSE_CLOSE;
+                self->response_framed = 0;
+            }
+            Py_DECREF(framing);
+            continue;
+        }
+        if (self->response_phase == CS_RESPONSE_LENGTH) {
+            if (available < self->response_length) {
+                if (self->eof) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "upstream closed before response body completed");
+                    return NULL;
+                }
+                *would_block = 1;
+                return NULL;
+            }
+            if (available > self->response_length) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "unsolicited bytes follow the framed response body");
+                return NULL;
+            }
+            PyObject *body = cs_consume(self, self->response_length);
+            PyObject *result = body != NULL ? cs_finish_response(self, body) : NULL;
+            Py_XDECREF(body);
+            return result;
+        }
+        if (self->response_phase == CS_RESPONSE_CLOSE) {
+            if (available > self->response_max_body) {
+                cs_raise_response(
+                    self->response_too_large,
+                    "response body exceeds configured limit");
+                return NULL;
+            }
+            if (!self->eof) {
+                *would_block = 1;
+                return NULL;
+            }
+            PyObject *body = cs_consume(self, available);
+            PyObject *result = body != NULL ? cs_finish_response(self, body) : NULL;
+            Py_XDECREF(body);
+            return result;
+        }
+        if (self->response_phase == CS_RESPONSE_CHUNK_SIZE) {
+            Py_ssize_t line_end = cs_find_crlf(self, 0, "\r\n", 2);
+            if (line_end < 0) {
+                if (available > 1024) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "response chunk line exceeds limit");
+                    return NULL;
+                }
+                if (self->eof) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "upstream closed during response chunk");
+                    return NULL;
+                }
+                *would_block = 1;
+                return NULL;
+            }
+            if (line_end > 1022) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "response chunk line exceeds limit");
+                return NULL;
+            }
+            const unsigned char *line =
+                (const unsigned char *)self->data + self->head;
+            Py_ssize_t digits = 0;
+            size_t size = 0;
+            while (digits < line_end && line[digits] != ';') {
+                unsigned char c = line[digits];
+                unsigned value;
+                if (c >= '0' && c <= '9') value = c - '0';
+                else if (c >= 'a' && c <= 'f') value = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') value = c - 'A' + 10;
+                else {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "invalid response chunk size");
+                    return NULL;
+                }
+                if (size > (size_t)PY_SSIZE_T_MAX / 16U) {
+                    cs_raise_response(
+                        self->response_too_large,
+                        "response body exceeds configured limit");
+                    return NULL;
+                }
+                size = size * 16U + value;
+                digits++;
+            }
+            if (digits == 0) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "invalid response chunk size");
+                return NULL;
+            }
+            if (cs_response_consume(self, line_end + 2) < 0) return NULL;
+            if (size == 0) {
+                self->response_phase = CS_RESPONSE_TRAILERS;
+                continue;
+            }
+            if ((Py_ssize_t)size > self->response_max_body -
+                    PyByteArray_GET_SIZE(self->response_body)) {
+                cs_raise_response(
+                    self->response_too_large,
+                    "response body exceeds configured limit");
+                return NULL;
+            }
+            self->response_length = (Py_ssize_t)size;
+            self->response_phase = CS_RESPONSE_CHUNK_DATA;
+            continue;
+        }
+        if (self->response_phase == CS_RESPONSE_CHUNK_DATA) {
+            if (available < self->response_length + 2) {
+                if (self->eof) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "upstream closed during response chunk");
+                    return NULL;
+                }
+                *would_block = 1;
+                return NULL;
+            }
+            const char *data = self->data + self->head;
+            if (data[self->response_length] != '\r' ||
+                data[self->response_length + 1] != '\n') {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "malformed response chunk terminator");
+                return NULL;
+            }
+            if (cs_response_append(self, data, self->response_length) < 0 ||
+                cs_response_consume(self, self->response_length + 2) < 0) {
+                return NULL;
+            }
+            self->response_phase = CS_RESPONSE_CHUNK_SIZE;
+            continue;
+        }
+        /* Trailers are validated by the same response-header parser as an
+         * ordinary head. They are deliberately not exposed in ClientResponse,
+         * matching the public client contract. */
+        Py_ssize_t line_end = cs_find_crlf(self, 0, "\r\n", 2);
+        if (line_end < 0) {
+            if (self->response_trailers + available > self->response_max_header) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "response trailers exceed configured limit");
+                return NULL;
+            }
+            if (self->eof) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "upstream closed during response trailers");
+                return NULL;
+            }
+            *would_block = 1;
+            return NULL;
+        }
+        self->response_trailers += line_end + 2;
+        if (self->response_trailers > self->response_max_header) {
+            cs_raise_response(
+                self->response_protocol_error,
+                "response trailers exceed configured limit");
+            return NULL;
+        }
+        if (line_end == 0) {
+            if (cs_response_consume(self, 2) < 0) return NULL;
+            if (cs_avail(self) != 0) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "unsolicited bytes follow the framed response body");
+                return NULL;
+            }
+            PyObject *body = PyBytes_FromStringAndSize(
+                PyByteArray_AS_STRING(self->response_body),
+                PyByteArray_GET_SIZE(self->response_body));
+            PyObject *result = body != NULL ? cs_finish_response(self, body) : NULL;
+            Py_XDECREF(body);
+            return result;
+        }
+        static const char synthetic_head[] = "HTTP/1.1 200 OK\r\n";
+        Py_ssize_t synthetic_size =
+            (Py_ssize_t)(sizeof(synthetic_head) - 1) + line_end + 4;
+        PyObject *synthetic = PyBytes_FromStringAndSize(NULL, synthetic_size);
+        if (synthetic != NULL) {
+            char *write = PyBytes_AS_STRING(synthetic);
+            memcpy(write, synthetic_head, sizeof(synthetic_head) - 1);
+            memcpy(write + sizeof(synthetic_head) - 1,
+                   self->data + self->head, (size_t)line_end);
+            memcpy(write + sizeof(synthetic_head) - 1 + line_end, "\r\n\r\n", 4);
+        }
+        PyObject *valid = synthetic != NULL
+            ? wreath_http_parse_response(NULL, synthetic) : NULL;
+        Py_XDECREF(synthetic);
+        if (valid == NULL) return NULL;
+        if (valid == Py_None) {
+            Py_DECREF(valid);
+            cs_raise_response(
+                self->response_protocol_error,
+                "malformed response trailer");
+            return NULL;
+        }
+        Py_DECREF(valid);
+        if (cs_response_consume(self, line_end + 2) < 0) return NULL;
+        /* The public reader's body timeout is per trailer read, not one total
+         * deadline for an arbitrary trailer block. Re-arm after each complete
+         * line while keeping the state wholly inside this transaction. */
+        self->response_timer_phase = -1;
+    }
 }
 
 static void
@@ -445,11 +951,28 @@ cs_try_satisfy(WreathClientStream *self)
     }
     int would_block = 0;
     Py_ssize_t scan = self->pending_scan;
-    PyObject *ready = cs_take_ready(
-        self, self->pending_kind, self->pending_sep, self->pending_sep_len,
-        self->pending_count, &scan, &would_block);
+    PyObject *ready = self->pending_kind == CS_READ_RESPONSE
+        ? cs_take_response(self, &would_block)
+        : cs_take_ready(
+              self, self->pending_kind, self->pending_sep, self->pending_sep_len,
+              self->pending_count, &scan, &would_block);
     if (would_block) {
         self->pending_scan = scan;
+        if (self->pending_kind == CS_READ_RESPONSE &&
+            self->response_timer_phase != self->response_phase) {
+            cs_cancel_response_timer(self);
+            PyObject *callback = PyObject_GetAttrString(
+                (PyObject *)self, "_response_timeout");
+            PyObject *delay = self->response_phase == CS_RESPONSE_HEAD
+                ? self->response_header_timeout : self->response_body_timeout;
+            self->response_timer = callback != NULL
+                ? PyObject_CallFunctionObjArgs(
+                      self->call_later, delay, callback, NULL)
+                : NULL;
+            Py_XDECREF(callback);
+            if (self->response_timer == NULL) return -1;
+            self->response_timer_phase = self->response_phase;
+        }
         return 0;
     }
     int status;
@@ -466,6 +989,31 @@ cs_try_satisfy(WreathClientStream *self)
     }
     cs_clear_pending(self);
     return status;
+}
+
+static PyObject *
+cs_response_timeout(WreathClientStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->pending_kind != CS_READ_RESPONSE || self->pending_future == NULL) {
+        Py_RETURN_NONE;
+    }
+    int done = cs_future_done(self->pending_future);
+    if (done < 0) return NULL;
+    if (done) {
+        cs_clear_pending(self);
+        Py_RETURN_NONE;
+    }
+    const char *message = self->response_phase == CS_RESPONSE_HEAD
+        ? "timed out reading response headers"
+        : "timed out reading response body";
+    PyObject *exc = PyObject_CallFunction(
+        self->response_timeout_error, "s", message);
+    if (exc == NULL) return NULL;
+    int status = cs_resolve(self->pending_future, exc, 1);
+    Py_DECREF(exc);
+    cs_clear_pending(self);
+    if (status < 0) return NULL;
+    Py_RETURN_NONE;
 }
 
 /* Begin a read. When buffered bytes can satisfy it, the result is returned
@@ -511,6 +1059,81 @@ cs_begin_read(WreathClientStream *self, int kind, const char *sep,
     self->pending_count = count;
     self->pending_scan = scan;
     self->pending_future = Py_NewRef(future);
+    return future;
+}
+
+static PyObject *
+cs_read_response(WreathClientStream *self, PyObject *args)
+{
+    PyObject *method;
+    PyObject *response_type;
+    PyObject *protocol_error;
+    PyObject *too_large;
+    PyObject *timeout_error;
+    PyObject *header_timeout;
+    PyObject *body_timeout;
+    Py_ssize_t max_header;
+    Py_ssize_t max_body;
+    if (!PyArg_ParseTuple(
+            args, "OnnOOOOOO:read_response", &method, &max_header, &max_body,
+            &response_type, &protocol_error, &too_large, &timeout_error,
+            &header_timeout, &body_timeout)) {
+        return NULL;
+    }
+    if (!PyUnicode_Check(method)) {
+        PyErr_SetString(PyExc_TypeError, "response method must be str");
+        return NULL;
+    }
+    if (max_header <= 0 || max_body < 0) {
+        PyErr_SetString(PyExc_ValueError, "response limits are invalid");
+        return NULL;
+    }
+    if (self->pending_kind != CS_READ_NONE) {
+        int done = cs_future_done(self->pending_future);
+        if (done < 0) return NULL;
+        if (!done) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "a stream read is already awaited elsewhere");
+            return NULL;
+        }
+        cs_clear_pending(self);
+    }
+    if (self->exc != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->exc));
+        return NULL;
+    }
+    self->pending_kind = CS_READ_RESPONSE;
+    self->response_method = Py_NewRef(method);
+    self->response_type = Py_NewRef(response_type);
+    self->response_protocol_error = Py_NewRef(protocol_error);
+    self->response_too_large = Py_NewRef(too_large);
+    self->response_timeout_error = Py_NewRef(timeout_error);
+    self->response_header_timeout = Py_NewRef(header_timeout);
+    self->response_body_timeout = Py_NewRef(body_timeout);
+    self->response_max_header = max_header;
+    self->response_max_body = max_body;
+    self->response_phase = CS_RESPONSE_HEAD;
+    self->response_timer_phase = -1;
+
+    int would_block = 0;
+    PyObject *ready = cs_take_response(self, &would_block);
+    if (!would_block) {
+        cs_clear_pending(self);
+        return ready;
+    }
+    PyObject *future = PyObject_CallNoArgs(self->create_future);
+    if (future == NULL) {
+        cs_clear_pending(self);
+        return NULL;
+    }
+    self->pending_future = Py_NewRef(future);
+    /* Schedule the phase deadline through the same path used after a head
+     * transition, keeping the timer attached to this response operation. */
+    if (cs_try_satisfy(self) < 0) {
+        Py_DECREF(future);
+        cs_clear_pending(self);
+        return NULL;
+    }
     return future;
 }
 
@@ -863,17 +1486,23 @@ cs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     PyObject *create_future = PyObject_GetAttrString(loop, "create_future");
+    PyObject *call_later = PyObject_GetAttrString(loop, "call_later");
     Py_DECREF(loop);
-    if (create_future == NULL) {
+    if (create_future == NULL || call_later == NULL) {
+        Py_XDECREF(create_future);
+        Py_XDECREF(call_later);
         return NULL;
     }
     WreathClientStream *self = (WreathClientStream *)type->tp_alloc(type, 0);
     if (self == NULL) {
         Py_DECREF(create_future);
+        Py_DECREF(call_later);
         return NULL;
     }
     self->create_future = create_future;
+    self->call_later = call_later;
     self->limit = limit;
+    self->response_timer_phase = -1;
     return (PyObject *)self;
 }
 
@@ -885,10 +1514,21 @@ cs_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->exc);
     Py_VISIT(self->transport);
     Py_VISIT(self->create_future);
+    Py_VISIT(self->call_later);
     Py_VISIT(self->drain_waiter);
     Py_VISIT(self->closed_future);
     Py_VISIT(self->offer_obj);
     Py_VISIT(self->pending_future);
+    Py_VISIT(self->response_method);
+    Py_VISIT(self->response_type);
+    Py_VISIT(self->response_protocol_error);
+    Py_VISIT(self->response_too_large);
+    Py_VISIT(self->response_timeout_error);
+    Py_VISIT(self->response_head);
+    Py_VISIT(self->response_body);
+    Py_VISIT(self->response_header_timeout);
+    Py_VISIT(self->response_body_timeout);
+    Py_VISIT(self->response_timer);
     return 0;
 }
 
@@ -899,10 +1539,12 @@ cs_clear(PyObject *op)
     Py_CLEAR(self->exc);
     Py_CLEAR(self->transport);
     Py_CLEAR(self->create_future);
+    Py_CLEAR(self->call_later);
     Py_CLEAR(self->drain_waiter);
     Py_CLEAR(self->closed_future);
     Py_CLEAR(self->offer_obj);
     Py_CLEAR(self->pending_future);
+    cs_clear_response(self);
     return 0;
 }
 
@@ -930,6 +1572,8 @@ static PyMethodDef cs_methods[] = {
     {"readuntil", (PyCFunction)cs_readuntil, METH_O, NULL},
     {"readexactly", (PyCFunction)cs_readexactly, METH_O, NULL},
     {"read", (PyCFunction)cs_read, METH_O, NULL},
+    {"read_response", (PyCFunction)cs_read_response, METH_VARARGS, NULL},
+    {"_response_timeout", (PyCFunction)cs_response_timeout, METH_NOARGS, NULL},
     {"at_eof", (PyCFunction)cs_at_eof, METH_NOARGS, NULL},
     {"_drain", (PyCFunction)cs_drain, METH_NOARGS, NULL},
     {"_wait_closed", (PyCFunction)cs_wait_closed, METH_NOARGS, NULL},
@@ -982,9 +1626,11 @@ wreath_register_http_client_protocol(PyObject *module)
     cs_str_done = PyUnicode_InternFromString("done");
     cs_str_set_result = PyUnicode_InternFromString("set_result");
     cs_str_set_exception = PyUnicode_InternFromString("set_exception");
+    cs_str_cancel = PyUnicode_InternFromString("cancel");
     if (base == NULL || cs_incomplete_read_error == NULL ||
         cs_limit_overrun_error == NULL || cs_str_done == NULL ||
-        cs_str_set_result == NULL || cs_str_set_exception == NULL) {
+        cs_str_set_result == NULL || cs_str_set_exception == NULL ||
+        cs_str_cancel == NULL) {
         Py_XDECREF(base);
         return -1;
     }

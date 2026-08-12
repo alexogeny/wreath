@@ -139,7 +139,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'series',
-        'capability': "Chart data as a declaration: buckets, fills, and rankings computed in the database in the reader's own timezone",
+        'capability': 'Chart data as a declaration or storage-neutral native data kernel: DST-correct buckets, fills, downsampling, paths, and axes',
         'modules': ('wreath.series',),
         'guides': ('docs/guides/calculated-views.md',),
         'replaces': (),
@@ -300,7 +300,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'geospatial',
-        'capability': 'Coordinates, great-circle distances, and index-answerable proximity bounds, with no PostgreSQL extension',
+        'capability': 'Coordinates, packed trajectories, great-circle distances, grids, and index-answerable proximity bounds, with no PostgreSQL extension',
         'modules': ('wreath.geospatial',),
         'guides': ('docs/guides/geospatial.md',),
         'replaces': ('geopy', 'haversine'),

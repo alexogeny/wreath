@@ -17,6 +17,13 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
+
+if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    raise RuntimeError(
+        "Wreath supports regular CPython 3.14; free-threaded CPython 3.14t "
+        "is not supported. Use a regular CPython 3.14 interpreter."
+    )
 
 from setuptools import Extension, setup
 from setuptools.command.build import build
@@ -195,6 +202,7 @@ def _http3_extension() -> Extension:
             "src/wreath/_native/ascii.h",
             "src/wreath/_native/server_policy.h",
             "src/wreath/_native/header_block.h",
+            "src/wreath/_native/server_request_capi.h",
         ],
         extra_compile_args=extra_compile_args + pc("--cflags"),
         extra_link_args=pc("--libs"),
@@ -247,6 +255,7 @@ ext_modules = [
                 "src/wreath/_native/flight_project.c",
                 "src/wreath/_native/webpolicy.c",
                 "src/wreath/_native/observability.c",
+                "src/wreath/_native/series.c",
                 "src/wreath/_native/proxy.c",
                 "src/wreath/_native/ratelimit.c",
                 "src/wreath/_native/kv.c",
@@ -329,6 +338,7 @@ ext_modules = [
                 "src/wreath/_native/server.h",
                 "src/wreath/_native/server_policy.h",
                 "src/wreath/_native/header_block.h",
+                "src/wreath/_native/server_request_capi.h",
                 "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/byteorder.h",

@@ -18,6 +18,7 @@ from wreath.policy import (
     TieredRateLimitPolicy,
     TrustedHostPolicy,
 )
+from wreath.response import HTMLResponse
 from wreath.server import ServerConfig
 
 _server = importlib.import_module("wreath._native._server")
@@ -124,6 +125,23 @@ async def test_accepted_response_receives_native_egress_policy() -> None:
     assert b"server-timing: total;dur=" in response
     assert b"x-request-id: " in response
     assert materialized == [True]
+
+
+@pytest.mark.asyncio
+async def test_html_response_materializes_mutable_headers_for_native_egress() -> None:
+    app = Wreath(http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy()))
+
+    @app.get("/html")
+    async def html(request: Any) -> HTMLResponse:
+        return HTMLResponse("<p>safe</p>")
+
+    app._compile_routes()
+    response = await serve(app, b"GET /html HTTP/1.1\r\nhost: allowed.test\r\n\r\n")
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"content-type: text/html; charset=utf-8\r\n" in response
+    assert b"x-content-type-options: nosniff\r\n" in response
+    assert response.endswith(b"<p>safe</p>")
 
 
 @pytest.mark.parametrize(

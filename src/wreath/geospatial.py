@@ -628,9 +628,9 @@ class Trajectory:
     spatial engine.
     """
 
-    __slots__ = ("_fixes",)
+    __slots__ = ("_native",)
 
-    _fixes: tuple[tuple[Any, Coordinate], ...]
+    _native: Any
 
     def __init__(self, fixes: Iterable[tuple[Any, Coordinate]]) -> None:
         collected = list(fixes)
@@ -652,8 +652,13 @@ class Trajectory:
                     f"timestamp makes both wrong across a DST boundary. Use "
                     f"wreath.temporal.Instant."
                 )
-        collected.sort(key=lambda fix: fix[0])
-        object.__setattr__(self, "_fixes", tuple(collected))
+        object.__setattr__(self, "_native", _core_module.geo_trajectory_compile(collected))
+
+    @classmethod
+    def _from_native(cls, native: Any) -> Trajectory:
+        result = object.__new__(cls)
+        object.__setattr__(result, "_native", native)
+        return result
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("Trajectory is immutable")
@@ -661,10 +666,13 @@ class Trajectory:
     @property
     def fixes(self) -> Sequence[tuple[Any, Coordinate]]:
         """The fixes, oldest first."""
-        return self._fixes
+        return tuple(
+            (when, Coordinate(lat=lat, lon=lon))
+            for when, lat, lon in _core_module.geo_trajectory_fixes(self._native)
+        )
 
     def __len__(self) -> int:
-        return len(self._fixes)
+        return _core_module.geo_trajectory_info(self._native)[0]
 
     @property
     def distance(self) -> float:
@@ -674,20 +682,12 @@ class Trajectory:
         animal that returns to where it started travelled a long way, and a
         van that did a loop is owed its fuel.
         """
-        total = 0.0
-        previous: Coordinate | None = None
-        for _, where in self._fixes:
-            if previous is not None:
-                total += distance(previous, where)
-            previous = where
-        return total
+        return _core_module.geo_trajectory_info(self._native)[1]
 
     @property
     def duration(self) -> float:
         """Seconds between the first and last fix, or 0.0 for fewer than two."""
-        if len(self._fixes) < 2:
-            return 0.0
-        return (self._fixes[-1][0] - self._fixes[0][0]).total_seconds()
+        return _core_module.geo_trajectory_info(self._native)[2]
 
     @property
     def speed(self) -> float | None:
@@ -697,10 +697,7 @@ class Trajectory:
         cannot be performed has no answer, and returning 0.0 would read as
         "stationary", which is a different claim.
         """
-        seconds = self.duration
-        if seconds <= 0.0:
-            return None
-        return self.distance / seconds
+        return _core_module.geo_trajectory_info(self._native)[3]
 
     def between(self, start: Any, end: Any) -> Trajectory:
         """The path travelled during `[start, end)`, anchored to where it began.
@@ -727,13 +724,41 @@ class Trajectory:
             )
         if end < start:
             raise GeospatialError(f"between() end {end!r} is before start {start!r}")
-        inside = [fix for fix in self._fixes if start <= fix[0] < end]
-        # `[-1:]` on an empty list is already the empty list, so there is no
-        # branch to write here. A mutation pass removed the `if anchor else []`
-        # arm and nothing objected, correctly: two spellings of one rule is how
-        # they drift apart later.
-        anchor = [fix for fix in self._fixes if fix[0] < start][-1:]
-        return Trajectory(anchor + inside)
+        return self._from_native(
+            _core_module.geo_trajectory_between(self._native, start, end)
+        )
+
+    def grid_summary(
+        self, start: Any, end: Any, lattice: Grid
+    ) -> tuple[tuple[tuple[int, int], ...], float | None]:
+        """Occupied cells and mean speed for `[start, end)` in one data pass.
+
+        The operation owns its distance accumulator and occupancy bitset for
+        the call. Only compact cell identities and the final scalar cross back
+        into Python.
+        """
+        if not isinstance(lattice, Grid):
+            raise TypeError("grid_summary() takes a Grid")
+        if getattr(start, "tzinfo", None) is None or getattr(end, "tzinfo", None) is None:
+            raise GeospatialError(
+                "grid_summary() takes aware timestamps; a naive bound cannot be "
+                "compared to a fix without assuming a zone"
+            )
+        if end < start:
+            raise GeospatialError(f"grid_summary() end {end!r} is before start {start!r}")
+        return _core_module.geo_trajectory_grid_summary(
+            self._native,
+            start,
+            end,
+            lattice.extent.lat_min,
+            lattice.extent.lat_max,
+            lattice.extent.lon_min,
+            lattice.extent.lon_max,
+            lattice.lat_step,
+            lattice.lon_step,
+            lattice.rows,
+            lattice.columns,
+        )
 
     def __repr__(self) -> str:
-        return f"<Trajectory {len(self._fixes)} fixes, {self.distance:.1f} m>"
+        return f"<Trajectory {len(self)} fixes, {self.distance:.1f} m>"

@@ -187,6 +187,22 @@ async def test_a_disabled_flag_is_absent_from_the_set_and_the_policy_denies() ->
     assert (await invoke(app, "alice"))["status"] == 403
 
 
+@pytest.mark.asyncio
+async def test_an_exactly_scoped_other_action_does_not_resolve_its_flags() -> None:
+    flags = CountingFlags({"new_ui": "on"})
+    app = build(
+        flags=flags,
+        source=(
+            'permit(principal, action == Action::"read", resource);'
+            'permit(principal, action == Action::"render", resource) '
+            'when { context.flags.contains("new_ui") };'
+        ),
+    )
+
+    assert (await invoke(app, "alice"))["status"] == 200
+    assert flags.calls == 0
+
+
 class OpaqueFlags:
     """A provider that answers one name at a time and cannot list its vocabulary.
 

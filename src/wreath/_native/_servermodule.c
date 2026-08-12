@@ -12,6 +12,8 @@ static WreathRequestCAPI request_capi = {
     wreath_request_scope_seed_flight,
     wreath_request_context_set_policy,
     wreath_request_context_update_policy,
+    wreath_header_block_new_objects,
+    wreath_header_block_append_objects,
 };
 
 static WreathHttp1CAPI http1_capi = {

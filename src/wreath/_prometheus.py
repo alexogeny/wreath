@@ -292,21 +292,11 @@ def render_exposition(
     # every sample of a family to be contiguous and a scraper rejects the text
     # outright when they are not -- two queues would otherwise interleave into
     # two HELP blocks for one name.
-    families: dict[str, list[tuple[str, int]]] = {}
-    for reading in counters:
-        subsystem = _sanitize_metric_name(str(reading.subsystem))
-        for name, value in reading.values.items():
-            family = f"{ns}_{subsystem}_{_sanitize_metric_name(str(name))}"
-            families.setdefault(family, []).append((str(reading.instance), int(value)))
-    for family, samples in families.items():
-        # `gauge`, not `counter`: a reading may be either -- `jobs.run_errors`
-        # only rises, `pool.borrowed` moves both ways -- and this module cannot
-        # tell them apart. Declaring a falling series a counter makes a scraper
-        # read every decrease as a process restart and invent a rate spike;
-        # declaring a rising one a gauge costs `rate()` and nothing else.
-        w.family(family, "gauge", "Reported by the subsystem that owns it.")
-        for instance, value in samples:
-            w.sample(family, {"instance": instance}, value)
+    # `gauge`, not `counter`: a reading may be either -- `jobs.run_errors`
+    # only rises, `pool.borrowed` moves both ways -- and this layer cannot tell
+    # them apart. Declaring a falling series a counter makes a scraper read
+    # every decrease as a process restart and invent a rate spike.
+    w.block(_core.prometheus_counter_block(counters, ns))
 
     text = w.text()
     return text + "# EOF\n" if openmetrics else text

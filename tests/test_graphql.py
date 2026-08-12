@@ -1218,6 +1218,39 @@ class RecordingAuthorizer(_RequirementOnly):
         return Decision()
 
 
+class BatchRecordingAuthorizer(_RequirementOnly):
+    """A generic batch provider proving the native plan keeps the protocol."""
+
+    def __init__(self, denied: set[str] | None = None) -> None:
+        self.denied = {resource(policy) for policy in denied or set()}
+        self.batches: list[tuple[PolicyRequirement, ...]] = []
+
+    async def authorize(self, request: Any, requirement: Any) -> Any:
+        requirement = self._requirement(requirement)
+
+        class Decision:
+            allowed = requirement.resource not in self.denied
+            reason = f"{requirement.resource} denied"
+
+        return Decision()
+
+    async def _authorize_many(
+        self,
+        request: Any,
+        requirements: tuple[PolicyRequirement, ...],
+        *,
+        stop_on_denied: bool,
+    ) -> tuple[Any, ...]:
+        checked = tuple(self._requirement(item) for item in requirements)
+        self.batches.append(checked)
+        decisions = []
+        for requirement in checked:
+            decisions.append(await self.authorize(request, requirement))
+            if stop_on_denied and not decisions[-1].allowed:
+                break
+        return tuple(decisions)
+
+
 @pytest.mark.asyncio
 async def test_authorization_is_asked_once_per_resource_per_request(
     registry: Registry, database: FakeDatabase
@@ -1231,6 +1264,78 @@ async def test_authorization_is_asked_once_per_resource_per_request(
         "{ users { a: email b: email c: email } }", Session(registry, "read")
     )
     assert authorizer.asked.count(resource("User.email")) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_selection_plan_preserves_the_generic_batch_protocol(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """Only the authorizer boundary materializes requirements, once each."""
+    from wreath._json import loads
+
+    database.connection.script("users", [user_row(1, "a@b.c")])
+    authorizer = BatchRecordingAuthorizer()
+    api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
+
+    body = await api._run(
+        "{ users { a: email b: email id } }",
+        Session(registry, "read"),
+        operation_name=None,
+        variables=None,
+        request=make_request(Identity("alice")),
+        json_output=True,
+    )
+
+    assert isinstance(body, bytes)
+    assert loads(body) == {"data": {"users": [{"a": "a@b.c", "b": "a@b.c", "id": 1}]}}
+    assert len(authorizer.batches) == 1
+    assert {item.resource for item in authorizer.batches[0]} == {
+        resource("Query.users"),
+        resource("User.email"),
+        resource("User.id"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_policy_decisions_belong_to_one_execution(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """A denial cannot leak through the compiled schema into the next request."""
+    from wreath._json import loads
+
+    authorizer = BatchRecordingAuthorizer({"User.email"})
+    api = GraphQL(
+        registry,
+        models=[User, Post],
+        authorizer=authorizer,
+        on_denied="null",
+    )
+    request = make_request(Identity("alice"))
+
+    database.connection.script("users", [user_row(1, "a@b.c")])
+    denied = await api._run(
+        "{ users { id email } }",
+        Session(registry, "read"),
+        operation_name=None,
+        variables=None,
+        request=request,
+        json_output=True,
+    )
+    authorizer.denied.clear()
+    database.connection.script("users", [user_row(1, "a@b.c")])
+    allowed = await api._run(
+        "{ users { id email } }",
+        Session(registry, "read"),
+        operation_name=None,
+        variables=None,
+        request=request,
+        json_output=True,
+    )
+
+    assert isinstance(denied, bytes)
+    assert isinstance(allowed, bytes)
+    assert loads(denied)["data"]["users"][0] == {"id": 1, "email": None}
+    assert loads(allowed)["data"]["users"][0] == {"id": 1, "email": "a@b.c"}
 
 
 @pytest.mark.asyncio

@@ -1128,6 +1128,19 @@ start_request(WreathH3Stream *s)
     PyObject *traceparent = NULL;  /* borrowed; captured in the one header pass */
     PyObject *scope_headers = wreath_header_block_new_objects(16);
     if (scope_headers == NULL) return -1;
+    /* `_http3` and `_server` are separate extension modules, so each has its
+     * own private HeaderBlock type.  The request context belongs to `_server`:
+     * populate one of its blocks through the capsule instead of handing it an
+     * opaque `_http3` block that it cannot scan or materialize.  This duplicates
+     * only the native pointer arrays and references; it still creates no ASGI
+     * header list or pair tuples before Python observes `Request.headers`. */
+    PyObject *context_headers = c->endpoint->native_app != NULL
+        ? wreath_h3_request_capi->header_block_new_objects(16)
+        : NULL;
+    if (c->endpoint->native_app != NULL && context_headers == NULL) {
+        Py_DECREF(scope_headers);
+        return -1;
+    }
     int has_host = 0;
     Py_ssize_t n = wreath_headers_count(s->header_list);
     for (Py_ssize_t i = 0; i < n; i++) {
@@ -1136,11 +1149,13 @@ start_request(WreathH3Stream *s)
         Py_ssize_t nl;
         Py_ssize_t vl;
         if (wreath_headers_view(s->header_list, i, &np, &nl, &vp, &vl) < 0) {
+            Py_XDECREF(context_headers);
             Py_DECREF(scope_headers);
             return -1;
         }
         PyObject *value = wreath_headers_value_borrowed(s->header_list, i);
         if (value == NULL) {
+            Py_XDECREF(context_headers);
             Py_DECREF(scope_headers);
             return -1;
         }
@@ -1166,9 +1181,17 @@ start_request(WreathH3Stream *s)
         int append_result = name != NULL && owned_value != NULL
             ? wreath_header_block_append_objects(scope_headers, name, owned_value)
             : -1;
+        if (append_result == 0 && context_headers != NULL) {
+            append_result = wreath_h3_request_capi->header_block_append_objects(
+                context_headers, name, owned_value);
+        }
         Py_XDECREF(name);
         Py_XDECREF(owned_value);
-        if (append_result < 0) { Py_DECREF(scope_headers); return -1; }
+        if (append_result < 0) {
+            Py_XDECREF(context_headers);
+            Py_DECREF(scope_headers);
+            return -1;
+        }
     }
     if (authority != NULL) {
         H3Authority parsed;
@@ -1189,6 +1212,14 @@ start_request(WreathH3Stream *s)
         if (!has_host) {
             if (wreath_header_block_append_objects(
                     scope_headers, k_host_name, authority) < 0) {
+                Py_XDECREF(context_headers);
+                Py_DECREF(scope_headers);
+                return -1;
+            }
+            if (context_headers != NULL &&
+                wreath_h3_request_capi->header_block_append_objects(
+                    context_headers, k_host_name, authority) < 0) {
+                Py_DECREF(context_headers);
                 Py_DECREF(scope_headers);
                 return -1;
             }
@@ -1223,7 +1254,8 @@ start_request(WreathH3Stream *s)
         : PyUnicode_FromString("https");
     if (!path_str || !raw_path || !query || !method_str || !scheme_str) {
         Py_XDECREF(path_str); Py_XDECREF(raw_path); Py_XDECREF(query);
-        Py_XDECREF(method_str); Py_XDECREF(scheme_str); Py_DECREF(scope_headers);
+        Py_XDECREF(method_str); Py_XDECREF(scheme_str);
+        Py_XDECREF(context_headers); Py_DECREF(scope_headers);
         return -1;
     }
     PyObject *scope;
@@ -1233,11 +1265,12 @@ start_request(WreathH3Stream *s)
         scope = wreath_request_context_new(
             c->endpoint->scope_type, c->endpoint->scope_asgi,
             c->endpoint->scope_http_version, method_str, scheme_str, path_str,
-            raw_path, query, scope_headers, Py_None, Py_None,
+            raw_path, query, context_headers, Py_None, Py_None,
             c->endpoint->scope_root_path
         );
         Py_DECREF(path_str); Py_DECREF(raw_path);
         Py_DECREF(query); Py_DECREF(method_str); Py_DECREF(scheme_str);
+        Py_DECREF(context_headers);
         Py_DECREF(scope_headers);
     }
     else {
@@ -1350,6 +1383,7 @@ start_request(WreathH3Stream *s)
     return cb == NULL ? -1 : 0;
 
 message_err:
+    Py_XDECREF(context_headers);
     Py_DECREF(scope_headers);
     h3_reject_stream(s, NGHTTP3_H3_MESSAGE_ERROR);
     return 1;

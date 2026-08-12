@@ -10,6 +10,59 @@ The bucket vocabulary itself lives in [`wreath.temporal`](temporal.md), because
 correct zone-aware bucketing is useful on its own and `Series` is not its only
 caller.
 
+The data operations underneath a declaration are public and storage-neutral.
+`wreath.temporal.spine(start, end, bucket=..., in_zone=...)` produces the same
+local-wall-clock bucket run PostgreSQL's `generate_series` does, including DST
+boundaries. `reconcile(buckets, sparse, fills)` accepts ordinary iterables and
+maps, so an in-memory producer uses exactly the dense-bucket and per-measure
+fill rules as a PostgreSQL-backed declaration—without a model or connection.
+When only cardinality is needed, `spine_length(...)` walks the same calendar
+without constructing one `Instant` per boundary.
+
+Rendering stays data-only too. `lttb(x, y, threshold)` returns indices into
+parallel arrays, `nice_ticks(minimum, maximum, target)` chooses a readable
+1/2/5 axis, and `series_path(x, y)` emits an SVG path where `None` begins a new
+segment. None of these operations knows about a declaration, ORM type, SQL, or
+renderer object.
+
+For a complete chart boundary, `project_chart(...)` reconciles only the rows a
+renderer asks for and returns stable identities, paths, and tick axes. If the
+dense run is described by a range rather than already held as an iterable,
+`project_chart_spine(start, end, bucket=..., in_zone=..., sparse=..., fills=...,
+...)` keeps that run native-owned: sparse timestamps map directly to ordinal
+positions and only compact final outputs materialise. SVG coordinates carry
+nine significant digits, which is well beyond display resolution while keeping
+the path locale-independent and bounded.
+
+```python
+from wreath.series import (
+    lttb,
+    nice_ticks,
+    project_chart_spine,
+    reconcile,
+    series_path,
+)
+from wreath.temporal import Day, spine
+
+buckets = spine(start, end, bucket=Day, in_zone="Pacific/Auckland")
+readings = {("north", False): {buckets[0]: {"count": 4}}}
+dense = reconcile(buckets, readings, {"count": 0})
+values = dense[0][2]
+selected = lttb(range(len(values)), values, min(96, len(values)))
+path = series_path(selected, tuple(values[index] for index in selected))
+ticks = nice_ticks(min(values), max(values))
+
+row_count, keys, paths, axes = project_chart_spine(
+    start,
+    end,
+    bucket=Day,
+    in_zone="Pacific/Auckland",
+    sparse=readings,
+    fills={"count": 0},
+    downsample_rows=(0,),
+)
+```
+
 `.seal(after=...)` makes a bucket final once that long has passed since it
 closed, so a settled value is computed once and afterwards read. A settled
 bucket is deliberately **not** a cache: no TTL, no eviction, no recomputation.

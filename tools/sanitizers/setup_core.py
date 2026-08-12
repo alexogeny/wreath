@@ -60,6 +60,7 @@ SOURCES = (
     "signatures.c",
     "webpolicy.c",
     "observability.c",
+    "series.c",
     "proxy.c",
     "ratelimit.c",
     "kv.c",

@@ -104,17 +104,24 @@ def extension_inputs(text: str) -> dict[str, list[str]]:
     return inputs
 
 
-def _artifact(root: Path, extension: str) -> Path | None:
-    """The built `.so`/`.pyd` for a dotted extension name, if one exists.
+def _artifacts(root: Path, extension: str) -> list[Path]:
+    """Every built `.so`/`.pyd` for a dotted extension name.
 
     The suffix carries the interpreter version and platform, so it is matched
     by glob rather than reconstructed -- an artifact built by a different
     interpreter is still an artifact, and still stale.
+
+    **All of them, not the first.** A tree accumulates one artifact per
+    interpreter that has built it, and free-threading is a separately swept
+    execution mode rather than a variant of the default one. Checking a single
+    match reported a clean build over a `cpython-314t` `_core` three days behind
+    its sources, because `sorted()` puts `cpython-314` first -- a stale artifact
+    that is importable, does not contain those sources, and had a passing lint
+    in front of it. That is this module's own failure mode, one ABI tag over.
     """
     *package, module = extension.split(".")
     directory = root.joinpath("src", *package)
-    matches = sorted(directory.glob(f"{module}.*.so")) + sorted(directory.glob(f"{module}.*.pyd"))
-    return matches[0] if matches else None
+    return sorted(directory.glob(f"{module}.*.so")) + sorted(directory.glob(f"{module}.*.pyd"))
 
 
 def _describe(seconds: float) -> str:
@@ -139,23 +146,23 @@ def scan(root: Path) -> list[Finding]:
                         " that would compile it fails instead")
             )
             continue
-        artifact = _artifact(root, extension)
-        if artifact is None:
-            # Not built. Nothing to be behind.
-            continue
-        built = artifact.stat().st_mtime
-        newer = [(name, (root / name).stat().st_mtime) for name in listed
-                 if (root / name).stat().st_mtime > built]
-        if not newer:
-            continue
-        name, changed = max(newer, key=lambda pair: pair[1])
-        findings.append(
-            Finding("BUILD001", artifact.relative_to(root).as_posix(),
-                    f"built {_describe(changed - built)} before {name}"
-                    f" ({len(newer)} source(s) newer than the artifact); it is importable"
-                    " and does not contain them -- rebuild, and prove the rebuild landed"
-                    " with a sentinel")
-        )
+        # Not built is not stale, so an extension with no artifact contributes
+        # nothing; one with several contributes one finding per stale artifact,
+        # because rebuilding the default interpreter's does not touch the others.
+        for artifact in _artifacts(root, extension):
+            built = artifact.stat().st_mtime
+            newer = [(name, (root / name).stat().st_mtime) for name in listed
+                     if (root / name).stat().st_mtime > built]
+            if not newer:
+                continue
+            name, changed = max(newer, key=lambda pair: pair[1])
+            findings.append(
+                Finding("BUILD001", artifact.relative_to(root).as_posix(),
+                        f"built {_describe(changed - built)} before {name}"
+                        f" ({len(newer)} source(s) newer than the artifact); it is importable"
+                        " and does not contain them -- rebuild, and prove the rebuild landed"
+                        " with a sentinel")
+            )
     return findings
 
 

@@ -36,10 +36,15 @@ PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args
 
 /* cedar.c */
 PyObject *wreath_cedar_is_authorized(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_is_authorized_many(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_to_value(PyObject *self, PyObject *args);
 
 /* env.c */
 PyObject *wreath_parse_dotenv(PyObject *self, PyObject *arg);
 PyObject *wreath_read_osenv(PyObject *self, PyObject *ignored);
+
+/* codecs.c */
+PyObject *wreath_cache_key_selected(PyObject *self, PyObject *args);
 
 /* security.c */
 PyObject *wreath_host_allowed(PyObject *self, PyObject *args);
@@ -78,9 +83,21 @@ PyObject *wreath_graphql_flatten_relationship(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_restore_layout(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_restore_values(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_parse(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_schema(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_state(PyObject *self, PyObject *schema);
+PyObject *wreath_graphql_policy_prepare(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_resources(PyObject *self, PyObject *plan);
+PyObject *wreath_graphql_policy_items(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_apply(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_result(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_cached(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_store(PyObject *self, PyObject *args);
+PyObject *wreath_graphql_policy_resource(PyObject *self, PyObject *args);
 PyObject *wreath_flight_project_cells(PyObject *self, PyObject *args);
 PyObject *wreath_flight_settle(PyObject *self, PyObject *args);
 PyObject *wreath_flight_evict_pending(PyObject *self, PyObject *args);
+PyObject *wreath_flight_metadata_bytes(PyObject *self, PyObject *args);
+PyObject *wreath_flight_metadata_decode(PyObject *self, PyObject *args);
 int wreath_register_flight_project(PyObject *module);
 PyObject *wreath_signature_parse_dictionary(PyObject *self, PyObject *args);
 PyObject *wreath_signature_parse_string(PyObject *self, PyObject *args);
@@ -106,6 +123,21 @@ PyObject *wreath_curve_p256_sign(PyObject *self, PyObject *args);
 PyObject *wreath_request_id_valid(PyObject *self, PyObject *args);
 PyObject *wreath_format_server_timing(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_route_blocks(PyObject *self, PyObject *args);
+PyObject *wreath_prometheus_counter_block(PyObject *self, PyObject *args);
+PyObject *wreath_statsd_lines(PyObject *self, PyObject *args);
+PyObject *wreath_emf_render(PyObject *self, PyObject *args);
+PyObject *wreath_metric_delta_state(PyObject *self, PyObject *arg);
+
+/* series.c */
+PyObject *wreath_series_reconcile(PyObject *self, PyObject *args);
+PyObject *wreath_series_dense_rows(PyObject *self, PyObject *args);
+PyObject *wreath_series_spine(PyObject *self, PyObject *args);
+PyObject *wreath_series_spine_length(PyObject *self, PyObject *args);
+PyObject *wreath_series_lttb(PyObject *self, PyObject *args);
+PyObject *wreath_series_path(PyObject *self, PyObject *args);
+PyObject *wreath_series_nice_ticks(PyObject *self, PyObject *args);
+PyObject *wreath_series_chart(PyObject *self, PyObject *args);
+PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
 int wreath_register_proxy(PyObject *module);
@@ -202,6 +234,7 @@ void wreath_ws_unmask_raw(uint8_t *dst, const uint8_t *src, Py_ssize_t len,
 
 /* multipart.c */
 PyObject *wreath_multipart_parse(PyObject *self, PyObject *args, PyObject *kwds);
+PyObject *wreath_multipart_part_info(PyObject *self, PyObject *arg);
 int wreath_register_multipart(PyObject *module);
 
 /* json.c */
@@ -224,6 +257,11 @@ PyObject *wreath_aes128gcm_decrypt_scalar(PyObject *self, PyObject *args);
 
 /* geospatial.c */
 PyObject *wreath_geo_haversine(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *wreath_geo_trajectory_grid_summary(PyObject *self, PyObject *args);
+PyObject *wreath_geo_trajectory_compile(PyObject *self, PyObject *source);
+PyObject *wreath_geo_trajectory_fixes(PyObject *self, PyObject *capsule);
+PyObject *wreath_geo_trajectory_info(PyObject *self, PyObject *capsule);
+PyObject *wreath_geo_trajectory_between(PyObject *self, PyObject *args);
 
 /* protobuf.c */
 PyObject *wreath_protobuf_compile(PyObject *self, PyObject *args);

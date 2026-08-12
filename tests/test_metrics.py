@@ -187,6 +187,18 @@ def test_a_name_that_is_not_a_valid_metric_name_is_sanitised() -> None:
     assert "wreath_odd_one_a_b{instance=\"x\"} 1" in text
 
 
+def test_native_counter_exposition_preserves_unicode_and_label_semantics() -> None:
+    readings = (
+        Counters(
+            subsystem="café",
+            instance='a"b\\c\nd',
+            values={"métric": True},
+        ),
+    )
+    text = render_exposition(FakeProjector().snapshot(), counters=readings)
+    assert 'wreath_caf__m_tric{instance="a\\"b\\\\c\\nd"} 1' in text
+
+
 def test_rendering_no_counters_changes_nothing() -> None:
     plain = render_exposition(FakeProjector().snapshot())
     assert render_exposition(FakeProjector().snapshot(), counters=()) == plain

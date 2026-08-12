@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final
 
+from ._native import _core
+
 
 def _require_layout(actual: int, expected: int, what: str) -> None:
     """Refuse to import a struct whose packed size is not the wire size.
@@ -1466,60 +1468,7 @@ class MetadataImage:
         no `PYTHONHASHSEED`-dependent hashing. Rows are emitted in ascending
         ID order so registration order that is not semantic cannot change it.
         """
-        parts: list[bytes] = [
-            b"WFRMETA",
-            _u32(self.version),
-        ]
-
-        def _named(rows: tuple[NamedMeta, ...]) -> None:
-            parts.append(_u32(len(rows)))
-            for row in sorted(rows, key=lambda r: r.entry_id):
-                parts.append(_u32(row.entry_id))
-                parts.append(_text(row.name))
-
-        parts.append(_u32(len(self.routes)))
-        for r in sorted(self.routes, key=lambda r: r.route_id):
-            parts.append(_u32(r.route_id))
-            parts.append(_text(r.method))
-            parts.append(_text(r.path))
-            parts.append(_text(r.operation_id))
-            parts.append(_u32(r.plan_id))
-            parts.append(_u32(len(r.tags)))
-            for tag in r.tags:
-                parts.append(_text(tag))
-            parts.append(_ids(r.dependency_ids))
-            parts.append(_ids(r.middleware_ids))
-            parts.append(_u32(r.auth_policy_id))
-            parts.append(_text(r.coverage))
-
-        parts.append(_u32(len(self.plans)))
-        for p in sorted(self.plans, key=lambda p: p.plan_id):
-            parts.append(_u32(p.plan_id))
-            parts.append(_u32(len(p.params)))
-            for name, kind, type_name in p.params:
-                parts.append(_text(name))
-                parts.append(_text(kind))
-                parts.append(_text(type_name))
-            parts.append(_text(p.body_type))
-            parts.append(_text(p.returns_type))
-            parts.append(_u32(p.serializer_id))
-            parts.append(_u32(p.validator_id))
-            parts.append(_ids(p.limit_ids))
-
-        for rows in (
-            self.dependencies,
-            self.middleware,
-            self.auth_policies,
-            self.serializers,
-            self.validators,
-            self.limits,
-            self.clients,
-            self.databases,
-            self.models,
-            self.components,
-        ):
-            _named(rows)
-        return b"".join(parts)
+        return _core.flight_metadata_bytes(self, SchemaError)
 
     def image_hash(self) -> bytes:
         """The full 32-byte BLAKE2b digest of the canonical form."""
@@ -1530,30 +1479,12 @@ class MetadataImage:
         return self.image_hash()[:IMAGE_HASH_BYTES]
 
 
-def _u32(value: int) -> bytes:
-    if value < 0 or value > 0xFFFFFFFF:
-        raise SchemaError(f"u32 out of range: {value}")
-    return struct.pack(BYTE_ORDER + "I", value)
-
-
-def _text(value: str) -> bytes:
-    raw = value.encode("utf-8")
-    return _u32(len(raw)) + raw
-
-
-def _ids(ids: tuple[int, ...]) -> bytes:
-    # IDs are sorted so a non-semantic ordering cannot change the image.
-    ordered = sorted(ids)
-    return _u32(len(ordered)) + b"".join(_u32(i) for i in ordered)
-
-
 # --- the metadata image's decoder, and the keyed fingerprint ----------------
 #
-# These three sit here, beside `MetadataImage.canonical_bytes` and `_u32`/
-# `_text`/`_ids`, because that is what they are the other half of:
+# These sit here beside `MetadataImage.canonical_bytes` because they describe
+# and consume the same wire format:
 #
 # * `decode_metadata_image` is the exact inverse of `canonical_bytes` above.
-#   There is no C decoder; one format, one file.
 # * `siphash24` *does* have a C counterpart (`_native/flight.c:74`, reachable
 #   across translation units as `wreath_nfr_fingerprint`), and it is not
 #   exported to Python on purpose: the native packer hashes in C and never
@@ -1573,136 +1504,20 @@ MAX_ROWS = 5_000_000
 
 # --- metadata image (de)serialization --------------------------------------
 #
-# Encoding mirrors MetadataImage.canonical_bytes exactly so a round trip is the
-# identity and the container hash stays stable. Decoding is defensive: every
-# length is bounds-checked before it is used to slice.
-
-
-class _Reader:
-    __slots__ = ("_data", "_pos")
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._pos = 0
-
-    def u32(self) -> int:
-        if self._pos + 4 > len(self._data):
-            raise SchemaError("metadata truncated reading a u32")
-        (value,) = struct.unpack_from(BYTE_ORDER + "I", self._data, self._pos)
-        self._pos += 4
-        return value
-
-    def text(self) -> str:
-        length = self.u32()
-        if length > MAX_CHUNK_BYTES:
-            raise SchemaError("metadata string declares an implausible length")
-        end = self._pos + length
-        if end > len(self._data):
-            raise SchemaError("metadata truncated reading a string")
-        raw = self._data[self._pos : end]
-        self._pos = end
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise SchemaError("metadata string is not valid UTF-8") from exc
-
-    def count(self) -> int:
-        n = self.u32()
-        if n > MAX_ROWS:
-            raise SchemaError(f"metadata declares {n} rows, over the limit")
-        return n
-
-    def ids(self) -> tuple[int, ...]:
-        return tuple(self.u32() for _ in range(self.count()))
-
-    def at_end(self) -> bool:
-        return self._pos == len(self._data)
+# The decoder consumes the canonical metadata wire form. Every declared length
+# is bounds-checked before it is used to slice, and a round trip preserves the
+# container hash.
 
 
 def decode_metadata_image(data: bytes) -> MetadataImage:
-    reader = _Reader(data)
-    if data[:7] != b"WFRMETA":
-        raise SchemaError("metadata image missing its marker")
-    reader._pos = 7
-    version = reader.u32()
-    if version != METADATA_VERSION:
-        raise SchemaError(f"unsupported metadata version {version}")
-
-    routes: list[RouteMeta] = []
-    for _ in range(reader.count()):
-        route_id = reader.u32()
-        method = reader.text()
-        path = reader.text()
-        operation_id = reader.text()
-        plan_id = reader.u32()
-        tags = tuple(reader.text() for _ in range(reader.count()))
-        dependency_ids = reader.ids()
-        middleware_ids = reader.ids()
-        auth_policy_id = reader.u32()
-        coverage = reader.text()
-        routes.append(
-            RouteMeta(
-                route_id=route_id,
-                method=method,
-                path=path,
-                operation_id=operation_id,
-                plan_id=plan_id,
-                tags=tags,
-                dependency_ids=dependency_ids,
-                middleware_ids=middleware_ids,
-                auth_policy_id=auth_policy_id,
-                coverage=coverage,
-            )
-        )
-
-    plans: list[PlanMeta] = []
-    for _ in range(reader.count()):
-        plan_id = reader.u32()
-        params = tuple(
-            (reader.text(), reader.text(), reader.text())
-            for _ in range(reader.count())
-        )
-        body_type = reader.text()
-        returns_type = reader.text()
-        serializer_id = reader.u32()
-        validator_id = reader.u32()
-        limit_ids = reader.ids()
-        plans.append(
-            PlanMeta(
-                plan_id=plan_id,
-                params=params,
-                body_type=body_type,
-                returns_type=returns_type,
-                serializer_id=serializer_id,
-                validator_id=validator_id,
-                limit_ids=limit_ids,
-            )
-        )
-
-    def _named() -> tuple[NamedMeta, ...]:
-        return tuple(
-            NamedMeta(entry_id=reader.u32(), name=reader.text())
-            for _ in range(reader.count())
-        )
-
-    image = MetadataImage(
-        version=version,
-        routes=tuple(routes),
-        plans=tuple(plans),
-        dependencies=_named(),
-        middleware=_named(),
-        auth_policies=_named(),
-        serializers=_named(),
-        validators=_named(),
-        limits=_named(),
-        clients=_named(),
-        databases=_named(),
-        models=_named(),
-        components=_named(),
+    return _core.flight_metadata_decode(
+        data,
+        (MetadataImage, RouteMeta, PlanMeta, NamedMeta),
+        SchemaError,
+        MAX_CHUNK_BYTES,
+        MAX_ROWS,
+        METADATA_VERSION,
     )
-    if not reader.at_end():
-        raise SchemaError("trailing bytes after the metadata image")
-    return image
 
 
 _U64 = 0xFFFFFFFFFFFFFFFF

@@ -1,6 +1,8 @@
 /* Flight-cell batch dispatch, independent of the mmap recorder extension. */
 #include "wreathcore.h"
 
+#include <stdlib.h>
+
 #define FLIGHT_CELL_BYTES 64
 #define FLIGHT_COMPLETION 1
 #define FLIGHT_CORRELATION 2
@@ -815,5 +817,688 @@ wreath_flight_evict_pending(PyObject *Py_UNUSED(self), PyObject *args)
     Py_RETURN_NONE;
 error:
     Py_XDECREF(oldest_entry); Py_XDECREF(oldest_key);
+    return NULL;
+}
+
+typedef struct {
+    uint32_t id;
+    Py_ssize_t order;
+    PyObject *row;  /* borrowed from the owning sequence */
+} FlightMetadataRow;
+
+static int
+flight_metadata_row_compare(const void *left, const void *right)
+{
+    const FlightMetadataRow *a = left;
+    const FlightMetadataRow *b = right;
+    if (a->id < b->id) return -1;
+    if (a->id > b->id) return 1;
+    return (a->order > b->order) - (a->order < b->order);
+}
+
+static int
+flight_metadata_u32_compare(const void *left, const void *right)
+{
+    uint32_t a = *(const uint32_t *)left;
+    uint32_t b = *(const uint32_t *)right;
+    return (a > b) - (a < b);
+}
+
+static int
+flight_metadata_write_u32(WreathBytesWriter *writer, uint32_t number)
+{
+    unsigned char encoded[4] = {
+        (unsigned char)number,
+        (unsigned char)(number >> 8),
+        (unsigned char)(number >> 16),
+        (unsigned char)(number >> 24),
+    };
+    return wreath_writer_write(writer, (const char *)encoded, 4);
+}
+
+static int
+flight_metadata_number(PyObject *value, PyObject *schema_error, uint32_t *result)
+{
+    if (!PyLong_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "metadata integer must be int, got %s",
+                     Py_TYPE(value)->tp_name);
+        return -1;
+    }
+    unsigned long long number = PyLong_AsUnsignedLongLong(value);
+    if (number == (unsigned long long)-1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        PyObject *message = PyUnicode_FromFormat("u32 out of range: %R", value);
+        if (message != NULL) {
+            PyErr_SetObject(schema_error, message);
+            Py_DECREF(message);
+        }
+        return -1;
+    }
+    if (number > UINT32_MAX) {
+        PyObject *message = PyUnicode_FromFormat("u32 out of range: %R", value);
+        if (message != NULL) {
+            PyErr_SetObject(schema_error, message);
+            Py_DECREF(message);
+        }
+        return -1;
+    }
+    *result = (uint32_t)number;
+    return 0;
+}
+
+static int
+flight_metadata_u32_object(WreathBytesWriter *writer, PyObject *value,
+                           PyObject *schema_error)
+{
+    uint32_t number;
+    if (flight_metadata_number(value, schema_error, &number) < 0) return -1;
+    return flight_metadata_write_u32(writer, number);
+}
+
+static int
+flight_metadata_u32_attr(WreathBytesWriter *writer, PyObject *object,
+                         const char *name, PyObject *schema_error)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value == NULL) return -1;
+    int result = flight_metadata_u32_object(writer, value, schema_error);
+    Py_DECREF(value);
+    return result;
+}
+
+static int
+flight_metadata_count(WreathBytesWriter *writer, Py_ssize_t count,
+                      PyObject *schema_error)
+{
+    if (count < 0 || (size_t)count > UINT32_MAX) {
+        PyErr_Format(schema_error, "u32 out of range: %zd", count);
+        return -1;
+    }
+    return flight_metadata_write_u32(writer, (uint32_t)count);
+}
+
+static int
+flight_metadata_text_object(WreathBytesWriter *writer, PyObject *text,
+                            PyObject *schema_error)
+{
+    Py_ssize_t length;
+    const char *data = PyUnicode_AsUTF8AndSize(text, &length);
+    if (data == NULL || flight_metadata_count(writer, length, schema_error) < 0) return -1;
+    return wreath_writer_write(writer, data, length);
+}
+
+static int
+flight_metadata_text_attr(WreathBytesWriter *writer, PyObject *object,
+                          const char *name, PyObject *schema_error)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value == NULL) return -1;
+    int result = flight_metadata_text_object(writer, value, schema_error);
+    Py_DECREF(value);
+    return result;
+}
+
+static PyObject *
+flight_metadata_sequence_attr(PyObject *object, const char *name)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value == NULL) return NULL;
+    PyObject *sequence = PySequence_Fast(value, "metadata field must be a sequence");
+    Py_DECREF(value);
+    return sequence;
+}
+
+static int
+flight_metadata_texts(WreathBytesWriter *writer, PyObject *object,
+                      const char *name, PyObject *schema_error)
+{
+    PyObject *sequence = flight_metadata_sequence_attr(object, name);
+    if (sequence == NULL) return -1;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    if (flight_metadata_count(writer, count, schema_error) < 0) {
+        Py_DECREF(sequence);
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (flight_metadata_text_object(
+                writer, PySequence_Fast_GET_ITEM(sequence, index), schema_error) < 0) {
+            Py_DECREF(sequence);
+            return -1;
+        }
+    }
+    Py_DECREF(sequence);
+    return 0;
+}
+
+static int
+flight_metadata_ids(WreathBytesWriter *writer, PyObject *object,
+                    const char *name, PyObject *schema_error)
+{
+    PyObject *sequence = flight_metadata_sequence_attr(object, name);
+    if (sequence == NULL) return -1;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    if ((size_t)count > SIZE_MAX / sizeof(uint32_t)) {
+        Py_DECREF(sequence);
+        return PyErr_NoMemory(), -1;
+    }
+    uint32_t *ids = count != 0 ? PyMem_Malloc((size_t)count * sizeof(*ids)) : NULL;
+    if (count != 0 && ids == NULL) {
+        Py_DECREF(sequence);
+        return PyErr_NoMemory(), -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *value = PySequence_Fast_GET_ITEM(sequence, index);
+        if (flight_metadata_number(value, schema_error, &ids[index]) < 0) {
+            PyMem_Free(ids);
+            Py_DECREF(sequence);
+            return -1;
+        }
+    }
+    if (count > 1) qsort(ids, (size_t)count, sizeof(*ids), flight_metadata_u32_compare);
+    if (flight_metadata_count(writer, count, schema_error) < 0) {
+        PyMem_Free(ids);
+        Py_DECREF(sequence);
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (flight_metadata_write_u32(writer, ids[index]) < 0) {
+            PyMem_Free(ids);
+            Py_DECREF(sequence);
+            return -1;
+        }
+    }
+    PyMem_Free(ids);
+    Py_DECREF(sequence);
+    return 0;
+}
+
+static FlightMetadataRow *
+flight_metadata_rows(PyObject *sequence, const char *id_name,
+                     PyObject *schema_error)
+{
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    if ((size_t)count > SIZE_MAX / sizeof(FlightMetadataRow)) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    FlightMetadataRow *rows = count != 0
+        ? PyMem_Malloc((size_t)count * sizeof(*rows)) : NULL;
+    if (count != 0 && rows == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *row = PySequence_Fast_GET_ITEM(sequence, index);
+        PyObject *value = PyObject_GetAttrString(row, id_name);
+        if (value == NULL) {
+            PyMem_Free(rows);
+            return NULL;
+        }
+        uint32_t id;
+        if (flight_metadata_number(value, schema_error, &id) < 0) {
+            Py_DECREF(value);
+            PyMem_Free(rows);
+            return NULL;
+        }
+        Py_DECREF(value);
+        rows[index] = (FlightMetadataRow){id, index, row};
+    }
+    if (count > 1) qsort(
+        rows, (size_t)count, sizeof(*rows), flight_metadata_row_compare);
+    return rows;
+}
+
+static int
+flight_metadata_named(WreathBytesWriter *writer, PyObject *image,
+                      const char *attribute, PyObject *schema_error)
+{
+    PyObject *sequence = flight_metadata_sequence_attr(image, attribute);
+    if (sequence == NULL) return -1;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    FlightMetadataRow *rows = flight_metadata_rows(sequence, "entry_id", schema_error);
+    if ((count != 0 && rows == NULL) ||
+        flight_metadata_count(writer, count, schema_error) < 0) {
+        PyMem_Free(rows);
+        Py_DECREF(sequence);
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (flight_metadata_u32_attr(
+                writer, rows[index].row, "entry_id", schema_error) < 0 ||
+            flight_metadata_text_attr(
+                writer, rows[index].row, "name", schema_error) < 0) {
+            PyMem_Free(rows);
+            Py_DECREF(sequence);
+            return -1;
+        }
+    }
+    PyMem_Free(rows);
+    Py_DECREF(sequence);
+    return 0;
+}
+
+PyObject *
+wreath_flight_metadata_bytes(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *image, *schema_error;
+    if (!PyArg_ParseTuple(
+            args, "OO:flight_metadata_bytes", &image, &schema_error)) return NULL;
+    WreathBytesWriter writer = {0};
+    if (wreath_writer_init(&writer, 4096) < 0 ||
+        wreath_writer_write(&writer, "WFRMETA", 7) < 0 ||
+        flight_metadata_u32_attr(&writer, image, "version", schema_error) < 0) {
+        Py_XDECREF(writer.bytes);
+        return NULL;
+    }
+
+    PyObject *routes = flight_metadata_sequence_attr(image, "routes");
+    Py_ssize_t route_count = routes != NULL ? PySequence_Fast_GET_SIZE(routes) : 0;
+    FlightMetadataRow *route_rows = routes != NULL
+        ? flight_metadata_rows(routes, "route_id", schema_error) : NULL;
+    if (routes == NULL || (route_count != 0 && route_rows == NULL) ||
+        flight_metadata_count(&writer, route_count, schema_error) < 0) goto error;
+    for (Py_ssize_t index = 0; index < route_count; index++) {
+        PyObject *row = route_rows[index].row;
+        if (flight_metadata_u32_attr(&writer, row, "route_id", schema_error) < 0 ||
+            flight_metadata_text_attr(&writer, row, "method", schema_error) < 0 ||
+            flight_metadata_text_attr(&writer, row, "path", schema_error) < 0 ||
+            flight_metadata_text_attr(&writer, row, "operation_id", schema_error) < 0 ||
+            flight_metadata_u32_attr(&writer, row, "plan_id", schema_error) < 0 ||
+            flight_metadata_texts(&writer, row, "tags", schema_error) < 0 ||
+            flight_metadata_ids(&writer, row, "dependency_ids", schema_error) < 0 ||
+            flight_metadata_ids(&writer, row, "middleware_ids", schema_error) < 0 ||
+            flight_metadata_u32_attr(&writer, row, "auth_policy_id", schema_error) < 0 ||
+            flight_metadata_text_attr(&writer, row, "coverage", schema_error) < 0) goto error;
+        if ((index & 63) == 63 && PyErr_CheckSignals() < 0) goto error;
+    }
+    PyMem_Free(route_rows); route_rows = NULL;
+    Py_CLEAR(routes);
+
+    PyObject *plans = flight_metadata_sequence_attr(image, "plans");
+    Py_ssize_t plan_count = plans != NULL ? PySequence_Fast_GET_SIZE(plans) : 0;
+    FlightMetadataRow *plan_rows = plans != NULL
+        ? flight_metadata_rows(plans, "plan_id", schema_error) : NULL;
+    if (plans == NULL || (plan_count != 0 && plan_rows == NULL) ||
+        flight_metadata_count(&writer, plan_count, schema_error) < 0) goto plan_error;
+    for (Py_ssize_t index = 0; index < plan_count; index++) {
+        PyObject *row = plan_rows[index].row;
+        if (flight_metadata_u32_attr(&writer, row, "plan_id", schema_error) < 0) goto plan_error;
+        PyObject *params = flight_metadata_sequence_attr(row, "params");
+        if (params == NULL) goto plan_error;
+        Py_ssize_t param_count = PySequence_Fast_GET_SIZE(params);
+        if (flight_metadata_count(&writer, param_count, schema_error) < 0) {
+            Py_DECREF(params);
+            goto plan_error;
+        }
+        for (Py_ssize_t param_index = 0; param_index < param_count; param_index++) {
+            PyObject *param = PySequence_Fast(
+                PySequence_Fast_GET_ITEM(params, param_index),
+                "metadata plan parameter must be a sequence");
+            if (param == NULL) {
+                Py_DECREF(params);
+                goto plan_error;
+            }
+            if (PySequence_Fast_GET_SIZE(param) != 3) {
+                PyErr_SetString(PyExc_ValueError, "metadata plan parameter must have three fields");
+                Py_DECREF(param);
+                Py_DECREF(params);
+                goto plan_error;
+            }
+            for (Py_ssize_t field = 0; field < 3; field++) {
+                if (flight_metadata_text_object(
+                        &writer, PySequence_Fast_GET_ITEM(param, field), schema_error) < 0) {
+                    Py_DECREF(param);
+                    Py_DECREF(params);
+                    goto plan_error;
+                }
+            }
+            Py_DECREF(param);
+        }
+        Py_DECREF(params);
+        if (flight_metadata_text_attr(&writer, row, "body_type", schema_error) < 0 ||
+            flight_metadata_text_attr(&writer, row, "returns_type", schema_error) < 0 ||
+            flight_metadata_u32_attr(&writer, row, "serializer_id", schema_error) < 0 ||
+            flight_metadata_u32_attr(&writer, row, "validator_id", schema_error) < 0 ||
+            flight_metadata_ids(&writer, row, "limit_ids", schema_error) < 0) goto plan_error;
+        if ((index & 63) == 63 && PyErr_CheckSignals() < 0) goto plan_error;
+    }
+    PyMem_Free(plan_rows);
+    Py_DECREF(plans);
+
+    static const char *named_tables[] = {
+        "dependencies", "middleware", "auth_policies", "serializers",
+        "validators", "limits", "clients", "databases", "models",
+        "components", NULL,
+    };
+    for (const char **table = named_tables; *table != NULL; table++) {
+        if (flight_metadata_named(&writer, image, *table, schema_error) < 0) {
+            Py_DECREF(writer.bytes);
+            return NULL;
+        }
+    }
+    return wreath_writer_finish(&writer);
+
+plan_error:
+    PyMem_Free(plan_rows);
+    Py_XDECREF(plans);
+error:
+    PyMem_Free(route_rows);
+    Py_XDECREF(routes);
+    Py_DECREF(writer.bytes);
+    return NULL;
+}
+
+typedef struct {
+    const unsigned char *data;
+    Py_ssize_t length;
+    Py_ssize_t position;
+    Py_ssize_t max_chunk;
+    Py_ssize_t max_rows;
+    PyObject *schema_error;  /* borrowed operation argument */
+} FlightMetadataReader;
+
+static int
+flight_decode_u32(FlightMetadataReader *reader, uint32_t *value)
+{
+    if (reader->position > reader->length - 4) {
+        PyErr_SetString(reader->schema_error, "metadata truncated reading a u32");
+        return -1;
+    }
+    const unsigned char *data = reader->data + reader->position;
+    *value = (uint32_t)data[0] |
+             ((uint32_t)data[1] << 8) |
+             ((uint32_t)data[2] << 16) |
+             ((uint32_t)data[3] << 24);
+    reader->position += 4;
+    return 0;
+}
+
+static int
+flight_decode_count(FlightMetadataReader *reader, uint32_t *count)
+{
+    if (flight_decode_u32(reader, count) < 0) return -1;
+    if ((uint64_t)*count > (uint64_t)reader->max_rows) {
+        PyErr_Format(
+            reader->schema_error, "metadata declares %u rows, over the limit",
+            (unsigned int)*count);
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+flight_decode_u32_object(FlightMetadataReader *reader)
+{
+    uint32_t value;
+    if (flight_decode_u32(reader, &value) < 0) return NULL;
+    return PyLong_FromUnsignedLong(value);
+}
+
+static PyObject *
+flight_decode_text(FlightMetadataReader *reader)
+{
+    uint32_t length;
+    if (flight_decode_u32(reader, &length) < 0) return NULL;
+    if ((uint64_t)length > (uint64_t)reader->max_chunk) {
+        PyErr_SetString(
+            reader->schema_error,
+            "metadata string declares an implausible length");
+        return NULL;
+    }
+    if ((Py_ssize_t)length > reader->length - reader->position) {
+        PyErr_SetString(reader->schema_error, "metadata truncated reading a string");
+        return NULL;
+    }
+    PyObject *text = PyUnicode_DecodeUTF8(
+        (const char *)reader->data + reader->position, (Py_ssize_t)length,
+        "strict");
+    if (text == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+            PyErr_Clear();
+            PyErr_SetString(
+                reader->schema_error, "metadata string is not valid UTF-8");
+        }
+        return NULL;
+    }
+    reader->position += (Py_ssize_t)length;
+    return text;
+}
+
+static PyObject *
+flight_decode_texts(FlightMetadataReader *reader)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    PyObject *values = PyList_New(0);
+    if (values == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *value = flight_decode_text(reader);
+        if (value == NULL || PyList_Append(values, value) < 0) {
+            Py_XDECREF(value);
+            Py_DECREF(values);
+            return NULL;
+        }
+        Py_DECREF(value);
+    }
+    PyObject *result = PyList_AsTuple(values);
+    Py_DECREF(values);
+    return result;
+}
+
+static PyObject *
+flight_decode_ids(FlightMetadataReader *reader)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    if ((uint64_t)count * 4U >
+        (uint64_t)(reader->length - reader->position)) {
+        PyErr_SetString(reader->schema_error, "metadata truncated reading a u32");
+        return NULL;
+    }
+    PyObject *values = PyTuple_New((Py_ssize_t)count);
+    if (values == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *value = flight_decode_u32_object(reader);
+        if (value == NULL) {
+            Py_DECREF(values);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(values, (Py_ssize_t)index, value);
+    }
+    return values;
+}
+
+static void
+flight_decode_clear(PyObject **values, Py_ssize_t count)
+{
+    for (Py_ssize_t index = 0; index < count; index++) Py_XDECREF(values[index]);
+}
+
+static PyObject *
+flight_decode_routes(FlightMetadataReader *reader, PyObject *route_type)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    PyObject *rows = PyList_New(0);
+    if (rows == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *values[10] = {NULL};
+        values[0] = flight_decode_u32_object(reader);
+        values[1] = values[0] != NULL ? flight_decode_text(reader) : NULL;
+        values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
+        values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
+        values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
+        values[5] = values[4] != NULL ? flight_decode_texts(reader) : NULL;
+        values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
+        values[7] = values[6] != NULL ? flight_decode_ids(reader) : NULL;
+        values[8] = values[7] != NULL ? flight_decode_u32_object(reader) : NULL;
+        values[9] = values[8] != NULL ? flight_decode_text(reader) : NULL;
+        PyObject *row = values[9] != NULL
+            ? PyObject_Vectorcall(route_type, values, 10, NULL) : NULL;
+        flight_decode_clear(values, 10);
+        if (row == NULL || PyList_Append(rows, row) < 0) {
+            Py_XDECREF(row);
+            Py_DECREF(rows);
+            return NULL;
+        }
+        Py_DECREF(row);
+        if ((index & 63U) == 63U && PyErr_CheckSignals() < 0) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+    }
+    PyObject *result = PyList_AsTuple(rows);
+    Py_DECREF(rows);
+    return result;
+}
+
+static PyObject *
+flight_decode_params(FlightMetadataReader *reader)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    PyObject *params = PyList_New(0);
+    if (params == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *values[3] = {NULL};
+        values[0] = flight_decode_text(reader);
+        values[1] = values[0] != NULL ? flight_decode_text(reader) : NULL;
+        values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
+        PyObject *param = values[2] != NULL
+            ? PyTuple_Pack(3, values[0], values[1], values[2]) : NULL;
+        flight_decode_clear(values, 3);
+        if (param == NULL || PyList_Append(params, param) < 0) {
+            Py_XDECREF(param);
+            Py_DECREF(params);
+            return NULL;
+        }
+        Py_DECREF(param);
+    }
+    PyObject *result = PyList_AsTuple(params);
+    Py_DECREF(params);
+    return result;
+}
+
+static PyObject *
+flight_decode_plans(FlightMetadataReader *reader, PyObject *plan_type)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    PyObject *rows = PyList_New(0);
+    if (rows == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *values[7] = {NULL};
+        values[0] = flight_decode_u32_object(reader);
+        values[1] = values[0] != NULL ? flight_decode_params(reader) : NULL;
+        values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
+        values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
+        values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
+        values[5] = values[4] != NULL ? flight_decode_u32_object(reader) : NULL;
+        values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
+        PyObject *row = values[6] != NULL
+            ? PyObject_Vectorcall(plan_type, values, 7, NULL) : NULL;
+        flight_decode_clear(values, 7);
+        if (row == NULL || PyList_Append(rows, row) < 0) {
+            Py_XDECREF(row);
+            Py_DECREF(rows);
+            return NULL;
+        }
+        Py_DECREF(row);
+        if ((index & 63U) == 63U && PyErr_CheckSignals() < 0) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+    }
+    PyObject *result = PyList_AsTuple(rows);
+    Py_DECREF(rows);
+    return result;
+}
+
+static PyObject *
+flight_decode_named(FlightMetadataReader *reader, PyObject *named_type)
+{
+    uint32_t count;
+    if (flight_decode_count(reader, &count) < 0) return NULL;
+    PyObject *rows = PyList_New(0);
+    if (rows == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        PyObject *entry_id = flight_decode_u32_object(reader);
+        PyObject *name = entry_id != NULL ? flight_decode_text(reader) : NULL;
+        PyObject *row = name != NULL
+            ? PyObject_CallFunctionObjArgs(named_type, entry_id, name, NULL) : NULL;
+        Py_XDECREF(name);
+        Py_XDECREF(entry_id);
+        if (row == NULL || PyList_Append(rows, row) < 0) {
+            Py_XDECREF(row);
+            Py_DECREF(rows);
+            return NULL;
+        }
+        Py_DECREF(row);
+    }
+    PyObject *result = PyList_AsTuple(rows);
+    Py_DECREF(rows);
+    return result;
+}
+
+PyObject *
+wreath_flight_metadata_decode(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    Py_buffer data;
+    PyObject *types, *schema_error;
+    Py_ssize_t max_chunk, max_rows;
+    unsigned int expected_version;
+    if (!PyArg_ParseTuple(
+            args, "y*O!OnnI:flight_metadata_decode", &data, &PyTuple_Type,
+            &types, &schema_error, &max_chunk, &max_rows,
+            &expected_version)) return NULL;
+    if (PyTuple_GET_SIZE(types) != 4) {
+        PyBuffer_Release(&data);
+        PyErr_SetString(PyExc_ValueError, "metadata types must contain four classes");
+        return NULL;
+    }
+    FlightMetadataReader reader = {
+        data.buf, data.len, 0, max_chunk, max_rows, schema_error,
+    };
+    if (data.len < 7 || memcmp(data.buf, "WFRMETA", 7) != 0) {
+        PyBuffer_Release(&data);
+        PyErr_SetString(schema_error, "metadata image missing its marker");
+        return NULL;
+    }
+    reader.position = 7;
+    uint32_t version;
+    if (flight_decode_u32(&reader, &version) < 0) goto error;
+    if (version != expected_version) {
+        PyErr_Format(schema_error, "unsupported metadata version %u", version);
+        goto error;
+    }
+
+    PyObject *image_values[13] = {NULL};
+    image_values[0] = PyLong_FromUnsignedLong(version);
+    image_values[1] = image_values[0] != NULL
+        ? flight_decode_routes(&reader, PyTuple_GET_ITEM(types, 1)) : NULL;
+    image_values[2] = image_values[1] != NULL
+        ? flight_decode_plans(&reader, PyTuple_GET_ITEM(types, 2)) : NULL;
+    for (Py_ssize_t index = 3; index < 13 && image_values[index - 1] != NULL;
+         index++) {
+        image_values[index] = flight_decode_named(
+            &reader, PyTuple_GET_ITEM(types, 3));
+    }
+    if (image_values[12] == NULL) {
+        flight_decode_clear(image_values, 13);
+        goto error;
+    }
+    if (reader.position != reader.length) {
+        flight_decode_clear(image_values, 13);
+        PyErr_SetString(schema_error, "trailing bytes after the metadata image");
+        goto error;
+    }
+    PyObject *image = PyObject_Vectorcall(
+        PyTuple_GET_ITEM(types, 0), image_values, 13, NULL);
+    flight_decode_clear(image_values, 13);
+    PyBuffer_Release(&data);
+    return image;
+
+error:
+    PyBuffer_Release(&data);
     return NULL;
 }

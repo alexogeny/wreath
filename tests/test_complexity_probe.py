@@ -10,6 +10,8 @@ from wreath._devtools.complexity_probe import (
     Todo,
     _contract,
     _graphql_depth_rejection,
+    _graphql_policy_plan_alias_control,
+    _graphql_policy_plan_unique,
     degree_name,
     probe,
 )
@@ -81,6 +83,11 @@ def test_graphql_depth_probe_reaches_the_bound_it_claims_to_measure() -> None:
     own control unobserved by mutation confidence.
     """
     assert _graphql_depth_rejection(32) >= 0.0
+
+
+def test_graphql_policy_plan_probes_reach_both_same_size_arms() -> None:
+    assert _graphql_policy_plan_unique(4) > 0.0
+    assert _graphql_policy_plan_alias_control(4) > 0.0
 
 
 def test_contract_records_the_scaled_axis_and_assumption() -> None:

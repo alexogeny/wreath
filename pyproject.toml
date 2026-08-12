@@ -7,7 +7,7 @@ name = "wreath"
 version = "0.2.0"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = "==3.14.*"
 license = "MPL-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Wreath contributors" }]
@@ -349,11 +349,11 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # only artifact on PyPI was an sdist, so every install compiled four extensions
 # locally -- and failed outright on a machine without a compiler.
 [tool.cibuildwheel]
-# CPython 3.14 only: `requires-python = ">=3.14"`. The free-threaded build is
-# excluded by the selector rather than by a skip -- its identifiers start
-# `cp314t-`, so the literal `-` here does not match them. It is left unbuilt
-# rather than built untested: `AGENTS.md` treats free-threading as a separately
-# *tested* execution mode, and nothing here tests one yet.
+# Regular CPython 3.14 only: `requires-python = "==3.14.*"` excludes later
+# language releases, while this selector excludes the free-threaded ABI -- its
+# identifiers start `cp314t-`, so the literal `-` here does not match them.
+# `setup.py` also refuses 3.14t explicitly, so a local source checkout cannot
+# accidentally present an untested build as supported.
 build = "cp314-*"
 # The base wheel is portable. Platform-bound extensions are separate companion
 # distributions, so selecting another runner here never changes what `wreath`

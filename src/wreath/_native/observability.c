@@ -275,6 +275,206 @@ prom_finish_block(WreathBytesWriter *writer)
     return text;
 }
 
+static inline int
+prom_metric_char(Py_UCS4 character)
+{
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') ||
+           character == '_' || character == ':';
+}
+
+static inline int
+prom_metric_lead(Py_UCS4 character)
+{
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           character == '_' || character == ':';
+}
+
+static PyObject *
+prom_sanitize_metric(PyObject *text)
+{
+    Py_ssize_t length = PyUnicode_GetLength(text);
+    if (length < 0) return NULL;
+    char *clean = PyMem_Malloc((size_t)length + 1);
+    if (clean == NULL) return PyErr_NoMemory();
+    for (Py_ssize_t index = 0; index < length; index++) {
+        Py_UCS4 character = PyUnicode_ReadChar(text, index);
+        if (character == (Py_UCS4)-1 && PyErr_Occurred()) {
+            PyMem_Free(clean);
+            return NULL;
+        }
+        clean[index] = prom_metric_char(character) ? (char)character : '_';
+    }
+    Py_ssize_t prefix = length != 0 && !prom_metric_lead((unsigned char)clean[0]);
+    PyObject *result;
+    if (prefix) {
+        char *prefixed = PyMem_Malloc((size_t)length + 1);
+        if (prefixed == NULL) {
+            PyMem_Free(clean);
+            return PyErr_NoMemory();
+        }
+        prefixed[0] = '_';
+        memcpy(prefixed + 1, clean, (size_t)length);
+        result = PyUnicode_FromStringAndSize(prefixed, length + 1);
+        PyMem_Free(prefixed);
+    }
+    else {
+        result = PyUnicode_FromStringAndSize(clean, length);
+    }
+    PyMem_Free(clean);
+    return result;
+}
+
+PyObject *
+wreath_prometheus_counter_block(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *readings_object, *namespace;
+    PyObject *readings = NULL, *groups = NULL;
+    WreathBytesWriter writer = {0};
+    if (!PyArg_ParseTuple(args, "OU:prometheus_counter_block",
+                          &readings_object, &namespace)) return NULL;
+    readings = PySequence_Fast(
+        readings_object, "Prometheus counters must be a sequence");
+    if (readings == NULL) return NULL;
+    groups = PyDict_New();
+    if (groups == NULL) goto error;
+
+    Py_ssize_t reading_count = PySequence_Fast_GET_SIZE(readings);
+    for (Py_ssize_t reading_index = 0;
+         reading_index < reading_count; reading_index++) {
+        PyObject *reading = PySequence_Fast_GET_ITEM(readings, reading_index);
+        PyObject *subsystem_value = PyObject_GetAttrString(reading, "subsystem");
+        PyObject *instance_value = PyObject_GetAttrString(reading, "instance");
+        PyObject *values = PyObject_GetAttrString(reading, "values");
+        PyObject *subsystem_text = NULL, *subsystem = NULL, *instance = NULL;
+        PyObject *items = NULL;
+        if (subsystem_value == NULL || instance_value == NULL || values == NULL)
+            goto reading_error;
+        subsystem_text = PyObject_Str(subsystem_value);
+        instance = PyObject_Str(instance_value);
+        if (subsystem_text == NULL || instance == NULL) goto reading_error;
+        subsystem = prom_sanitize_metric(subsystem_text);
+        if (subsystem == NULL) goto reading_error;
+        items = PyMapping_Items(values);
+        if (items == NULL) goto reading_error;
+
+        Py_ssize_t item_count = PyList_GET_SIZE(items);
+        for (Py_ssize_t item_index = 0; item_index < item_count; item_index++) {
+            PyObject *item = PyList_GET_ITEM(items, item_index);
+            PyObject *name_text = PyObject_Str(PyTuple_GET_ITEM(item, 0));
+            PyObject *name = name_text != NULL
+                ? prom_sanitize_metric(name_text) : NULL;
+            PyObject *family = name != NULL
+                ? PyUnicode_FromFormat("%U_%U_%U", namespace, subsystem, name)
+                : NULL;
+            PyObject *number = family != NULL
+                ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
+            PyObject *samples = NULL, *sample = NULL;
+            Py_XDECREF(name_text);
+            Py_XDECREF(name);
+            if (number == NULL) {
+                Py_XDECREF(family);
+                goto reading_error;
+            }
+            samples = PyDict_GetItemWithError(groups, family);
+            if (samples == NULL) {
+                if (PyErr_Occurred()) {
+                    Py_DECREF(number);
+                    Py_DECREF(family);
+                    goto reading_error;
+                }
+                samples = PyList_New(0);
+                if (samples == NULL || PyDict_SetItem(groups, family, samples) < 0) {
+                    Py_XDECREF(samples);
+                    Py_DECREF(number);
+                    Py_DECREF(family);
+                    goto reading_error;
+                }
+                Py_DECREF(samples);
+                samples = PyDict_GetItem(groups, family);
+            }
+            sample = PyTuple_Pack(2, instance, number);
+            Py_DECREF(number);
+            Py_DECREF(family);
+            if (sample == NULL || PyList_Append(samples, sample) < 0) {
+                Py_XDECREF(sample);
+                goto reading_error;
+            }
+            Py_DECREF(sample);
+        }
+        Py_DECREF(items);
+        Py_DECREF(subsystem);
+        Py_DECREF(subsystem_text);
+        Py_DECREF(instance);
+        Py_DECREF(values);
+        Py_DECREF(instance_value);
+        Py_DECREF(subsystem_value);
+        if ((reading_index & 63) == 63 && PyErr_CheckSignals() < 0) goto error;
+        continue;
+
+reading_error:
+        Py_XDECREF(items);
+        Py_XDECREF(subsystem);
+        Py_XDECREF(subsystem_text);
+        Py_XDECREF(instance);
+        Py_XDECREF(values);
+        Py_XDECREF(instance_value);
+        Py_XDECREF(subsystem_value);
+        goto error;
+    }
+
+    Py_ssize_t group_count = PyDict_Size(groups);
+    Py_ssize_t capacity = group_count > (PY_SSIZE_T_MAX - 64) / 128
+        ? 256 : group_count * 128 + 64;
+    if (wreath_writer_init(&writer, capacity) < 0) goto error;
+    Py_ssize_t position = 0;
+    PyObject *family, *samples;
+    while (PyDict_Next(groups, &position, &family, &samples)) {
+        if (writer.len != 0 && wreath_writer_byte(&writer, '\n') < 0) goto error;
+        if (wreath_writer_write(&writer, "# HELP ", 7) < 0 ||
+            prom_write_unicode(&writer, family) < 0 ||
+            wreath_writer_write(
+                &writer, " Reported by the subsystem that owns it.\n# TYPE ",
+                (Py_ssize_t)sizeof(
+                    " Reported by the subsystem that owns it.\n# TYPE ") - 1) < 0 ||
+            prom_write_unicode(&writer, family) < 0 ||
+            wreath_writer_write(&writer, " gauge", 6) < 0) goto error;
+        Py_ssize_t sample_count = PyList_GET_SIZE(samples);
+        for (Py_ssize_t index = 0; index < sample_count; index++) {
+            PyObject *sample = PyList_GET_ITEM(samples, index);
+            PyObject *instance = PyTuple_GET_ITEM(sample, 0);
+            PyObject *number = PyTuple_GET_ITEM(sample, 1);
+            Py_ssize_t instance_length;
+            const char *instance_data = PyUnicode_AsUTF8AndSize(
+                instance, &instance_length);
+            PyObject *number_text = instance_data != NULL
+                ? prom_number(number) : NULL;
+            if (number_text == NULL || wreath_writer_byte(&writer, '\n') < 0 ||
+                prom_write_unicode(&writer, family) < 0 ||
+                wreath_writer_write(&writer, "{instance=\"", 11) < 0 ||
+                prom_write_label_value(
+                    &writer, instance_data, instance_length) < 0 ||
+                wreath_writer_write(&writer, "\"} ", 3) < 0 ||
+                prom_write_unicode(&writer, number_text) < 0) {
+                Py_XDECREF(number_text);
+                goto error;
+            }
+            Py_DECREF(number_text);
+        }
+    }
+    Py_DECREF(groups);
+    Py_DECREF(readings);
+    return prom_finish_block(&writer);
+
+error:
+    Py_XDECREF(writer.bytes);
+    Py_XDECREF(groups);
+    Py_XDECREF(readings);
+    return NULL;
+}
+
 PyObject *
 wreath_prometheus_route_blocks(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -479,5 +679,1203 @@ error:
     prom_routes_clear(plan, count);
     Py_XDECREF(groups);
     Py_XDECREF(routes);
+    return NULL;
+}
+
+static inline int
+statsd_metric_char(Py_UCS4 character)
+{
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') ||
+           character == '.' || character == '_' || character == '-';
+}
+
+static inline int
+statsd_tag_char(Py_UCS4 character)
+{
+    return character != ',' && character != '|' && character != '#' &&
+           character != ':' && !Py_UNICODE_ISSPACE(character);
+}
+
+static int
+statsd_write_codepoint(WreathBytesWriter *writer, Py_UCS4 character)
+{
+    char encoded[4];
+    Py_ssize_t length;
+    if (character <= 0x7ff) {
+        encoded[0] = (char)(0xc0 | (character >> 6));
+        encoded[1] = (char)(0x80 | (character & 0x3f));
+        length = 2;
+    }
+    else if (character <= 0xffff && !(character >= 0xd800 && character <= 0xdfff)) {
+        encoded[0] = (char)(0xe0 | (character >> 12));
+        encoded[1] = (char)(0x80 | ((character >> 6) & 0x3f));
+        encoded[2] = (char)(0x80 | (character & 0x3f));
+        length = 3;
+    }
+    else if (character <= 0x10ffff) {
+        encoded[0] = (char)(0xf0 | (character >> 18));
+        encoded[1] = (char)(0x80 | ((character >> 12) & 0x3f));
+        encoded[2] = (char)(0x80 | ((character >> 6) & 0x3f));
+        encoded[3] = (char)(0x80 | (character & 0x3f));
+        length = 4;
+    }
+    else {
+        PyErr_SetString(PyExc_UnicodeEncodeError, "invalid metric tag character");
+        return -1;
+    }
+    return wreath_writer_write(writer, encoded, length);
+}
+
+static int
+statsd_write_sanitized(WreathBytesWriter *writer, PyObject *text, int tag)
+{
+    if (!PyUnicode_Check(text)) {
+        PyErr_Format(PyExc_TypeError, "metric component must be str, got %s",
+                     Py_TYPE(text)->tp_name);
+        return -1;
+    }
+    Py_ssize_t length = PyUnicode_GetLength(text);
+    if (length < 0) return -1;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        Py_UCS4 character = PyUnicode_ReadChar(text, index);
+        if (character == (Py_UCS4)-1 && PyErr_Occurred()) return -1;
+        if (tag ? statsd_tag_char(character) : statsd_metric_char(character)) {
+            if (character < 128) {
+                if (wreath_writer_byte(writer, (char)character) < 0) return -1;
+            }
+            else if (statsd_write_codepoint(writer, character) < 0) return -1;
+        }
+        else if (wreath_writer_byte(writer, '_') < 0) return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+statsd_number(PyObject *value)
+{
+    if (PyBool_Check(value))
+        return PyUnicode_FromString(value == Py_True ? "1" : "0");
+    if (PyFloat_Check(value)) {
+        double number = PyFloat_AS_DOUBLE(value);
+        if (isfinite(number) && floor(number) == number) {
+            PyObject *integer = PyLong_FromDouble(number);
+            PyObject *text;
+            if (integer == NULL) return NULL;
+            text = PyObject_Str(integer);
+            Py_DECREF(integer);
+            return text;
+        }
+        return PyObject_Repr(value);
+    }
+    if (PyLong_Check(value)) return PyObject_Str(value);
+    PyObject *integer = PyNumber_Long(value);
+    if (integer == NULL) return NULL;
+    PyObject *text = PyObject_Str(integer);
+    Py_DECREF(integer);
+    return text;
+}
+
+static PyObject *
+statsd_default_labels(PyObject *route_id)
+{
+    PyObject *labels = PyDict_New();
+    PyObject *key = PyUnicode_FromString("route_id");
+    PyObject *value = PyObject_Str(route_id);
+    if (labels == NULL || key == NULL || value == NULL ||
+        PyDict_SetItem(labels, key, value) < 0) {
+        Py_XDECREF(value);
+        Py_XDECREF(key);
+        Py_XDECREF(labels);
+        return NULL;
+    }
+    Py_DECREF(value);
+    Py_DECREF(key);
+    return labels;
+}
+
+static PyObject *
+statsd_route_labels(PyObject *resolver, PyObject *route_id)
+{
+    if (resolver == Py_None) return statsd_default_labels(route_id);
+    int mapping = PyObject_HasAttrString(resolver, "get");
+    if (mapping < 0) return NULL;
+    PyObject *resolved = mapping
+        ? PyObject_CallMethod(resolver, "get", "O", route_id)
+        : PyObject_CallOneArg(resolver, route_id);
+    if (resolved == NULL) return NULL;
+    int truth = PyObject_IsTrue(resolved);
+    if (truth <= 0) {
+        Py_DECREF(resolved);
+        return truth < 0 ? NULL : statsd_default_labels(route_id);
+    }
+    PyObject *items = PyMapping_Items(resolved);
+    Py_DECREF(resolved);
+    if (items == NULL) return NULL;
+    PyObject *labels = PyDict_New();
+    if (labels == NULL) {
+        Py_DECREF(items);
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(items);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PyList_GET_ITEM(items, index);
+        PyObject *key = PyTuple_GET_ITEM(item, 0);
+        PyObject *value = PyObject_Str(PyTuple_GET_ITEM(item, 1));
+        if (value == NULL || PyDict_SetItem(labels, key, value) < 0) {
+            Py_XDECREF(value);
+            Py_DECREF(labels);
+            Py_DECREF(items);
+            return NULL;
+        }
+        Py_DECREF(value);
+    }
+    Py_DECREF(items);
+    return labels;
+}
+
+#define METRIC_DELTA_CAPSULE "wreath.metric_delta_state"
+
+typedef struct {
+    uint64_t hash;
+    uint64_t identity;
+    char *name;
+    Py_ssize_t name_length;
+    uint64_t integer;
+    double real;
+    unsigned char kind;
+    unsigned char occupied;
+    unsigned char is_real;
+} MetricDeltaEntry;
+
+typedef struct {
+    PyMutex mutex;
+    MetricDeltaEntry *entries;
+    size_t capacity;
+    size_t size;
+} MetricDeltaState;
+
+static uint64_t
+metric_delta_mix(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+static uint64_t
+metric_delta_hash(unsigned char kind, uint64_t identity,
+                  const char *name, Py_ssize_t name_length)
+{
+    uint64_t hash = metric_delta_mix(identity ^ ((uint64_t)kind << 56));
+    for (Py_ssize_t index = 0; index < name_length; index++) {
+        hash ^= (unsigned char)name[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash != 0 ? hash : UINT64_C(1);
+}
+
+static int
+metric_delta_key_equal(const MetricDeltaEntry *entry, unsigned char kind,
+                       uint64_t identity, const char *name,
+                       Py_ssize_t name_length, uint64_t hash)
+{
+    return entry->occupied && entry->hash == hash && entry->kind == kind &&
+           entry->identity == identity && entry->name_length == name_length &&
+           (name_length == 0 || memcmp(entry->name, name, (size_t)name_length) == 0);
+}
+
+static MetricDeltaEntry *
+metric_delta_slot(MetricDeltaEntry *entries, size_t capacity,
+                  unsigned char kind, uint64_t identity,
+                  const char *name, Py_ssize_t name_length, uint64_t hash)
+{
+    size_t index = (size_t)hash & (capacity - 1);
+    for (;;) {
+        MetricDeltaEntry *entry = &entries[index];
+        if (!entry->occupied || metric_delta_key_equal(
+                entry, kind, identity, name, name_length, hash)) return entry;
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+static int
+metric_delta_grow(MetricDeltaState *state)
+{
+    size_t capacity = state->capacity == 0 ? 64 : state->capacity * 2;
+    if (capacity < state->capacity || capacity > SIZE_MAX / sizeof(MetricDeltaEntry)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    MetricDeltaEntry *entries = PyMem_Calloc(capacity, sizeof(*entries));
+    if (entries == NULL) return PyErr_NoMemory(), -1;
+    for (size_t index = 0; index < state->capacity; index++) {
+        MetricDeltaEntry *old = &state->entries[index];
+        if (!old->occupied) continue;
+        MetricDeltaEntry *next = metric_delta_slot(
+            entries, capacity, old->kind, old->identity,
+            old->name, old->name_length, old->hash);
+        *next = *old;
+    }
+    PyMem_Free(state->entries);
+    state->entries = entries;
+    state->capacity = capacity;
+    return 0;
+}
+
+static MetricDeltaEntry *
+metric_delta_get(MetricDeltaState *state, unsigned char kind,
+                 uint64_t identity, const char *name, Py_ssize_t name_length,
+                 int is_real, int *created)
+{
+    if (state->capacity == 0 ||
+        (state->size + 1) * 10 >= state->capacity * 7) {
+        if (metric_delta_grow(state) < 0) return NULL;
+    }
+    uint64_t hash = metric_delta_hash(kind, identity, name, name_length);
+    MetricDeltaEntry *entry = metric_delta_slot(
+        state->entries, state->capacity, kind, identity, name, name_length, hash);
+    *created = !entry->occupied;
+    if (!entry->occupied) {
+        char *copy = name_length != 0 ? PyMem_Malloc((size_t)name_length) : NULL;
+        if (name_length != 0 && copy == NULL) return PyErr_NoMemory(), NULL;
+        if (name_length != 0) memcpy(copy, name, (size_t)name_length);
+        *entry = (MetricDeltaEntry){
+            .hash = hash,
+            .identity = identity,
+            .name = copy,
+            .name_length = name_length,
+            .kind = kind,
+            .occupied = 1,
+            .is_real = (unsigned char)is_real,
+        };
+        state->size++;
+    }
+    else if (entry->is_real != (unsigned char)is_real) {
+        PyErr_SetString(PyExc_TypeError, "metric changed numeric representation");
+        return NULL;
+    }
+    return entry;
+}
+
+static int
+metric_delta_u64(MetricDeltaState *state, unsigned char kind,
+                 uint64_t identity, const char *name, Py_ssize_t name_length,
+                 uint64_t current, uint64_t *result)
+{
+    PyMutex_Lock(&state->mutex);
+    int created;
+    MetricDeltaEntry *entry = metric_delta_get(
+        state, kind, identity, name, name_length, 0, &created);
+    if (entry == NULL) {
+        PyMutex_Unlock(&state->mutex);
+        return -1;
+    }
+    *result = created || current < entry->integer
+        ? current : current - entry->integer;
+    entry->integer = current;
+    PyMutex_Unlock(&state->mutex);
+    return 0;
+}
+
+static int
+metric_delta_double(MetricDeltaState *state, unsigned char kind,
+                    uint64_t identity, double current, double *result)
+{
+    PyMutex_Lock(&state->mutex);
+    int created;
+    MetricDeltaEntry *entry = metric_delta_get(
+        state, kind, identity, NULL, 0, 1, &created);
+    if (entry == NULL) {
+        PyMutex_Unlock(&state->mutex);
+        return -1;
+    }
+    *result = created || current < entry->real
+        ? current : current - entry->real;
+    entry->real = current;
+    PyMutex_Unlock(&state->mutex);
+    return 0;
+}
+
+static void
+metric_delta_free(PyObject *capsule)
+{
+    MetricDeltaState *state = PyCapsule_GetPointer(capsule, METRIC_DELTA_CAPSULE);
+    if (state == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    for (size_t index = 0; index < state->capacity; index++)
+        PyMem_Free(state->entries[index].name);
+    PyMem_Free(state->entries);
+    PyMem_Free(state);
+}
+
+PyObject *
+wreath_metric_delta_state(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(arg))
+{
+    MetricDeltaState *state = PyMem_Calloc(1, sizeof(*state));
+    if (state == NULL) return PyErr_NoMemory();
+    PyObject *capsule = PyCapsule_New(
+        state, METRIC_DELTA_CAPSULE, metric_delta_free);
+    if (capsule == NULL) PyMem_Free(state);
+    return capsule;
+}
+
+static MetricDeltaState *
+metric_delta_state(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, METRIC_DELTA_CAPSULE);
+}
+
+static PyObject *
+statsd_delta(MetricDeltaState *state, unsigned char kind,
+             PyObject *identity, PyObject *current)
+{
+    uint64_t key = 0;
+    const char *name = NULL;
+    Py_ssize_t name_length = 0;
+    if (identity != NULL) {
+        if (kind == 20) {
+            name = PyUnicode_AsUTF8AndSize(identity, &name_length);
+            if (name == NULL) {
+                Py_DECREF(current);
+                return NULL;
+            }
+        }
+        else {
+            key = PyLong_AsUnsignedLongLong(identity);
+            if (PyErr_Occurred()) {
+                Py_DECREF(current);
+                return NULL;
+            }
+        }
+    }
+    if (PyFloat_Check(current)) {
+        double delta;
+        if (metric_delta_double(
+                state, kind, key, PyFloat_AS_DOUBLE(current), &delta) < 0) {
+            Py_DECREF(current);
+            return NULL;
+        }
+        Py_DECREF(current);
+        return PyFloat_FromDouble(delta);
+    }
+    uint64_t value = PyLong_AsUnsignedLongLong(current), delta;
+    Py_DECREF(current);
+    if (PyErr_Occurred() || metric_delta_u64(
+            state, kind, key, name, name_length, value, &delta) < 0) return NULL;
+    return PyLong_FromUnsignedLongLong(delta);
+}
+
+static int
+statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tags,
+            const char *name, PyObject *value, char kind, PyObject *labels)
+{
+    WreathBytesWriter writer = {0};
+    PyObject *number = NULL, *merged = NULL, *items = NULL;
+    PyObject *line = NULL, *bytes = NULL;
+    if (wreath_writer_init(&writer, 96) < 0 ||
+        statsd_write_sanitized(&writer, prefix, 0) < 0 ||
+        wreath_writer_byte(&writer, '.') < 0 ||
+        wreath_writer_write(&writer, name, (Py_ssize_t)strlen(name)) < 0)
+        goto error;
+    if (!dogstatsd) {
+        PyObject *values = PyDict_Values(labels);
+        if (values == NULL) goto error;
+        Py_ssize_t count = PyList_GET_SIZE(values);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            if (wreath_writer_byte(&writer, '.') < 0 ||
+                statsd_write_sanitized(
+                    &writer, PyList_GET_ITEM(values, index), 0) < 0) {
+                Py_DECREF(values);
+                goto error;
+            }
+        }
+        Py_DECREF(values);
+    }
+    number = statsd_number(value);
+    if (number == NULL || wreath_writer_byte(&writer, ':') < 0 ||
+        prom_write_unicode(&writer, number) < 0 ||
+        wreath_writer_byte(&writer, '|') < 0 ||
+        wreath_writer_byte(&writer, kind) < 0) goto error;
+    if (dogstatsd) {
+        merged = PyDict_Copy(static_tags);
+        if (merged == NULL || PyDict_Update(merged, labels) < 0) goto error;
+        if (PyDict_GET_SIZE(merged) != 0) {
+            if (wreath_writer_write(&writer, "|#", 2) < 0) goto error;
+            items = PyDict_Items(merged);
+            if (items == NULL) goto error;
+            Py_ssize_t count = PyList_GET_SIZE(items);
+            for (Py_ssize_t index = 0; index < count; index++) {
+                PyObject *item = PyList_GET_ITEM(items, index);
+                if ((index != 0 && wreath_writer_byte(&writer, ',') < 0) ||
+                    statsd_write_sanitized(
+                        &writer, PyTuple_GET_ITEM(item, 0), 1) < 0 ||
+                    wreath_writer_byte(&writer, ':') < 0) goto error;
+                PyObject *tag_value = PyObject_Str(PyTuple_GET_ITEM(item, 1));
+                int written = tag_value != NULL
+                    ? statsd_write_sanitized(&writer, tag_value, 1) : -1;
+                Py_XDECREF(tag_value);
+                if (written < 0) goto error;
+            }
+        }
+    }
+    bytes = wreath_writer_finish(&writer);
+    if (bytes == NULL) goto error;
+    line = PyUnicode_DecodeUTF8(
+        PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes), "strict");
+    if (line == NULL || PyList_Append(out, line) < 0) goto error;
+    Py_DECREF(line);
+    Py_DECREF(bytes);
+    Py_XDECREF(items);
+    Py_XDECREF(merged);
+    Py_DECREF(number);
+    return 0;
+
+error:
+    Py_XDECREF(line);
+    Py_XDECREF(bytes);
+    Py_XDECREF(items);
+    Py_XDECREF(merged);
+    Py_XDECREF(number);
+    Py_XDECREF(writer.bytes);
+    return -1;
+}
+
+static PyObject *
+statsd_optional_attr(PyObject *object, const char *name, PyObject *fallback)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value != NULL) return value;
+    if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
+    PyErr_Clear();
+    return Py_NewRef(fallback);
+}
+
+static PyObject *
+statsd_int_attr(PyObject *object, const char *name)
+{
+    PyObject *value = statsd_optional_attr(object, name, Py_False);
+    if (value == NULL) return NULL;
+    PyObject *integer = PyNumber_Long(value);
+    Py_DECREF(value);
+    return integer;
+}
+
+static PyObject *
+statsd_ms_attr(PyObject *object, const char *name)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value == NULL) return NULL;
+    double number = PyFloat_AsDouble(value);
+    Py_DECREF(value);
+    return PyErr_Occurred() ? NULL : PyFloat_FromDouble(number / 1000.0);
+}
+
+static PyObject *
+statsd_reason_name(PyObject *reason)
+{
+    PyObject *name = PyObject_GetAttrString(reason, "name");
+    if (name == NULL) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
+        PyErr_Clear();
+        name = PyObject_Str(reason);
+    }
+    if (name == NULL) return NULL;
+    PyObject *lower = PyObject_CallMethod(name, "lower", NULL);
+    Py_DECREF(name);
+    return lower;
+}
+
+PyObject *
+wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *snapshot, *recorder_loss, *prefix, *static_tags;
+    PyObject *route_resolver, *state_capsule;
+    int dogstatsd;
+    if (!PyArg_ParseTuple(args, "OOUiO!OO:statsd_lines", &snapshot,
+                          &recorder_loss, &prefix, &dogstatsd,
+                          &PyDict_Type, &static_tags, &route_resolver,
+                          &state_capsule)) return NULL;
+    MetricDeltaState *state = metric_delta_state(state_capsule);
+    if (state == NULL) return NULL;
+    PyObject *out = PyList_New(0);
+    PyObject *empty_labels = PyDict_New();
+    PyObject *empty_routes = PyTuple_New(0);
+    PyObject *routes_value = empty_routes != NULL
+        ? statsd_optional_attr(snapshot, "routes", empty_routes) : NULL;
+    PyObject *routes = NULL;
+    if (routes_value != NULL) {
+        int truth = PyObject_IsTrue(routes_value);
+        routes = truth < 0 ? NULL : truth
+            ? PySequence_Tuple(routes_value) : PyTuple_New(0);
+    }
+    Py_XDECREF(routes_value);
+    Py_XDECREF(empty_routes);
+    if (out == NULL || empty_labels == NULL || routes == NULL) goto error;
+
+    Py_ssize_t route_count = PyTuple_GET_SIZE(routes);
+    for (Py_ssize_t index = 0; index < route_count; index++) {
+        PyObject *route = PyTuple_GET_ITEM(routes, index);
+        PyObject *route_id = PyObject_GetAttrString(route, "route_id");
+        PyObject *labels = route_id != NULL
+            ? statsd_route_labels(route_resolver, route_id) : NULL;
+        PyObject *value = route_id != NULL ? statsd_int_attr(route, "count") : NULL;
+        value = value != NULL ? statsd_delta(state, 1, route_id, value) : NULL;
+        if (labels == NULL || value == NULL || statsd_emit(
+                out, prefix, dogstatsd, static_tags, "http.requests",
+                value, 'c', labels) < 0) {
+            Py_XDECREF(value); Py_XDECREF(labels); Py_XDECREF(route_id); goto error;
+        }
+        Py_DECREF(value);
+        value = statsd_int_attr(route, "errors");
+        value = value != NULL ? statsd_delta(state, 2, route_id, value) : NULL;
+        if (value == NULL || statsd_emit(
+                out, prefix, dogstatsd, static_tags, "http.errors",
+                value, 'c', labels) < 0) {
+            Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
+        }
+        Py_DECREF(value);
+        value = statsd_ms_attr(route, "duration_us_sum");
+        value = value != NULL ? statsd_delta(state, 3, route_id, value) : NULL;
+        if (value == NULL || statsd_emit(
+                out, prefix, dogstatsd, static_tags, "http.duration.sum_ms",
+                value, 'c', labels) < 0) {
+            Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
+        }
+        Py_DECREF(value);
+        value = statsd_ms_attr(route, "duration_us_max");
+        if (value == NULL || statsd_emit(
+                out, prefix, dogstatsd, static_tags, "http.duration.max_ms",
+                value, 'g', labels) < 0) {
+            Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
+        }
+        Py_DECREF(value);
+        Py_DECREF(labels);
+        Py_DECREF(route_id);
+        if ((index & 63) == 63 && PyErr_CheckSignals() < 0) goto error;
+    }
+    Py_DECREF(routes); routes = NULL;
+
+    PyObject *value = statsd_int_attr(snapshot, "assembled");
+    value = value != NULL ? statsd_delta(state, 4, NULL, value) : NULL;
+    if (value == NULL || statsd_emit(
+            out, prefix, dogstatsd, static_tags, "flight.assembled",
+            value, 'c', empty_labels) < 0) {
+        Py_XDECREF(value); goto error;
+    }
+    Py_DECREF(value);
+    value = statsd_int_attr(snapshot, "pending");
+    if (value == NULL || statsd_emit(
+            out, prefix, dogstatsd, static_tags, "flight.pending",
+            value, 'g', empty_labels) < 0) {
+        Py_XDECREF(value); goto error;
+    }
+    Py_DECREF(value);
+
+    static const char *loss_fields[] = {
+        "orphan_phase", "orphan_correlation", "pending_evicted",
+        "decode_error", "export_error", "recent_evicted",
+    };
+    PyObject *loss = statsd_optional_attr(snapshot, "loss", Py_None);
+    if (loss == NULL) goto error;
+    for (int index = 0; index < 6; index++) {
+        PyObject *labels = Py_BuildValue("{s:s}", "reason", loss_fields[index]);
+        value = statsd_int_attr(loss, loss_fields[index]);
+        value = value != NULL
+            ? statsd_delta(state, (unsigned char)(10 + index), NULL, value) : NULL;
+        if (labels == NULL || value == NULL || statsd_emit(
+                out, prefix, dogstatsd, static_tags, "flight.projector_loss",
+                value, 'c', labels) < 0) {
+            Py_XDECREF(value); Py_XDECREF(labels); Py_DECREF(loss); goto error;
+        }
+        Py_DECREF(value);
+        Py_DECREF(labels);
+    }
+    Py_DECREF(loss);
+
+    if (recorder_loss != Py_None) {
+        int truth = PyObject_IsTrue(recorder_loss);
+        PyObject *items = truth > 0 ? PyMapping_Items(recorder_loss) : NULL;
+        if (truth < 0 || (truth > 0 && items == NULL)) goto error;
+        if (items != NULL) {
+            Py_ssize_t count = PyList_GET_SIZE(items);
+            for (Py_ssize_t index = 0; index < count; index++) {
+                PyObject *item = PyList_GET_ITEM(items, index);
+                PyObject *name = statsd_reason_name(PyTuple_GET_ITEM(item, 0));
+                PyObject *labels = name != NULL
+                    ? Py_BuildValue("{s:O}", "reason", name) : NULL;
+                value = labels != NULL
+                    ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
+                value = value != NULL
+                    ? statsd_delta(state, 20, name, value) : NULL;
+                if (value == NULL || statsd_emit(
+                        out, prefix, dogstatsd, static_tags,
+                        "flight.recorder_loss", value, 'c', labels) < 0) {
+                    Py_XDECREF(value); Py_XDECREF(labels); Py_XDECREF(name);
+                    Py_DECREF(items); goto error;
+                }
+                Py_DECREF(value);
+                Py_DECREF(labels);
+                Py_DECREF(name);
+            }
+            Py_DECREF(items);
+        }
+    }
+    Py_DECREF(empty_labels);
+    return out;
+
+error:
+    Py_XDECREF(routes);
+    Py_XDECREF(empty_labels);
+    Py_XDECREF(out);
+    return NULL;
+}
+
+typedef struct {
+    char *key;
+    Py_ssize_t key_length;
+    char *value;
+    Py_ssize_t value_length;
+} MetricLabel;
+
+typedef struct {
+    MetricLabel *items;
+    Py_ssize_t count;
+} MetricLabelTape;
+
+typedef struct {
+    const char *name;
+    Py_ssize_t name_length;
+    const char *unit;
+    Py_ssize_t unit_length;
+    uint64_t integer;
+    double real;
+    unsigned char is_real;
+    unsigned char owns_name;
+} EmfMetric;
+
+static void
+metric_labels_clear(MetricLabelTape *tape)
+{
+    for (Py_ssize_t index = 0; index < tape->count; index++) {
+        PyMem_Free(tape->items[index].value);
+        PyMem_Free(tape->items[index].key);
+    }
+    PyMem_Free(tape->items);
+    *tape = (MetricLabelTape){0};
+}
+
+static int
+metric_copy_unicode(PyObject *value, char **copy, Py_ssize_t *length)
+{
+    const char *data = PyUnicode_AsUTF8AndSize(value, length);
+    if (data == NULL) return -1;
+    *copy = *length != 0 ? PyMem_Malloc((size_t)*length) : NULL;
+    if (*length != 0 && *copy == NULL) return PyErr_NoMemory(), -1;
+    if (*length != 0) memcpy(*copy, data, (size_t)*length);
+    return 0;
+}
+
+static int
+metric_labels_from_mapping(PyObject *mapping, MetricLabelTape *tape)
+{
+    PyObject *items = PyMapping_Items(mapping);
+    if (items == NULL) return -1;
+    Py_ssize_t count = PyList_GET_SIZE(items);
+    if (count != 0) {
+        tape->items = PyMem_Calloc((size_t)count, sizeof(*tape->items));
+        if (tape->items == NULL) {
+            Py_DECREF(items);
+            return PyErr_NoMemory(), -1;
+        }
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PyList_GET_ITEM(items, index);
+        PyObject *key = PyTuple_GET_ITEM(item, 0);
+        PyObject *value = PyObject_Str(PyTuple_GET_ITEM(item, 1));
+        if (!PyUnicode_Check(key)) {
+            Py_XDECREF(value);
+            PyErr_SetString(PyExc_TypeError, "metric label names must be str");
+            goto error;
+        }
+        MetricLabel *label = &tape->items[index];
+        if (value == NULL || metric_copy_unicode(
+                key, &label->key, &label->key_length) < 0 ||
+            metric_copy_unicode(
+                value, &label->value, &label->value_length) < 0) {
+            Py_XDECREF(value);
+            goto error;
+        }
+        Py_DECREF(value);
+        tape->count++;
+    }
+    Py_DECREF(items);
+    return 0;
+
+error:
+    Py_DECREF(items);
+    metric_labels_clear(tape);
+    return -1;
+}
+
+static int
+metric_default_route_label(uint64_t route_id, MetricLabelTape *tape)
+{
+    tape->items = PyMem_Calloc(1, sizeof(*tape->items));
+    if (tape->items == NULL) return PyErr_NoMemory(), -1;
+    tape->items[0].key = PyMem_Malloc(8);
+    if (tape->items[0].key == NULL) {
+        metric_labels_clear(tape);
+        return PyErr_NoMemory(), -1;
+    }
+    memcpy(tape->items[0].key, "route_id", 8);
+    tape->items[0].key_length = 8;
+    tape->count = 1;
+    char reversed[20];
+    Py_ssize_t length = 0;
+    do {
+        reversed[length++] = (char)('0' + route_id % 10U);
+        route_id /= 10U;
+    } while (route_id != 0);
+    tape->items[0].value = PyMem_Malloc((size_t)length);
+    if (tape->items[0].value == NULL) {
+        metric_labels_clear(tape);
+        return PyErr_NoMemory(), -1;
+    }
+    for (Py_ssize_t index = 0; index < length; index++)
+        tape->items[0].value[index] = reversed[length - index - 1];
+    tape->items[0].value_length = length;
+    return 0;
+}
+
+static int
+metric_route_label_tape(PyObject *resolver, PyObject *route_id,
+                        uint64_t route_number, MetricLabelTape *tape)
+{
+    if (resolver == Py_None) return metric_default_route_label(route_number, tape);
+    int mapping = PyObject_HasAttrString(resolver, "get");
+    if (mapping < 0) return -1;
+    PyObject *resolved = mapping
+        ? PyObject_CallMethod(resolver, "get", "O", route_id)
+        : PyObject_CallOneArg(resolver, route_id);
+    if (resolved == NULL) return -1;
+    int truth = PyObject_IsTrue(resolved);
+    if (truth <= 0) {
+        Py_DECREF(resolved);
+        return truth < 0 ? -1 : metric_default_route_label(route_number, tape);
+    }
+    int result = metric_labels_from_mapping(resolved, tape);
+    Py_DECREF(resolved);
+    return result;
+}
+
+static int
+metric_label_equal(const MetricLabel *left, const MetricLabel *right)
+{
+    return left->key_length == right->key_length &&
+           (left->key_length == 0 || memcmp(
+               left->key, right->key, (size_t)left->key_length) == 0);
+}
+
+static const MetricLabel *
+metric_label_find(const MetricLabelTape *tape, const MetricLabel *wanted)
+{
+    for (Py_ssize_t index = 0; index < tape->count; index++)
+        if (metric_label_equal(&tape->items[index], wanted)) return &tape->items[index];
+    return NULL;
+}
+
+static int
+emf_write_json_string(WreathBytesWriter *writer, const char *data, Py_ssize_t length)
+{
+    static const char hex[] = "0123456789abcdef";
+    if (wreath_writer_byte(writer, '"') < 0) return -1;
+    Py_ssize_t start = 0;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        const char *escape = NULL;
+        char unicode[6];
+        unsigned char byte = (unsigned char)data[index];
+        if (byte == '"') escape = "\\\"";
+        else if (byte == '\\') escape = "\\\\";
+        else if (byte == '\b') escape = "\\b";
+        else if (byte == '\f') escape = "\\f";
+        else if (byte == '\n') escape = "\\n";
+        else if (byte == '\r') escape = "\\r";
+        else if (byte == '\t') escape = "\\t";
+        else if (byte < 0x20) {
+            unicode[0] = '\\'; unicode[1] = 'u'; unicode[2] = '0'; unicode[3] = '0';
+            unicode[4] = hex[byte >> 4]; unicode[5] = hex[byte & 15];
+            escape = unicode;
+        }
+        else continue;
+        if (wreath_writer_write(writer, data + start, index - start) < 0 ||
+            wreath_writer_write(writer, escape, byte < 0x20 && escape == unicode ? 6 : 2) < 0)
+            return -1;
+        start = index + 1;
+    }
+    return wreath_writer_write(writer, data + start, length - start) < 0
+        ? -1 : wreath_writer_byte(writer, '"');
+}
+
+static int
+emf_write_double(WreathBytesWriter *writer, double value)
+{
+    if (!isfinite(value)) {
+        PyErr_SetString(PyExc_ValueError, "EMF metric values must be finite");
+        return -1;
+    }
+    char *text = PyOS_double_to_string(value, 'r', 0, Py_DTSF_ADD_DOT_0, NULL);
+    if (text == NULL) return -1;
+    int result = wreath_writer_write(writer, text, (Py_ssize_t)strlen(text));
+    PyMem_Free(text);
+    return result;
+}
+
+static int
+emf_write_metric_value(WreathBytesWriter *writer, const EmfMetric *metric)
+{
+    return metric->is_real
+        ? emf_write_double(writer, metric->real)
+        : prom_write_uint64(writer, metric->integer);
+}
+
+static int
+emf_write_label_pair(WreathBytesWriter *writer, const MetricLabel *label,
+                     int *first)
+{
+    if ((!*first && wreath_writer_byte(writer, ',') < 0) ||
+        emf_write_json_string(writer, label->key, label->key_length) < 0 ||
+        wreath_writer_byte(writer, ':') < 0 ||
+        emf_write_json_string(writer, label->value, label->value_length) < 0)
+        return -1;
+    *first = 0;
+    return 0;
+}
+
+static int
+emf_write_dimensions(WreathBytesWriter *writer, const MetricLabelTape *base,
+                     const MetricLabelTape *route, int names_only)
+{
+    int first = 1;
+    for (Py_ssize_t index = 0; index < base->count; index++) {
+        const MetricLabel *label = &base->items[index];
+        const MetricLabel *override = route != NULL
+            ? metric_label_find(route, label) : NULL;
+        const MetricLabel *chosen = override != NULL ? override : label;
+        if ((!first && wreath_writer_byte(writer, ',') < 0) ||
+            emf_write_json_string(writer, chosen->key, chosen->key_length) < 0 ||
+            (!names_only && (wreath_writer_byte(writer, ':') < 0 ||
+                emf_write_json_string(
+                    writer, chosen->value, chosen->value_length) < 0))) return -1;
+        first = 0;
+    }
+    if (route != NULL) {
+        for (Py_ssize_t index = 0; index < route->count; index++) {
+            const MetricLabel *label = &route->items[index];
+            if (metric_label_find(base, label) != NULL) continue;
+            if ((!first && wreath_writer_byte(writer, ',') < 0) ||
+                emf_write_json_string(writer, label->key, label->key_length) < 0 ||
+                (!names_only && (wreath_writer_byte(writer, ':') < 0 ||
+                    emf_write_json_string(
+                        writer, label->value, label->value_length) < 0))) return -1;
+            first = 0;
+        }
+    }
+    return 0;
+}
+
+static int
+emf_write_document(WreathBytesWriter *writer, const MetricLabelTape *base,
+                   const MetricLabelTape *route, const EmfMetric *metrics,
+                   Py_ssize_t metric_count, const char *namespace,
+                   Py_ssize_t namespace_length, uint64_t timestamp)
+{
+    if (writer->len != 0 && wreath_writer_byte(writer, '\n') < 0) return -1;
+    if (wreath_writer_byte(writer, '{') < 0) return -1;
+    int first = 1;
+    for (Py_ssize_t index = 0; index < base->count; index++) {
+        const MetricLabel *label = &base->items[index];
+        const MetricLabel *override = route != NULL
+            ? metric_label_find(route, label) : NULL;
+        if (emf_write_label_pair(
+                writer, override != NULL ? override : label, &first) < 0) return -1;
+    }
+    if (route != NULL) {
+        for (Py_ssize_t index = 0; index < route->count; index++) {
+            const MetricLabel *label = &route->items[index];
+            if (metric_label_find(base, label) == NULL &&
+                emf_write_label_pair(writer, label, &first) < 0) return -1;
+        }
+    }
+    for (Py_ssize_t index = 0; index < metric_count; index++) {
+        if ((!first && wreath_writer_byte(writer, ',') < 0) ||
+            emf_write_json_string(
+                writer, metrics[index].name, metrics[index].name_length) < 0 ||
+            wreath_writer_byte(writer, ':') < 0 ||
+            emf_write_metric_value(writer, &metrics[index]) < 0) return -1;
+        first = 0;
+    }
+    if ((!first && wreath_writer_byte(writer, ',') < 0) ||
+        wreath_writer_write(
+            writer, "\"_aws\":{\"Timestamp\":",
+            (Py_ssize_t)(sizeof("\"_aws\":{\"Timestamp\":") - 1)) < 0 ||
+        prom_write_uint64(writer, timestamp) < 0 ||
+        wreath_writer_write(
+            writer, ",\"CloudWatchMetrics\":[{\"Namespace\":",
+            (Py_ssize_t)(sizeof(",\"CloudWatchMetrics\":[{\"Namespace\":") - 1)) < 0 ||
+        emf_write_json_string(writer, namespace, namespace_length) < 0 ||
+        wreath_writer_write(
+            writer, ",\"Dimensions\":[[",
+            (Py_ssize_t)(sizeof(",\"Dimensions\":[[") - 1)) < 0 ||
+        emf_write_dimensions(writer, base, route, 1) < 0 ||
+        wreath_writer_write(
+            writer, "]],\"Metrics\":[",
+            (Py_ssize_t)(sizeof("]],\"Metrics\":[") - 1)) < 0) return -1;
+    for (Py_ssize_t index = 0; index < metric_count; index++) {
+        if ((index != 0 && wreath_writer_byte(writer, ',') < 0) ||
+            wreath_writer_write(
+                writer, "{\"Name\":",
+                (Py_ssize_t)(sizeof("{\"Name\":") - 1)) < 0 ||
+            emf_write_json_string(
+                writer, metrics[index].name, metrics[index].name_length) < 0 ||
+            wreath_writer_write(
+                writer, ",\"Unit\":",
+                (Py_ssize_t)(sizeof(",\"Unit\":") - 1)) < 0 ||
+            emf_write_json_string(
+                writer, metrics[index].unit, metrics[index].unit_length) < 0 ||
+            wreath_writer_byte(writer, '}') < 0) return -1;
+    }
+    return wreath_writer_write(
+        writer, "]}]}}", (Py_ssize_t)(sizeof("]}]}}") - 1));
+}
+
+static int
+metric_u64_attr(PyObject *object, const char *name, int optional, uint64_t *result)
+{
+    PyObject *value = optional
+        ? statsd_optional_attr(object, name, Py_False)
+        : PyObject_GetAttrString(object, name);
+    if (value == NULL) return -1;
+    PyObject *integer = PyNumber_Long(value);
+    Py_DECREF(value);
+    if (integer == NULL) return -1;
+    *result = PyLong_AsUnsignedLongLong(integer);
+    Py_DECREF(integer);
+    return PyErr_Occurred() ? -1 : 0;
+}
+
+static int
+metric_double_attr(PyObject *object, const char *name, double *result)
+{
+    PyObject *value = PyObject_GetAttrString(object, name);
+    if (value == NULL) return -1;
+    *result = PyFloat_AsDouble(value);
+    Py_DECREF(value);
+    return PyErr_Occurred() ? -1 : 0;
+}
+
+static void
+emf_metrics_clear(EmfMetric *metrics, Py_ssize_t count)
+{
+    for (Py_ssize_t index = 0; index < count; index++)
+        if (metrics[index].owns_name) PyMem_Free((void *)metrics[index].name);
+}
+
+static int
+emf_dynamic_metric(EmfMetric *metric, const char *prefix,
+                   PyObject *suffix, uint64_t value)
+{
+    Py_ssize_t suffix_length;
+    const char *suffix_data = PyUnicode_AsUTF8AndSize(suffix, &suffix_length);
+    Py_ssize_t prefix_length = (Py_ssize_t)strlen(prefix);
+    if (suffix_data == NULL || suffix_length > PY_SSIZE_T_MAX - prefix_length)
+        return suffix_data == NULL ? -1 : (PyErr_NoMemory(), -1);
+    char *name = PyMem_Malloc((size_t)(prefix_length + suffix_length));
+    if (name == NULL) return PyErr_NoMemory(), -1;
+    memcpy(name, prefix, (size_t)prefix_length);
+    memcpy(name + prefix_length, suffix_data, (size_t)suffix_length);
+    *metric = (EmfMetric){
+        name, prefix_length + suffix_length, "Count", 5, value, 0.0, 0, 1,
+    };
+    return 0;
+}
+
+PyObject *
+wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *snapshot, *recorder_loss, *namespace_object, *dimensions_object;
+    PyObject *resolver, *state_capsule;
+    unsigned long long timestamp;
+    int cumulative;
+    Py_ssize_t max_metrics;
+    if (!PyArg_ParseTuple(
+            args, "OKOUO!OiOn:emf_render", &snapshot, &timestamp,
+            &recorder_loss, &namespace_object, &PyDict_Type, &dimensions_object,
+            &resolver, &cumulative, &state_capsule, &max_metrics)) return NULL;
+    MetricDeltaState *state = metric_delta_state(state_capsule);
+    Py_ssize_t namespace_length;
+    const char *namespace = PyUnicode_AsUTF8AndSize(
+        namespace_object, &namespace_length);
+    MetricLabelTape base = {0};
+    WreathBytesWriter writer = {0};
+    if (state == NULL || namespace == NULL || max_metrics < 8 ||
+        metric_labels_from_mapping(dimensions_object, &base) < 0 ||
+        wreath_writer_init(&writer, 4096) < 0) goto error;
+
+    PyObject *empty = PyTuple_New(0);
+    PyObject *routes_object = empty != NULL
+        ? statsd_optional_attr(snapshot, "routes", empty) : NULL;
+    PyObject *iterator = NULL;
+    if (routes_object != NULL) {
+        int truth = PyObject_IsTrue(routes_object);
+        iterator = truth < 0 ? NULL : PyObject_GetIter(truth ? routes_object : empty);
+    }
+    Py_XDECREF(routes_object);
+    Py_XDECREF(empty);
+    if (iterator == NULL) goto error;
+    PyObject *route;
+    Py_ssize_t route_index = 0;
+    while ((route = PyIter_Next(iterator)) != NULL) {
+        PyObject *route_id_object = PyObject_GetAttrString(route, "route_id");
+        uint64_t route_id, count, errors;
+        double duration_sum, duration_max;
+        MetricLabelTape labels = {0};
+        if (route_id_object == NULL ||
+            (route_id = PyLong_AsUnsignedLongLong(route_id_object), PyErr_Occurred()) ||
+            metric_route_label_tape(
+                resolver, route_id_object, route_id, &labels) < 0 ||
+            metric_u64_attr(route, "count", 0, &count) < 0 ||
+            metric_u64_attr(route, "errors", 0, &errors) < 0 ||
+            metric_double_attr(route, "duration_us_sum", &duration_sum) < 0 ||
+            metric_double_attr(route, "duration_us_max", &duration_max) < 0) {
+            metric_labels_clear(&labels);
+            Py_XDECREF(route_id_object);
+            Py_DECREF(route);
+            Py_DECREF(iterator);
+            goto error;
+        }
+        Py_DECREF(route_id_object);
+        Py_DECREF(route);
+        uint64_t count_value = count, error_value = errors;
+        double sum_value = duration_sum / 1000.0;
+        if (!cumulative && (
+                metric_delta_u64(state, 1, route_id, NULL, 0, count, &count_value) < 0 ||
+                metric_delta_u64(state, 2, route_id, NULL, 0, errors, &error_value) < 0 ||
+                metric_delta_double(state, 3, route_id, sum_value, &sum_value) < 0)) {
+            metric_labels_clear(&labels);
+            Py_DECREF(iterator);
+            goto error;
+        }
+        EmfMetric metrics[4] = {
+            {"Requests", 8, "Count", 5, count_value, 0.0, 0, 0},
+            {"Errors", 6, "Count", 5, error_value, 0.0, 0, 0},
+            {"DurationSum", 11, "Milliseconds", 12, 0, sum_value, 1, 0},
+            {"DurationMax", 11, "Milliseconds", 12, 0, duration_max / 1000.0, 1, 0},
+        };
+        if (emf_write_document(
+                &writer, &base, &labels, metrics, 4,
+                namespace, namespace_length, timestamp) < 0) {
+            metric_labels_clear(&labels);
+            Py_DECREF(iterator);
+            goto error;
+        }
+        metric_labels_clear(&labels);
+        if ((route_index++ & 63) == 63 && PyErr_CheckSignals() < 0) {
+            Py_DECREF(iterator);
+            goto error;
+        }
+    }
+    Py_DECREF(iterator);
+    if (PyErr_Occurred()) goto error;
+
+    EmfMetric *global = PyMem_Calloc((size_t)max_metrics, sizeof(*global));
+    if (global == NULL) { PyErr_NoMemory(); goto error; }
+    Py_ssize_t global_count = 0;
+    uint64_t assembled, pending;
+    if (metric_u64_attr(snapshot, "assembled", 1, &assembled) < 0 ||
+        metric_u64_attr(snapshot, "pending", 1, &pending) < 0) goto global_error;
+    uint64_t assembled_value = assembled;
+    if (!cumulative && metric_delta_u64(
+            state, 4, 0, NULL, 0, assembled, &assembled_value) < 0) goto global_error;
+    global[global_count++] = (EmfMetric){
+        "TracesAssembled", 15, "Count", 5, assembled_value, 0.0, 0, 0,
+    };
+    global[global_count++] = (EmfMetric){
+        "Pending", 7, "Count", 5, pending, 0.0, 0, 0,
+    };
+    static const char *loss_fields[] = {
+        "orphan_phase", "orphan_correlation", "pending_evicted",
+        "decode_error", "export_error", "recent_evicted",
+    };
+    PyObject *loss = statsd_optional_attr(snapshot, "loss", Py_None);
+    if (loss == NULL) goto global_error;
+    for (int index = 0; index < 6; index++) {
+        uint64_t value, delta;
+        PyObject *suffix = PyUnicode_FromString(loss_fields[index]);
+        if (metric_u64_attr(loss, loss_fields[index], 1, &value) < 0 ||
+            (!cumulative && metric_delta_u64(
+                state, (unsigned char)(10 + index), 0, NULL, 0, value, &delta) < 0) ||
+            suffix == NULL || emf_dynamic_metric(
+                &global[global_count], "ProjectorLoss_", suffix,
+                cumulative ? value : delta) < 0) {
+            Py_XDECREF(suffix);
+            Py_DECREF(loss);
+            goto global_error;
+        }
+        Py_DECREF(suffix);
+        global_count++;
+    }
+    Py_DECREF(loss);
+    if (recorder_loss != Py_None && PyDict_Check(recorder_loss)) {
+        Py_ssize_t position = 0;
+        PyObject *reason, *count_object;
+        while (global_count < max_metrics && PyDict_Next(
+                recorder_loss, &position, &reason, &count_object)) {
+            PyObject *name = statsd_reason_name(reason);
+            PyObject *integer = name != NULL ? PyNumber_Long(count_object) : NULL;
+            uint64_t value = integer != NULL
+                ? PyLong_AsUnsignedLongLong(integer) : 0;
+            Py_XDECREF(integer);
+            Py_ssize_t name_length = 0;
+            const char *name_data = name != NULL
+                ? PyUnicode_AsUTF8AndSize(name, &name_length) : NULL;
+            uint64_t delta;
+            if (name_data == NULL || PyErr_Occurred() ||
+                (!cumulative && metric_delta_u64(
+                    state, 20, 0, name_data, name_length, value, &delta) < 0) ||
+                emf_dynamic_metric(
+                    &global[global_count], "RecorderLoss_", name,
+                    cumulative ? value : delta) < 0) {
+                Py_XDECREF(name);
+                goto global_error;
+            }
+            Py_DECREF(name);
+            global_count++;
+        }
+    }
+    if (emf_write_document(
+            &writer, &base, NULL, global, global_count,
+            namespace, namespace_length, timestamp) < 0) goto global_error;
+    emf_metrics_clear(global, global_count);
+    PyMem_Free(global);
+    metric_labels_clear(&base);
+    PyObject *bytes = wreath_writer_finish(&writer);
+    if (bytes == NULL) return NULL;
+    PyObject *result = PyUnicode_DecodeUTF8(
+        PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes), "strict");
+    Py_DECREF(bytes);
+    return result;
+
+global_error:
+    emf_metrics_clear(global, global_count);
+    PyMem_Free(global);
+error:
+    metric_labels_clear(&base);
+    Py_XDECREF(writer.bytes);
     return NULL;
 }

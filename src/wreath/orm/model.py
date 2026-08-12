@@ -428,34 +428,35 @@ class Model(metaclass=ModelMeta):
         columns = type(self).__wreath_columns__
         if not columns:
             raise TypeError(f"{type(self).__name__} is not a mapped model")
-        unknown = values.keys() - type(self).__wreath_column_map__.keys()
-        if unknown:
+        initialized = self._orm_initialize(values)
+        if initialized is None:
+            unknown = values.keys() - type(self).__wreath_column_map__.keys()
             raise TypeError(
                 f"{type(self).__name__} has no column(s) "
                 f"{', '.join(sorted(unknown))}"
             )
-        for spec in columns:
-            if spec.python_name in values:
-                self._orm_set(spec.index, values[spec.python_name])
-                continue
-            default = resolve_default(spec)
-            if default is not MISSING:
-                self._orm_set(spec.index, default)
-            elif not (
-                spec.nullable
-                or spec.server_default
-                or spec.primary_key
-                # A generated column has no value to supply: PostgreSQL computes
-                # it from other columns of the same row, and an INSERT naming one
-                # is an error. It stays unloaded, which is exactly what puts it in
-                # the statement's RETURNING list.
-                or spec.generated
-            ):
-                # Anything else would insert a NULL the column forbids.
-                raise TypeError(
-                    f"{type(self).__name__}.{spec.python_name} is not nullable and has "
-                    "no default; pass it to the constructor"
-                )
+        if not initialized:
+            for spec in columns:
+                if self._orm_is_loaded(spec.index):
+                    continue
+                default = resolve_default(spec)
+                if default is not MISSING:
+                    self._orm_set(spec.index, default)
+                elif not (
+                    spec.nullable
+                    or spec.server_default
+                    or spec.primary_key
+                    # A generated column has no value to supply: PostgreSQL computes
+                    # it from other columns of the same row, and an INSERT naming one
+                    # is an error. It stays unloaded, which is exactly what puts it in
+                    # the statement's RETURNING list.
+                    or spec.generated
+                ):
+                    # Anything else would insert a NULL the column forbids.
+                    raise TypeError(
+                        f"{type(self).__name__}.{spec.python_name} is not nullable and has "
+                        "no default; pass it to the constructor"
+                    )
         # Per-field checks already ran, fused into each assignment above. A rule
         # spans fields, so it can only run now that they are all in. Hydration
         # goes through _orm_new() and never lands here, which is deliberate: a
@@ -474,6 +475,10 @@ class Model(metaclass=ModelMeta):
     @classmethod
     def _orm_new(cls) -> Any:
         """Allocate an empty instance, bypassing `__init__`."""
+        raise NotImplementedError
+
+    def _orm_initialize(self, values: dict[str, Any]) -> bool | None:
+        """Fill supplied constructor fields; report complete, incomplete, or unknown."""
         raise NotImplementedError
 
     def _orm_get(self, index: int) -> Any:

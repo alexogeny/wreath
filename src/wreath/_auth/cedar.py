@@ -728,6 +728,133 @@ class CedarAuthorizer:
         engine: Any = self._engine
         return engine.policies
 
+    async def _query_base(
+        self, request: Request, identity: Identity, action_name: str
+    ) -> tuple[object, object, object, dict[str, object]]:
+        """Map the resource-independent half of one or more engine queries."""
+        principal = await _resolve(self._principal(identity))
+        action = await _resolve(self._action(action_name, request))
+        entities = await _resolve(self._entities(request))
+        context = dict(await _resolve(self._context(request)))
+        action_attributes = getattr(
+            self._engine, "context_attributes_for_action", None
+        )
+        needed = action_attributes(action) if callable(action_attributes) else None
+        needs_now = self._reads_now is not False if needed is None else "now" in needed
+        if needs_now:
+            context["now"] = _request_now(request, self._clock)
+        for fact in self._facts:
+            context[fact.attribute] = (
+                EMPTY
+                if needed is not None and fact.attribute not in needed
+                else fact.for_request(request)
+            )
+        context["delegated"] = False
+        return principal, action, entities, context
+
+    async def _authorize_resources(
+        self,
+        request: Request,
+        action_name: str,
+        resources: tuple[object, ...],
+        *,
+        stop_on_denied: bool,
+    ) -> tuple[AuthorizationDecision, ...]:
+        """Evaluate precompiled resources materialized at an internal boundary.
+
+        GraphQL owns its selected resources and decision state natively. This
+        method is where those immutable entity ids become Python objects for a
+        configurable authorizer; it deliberately takes data rather than a
+        GraphQL declaration or schema object.
+        """
+        if not resources:
+            return ()
+        identity = request.identity
+        if identity is None:
+            denied = AuthorizationDecision(False, "anonymous")
+            return (denied,) if stop_on_denied else (denied,) * len(resources)
+        narrowing = getattr(identity, "narrowing", None)
+        if narrowing is not None:
+            decisions: list[AuthorizationDecision] = []
+            for resource in resources:
+                decision = await self.authorize(
+                    request, PolicyRequirement(action_name, resource)
+                )
+                decisions.append(decision)
+                if stop_on_denied and not decision.allowed:
+                    break
+            return tuple(decisions)
+
+        principal, action, base_entities, context = await self._query_base(
+            request, identity, action_name
+        )
+        if (
+            self._resource is _default_resource
+            and self._resource_entities is None
+            and not any(isinstance(resource, CedarEntity) for resource in resources)
+        ):
+            authorize_many = getattr(self._engine, "_is_authorized_many", None)
+            if callable(authorize_many):
+                results = await _resolve(authorize_many(
+                    principal=principal,
+                    action=action,
+                    resources=resources,
+                    context=context,
+                    entities=base_entities,
+                    stop_on_denied=stop_on_denied,
+                ))
+                normalize = _core.normalize_authorization_decision
+                return tuple(
+                    cast(AuthorizationDecision, normalize(result, AuthorizationDecision))
+                    for result in results
+                )
+        decisions = []
+        for raw_resource in resources:
+            resource_entity = raw_resource if isinstance(raw_resource, CedarEntity) else None
+            if resource_entity is not None:
+                raw_resource = resource_entity.uid
+            resource = await _resolve(self._resource(raw_resource, request))
+            entities = _with_entities(base_entities, resource_entity)
+            if self._resource_entities is not None:
+                additions = await _resolve(self._resource_entities(resource, request))
+                entities = _with_entities(entities, additions)
+            decision = await self._evaluate(
+                principal, action, resource, context, entities
+            )
+            decisions.append(decision)
+            if stop_on_denied and not decision.allowed:
+                break
+        return tuple(decisions)
+
+    async def _authorize_many(
+        self,
+        request: Request,
+        requirements: tuple[PolicyRequirement, ...],
+        *,
+        stop_on_denied: bool,
+    ) -> tuple[AuthorizationDecision, ...]:
+        """Evaluate one action over several resources with one mapping pass."""
+        if not requirements:
+            return ()
+        action_name = requirements[0].action
+        if (
+            any(requirement.action != action_name for requirement in requirements)
+            or any(callable(requirement.resource) for requirement in requirements)
+        ):
+            decisions: list[AuthorizationDecision] = []
+            for requirement in requirements:
+                decision = await self.authorize(request, requirement)
+                decisions.append(decision)
+                if stop_on_denied and not decision.allowed:
+                    break
+            return tuple(decisions)
+        return await self._authorize_resources(
+            request,
+            action_name,
+            tuple(requirement.resource for requirement in requirements),
+            stop_on_denied=stop_on_denied,
+        )
+
     async def authorize(
         self, request: Request, requirement: PolicyRequirement
     ) -> AuthorizationDecision:
@@ -763,52 +890,14 @@ class CedarAuthorizer:
         resource_entity = raw_resource if isinstance(raw_resource, CedarEntity) else None
         if resource_entity is not None:
             raw_resource = resource_entity.uid
-        principal = await _resolve(self._principal(identity))
-        action = await _resolve(self._action(requirement.action, request))
         resource = await _resolve(self._resource(raw_resource, request))
-        entities = await _resolve(self._entities(request))
+        principal, action, entities, context = await self._query_base(
+            request, identity, requirement.action
+        )
         entities = _with_entities(entities, resource_entity)
         if self._resource_entities is not None:
             additions = await _resolve(self._resource_entities(resource, request))
             entities = _with_entities(entities, additions)
-        context = dict(await _resolve(self._context(request)))
-        # Time is a scalar fact rather than a Cedar dialect extension: Unix
-        # seconds compare with the engine's ordinary i64 operators, while
-        # Wreath's temporal types own parsing and timezone correctness at the
-        # boundary. Built-in policies that do not read it pay no clock call;
-        # an outside engine that cannot expose `reads_context` gets the complete
-        # context rather than a guessed short one.
-        if self._reads_now is not False:
-            context["now"] = _request_now(request, self._clock)
-        # The authorizer owns this key, and supplies it whether or not a
-        # provider was configured. An *absent* `flags` is not a neutral
-        # default: `forbid(...) unless { context.flags.contains("bypass") }`
-        # against a context with no `flags` at all evaluates to allowed --
-        # the forbid is skipped rather than standing -- so an application that
-        # never configured a provider, or a custom context mapper that forgot
-        # the key, would silently stop forbidding. An empty set denies in both
-        # the `when` and the `unless` shape, which is the only fail-closed
-        # answer. (`second_factor_age` above reaches the opposite conclusion
-        # for the opposite reason: it is guarded by `has`, and a *number* has
-        # no value that fails closed in both shapes.)
-        context["flags"] = self._facts[0].for_request(request)
-        # Supplied unconditionally for the reason `flags` is, and verified for
-        # this key rather than assumed to transfer: against a context with no
-        # `regions` at all, `forbid(...) unless { context.regions.contains(x) }`
-        # evaluates to *allowed* -- the forbid is skipped rather than standing,
-        # so an application that never configured regions, or a custom context
-        # mapper that dropped the key, would silently stop geofencing. An empty
-        # set denies in both the `when` and the `unless` shape.
-        context["regions"] = self._facts[1].for_request(request)
-        for fact in self._facts[2:]:
-            context[fact.attribute] = fact.for_request(request)
-        # Supplied as a *bool* rather than left absent, for the reason the empty
-        # sets above are supplied: `forbid(...) unless { context.delegated }`
-        # against a context with no `delegated` key skips the forbid rather than
-        # standing it, so an agent would escape a rule written to catch it. A
-        # literal `false` denies in both the `when` and the `unless` shape.
-        context["delegated"] = False
-
         # Pass one: the delegating principal's own authority, evaluated exactly
         # as if they had made this request themselves.
         decision = await self._evaluate(principal, action, resource, context, entities)

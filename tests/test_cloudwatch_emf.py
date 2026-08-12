@@ -120,6 +120,42 @@ def test_cumulative_mode():
     assert again[0]["Requests"] == 5  # absolute, not a delta
 
 
+def test_route_dimension_resolvers_override_static_dimensions():
+    snap = _Snap(1, 0, [_Route(3, 2, 0, 500.0, 250.0)], _Loss())
+    bridge = emf.EmfBridge(
+        _Src(snap),
+        dimensions={"Service": "api", "Region": "static"},
+        route_labels={3: {"Region": "route", "Endpoint": 17}},
+    )
+
+    route = bridge.blobs(snap, timestamp_ms=99)[0]
+
+    assert route["Region"] == "route"
+    assert route["Endpoint"] == "17"
+    assert route["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [
+        ["Service", "Region", "Endpoint"]
+    ]
+
+
+def test_recorder_loss_names_reset_and_obey_the_metric_cap():
+    class Reason:
+        def __init__(self, name):
+            self.name = name
+
+    snap = _Snap(0, 0, [], _Loss())
+    bridge = emf.EmfBridge(_Src(snap))
+    reasons = {Reason(f"REASON_{index}"): index for index in range(110)}
+
+    first = bridge.blobs(snap, timestamp_ms=1, recorder_loss=reasons)[0]
+    definitions = first["_aws"]["CloudWatchMetrics"][0]["Metrics"]
+    assert len(definitions) == emf._MAX_METRICS_PER_BLOB
+    assert first["RecorderLoss_reason_1"] == 1
+
+    reason = next(item for item in reasons if item.name == "REASON_1")
+    second = bridge.blobs(snap, timestamp_ms=2, recorder_loss={reason: 0})[0]
+    assert second["RecorderLoss_reason_1"] == 0
+
+
 def test_render_emits_valid_json_lines():
     snap = _Snap(1, 0, [_Route(3, 2, 0, 500.0, 250.0)], _Loss())
     text = emf.EmfBridge(_Src(snap)).render(timestamp_ms=99)

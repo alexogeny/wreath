@@ -88,6 +88,14 @@ def test_the_plan_typechecks_the_generated_package() -> None:
     assert "uv run ty check" in plan("shop").commands()
 
 
+def test_the_generated_github_pipeline_uses_node24_actions() -> None:
+    workflow = render(plan("shop"), "github")[".github/workflows/ci.yml"]
+    assert "uses: actions/checkout@v7" in workflow
+    assert "uses: astral-sh/setup-uv@v9.0.0" in workflow
+    assert "uses: actions/checkout@v4" not in workflow
+    assert "uses: astral-sh/setup-uv@v5" not in workflow
+
+
 def test_the_env_file_is_copied_before_anything_imports_the_application() -> None:
     """The generated `config.py` reads `.env` at import, and with `--database
     postgres` the DSN has no default -- so a job that imports before copying

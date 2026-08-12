@@ -867,6 +867,61 @@ storage_orm_set(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     Py_RETURN_NONE;
 }
 
+/* Fill constructor keyword values in one C loop.
+
+   The fixed storage type already owns descriptor lookup, coercion and cell
+   writes, but Model.__init__ previously walked every declared column in
+   Python and called `_orm_set` once per supplied value. Most request-created
+   DTO/model objects supply every field, so that loop materialised indices and
+   crossed the extension boundary N times only to arrive back here.
+
+   Return True when every column was supplied, False when Python must resolve
+   defaults/required omissions, and None for an unknown name. Unknowns are
+   preflighted before the first write so the Python error path can name the
+   complete offending set without leaving a partially initialized object. */
+static PyObject *
+storage_orm_initialize(PyObject *self, PyObject *values)
+{
+    WreathPgModelLayout *layout = require_layout(self);
+    PyObject *dict;
+    Py_ssize_t position = 0;
+    PyObject *name;
+    PyObject *value;
+    if (layout == NULL) return NULL;
+    if (!PyDict_CheckExact(values)) {
+        PyErr_SetString(PyExc_TypeError, "model constructor values must be an exact dict");
+        return NULL;
+    }
+    dict = PyType_GetDict(Py_TYPE(self));
+    if (dict == NULL) return NULL;
+
+    while (PyDict_Next(values, &position, &name, &value)) {
+        PyObject *descriptor = PyDict_GetItemWithError(dict, name);
+        if (descriptor == NULL) {
+            Py_DECREF(dict);
+            if (PyErr_Occurred()) return NULL;
+            Py_RETURN_NONE;
+        }
+        if (!Py_IS_TYPE(descriptor, WreathPgColumnDescriptorType)) {
+            Py_DECREF(dict);
+            Py_RETURN_NONE;
+        }
+    }
+
+    position = 0;
+    while (PyDict_Next(values, &position, &name, &value)) {
+        PyObject *descriptor = PyDict_GetItemWithError(dict, name);
+        if (descriptor == NULL ||
+            column_store(
+                self, (WreathPgColumnDescriptor *)descriptor, value) < 0) {
+            Py_DECREF(dict);
+            return NULL;
+        }
+    }
+    Py_DECREF(dict);
+    return PyBool_FromLong(PyDict_GET_SIZE(values) == layout->field_count);
+}
+
 static PyObject *
 bit_query(PyObject *self, PyObject *arg, int which)
 {
@@ -1187,6 +1242,7 @@ storage_layout(PyObject *cls, void *closure)
 
 static PyMethodDef storage_methods[] = {
     {"_orm_new", storage_orm_new, METH_NOARGS | METH_CLASS, NULL},
+    {"_orm_initialize", storage_orm_initialize, METH_O, NULL},
     {"_orm_get", storage_orm_get, METH_O, NULL},
     {"_orm_set", (PyCFunction)(void(*)(void))storage_orm_set, METH_FASTCALL, NULL},
     {"_orm_set_loaded", (PyCFunction)(void(*)(void))storage_orm_set_loaded, METH_FASTCALL, NULL},

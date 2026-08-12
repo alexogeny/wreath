@@ -124,6 +124,28 @@ def test_dogstatsd_tags():
     assert loss.startswith("wreath.flight.projector_loss:3|c|#") and "env:prod" in loss
 
 
+def test_route_label_resolvers_and_tag_sanitization():
+    snap = _Snap(1, 0, [_Route(7, 5, 0, 0.0, 0.0)], _Loss())
+    mapping = {7: {"route:name": "café west", "env": "route"}}
+    b = statsd.StatsDBridge(
+        _Src(snap), prefix="my service", dogstatsd=True,
+        tags={"env": "static", "region": "ap:south"}, route_labels=mapping,
+    )
+
+    request = next(line for line in b._lines(snap) if ".http.requests:" in line)
+    assert request.startswith("my_service.http.requests:5|c|#")
+    assert request.endswith("env:route,region:ap_south,route_name:café_west")
+
+    callable_bridge = statsd.StatsDBridge(
+        _Src(snap), route_labels=lambda route_id: {"endpoint": f"route {route_id}"}
+    )
+    request = next(
+        line for line in callable_bridge._lines(snap)
+        if ".http.requests." in line
+    )
+    assert request == "wreath.http.requests.route_7:5|c"
+
+
 def test_recorder_loss_reason_and_counter_reset():
     b = statsd.StatsDBridge(_Src(_Snap(0, 0, [], _Loss())), dogstatsd=True)
     snap = _Snap(0, 0, [], _Loss())

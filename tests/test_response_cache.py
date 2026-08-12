@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.response import Response
-from wreath.response_cache import cached
+from wreath.response_cache import cache_key_for, cached
 
 
 class _Req:
@@ -268,6 +268,43 @@ async def test_query_params_builds_a_key_from_the_named_parameters_only() -> Non
     assert calls == 1
     await handler(_Req(query=b"a=2&b=1"))
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    ("declared", "query"),
+    [
+        (("q",), b"q=first&q=second"),
+        (("q", "missing"), b"q=hello+world"),
+        (("empty",), b"empty="),
+        (("unicode",), b"unicode=na%C3%AFve"),
+        (("reserved",), b"reserved=%2F%3F%26%3D%2B"),
+        (("bad",), b"bad=%FF"),
+        (("raw",), b"raw=\xff"),
+        (("space name",), b"space+name=a+b"),
+        ((), b"ignored=1"),
+    ],
+)
+async def test_declared_query_key_matches_stdlib_form_semantics(
+    declared: tuple[str, ...], query: bytes
+) -> None:
+    from urllib.parse import parse_qsl, urlencode
+
+    request = _Req(method="PATCH", path="/search", query=query)
+    parsed: dict[str, str] = {}
+    for raw_name, raw_value in parse_qsl(query, keep_blank_values=True):
+        name = raw_name.decode("utf-8", "replace")
+        parsed.setdefault(name, raw_value.decode("utf-8", "replace"))
+    selected = [(name, parsed[name]) for name in declared if name in parsed]
+    suffix = urlencode(selected)
+    expected = f"PATCH /search?{suffix}" if suffix else "PATCH /search"
+    assert cache_key_for(declared)(request) == expected
+
+
+async def test_declared_query_names_are_refused_when_declared() -> None:
+    with pytest.raises(
+        TypeError, match=r"cache_key_for names\[1\] must be str, got int"
+    ):
+        cache_key_for(("valid", 7))  # ty: ignore[invalid-argument-type]
 
 
 async def test_concurrent_callers_of_a_cold_key_share_one_computation() -> None:

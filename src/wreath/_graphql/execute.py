@@ -112,14 +112,16 @@ class _Run:
     """One execution. Carries the per-request caches so they cannot leak."""
 
     __slots__ = (
-        "_action", "_authorizer", "_decisions", "_document", "_max_page_size",
-        "_on_denied", "_request", "_schema", "_session", "_variables",
+        "_action", "_authorizer", "_document", "_max_page_size", "_on_denied",
+        "_policy_schema", "_policy_state", "_request", "_schema", "_session",
+        "_variables",
     )
 
     def __init__(
         self, schema: Schema, document: Document, session: Any, *,
         variables: dict[str, Any], authorizer: Any, request: Any,
         max_page_size: int, on_denied: str, action: str,
+        policy_schema: Any,
     ) -> None:
         self._action = action
         self._schema = schema
@@ -130,16 +132,33 @@ class _Run:
         self._request = request
         self._max_page_size = max_page_size
         self._on_denied = on_denied
-        # Authorization is asked once per resource per request: the same field
-        # under three aliases, or on three levels, is one decision.
-        self._decisions: dict[str, bool] = {}
+        if authorizer is not None and policy_schema is None:
+            policies = tuple(
+                schema_field.policy
+                for object_type in schema.types.values()
+                for schema_field in object_type.fields.values()
+            ) + tuple(root.policy for root in schema.roots.values()) + tuple(
+                root.policy for root in schema.mutations.values()
+            )
+            policy_schema = _core.graphql_policy_schema(policies, policy_resource)
+        self._policy_schema = policy_schema
+        # Authorization is asked once per resource per request. The tri-state
+        # array is native-owned and belongs to this execution, so aliases and
+        # repeated levels share decisions without a Python dict or global cache.
+        self._policy_state = (
+            _core.graphql_policy_state(policy_schema)
+            if self._authorizer is not None
+            else None
+        )
 
     async def _allowed(self, resource: str, path: tuple[str, ...]) -> bool:
         if self._authorizer is None:
             return True
-        cached = self._decisions.get(resource)
-        if cached is not None:
-            return cached
+        cached = _core.graphql_policy_cached(
+            self._policy_schema, self._policy_state, resource
+        )
+        if cached >= 0:
+            return bool(cached)
         # An `AuthorizationProvider` is asked with a `PolicyRequirement`, never
         # with a bare resource: that is the protocol every route already uses,
         # and handing the shipped `CedarAuthorizer` a `str` raised
@@ -148,16 +167,97 @@ class _Run:
         # engine reads `User::"email"`, not `"User.email"`.
         decision = await self._authorizer.authorize(
             self._request,
-            PolicyRequirement(action=self._action, resource=policy_resource(resource)),
+            PolicyRequirement(
+                action=self._action,
+                resource=_core.graphql_policy_resource(
+                    self._policy_schema, resource
+                ),
+            ),
         )
         allowed = bool(getattr(decision, "allowed", False))
-        self._decisions[resource] = allowed
+        _core.graphql_policy_store(
+            self._policy_schema, self._policy_state, resource, allowed
+        )
         if not allowed and self._on_denied == "error":
             raise ExecutionError(
                 getattr(decision, "reason", None) or f"not authorized to read {resource}",
                 path=path,
             )
         return allowed
+
+    async def _projection_allowed(
+        self,
+        object_type: ObjectType,
+        fields: list[Field],
+        root_name: str,
+        *,
+        root_resource: str | None = None,
+    ) -> tuple[bool, bool]:
+        """Authorize one plain projection, batching shared Cedar query inputs."""
+        if self._authorizer is None:
+            return True, True
+        try:
+            plan = _core.graphql_policy_prepare(
+                self._policy_schema,
+                self._policy_state,
+                object_type.fields,
+                fields,
+                root_resource,
+                root_name,
+            )
+        except KeyError as error:
+            missing = error.args[0]
+            raise ExecutionError(
+                f"{object_type.name} has no field {missing!r}", path=(root_name,)
+            ) from None
+        resources = _core.graphql_policy_resources(plan)
+        decisions: Any = ()
+        authorize_resources = getattr(self._authorizer, "_authorize_resources", None)
+        authorize_many = getattr(self._authorizer, "_authorize_many", None)
+        if resources and callable(authorize_resources):
+            decisions = await authorize_resources(
+                self._request,
+                self._action,
+                resources,
+                stop_on_denied=self._on_denied == "error",
+            )
+        elif len(resources) > 1 and callable(authorize_many):
+            decisions = await authorize_many(
+                self._request,
+                tuple(
+                    PolicyRequirement(action=self._action, resource=resource)
+                    for resource in resources
+                ),
+                stop_on_denied=self._on_denied == "error",
+            )
+        elif resources:
+            boundary = _core.graphql_policy_items(
+                plan, self._action, PolicyRequirement
+            )
+            scalar_decisions = []
+            for requirement, _path in boundary:
+                scalar_decisions.append(
+                    await self._authorizer.authorize(self._request, requirement)
+                )
+                if (
+                    self._on_denied == "error"
+                    and not bool(getattr(scalar_decisions[-1], "allowed", False))
+                ):
+                    break
+            decisions = scalar_decisions
+        denial = _core.graphql_policy_apply(
+            plan,
+            self._policy_state,
+            decisions,
+            self._on_denied == "error",
+        )
+        if denial is not None:
+            reason, path, resource = denial
+            raise ExecutionError(
+                reason or f"not authorized to read {resource}", path=path
+            )
+        result = _core.graphql_policy_result(plan, self._policy_state)
+        return bool(result & 1), bool(result & 2)
 
     async def _call_resolver(
         self, spec: Any, parents: list[Any], field: Field, path: tuple[str, ...],
@@ -393,11 +493,31 @@ class _Run:
             root = lookup(field.name)
             if root is None:
                 raise ExecutionError(f"unknown {kind} field {field.name!r}")
-            if not await self._allowed(root.policy, (field.name,)):
+            object_type = self._schema.type_of(root.type_name)
+            child_fields = None
+            projection_allowed = None
+            if (
+                json_output
+                and _phase_marker.get(None) is None
+                and object_type is not None
+                and field.selection_set is not None
+                and callable(getattr(self._authorizer, "_authorize_many", None))
+            ):
+                child_fields = _flatten(
+                    field.selection_set.selections, self._document, object_type.name
+                )
+                root_allowed, projection_allowed = await self._projection_allowed(
+                    object_type,
+                    child_fields,
+                    field.name,
+                    root_resource=root.policy,
+                )
+            else:
+                root_allowed = await self._allowed(root.policy, (field.name,))
+            if not root_allowed:
                 data[field.key] = None
                 continue
             instances = await self._root_instances(root, field)
-            object_type = self._schema.type_of(root.type_name)
             if object_type is None or field.selection_set is None:
                 # A scalar-returning root (a count, an ack) needs no projection.
                 value: Any = instances if root.is_list else (
@@ -405,16 +525,29 @@ class _Run:
                 )
                 data[field.key] = value
                 continue
-            child_fields = _flatten(
-                field.selection_set.selections, self._document, object_type.name
-            )
-            if json_output and self._authorizer is None and _phase_marker.get(None) is None:
-                projection = _core.graphql_project_json(
-                    instances, object_type.fields, child_fields, root.is_list
+            if child_fields is None:
+                child_fields = _flatten(
+                    field.selection_set.selections, self._document, object_type.name
                 )
-                if projection is not None:
-                    data[field.key] = projection
-                    continue
+            if json_output and _phase_marker.get(None) is None:
+                # Authorization decides whether a field may materialize; it
+                # does not require materializing the allowed values.  Once all
+                # selected fields are allowed, keep the plain-object projection
+                # native-owned through JSON egress just as an unprotected query
+                # does.  If the native projector declines a resolver or
+                # relationship, the decisions stay in this run's cache and the
+                # general executor below observes exactly the same policy result.
+                if projection_allowed is None:
+                    _root_allowed, projection_allowed = await self._projection_allowed(
+                        object_type, child_fields, field.name
+                    )
+                if projection_allowed:
+                    projection = _core.graphql_project_json(
+                        instances, object_type.fields, child_fields, root.is_list
+                    )
+                    if projection is not None:
+                        data[field.key] = projection
+                        continue
             projected = await self._project(
                 instances, object_type, child_fields, (field.name,)
             )
@@ -436,6 +569,7 @@ async def execute(
     max_page_size: int = 100,
     on_denied: str = "error",
     action: str = "read",
+    policy_schema: Any = None,
 ) -> dict[str, Any]:
     """Run `document` against `schema` on `session`, returning the data map."""
     operation: Operation = document.operation(operation_name)
@@ -454,6 +588,7 @@ async def execute(
         schema, document, session,
         variables=supplied, authorizer=authorizer, request=request,
         max_page_size=max_page_size, on_denied=on_denied, action=action,
+        policy_schema=policy_schema,
     ).run(operation)
 
 
@@ -469,6 +604,7 @@ async def execute_json(
     max_page_size: int = 100,
     on_denied: str = "error",
     action: str = "read",
+    policy_schema: Any = None,
 ) -> bytes:
     """Run one operation and encode its GraphQL data envelope."""
     from .._json import dumps
@@ -489,5 +625,6 @@ async def execute_json(
         schema, document, session,
         variables=supplied, authorizer=authorizer, request=request,
         max_page_size=max_page_size, on_denied=on_denied, action=action,
+        policy_schema=policy_schema,
     ).run(operation, json_output=True)
     return dumps({"data": data})

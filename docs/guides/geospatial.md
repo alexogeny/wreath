@@ -135,6 +135,14 @@ Every fix must carry a timezone-aware timestamp. A naive one makes `duration`
 wrong across a DST boundary and `speed` wrong with it, so it is refused at
 construction in the same spirit as everything else here.
 
+The trajectory owns a packed native record array after construction. Distance,
+windowing, speed, and `grid_summary(start, end, lattice)` scan integer instants
+and numeric coordinates directly; no `(Instant, Coordinate)` pairs are touched
+in those loops. The public `.fixes` sequence is materialised only when code asks
+for it. `grid_summary` combines the anchored half-open window, leg distance,
+mean speed, and occupied-cell bitset in one pass and returns only compact cell
+indices plus the scalar speed.
+
 ## In the database
 
 A `Coordinate` column is `Point`, which is core PostgreSQL's `point` — OID 600,

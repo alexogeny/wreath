@@ -31,7 +31,7 @@ import datetime
 import pytest
 
 from wreath._series.settle import difference, fold
-from wreath.geospatial import Coordinate, GeospatialError, Trajectory
+from wreath.geospatial import BoundingBox, Coordinate, GeospatialError, Trajectory, grid
 from wreath.series import Measure, avg
 
 MONDAY = datetime.datetime(2026, 3, 2, tzinfo=datetime.UTC)
@@ -115,6 +115,29 @@ class TestAWindowedDistanceAddsUp:
         path = Trajectory(BASE)
         with pytest.raises(GeospatialError, match="is before start"):
             path.between(TUESDAY, MONDAY)
+
+    def test_grid_summary_matches_the_materialized_window(self):
+        path = Trajectory(BASE)
+        lattice = grid(BoundingBox(-29.5, -28.5, 149.5, 150.5), metres=20_000)
+        window = path.between(MONDAY, WEDNESDAY)
+        expected_cells = {
+            found
+            for _when, point in window.fixes
+            if (found := lattice.index_of(point)) is not None
+        }
+        cells, speed = path.grid_summary(MONDAY, WEDNESDAY, lattice)
+        assert set(cells) == expected_cells
+        assert speed == pytest.approx(window.speed)
+
+    def test_grid_summary_keeps_the_window_anchor(self):
+        path = Trajectory(BASE)
+        lattice = grid(BoundingBox(-29.5, -28.5, 149.5, 150.5), metres=20_000)
+        cells, speed = path.grid_summary(TUESDAY, WEDNESDAY, lattice)
+        window = path.between(TUESDAY, WEDNESDAY)
+        assert set(cells) == {
+            lattice.index_of(point) for _when, point in window.fixes
+        }
+        assert speed == pytest.approx(window.speed)
 
 
 class TestATrajectoryRefusesWhatItCannotMeasure:
