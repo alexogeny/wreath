@@ -32,8 +32,9 @@ every template. English ships today; `_LOCALES` is where the next
 language goes, and the docstring there marks exactly where CLDR plural rules
 slot in.
 
-Everything is Python over stdlib `datetime`/`zoneinfo`. None of it is in C;
-see the note on `format_iso` for what would have to be measured first.
+The public types remain stdlib-compatible. Dense local-wall-clock spine walks
+are native data operations, including a cardinality-only form that avoids
+materialising `Instant` objects when only the size crosses the boundary.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ._native import _core
 from .protobuf import field as _protobuf_field
 from .protobuf import message as _message
 
@@ -78,6 +80,8 @@ __all__ = [
     "parse_duration",
     "relative",
     "seconds",
+    "spine",
+    "spine_length",
     "to_timestamp",
     "wall_clock",
     "weeks",
@@ -118,9 +122,19 @@ class Instant(datetime.datetime):
 
     __slots__ = ()
 
-    def __new__(cls, year: Any, month: Any = None, day: Any = None, hour: int = 0,
-                minute: int = 0, second: int = 0, microsecond: int = 0,
-                tzinfo: datetime.tzinfo | None = None, *, fold: int = 0) -> Instant:
+    def __new__(
+        cls,
+        year: Any,
+        month: Any = None,
+        day: Any = None,
+        hour: int = 0,
+        minute: int = 0,
+        second: int = 0,
+        microsecond: int = 0,
+        tzinfo: datetime.tzinfo | None = None,
+        *,
+        fold: int = 0,
+    ) -> Instant:
         if isinstance(year, (bytes, bytearray)):
             # The pickle/copy path hands the packed state through; `month` is
             # the tzinfo there, and it is already whatever it was. The stub only
@@ -185,8 +199,15 @@ class Instant(datetime.datetime):
         if type(value) is cls:
             return value
         return cls(
-            value.year, value.month, value.day, value.hour, value.minute,
-            value.second, value.microsecond, value.tzinfo, fold=value.fold,
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            value.tzinfo,
+            fold=value.fold,
         )
 
     # -- reading -------------------------------------------------------------
@@ -207,9 +228,7 @@ class Instant(datetime.datetime):
         # not make the return type depend on an implementation detail.
         return Instant.of(self.astimezone(_tzinfo(in_zone)))
 
-    def relative(
-        self, *, now: datetime.datetime | None = None, locale: str = "en"
-    ) -> str:
+    def relative(self, *, now: datetime.datetime | None = None, locale: str = "en") -> str:
         """This moment as a person would say it — `"3 hours ago"`."""
         return relative(self, now=now, locale=locale)
 
@@ -263,14 +282,17 @@ def wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.dateti
     """
     local = Instant.of(value).astimezone(tz)
     return datetime.datetime(
-        local.year, local.month, local.day,
-        local.hour, local.minute, local.second, local.microsecond,
+        local.year,
+        local.month,
+        local.day,
+        local.hour,
+        local.minute,
+        local.second,
+        local.microsecond,
     )
 
 
-def from_wall_clock(
-    local: datetime.datetime, tz: datetime.tzinfo
-) -> datetime.datetime:
+def from_wall_clock(local: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime:
     """A naive local wall clock put back on the timeline, as PostgreSQL does it.
 
     The inverse of `wall_clock`, and public for the same reason: every
@@ -372,13 +394,9 @@ class Bucket:
         needs.
         """
         tz = _tzinfo(in_zone)
-        return Instant.of(
-            from_wall_clock(self._truncate(wall_clock(value, tz)), tz)
-        )
+        return Instant.of(from_wall_clock(self._truncate(wall_clock(value, tz)), tz))
 
-    def end_of(
-        self, value: datetime.datetime, in_zone: str | datetime.tzinfo
-    ) -> Instant:
+    def end_of(self, value: datetime.datetime, in_zone: str | datetime.tzinfo) -> Instant:
         """The instant the *next* bucket starts -- this one's exclusive end.
 
         Ranges here are half-open throughout, so a bucket runs from
@@ -450,10 +468,64 @@ def bucket(name: str | Bucket) -> Bucket:
         return name
     found = BUCKETS.get(name) if isinstance(name, str) else None
     if found is None:
-        raise TemporalError(
-            f"unknown bucket {name!r}; one of {', '.join(sorted(BUCKETS))}"
-        )
+        raise TemporalError(f"unknown bucket {name!r}; one of {', '.join(sorted(BUCKETS))}")
     return found
+
+
+def spine(
+    start: datetime.datetime,
+    end: datetime.datetime,
+    *,
+    bucket: str | Bucket,
+    in_zone: str | datetime.tzinfo,
+) -> tuple[Instant, ...]:
+    """Dense local-wall-clock bucket starts for `start <= value < end`.
+
+    This is the in-memory counterpart of the calculated-view SQL spine. It
+    truncates and advances on the reader's wall clock before putting each
+    boundary back on the timeline, including the 23- and 25-hour days around a
+    DST change. The native operation takes only temporal data and a unit index;
+    it knows nothing about a series declaration, model, connection or SQL.
+    """
+    width = (
+        bucket
+        if isinstance(bucket, Bucket)
+        else (BUCKETS.get(bucket) if isinstance(bucket, str) else None)
+    )
+    if width is None:
+        raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
+    start_instant = Instant.of(start)
+    end_instant = Instant.of(end)
+    tz = _tzinfo(in_zone)
+    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
+    return _core.series_spine(start_instant, end_instant, unit, tz)
+
+
+def spine_length(
+    start: datetime.datetime,
+    end: datetime.datetime,
+    *,
+    bucket: str | Bucket,
+    in_zone: str | datetime.tzinfo,
+) -> int:
+    """Number of local-wall-clock buckets in a half-open range.
+
+    This is `len(spine(...))` without materialising every `Instant`. Use it
+    when only cardinality crosses the boundary, such as sizing a chart or
+    enforcing a result limit.
+    """
+    width = (
+        bucket
+        if isinstance(bucket, Bucket)
+        else (BUCKETS.get(bucket) if isinstance(bucket, str) else None)
+    )
+    if width is None:
+        raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
+    start_instant = Instant.of(start)
+    end_instant = Instant.of(end)
+    tz = _tzinfo(in_zone)
+    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
+    return _core.series_spine_length(start_instant, end_instant, unit, tz)
 
 
 # --- durations -------------------------------------------------------------------
@@ -723,9 +795,7 @@ class Recurrence:
         meant before this type existed.
         """
         if not isinstance(expression, str):
-            raise RecurrenceError(
-                f"expected a cron expression, got {type(expression).__name__}"
-            )
+            raise RecurrenceError(f"expected a cron expression, got {type(expression).__name__}")
         fields = expression.split()
         if len(fields) != 5:
             raise RecurrenceError(
@@ -733,13 +803,16 @@ class Recurrence:
             )
         minute, hour, day, month, weekday = (
             _parse_cron_field(field, low, high, wrap=index == 4)
-            for index, (field, (low, high)) in enumerate(
-                zip(fields, _FIELD_BOUNDS, strict=True)
-            )
+            for index, (field, (low, high)) in enumerate(zip(fields, _FIELD_BOUNDS, strict=True))
         )
         return cls(
-            minute=minute, hour=hour, day=day, month=month, weekday=weekday,
-            tz=_tzinfo(tz), text=expression,
+            minute=minute,
+            hour=hour,
+            day=day,
+            month=month,
+            weekday=weekday,
+            tz=_tzinfo(tz),
+            text=expression,
         )
 
     @classmethod
@@ -780,8 +853,13 @@ class Recurrence:
             parts[name.strip().upper()] = value.strip()
         minute, hour, day, month, weekday = _calendar_fields(parts)
         return cls(
-            minute=minute, hour=hour, day=day, month=month, weekday=weekday,
-            tz=_tzinfo(tz), text=text,
+            minute=minute,
+            hour=hour,
+            day=day,
+            month=month,
+            weekday=weekday,
+            tz=_tzinfo(tz),
+            text=text,
         )
 
     # -- reading -------------------------------------------------------------
@@ -801,9 +879,7 @@ class Recurrence:
             weekday=local.weekday(),
         )
 
-    def matches(
-        self, *, minute: int, hour: int, day: int, month: int, weekday: int
-    ) -> bool:
+    def matches(self, *, minute: int, hour: int, day: int, month: int, weekday: int) -> bool:
         """Whether a wall-clock reading is a firing time. `weekday` is Monday=0.
 
         Vixie-cron semantics for the day fields: when both day-of-month and
@@ -850,9 +926,7 @@ class Recurrence:
                 continue
             for hour in hours:
                 for minute in minutes_:
-                    local = datetime.datetime(
-                        date.year, date.month, date.day, hour, minute
-                    )
+                    local = datetime.datetime(date.year, date.month, date.day, hour, minute)
                     if local <= start:
                         continue
                     candidate = from_wall_clock(local, self.tz)
@@ -889,9 +963,7 @@ class Recurrence:
         return f"{self.text} [{self.tz}]"
 
 
-def _parse_cron_field(
-    field: str, low: int, high: int, *, wrap: bool = False
-) -> frozenset[int]:
+def _parse_cron_field(field: str, low: int, high: int, *, wrap: bool = False) -> frozenset[int]:
     """Parse one cron field into the set of values it matches.
 
     `wrap` is the day-of-week field, where every crontab accepts **7** as a
@@ -1004,9 +1076,7 @@ def _calendar_fields(
     interval = int(parts.get("INTERVAL", "1") or "1")
 
     minute = (
-        _calendar_numbers(parts["BYMINUTE"], 0, 59, "BYMINUTE")
-        if "BYMINUTE" in parts
-        else None
+        _calendar_numbers(parts["BYMINUTE"], 0, 59, "BYMINUTE") if "BYMINUTE" in parts else None
     )
     hour = _calendar_numbers(parts["BYHOUR"], 0, 23, "BYHOUR") if "BYHOUR" in parts else None
     monthday = (
@@ -1057,13 +1127,10 @@ def _calendar_fields(
         if freq == "WEEKLY" and weekday is None:
             raise RecurrenceError("FREQ=WEEKLY needs BYDAY to say which days")
         if freq == "MONTHLY" and monthday is None and weekday is None:
-            raise RecurrenceError(
-                "FREQ=MONTHLY needs BYMONTHDAY or BYDAY to say which days"
-            )
+            raise RecurrenceError("FREQ=MONTHLY needs BYMONTHDAY or BYDAY to say which days")
     else:
         raise RecurrenceError(
-            f"FREQ={freq} is not supported; use MINUTELY, HOURLY, DAILY, "
-            f"WEEKLY or MONTHLY"
+            f"FREQ={freq} is not supported; use MINUTELY, HOURLY, DAILY, WEEKLY or MONTHLY"
         )
 
     # `minute` has no `every_minute` fallback because every branch above assigns
@@ -1097,7 +1164,7 @@ class _Locale:
     """
 
     just_now: str
-    past: str            # formatted with {value}
+    past: str  # formatted with {value}
     future: str
     yesterday: str
     tomorrow: str
@@ -1177,7 +1244,7 @@ def _phrase(seconds: float, table: _Locale, *, future: bool) -> str | None:
     if seconds < 45:
         return table.just_now
     # A day either side reads far better as yesterday/tomorrow than as "1 day".
-    if 79200 <= seconds < 129600:          # 22h to 36h
+    if 79200 <= seconds < 129600:  # 22h to 36h
         return table.tomorrow if future else table.yesterday
     return None
 
@@ -1194,7 +1261,7 @@ def _counted(seconds: float, table: _Locale) -> str:
     days = round(seconds / 86400)
     if days < 26:
         return table.count(days, "day")
-    months = round(seconds / 2629800)      # a mean Gregorian month
+    months = round(seconds / 2629800)  # a mean Gregorian month
     if months < 11:
         return table.count(months, "month")
     return table.count(round(seconds / 31557600), "year")

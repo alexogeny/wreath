@@ -3769,7 +3769,8 @@ class Wreath:
             protocol = cast(Any, send).__self__
             headers = (
                 _HTML_HEADERS[len(plain.body)]
-                if plain.__class__ is HTMLResponse
+                if policy is None
+                and plain.__class__ is HTMLResponse
                 and plain._headers is None
                 and len(plain.body) < len(_HTML_HEADERS)
                 else plain.headers

@@ -17,8 +17,10 @@
  *   (6, item_plan)            LIST
  *   (7, value_plan)           DICT         string-keyed record
  *   (8, has_none, options, msg)  UNION
- *   (9, cls, fields)          DATACLASS    fields = ((name, plan, required), ...)
+ *   (9, cls, fields)          DATACLASS    fields =
+ *                             ((python_name, wire_name, plan, required), ...)
  *   (10, message)             UNSUPPORTED
+ *   (11, child, comparisons, lengths, pattern)  FIELD
  */
 
 #include "wreathcore.h"
@@ -35,6 +37,7 @@ enum {
     OP_UNION = 8,
     OP_DATACLASS = 9,
     OP_UNSUPPORTED = 10,
+    OP_FIELD = 11,
 };
 
 /* Total node visits allowed per validation. A OP_UNION tries every option
@@ -61,6 +64,19 @@ emit(PyObject *errors, PyObject *loc, const char *msg, const char *kind)
     if (err == NULL) {
         return -1;
     }
+    int rc = PyList_Append(errors, err);
+    Py_DECREF(err);
+    return rc;
+}
+
+static int
+emit_objects(PyObject *errors, PyObject *loc, PyObject *message, PyObject *kind)
+{
+    PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
+    if (loc_copy == NULL) return -1;
+    PyObject *err = Py_BuildValue(
+        "{s:N,s:O,s:O}", "loc", loc_copy, "msg", message, "type", kind);
+    if (err == NULL) return -1;
     int rc = PyList_Append(errors, err);
     Py_DECREF(err);
     return rc;
@@ -97,11 +113,14 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
         *steps = -1;
         return Py_NewRef(value);
     }
-    (*steps)--;
     long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
     if (opcode == -1 && PyErr_Occurred()) {
         return NULL;
     }
+    /* Field metadata wraps a child without visiting another value. The Python
+     * definition strips the annotation before decrementing its node budget,
+     * so the native tape must not charge this wrapper as a second node. */
+    if (opcode != OP_FIELD) (*steps)--;
 
     switch (opcode) {
     case OP_ANY:
@@ -312,19 +331,20 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
         for (Py_ssize_t index = 0; index < field_count; index++) {
             PyObject *field = PyTuple_GET_ITEM(fields, index);
             PyObject *name = PyTuple_GET_ITEM(field, 0);
-            PyObject *field_plan = PyTuple_GET_ITEM(field, 1);
-            long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 2));
+            PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
+            PyObject *field_plan = PyTuple_GET_ITEM(field, 2);
+            long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
             if (required == -1 && PyErr_Occurred()) {
                 Py_DECREF(kwargs);
                 return NULL;
             }
-            PyObject *present = PyDict_GetItemWithError(value, name); /* borrowed */
+            PyObject *present = PyDict_GetItemWithError(value, wire_name); /* borrowed */
             if (present == NULL && PyErr_Occurred()) {
                 Py_DECREF(kwargs);
                 return NULL;
             }
             if (present != NULL) {
-                if (loc_push(loc, name) < 0) {
+                if (loc_push(loc, wire_name) < 0) {
                     Py_DECREF(kwargs);
                     return NULL;
                 }
@@ -343,7 +363,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 }
             }
             else if (required) {
-                if (loc_push(loc, name) < 0) {
+                if (loc_push(loc, wire_name) < 0) {
                     Py_DECREF(kwargs);
                     return NULL;
                 }
@@ -369,8 +389,9 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 return NULL;
             }
             for (Py_ssize_t index = 0; index < field_count; index++) {
-                PyObject *name = PyTuple_GET_ITEM(PyTuple_GET_ITEM(fields, index), 0);
-                if (PySet_Add(known, name) < 0) {
+                PyObject *wire_name = PyTuple_GET_ITEM(
+                    PyTuple_GET_ITEM(fields, index), 1);
+                if (PySet_Add(known, wire_name) < 0) {
                     Py_DECREF(known);
                     Py_DECREF(kwargs);
                     return NULL;
@@ -437,6 +458,93 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             return NULL;
         }
         return Py_NewRef(value);
+    }
+
+    case OP_FIELD: {
+        Py_ssize_t before = PyList_GET_SIZE(errors);
+        PyObject *validated = validate_node(
+            PyTuple_GET_ITEM(plan, 1), value, loc, errors, steps);
+        if (validated == NULL || PyList_GET_SIZE(errors) != before || *steps < 0) {
+            return validated;
+        }
+
+        PyObject *comparisons = PyTuple_GET_ITEM(plan, 2);
+        Py_ssize_t count = PyTuple_GET_SIZE(comparisons);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *entry = PyTuple_GET_ITEM(comparisons, index);
+            long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
+            if (operation == -1 && PyErr_Occurred()) goto field_error;
+            static const int rich_operations[] = {Py_GT, Py_GE, Py_LT, Py_LE};
+            if (operation < 0 || operation >= 4) {
+                PyErr_SetString(PyExc_ValueError, "invalid field comparison opcode");
+                goto field_error;
+            }
+            int valid = PyObject_RichCompareBool(
+                validated, PyTuple_GET_ITEM(entry, 1), rich_operations[operation]);
+            if (valid < 0) {
+                if (!PyErr_ExceptionMatches(PyExc_TypeError)) goto field_error;
+                PyErr_Clear();
+                if (emit_objects(
+                        errors, loc, PyTuple_GET_ITEM(entry, 3),
+                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
+                return validated;
+            }
+            if (!valid) {
+                if (emit_objects(
+                        errors, loc, PyTuple_GET_ITEM(entry, 2),
+                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
+                return validated;
+            }
+        }
+
+        PyObject *lengths = PyTuple_GET_ITEM(plan, 3);
+        count = PyTuple_GET_SIZE(lengths);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *entry = PyTuple_GET_ITEM(lengths, index);
+            long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
+            Py_ssize_t bound = PyLong_AsSsize_t(PyTuple_GET_ITEM(entry, 1));
+            if ((operation == -1 || bound == -1) && PyErr_Occurred()) goto field_error;
+            if (operation < 0 || operation >= 2) {
+                PyErr_SetString(PyExc_ValueError, "invalid field length opcode");
+                goto field_error;
+            }
+            Py_ssize_t length = PyObject_Length(validated);
+            if (length < 0) {
+                if (!PyErr_ExceptionMatches(PyExc_TypeError)) goto field_error;
+                PyErr_Clear();
+                if (emit_objects(
+                        errors, loc, PyTuple_GET_ITEM(entry, 3),
+                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
+                return validated;
+            }
+            int valid = operation == 0 ? length >= bound : length <= bound;
+            if (!valid) {
+                if (emit_objects(
+                        errors, loc, PyTuple_GET_ITEM(entry, 2),
+                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
+                return validated;
+            }
+        }
+
+        PyObject *pattern = PyTuple_GET_ITEM(plan, 4);
+        if (pattern != Py_None) {
+            int valid = 0;
+            if (PyUnicode_Check(validated)) {
+                PyObject *match = PyObject_CallOneArg(
+                    PyTuple_GET_ITEM(pattern, 0), validated);
+                if (match == NULL) goto field_error;
+                valid = match != Py_None;
+                Py_DECREF(match);
+            }
+            if (!valid && emit_objects(
+                    errors, loc, PyTuple_GET_ITEM(pattern, 1),
+                    PyTuple_GET_ITEM(pattern, 2)) < 0) goto field_error;
+        }
+        return validated;
+
+field_error:
+        Py_DECREF(validated);
+        return NULL;
     }
 
     default:

@@ -51,6 +51,7 @@ from ._graphql.resolvers import (
     validate_dependencies,
 )
 from ._graphql.schema import RootField, Schema, SchemaField, build_schema, policy_resource
+from ._native import _core
 from .cache import BoundedCache
 from .request import Request
 from .response import JSONResponse, Response
@@ -86,7 +87,7 @@ class GraphQL:
     __slots__ = (
         "_action", "_authorizer", "_cache", "_frozen", "_introspection", "_limits",
         "_max_page_size", "_on_denied", "_registry", "_resolvers", "_schema",
-        "_session_factory", "resolver_errors",
+        "_policy_schema", "_session_factory", "resolver_errors",
     )
 
     def __init__(
@@ -138,6 +139,7 @@ class GraphQL:
         self._on_denied = on_denied
         self._resolvers = ResolverRegistry()
         self._frozen = False
+        self._policy_schema: Any = None
         # Parsed documents are immutable, so a repeated query skips the parse
         # (and its limit checks) entirely. Bounded, because the key is
         # client-supplied text -- an unbounded cache here is a memory DoS.
@@ -279,6 +281,7 @@ class GraphQL:
             policy=spec.policy or f"{spec.type_name}.{spec.field_name}",
             cost=spec.cost,
         )
+        self._policy_schema = None
 
     def _add_root(
         self, name: str, fn: Any, returns: str, is_list: bool,
@@ -304,6 +307,7 @@ class GraphQL:
         )
         target = self._schema.mutations if mutation else self._schema.roots
         target[name] = root
+        self._policy_schema = None
 
     def _check_mutable(self) -> None:
         if self._frozen:
@@ -323,7 +327,23 @@ class GraphQL:
             self._resolvers,
             {name: set(t.fields) for name, t in self._schema.types.items()},
         )
+        self._ensure_policy_schema()
         self._frozen = True
+
+    def _ensure_policy_schema(self) -> Any:
+        """Compile immutable policy names once for native request-local decisions."""
+        if self._policy_schema is None:
+            policies = tuple(
+                schema_field.policy
+                for object_type in self._schema.types.values()
+                for schema_field in object_type.fields.values()
+            ) + tuple(root.policy for root in self._schema.roots.values()) + tuple(
+                root.policy for root in self._schema.mutations.values()
+            )
+            self._policy_schema = _core.graphql_policy_schema(
+                policies, policy_resource
+            )
+        return self._policy_schema
 
     def declared_actions(self) -> dict[str, tuple[str, ...]]:
         """Resource type -> the Cedar actions this endpoint is gated on.
@@ -439,6 +459,7 @@ class GraphQL:
                 max_page_size=self._max_page_size,
                 on_denied=self._on_denied,
                 action=self._action,
+                policy_schema=self._ensure_policy_schema(),
             )
         except ExecutionError as error:
             body: dict[str, Any] = {"message": str(error)}

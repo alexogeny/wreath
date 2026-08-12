@@ -158,6 +158,7 @@ _OP_DICT = 7
 _OP_UNION = 8
 _OP_DATACLASS = 9
 _OP_UNSUPPORTED = 10
+_OP_FIELD = 11
 
 
 class _PlanUnsupported(Exception):
@@ -174,10 +175,52 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
     """
     annotation, field = _field_annotation(annotation)
     if field is not None:
-        # Advanced annotations are uncommon and stay on the Python path until
-        # the plan has opcodes for every constraint. Falling back is safe;
-        # compiling a partial plan would let the two disagree.
-        raise _PlanUnsupported
+        child = _compile_plan(annotation, seen)
+        comparisons = tuple(
+            (
+                opcode,
+                bound,
+                f"value must be {symbol} {bound}",
+                f"{kind} requires a comparable value",
+                kind,
+            )
+            for opcode, bound, symbol, kind in (
+                (0, field.gt, ">", "gt"),
+                (1, field.ge, ">=", "ge"),
+                (2, field.lt, "<", "lt"),
+                (3, field.le, "<=", "le"),
+            )
+            if bound is not None
+        )
+        lengths = tuple(
+            (
+                opcode,
+                bound,
+                f"length must be {symbol} {bound}",
+                f"{kind} requires a sized value",
+                kind,
+            )
+            for opcode, bound, symbol, kind in (
+                (0, field.min_length, ">=", "min_length"),
+                (1, field.max_length, "<=", "max_length"),
+            )
+            if bound is not None
+        )
+        pattern = (
+            None
+            if field.pattern is None
+            else (
+                re.compile(field.pattern).search,
+                f"value does not match {field.pattern!r}",
+                "pattern",
+            )
+        )
+        # Alias, description and examples affect the wire schema but do not
+        # constrain a value. Avoid wrapping the child plan when there is no
+        # request-time work to perform.
+        if not comparisons and not lengths and pattern is None:
+            return child
+        return (_OP_FIELD, child, comparisons, lengths, pattern)
     if annotation in (Any, object) or annotation is inspect.Parameter.empty:
         return (_OP_ANY,)
     if annotation is None or annotation is _NONE_TYPE:
@@ -196,11 +239,12 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
             if annotation in seen:
                 raise _PlanUnsupported
             child_seen = seen | {annotation}
-            fields_list: list[tuple[str, tuple[Any, ...], int]] = []
-            for name, _wire_name, field_annotation, required in _dataclass_wire_spec(annotation):
+            fields_list: list[tuple[str, str, tuple[Any, ...], int]] = []
+            for name, wire_name, field_annotation, required in _dataclass_wire_spec(annotation):
                 fields_list.append(
                     (
                         name,
+                        wire_name,
                         _compile_plan(field_annotation, child_seen),
                         1 if required else 0,
                     )

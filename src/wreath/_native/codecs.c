@@ -149,6 +149,124 @@ wreath_parse_qs(PyObject *Py_UNUSED(self), PyObject *args)
     return pairs;
 }
 
+static inline int
+urlencode_safe(uint8_t byte)
+{
+    return (byte >= 'a' && byte <= 'z') ||
+           (byte >= 'A' && byte <= 'Z') ||
+           (byte >= '0' && byte <= '9') ||
+           byte == '_' || byte == '.' || byte == '-' || byte == '~';
+}
+
+static int
+write_urlencoded(WreathBytesWriter *writer, PyObject *text)
+{
+    Py_ssize_t length;
+    const uint8_t *data = (const uint8_t *)PyUnicode_AsUTF8AndSize(text, &length);
+    static const char hex[] = "0123456789ABCDEF";
+    if (data == NULL) return -1;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        uint8_t byte = data[index];
+        if (urlencode_safe(byte)) {
+            if (wreath_writer_byte(writer, (char)byte) < 0) return -1;
+        }
+        else if (byte == ' ') {
+            if (wreath_writer_byte(writer, '+') < 0) return -1;
+        }
+        else {
+            char escaped[3] = {'%', hex[byte >> 4], hex[byte & 15]};
+            if (wreath_writer_write(writer, escaped, 3) < 0) return -1;
+        }
+    }
+    return 0;
+}
+
+PyObject *
+wreath_cache_key_selected(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *method, *path, *declared;
+    Py_buffer query;
+    if (!PyArg_ParseTuple(
+            args, "UUy*O!:cache_key_selected", &method, &path, &query,
+            &PyTuple_Type, &declared)) return NULL;
+
+    PyObject *values = PyDict_New();
+    if (values == NULL) {
+        PyBuffer_Release(&query);
+        return NULL;
+    }
+    const uint8_t *data = query.buf;
+    Py_ssize_t start = 0;
+    for (Py_ssize_t index = 0; index <= query.len; index++) {
+        if (index < query.len && data[index] != '&') continue;
+        Py_ssize_t field_length = index - start;
+        if (field_length != 0) {
+            const uint8_t *field = data + start;
+            Py_ssize_t equals = 0;
+            while (equals < field_length && field[equals] != '=') equals++;
+            PyObject *key = component_to_str(field, equals);
+            PyObject *value = equals < field_length
+                ? component_to_str(field + equals + 1, field_length - equals - 1)
+                : PyUnicode_New(0, 127);
+            int failed = key == NULL || value == NULL;
+            if (!failed) {
+                failed = PyDict_SetDefaultRef(values, key, value, NULL) < 0;
+            }
+            Py_XDECREF(key);
+            Py_XDECREF(value);
+            if (failed) {
+                Py_DECREF(values);
+                PyBuffer_Release(&query);
+                return NULL;
+            }
+        }
+        start = index + 1;
+    }
+    PyBuffer_Release(&query);
+
+    WreathBytesWriter writer = {0};
+    Py_ssize_t method_length, path_length;
+    const char *method_data = PyUnicode_AsUTF8AndSize(method, &method_length);
+    const char *path_data = method_data != NULL
+        ? PyUnicode_AsUTF8AndSize(path, &path_length) : NULL;
+    if (path_data == NULL ||
+        wreath_writer_init(&writer, method_length + path_length + 64) < 0 ||
+        wreath_writer_write(&writer, method_data, method_length) < 0 ||
+        wreath_writer_byte(&writer, ' ') < 0 ||
+        wreath_writer_write(&writer, path_data, path_length) < 0) {
+        Py_XDECREF(writer.bytes);
+        Py_DECREF(values);
+        return NULL;
+    }
+
+    int first = 1;
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(declared); index++) {
+        PyObject *name = PyTuple_GET_ITEM(declared, index);
+        PyObject *value = PyDict_GetItemWithError(values, name);
+        if (value == NULL) {
+            if (PyErr_Occurred()) goto error;
+            continue;
+        }
+        if (wreath_writer_byte(&writer, first ? '?' : '&') < 0 ||
+            write_urlencoded(&writer, name) < 0 ||
+            wreath_writer_byte(&writer, '=') < 0 ||
+            write_urlencoded(&writer, value) < 0) goto error;
+        first = 0;
+    }
+    Py_DECREF(values);
+    PyObject *encoded = wreath_writer_finish(&writer);
+    if (encoded == NULL) return NULL;
+    PyObject *result = PyUnicode_DecodeUTF8(
+        PyBytes_AS_STRING(encoded), PyBytes_GET_SIZE(encoded), "strict");
+    Py_DECREF(encoded);
+    return result;
+
+error:
+    Py_DECREF(values);
+    Py_XDECREF(writer.bytes);
+    return NULL;
+}
+
 PyObject *
 wreath_parse_cookies(PyObject *Py_UNUSED(self), PyObject *args)
 {

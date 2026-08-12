@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "wreath-http3"
 version = "0.2.0"
 description = "Wreath's native HTTP/3 and QUIC server extension"
-requires-python = ">=3.14"
+requires-python = "==3.14.*"
 license = "MPL-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*"]
 dependencies = []

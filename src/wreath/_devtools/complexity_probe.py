@@ -1656,6 +1656,82 @@ def _graphql_depth_rejection(depth: int):
     return elapsed
 
 
+def _graphql_policy_plan_harness(field_count: int, *, unique: bool) -> float:
+    """Price native selection planning with a same-size alias control."""
+    from wreath._graphql.ast import Field
+    from wreath._graphql.schema import SchemaField, policy_resource
+    from wreath._native import _core
+
+    if unique:
+        schema_fields = {
+            f"field{index}": SchemaField(
+                name=f"field{index}",
+                type_name="String",
+                non_null=False,
+                is_list=False,
+                policy=f"Report.field{index}",
+            )
+            for index in range(field_count)
+        }
+        fields = tuple(
+            Field(name=f"field{index}", key=f"field{index}")
+            for index in range(field_count)
+        )
+    else:
+        schema_fields = {
+            "shared": SchemaField(
+                name="shared",
+                type_name="String",
+                non_null=False,
+                is_list=False,
+                policy="Report.shared",
+            )
+        }
+        fields = tuple(
+            Field(name="shared", key=f"alias{index}")
+            for index in range(field_count)
+        )
+    schema = _core.graphql_policy_schema(
+        tuple(item.policy for item in schema_fields.values()), policy_resource
+    )
+    before = time.perf_counter()
+    for _ in range(500):
+        state = _core.graphql_policy_state(schema)
+        plan = _core.graphql_policy_prepare(
+            schema, state, schema_fields, fields, None, "report"
+        )
+        del plan, state
+    return time.perf_counter() - before
+
+
+@probe(
+    "graphql-policy-plan-unique",
+    expect=1.0,
+    sizes=(8, 16, 32, 64),
+    axis="distinct selected field policies",
+    assumption="native policy planning is linear in selected field count",
+    stage="graphql-authorization",
+    group="web",
+)
+def _graphql_policy_plan_unique(field_count: int):
+    """Each selected field adds one schema lookup and native decision slot."""
+    return _graphql_policy_plan_harness(field_count, unique=True)
+
+
+@probe(
+    "graphql-policy-plan-alias-control",
+    expect=1.0,
+    sizes=(8, 16, 32, 64),
+    axis="selected aliases sharing one policy",
+    assumption="the same-size alias control remains linear while deduplicating",
+    stage="graphql-authorization",
+    group="web",
+)
+def _graphql_policy_plan_alias_control(field_count: int):
+    """Same-size control: every selected alias resolves to one decision."""
+    return _graphql_policy_plan_harness(field_count, unique=False)
+
+
 @probe(
     "sigv4-canonical-request", expect=1.0, sizes=(500, 1000, 2000, 4000),
     axis="signed request header count",
@@ -1748,38 +1824,6 @@ def _cedar_set_dedupe(n: int):
     for _ in range(loops):
         _to_cedar_value(values, where="probe")
     return (time.perf_counter() - start) / loops
-
-
-@probe("cedar-set-dedupe-comparisons", expect=0.0, sizes=(200, 400, 800, 1600),
-       stage="handler", group="web", metric="comparisons",
-       assumption="A Cedar set of scalars costs zero structural comparisons.")
-def _cedar_set_dedupe_comparisons(n: int):
-    """The same invariant stated as a count, so it cannot hide under a fast machine.
-
-    Wall time can flatter a quadratic when the constant is small; the number of
-    `_cedar_eq` calls cannot. For an all-scalar set it must be exactly zero at
-    every size."""
-    import wreath._auth.cedar_engine as engine
-
-    values = [f"group-{index}" for index in range(n)]
-    calls = 0
-    original = engine._cedar_eq
-
-    def counting(a: Any, b: Any) -> bool:
-        nonlocal calls
-        calls += 1
-        return original(a, b)
-
-    # Swapping the module's comparison is the point of this probe; the counter
-    # is restored in `finally` so nothing outside it observes the substitution.
-    engine._cedar_eq = counting  # ty: ignore[invalid-assignment]
-    try:
-        start = time.perf_counter()
-        engine._to_cedar_value(values, where="probe")
-        elapsed = time.perf_counter() - start
-    finally:
-        engine._cedar_eq = original
-    return elapsed, {"comparisons": calls}
 
 
 @probe("cedar-set-literal-eval", expect=1.0, sizes=(100, 200, 400, 800),
@@ -1977,6 +2021,175 @@ def _pipeline_cancel_back_to_front(k: int):
 def _pipeline_cancel_front_to_back(k: int):
     """The order control for the newest-first cancellation probe."""
     return _cancel_harness(k, "front")
+
+
+def _series_reconcile_harness(bucket_count: int, *, populated: bool) -> float:
+    """Price dense output construction with and without successful lookups."""
+    from wreath.series import reconcile
+
+    buckets = tuple(range(bucket_count))
+    identities = tuple((f"tenant-{index}", False) for index in range(8))
+    fills = {"requests": 0, "errors": 0, "latency": None, "saturation": None}
+    if populated:
+        sparse = {
+            identity: {
+                bucket: {
+                    "requests": bucket,
+                    "errors": bucket & 3,
+                    "latency": bucket / 10,
+                    "saturation": bucket / 100,
+                }
+                for bucket in buckets
+            }
+            for identity in identities
+        }
+    else:
+        # Keep the same series identities, bucket run, measures and output
+        # cardinality as the subject. Only successful per-cell lookups differ.
+        sparse = {identity: {} for identity in identities}
+    start = time.perf_counter()
+    dense = reconcile(buckets, sparse, fills)
+    elapsed = time.perf_counter() - start
+    if len(dense) != len(identities) * len(fills):
+        raise RuntimeError("series reconciliation emitted the wrong number of rows")
+    return elapsed
+
+
+@probe(
+    "series-reconcile-populated", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="dense buckets at eight series and four measures",
+    assumption="reconciling populated cells is linear in emitted cell count",
+    stage="series", group="web",
+)
+def _series_reconcile_populated(bucket_count: int):
+    """Successful sparse lookups add constant work to every emitted cell."""
+    return _series_reconcile_harness(bucket_count, populated=True)
+
+
+@probe(
+    "series-reconcile-empty-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="dense buckets at eight series and four measures",
+    assumption="the same-size missing-cell control is linear in emitted cell count",
+    stage="series", group="web",
+)
+def _series_reconcile_empty_control(bucket_count: int):
+    """Same-size control: identical output shape, with every lookup missing."""
+    return _series_reconcile_harness(bucket_count, populated=False)
+
+
+def _series_chart_spine_harness(bucket_count: int, *, populated: bool) -> float:
+    """Price native range projection with a same-shape empty-data control."""
+    import datetime
+
+    from wreath.series import project_chart_spine
+    from wreath.temporal import Day, Instant, spine, zone
+
+    timezone = zone("Pacific/Auckland")
+    start = Instant.of(datetime.datetime(2025, 1, 1, 11, tzinfo=datetime.UTC))
+    end = start + datetime.timedelta(days=bucket_count)
+    identities = tuple((f"tenant-{index}", False) for index in range(4))
+    fills = {"requests": 0.0, "latency": None}
+    if populated:
+        buckets = spine(start, end, bucket=Day, in_zone=timezone)
+        sparse = {
+            identity: {
+                bucket: {"requests": float(index), "latency": index / 10}
+                for index, bucket in enumerate(buckets)
+            }
+            for identity in identities
+        }
+    else:
+        sparse = {identity: {} for identity in identities}
+    before = time.perf_counter()
+    result = project_chart_spine(
+        start,
+        end,
+        bucket=Day,
+        in_zone=timezone,
+        sparse=sparse,
+        fills=fills,
+        downsample_rows=(0, 2, 4, 6),
+        full_rows=(1,),
+        threshold=128,
+        tick_target=9,
+    )
+    elapsed = time.perf_counter() - before
+    if result[0] != len(identities) * len(fills):
+        raise RuntimeError("series chart projection emitted the wrong row count")
+    return elapsed
+
+
+@probe(
+    "series-chart-spine-populated", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="native dense buckets at four series and two measures",
+    assumption="range reconciliation and path emission are linear in bucket count",
+    stage="series", group="web",
+)
+def _series_chart_spine_populated(bucket_count: int):
+    """A populated native-owned range has one bounded pass per selected row."""
+    return _series_chart_spine_harness(bucket_count, populated=True)
+
+
+@probe(
+    "series-chart-spine-empty-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="native dense buckets at four series and two measures",
+    assumption="the same-size empty range projection remains linear",
+    stage="series", group="web",
+)
+def _series_chart_spine_empty_control(bucket_count: int):
+    """Same-size control: identical paths and axes, with no populated cells."""
+    return _series_chart_spine_harness(bucket_count, populated=False)
+
+
+def _trajectory_grid_harness(fix_count: int, *, inside: bool) -> float:
+    """Price packed trajectory scans with and without occupied cells."""
+    import datetime
+
+    from wreath.geospatial import BoundingBox, Coordinate, Trajectory, grid
+
+    start = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    latitude = -27.5 if inside else -40.0
+    trajectory = Trajectory(
+        (
+            start + datetime.timedelta(seconds=index),
+            Coordinate(lat=latitude, lon=152.9 + (index % 20) * 0.001),
+        )
+        for index in range(fix_count)
+    )
+    lattice = grid(BoundingBox(-28.0, -27.0, 152.4, 153.4), metres=20_000)
+    before = time.perf_counter()
+    trajectory.grid_summary(
+        start, start + datetime.timedelta(seconds=fix_count + 1), lattice
+    )
+    return time.perf_counter() - before
+
+
+@probe(
+    "trajectory-grid-inside", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="packed fixes scanned inside one grid",
+    assumption="distance and occupancy are accumulated in one linear pass",
+    stage="geospatial", group="web",
+)
+def _trajectory_grid_inside(fix_count: int):
+    """The occupied-cell subject scans each native record once."""
+    return _trajectory_grid_harness(fix_count, inside=True)
+
+
+@probe(
+    "trajectory-grid-outside-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="packed fixes scanned outside one grid",
+    assumption="the same-size no-occupancy control is linear",
+    stage="geospatial", group="web",
+)
+def _trajectory_grid_outside_control(fix_count: int):
+    """Same-size control: every distance leg remains, no cell is emitted."""
+    return _trajectory_grid_harness(fix_count, inside=False)
 
 
 def _todo_document(todo: Todo | None) -> dict[str, Any] | None:

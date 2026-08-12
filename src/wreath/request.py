@@ -409,30 +409,6 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
             return value if _valid_boundary(value) else None
     return None
 
-def _stream_part_headers(block: bytes) -> list[tuple[bytes, bytes]]:
-    headers: list[tuple[bytes, bytes]] = []
-    if not block:
-        return headers
-    for line in block.split(b"\r\n"):
-        name, separator, value = line.partition(b":")
-        if not separator or not name:
-            raise ValueError("malformed multipart header line")
-        headers.append((name.lower(), value.strip(b" \t")))
-    return headers
-
-
-def _disposition_value(value: bytes, parameter: bytes) -> str | None:
-    for fragment in value.split(b";"):
-        key, separator, raw = fragment.strip(b" \t").partition(b"=")
-        if not separator or key.strip(b" \t").lower() != parameter:
-            continue
-        raw = raw.strip(b" \t")
-        if len(raw) >= 2 and raw.startswith(b'"') and raw.endswith(b'"'):
-            raw = raw[1:-1].replace(b'\\"', b'"').replace(b"\\\\", b"\\")
-        return raw.decode("utf-8", "replace")
-    return None
-
-
 async def _stream_multipart(
     chunks: AsyncIterator[bytes], boundary: bytes, limits: RequestLimits
 ) -> FormData:
@@ -457,12 +433,7 @@ async def _stream_multipart(
 
     def begin_part(header_block: bytes) -> None:
         nonlocal headers, field_name, filename, part_data, part_spool, part_size
-        headers = _stream_part_headers(header_block)
-        disposition = find_header(headers, b"content-disposition")
-        field_name = filename = None
-        if disposition is not None:
-            field_name = _disposition_value(disposition, b"name")
-            filename = _disposition_value(disposition, b"filename")
+        headers, field_name, filename = _core.multipart_part_info(header_block)
         part_data = bytearray()
         part_spool = None
         part_size = 0

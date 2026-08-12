@@ -1976,6 +1976,33 @@ class HTTPClient:
     async def _read_response(
         self, reader: asyncio.StreamReader, method: str
     ) -> tuple[ClientResponse, bool]:
+        if type(reader) is _ClientStream:
+            # The stream already owns the receive buffer. Let the request-owned
+            # native transaction retain framing and timeout state until the
+            # complete response crosses back to Python; asking it separately
+            # for a head and body would materialize bytes merely to feed them
+            # back into the same extension.
+            try:
+                native_reader = cast(Any, reader)
+                result = native_reader.read_response(
+                    method,
+                    self._limits.max_response_header_bytes,
+                    self._limits.max_response_bytes,
+                    ClientResponse,
+                    ProtocolError,
+                    ResponseTooLarge,
+                    ResponseTimeout,
+                    self._timeout.response_headers,
+                    self._timeout.response_body,
+                )
+                if type(result) is tuple:
+                    return result
+                return await result
+            except ValueError as error:
+                # The shared head/framing parser deliberately raises ValueError
+                # as a standalone codec. At the client boundary malformed wire
+                # is a ProtocolError, exactly as on an asyncio StreamReader.
+                raise ProtocolError(str(error)) from error
         minor, status, reason, headers = await self._read_head(reader)
         body, framed = await self._read_body(reader, method, status, headers)
         return (

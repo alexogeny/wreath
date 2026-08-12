@@ -48,9 +48,8 @@ from dataclasses import dataclass
 from functools import wraps
 from hashlib import blake2b
 from typing import Any, Final
-from urllib.parse import urlencode
 
-from ._codecs import parse_qs as _parse_qs
+from ._native import _core
 from ._orm_events import subscribe_writes
 from .cache import BoundedCache
 from .response import Response
@@ -104,23 +103,20 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
     matching how the binding layer reads them.
     """
     declared = tuple(names)
+    for index, name in enumerate(declared):
+        if not isinstance(name, str):
+            raise TypeError(
+                f"cache_key_for names[{index}] must be str, "
+                f"got {type(name).__name__}"
+            )
 
     def key(request: Any) -> str:
         base = f"{request.method} {request.path}"
         if not declared:
             return base
-        values: dict[str, str] = {}
-        for name, value in _parse_qs(request.query_string, 0):
-            values.setdefault(name, value)
-        # Encode each parsed component again before joining it into the cache
-        # key.  Concatenating decoded values directly lets an embedded `%26`
-        # and `%3D` impersonate another field and collide with a different
-        # request (for example one `a=x&b=y` value versus two `a=x`, `b=y`
-        # values).
-        selected = urlencode(
-            [(name, values[name]) for name in declared if name in values]
+        return _core.cache_key_selected(
+            request.method, request.path, request.query_string, declared
         )
-        return f"{base}?{selected}" if selected else base
 
     # This helper deliberately builds a shared key with no principal.  Keep the
     # marker on the callable so `cached(key=cache_key_for(...))` and the

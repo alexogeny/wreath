@@ -3,6 +3,649 @@
 #include "wreathcore.h"
 
 typedef struct {
+    PyObject *name;
+    PyObject *resource;
+    Py_hash_t hash;
+} GraphqlPolicyEntry;
+
+typedef struct {
+    GraphqlPolicyEntry *entries;
+    Py_ssize_t count;
+    Py_ssize_t table_size;
+    Py_ssize_t *slots;
+} GraphqlPolicySchema;
+
+typedef struct {
+    PyObject *schema_capsule;
+    signed char *decisions;
+} GraphqlPolicyState;
+
+typedef struct {
+    PyObject *schema_capsule;
+    Py_ssize_t root_index;
+    PyObject *root_name;
+    Py_ssize_t *field_indices;
+    PyObject **field_names;
+    Py_ssize_t field_count;
+    Py_ssize_t *pending;
+    Py_ssize_t pending_count;
+} GraphqlPolicyPlan;
+
+#define GRAPHQL_POLICY_SCHEMA_CAPSULE "wreath.graphql.policy_schema"
+#define GRAPHQL_POLICY_STATE_CAPSULE "wreath.graphql.policy_state"
+#define GRAPHQL_POLICY_PLAN_CAPSULE "wreath.graphql.policy_plan"
+
+static GraphqlPolicySchema *
+graphql_policy_schema_from(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, GRAPHQL_POLICY_SCHEMA_CAPSULE);
+}
+
+static GraphqlPolicyState *
+graphql_policy_state_from(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, GRAPHQL_POLICY_STATE_CAPSULE);
+}
+
+static GraphqlPolicyPlan *
+graphql_policy_plan_from(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, GRAPHQL_POLICY_PLAN_CAPSULE);
+}
+
+static void
+graphql_policy_schema_free(GraphqlPolicySchema *schema)
+{
+    if (schema == NULL) return;
+    for (Py_ssize_t index = 0; index < schema->count; index++) {
+        Py_XDECREF(schema->entries[index].name);
+        Py_XDECREF(schema->entries[index].resource);
+    }
+    PyMem_Free(schema->entries);
+    PyMem_Free(schema->slots);
+    PyMem_Free(schema);
+}
+
+static void
+graphql_policy_schema_destroy(PyObject *capsule)
+{
+    GraphqlPolicySchema *schema = graphql_policy_schema_from(capsule);
+    if (schema == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    graphql_policy_schema_free(schema);
+}
+
+static void
+graphql_policy_state_destroy(PyObject *capsule)
+{
+    GraphqlPolicyState *state = graphql_policy_state_from(capsule);
+    if (state == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    Py_DECREF(state->schema_capsule);
+    PyMem_Free(state->decisions);
+    PyMem_Free(state);
+}
+
+static void
+graphql_policy_plan_free(GraphqlPolicyPlan *plan)
+{
+    if (plan == NULL) return;
+    Py_XDECREF(plan->schema_capsule);
+    Py_XDECREF(plan->root_name);
+    for (Py_ssize_t index = 0; index < plan->field_count; index++)
+        Py_XDECREF(plan->field_names[index]);
+    PyMem_Free(plan->field_names);
+    PyMem_Free(plan->field_indices);
+    PyMem_Free(plan->pending);
+    PyMem_Free(plan);
+}
+
+static void
+graphql_policy_plan_destroy(PyObject *capsule)
+{
+    GraphqlPolicyPlan *plan = graphql_policy_plan_from(capsule);
+    if (plan == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    graphql_policy_plan_free(plan);
+}
+
+static Py_ssize_t
+graphql_policy_table_size(Py_ssize_t count)
+{
+    Py_ssize_t size = 8;
+    Py_ssize_t target;
+    if (count > PY_SSIZE_T_MAX / 2) return -1;
+    target = count * 2;
+    while (size < target) {
+        if (size > PY_SSIZE_T_MAX / 2) return -1;
+        size *= 2;
+    }
+    return size;
+}
+
+static Py_ssize_t
+graphql_policy_find_hashed(GraphqlPolicySchema *schema, PyObject *name,
+                           Py_hash_t hash)
+{
+    size_t mask = (size_t)schema->table_size - 1;
+    size_t slot = (size_t)hash & mask;
+    for (;;) {
+        Py_ssize_t index = schema->slots[slot];
+        if (index < 0) return -1;
+        if (schema->entries[index].hash == hash) {
+            int equal = PyObject_RichCompareBool(
+                schema->entries[index].name, name, Py_EQ);
+            if (equal < 0) return -2;
+            if (equal) return index;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
+static Py_ssize_t
+graphql_policy_find(GraphqlPolicySchema *schema, PyObject *name)
+{
+    Py_hash_t hash = PyObject_Hash(name);
+    if (hash == -1) return -2;
+    return graphql_policy_find_hashed(schema, name, hash);
+}
+
+static int
+graphql_policy_insert(GraphqlPolicySchema *schema, Py_ssize_t index)
+{
+    size_t mask = (size_t)schema->table_size - 1;
+    size_t slot = (size_t)schema->entries[index].hash & mask;
+    while (schema->slots[slot] >= 0) slot = (slot + 1) & mask;
+    schema->slots[slot] = index;
+    return 0;
+}
+
+PyObject *
+wreath_graphql_policy_schema(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *policies_object, *converter;
+    PyObject *policies = NULL, *capsule = NULL;
+    GraphqlPolicySchema *schema = NULL;
+    if (!PyArg_UnpackTuple(args, "graphql_policy_schema", 2, 2,
+                           &policies_object, &converter)) return NULL;
+    if (!PyCallable_Check(converter)) {
+        PyErr_SetString(PyExc_TypeError, "GraphQL policy converter must be callable");
+        return NULL;
+    }
+    policies = PySequence_Fast(
+        policies_object, "GraphQL policies must be a sequence");
+    if (policies == NULL) return NULL;
+    Py_ssize_t supplied = PySequence_Fast_GET_SIZE(policies);
+    if ((size_t)supplied > SIZE_MAX / sizeof(*schema->entries)) {
+        Py_DECREF(policies);
+        return PyErr_NoMemory();
+    }
+    schema = PyMem_Calloc(1, sizeof(*schema));
+    if (schema == NULL) goto memory;
+    schema->table_size = graphql_policy_table_size(supplied);
+    if (schema->table_size < 0) goto memory;
+    schema->entries = PyMem_Calloc(
+        (size_t)(supplied > 0 ? supplied : 1), sizeof(*schema->entries));
+    schema->slots = PyMem_Malloc(
+        (size_t)schema->table_size * sizeof(*schema->slots));
+    if (schema->entries == NULL || schema->slots == NULL) goto memory;
+    for (Py_ssize_t slot = 0; slot < schema->table_size; slot++)
+        schema->slots[slot] = -1;
+    for (Py_ssize_t supplied_index = 0; supplied_index < supplied;
+         supplied_index++) {
+        PyObject *name = PySequence_Fast_GET_ITEM(policies, supplied_index);
+        Py_hash_t hash;
+        Py_ssize_t found;
+        if (!PyUnicode_Check(name)) {
+            PyErr_SetString(PyExc_TypeError, "GraphQL policy names must be strings");
+            goto error;
+        }
+        hash = PyObject_Hash(name);
+        if (hash == -1) goto error;
+        found = graphql_policy_find_hashed(schema, name, hash);
+        if (found == -2) goto error;
+        if (found >= 0) continue;
+        schema->entries[schema->count].name = Py_NewRef(name);
+        schema->entries[schema->count].resource = PyObject_CallOneArg(converter, name);
+        schema->entries[schema->count].hash = hash;
+        if (schema->entries[schema->count].resource == NULL) goto error;
+        graphql_policy_insert(schema, schema->count);
+        schema->count++;
+    }
+    capsule = PyCapsule_New(
+        schema, GRAPHQL_POLICY_SCHEMA_CAPSULE, graphql_policy_schema_destroy);
+    if (capsule == NULL) goto error;
+    Py_DECREF(policies);
+    return capsule;
+
+memory:
+    PyErr_NoMemory();
+error:
+    Py_XDECREF(policies);
+    graphql_policy_schema_free(schema);
+    return NULL;
+}
+
+PyObject *
+wreath_graphql_policy_state(PyObject *Py_UNUSED(self), PyObject *schema_capsule)
+{
+    GraphqlPolicySchema *schema = graphql_policy_schema_from(schema_capsule);
+    GraphqlPolicyState *state;
+    PyObject *capsule;
+    if (schema == NULL) return NULL;
+    state = PyMem_Calloc(1, sizeof(*state));
+    if (state == NULL) return PyErr_NoMemory();
+    state->decisions = PyMem_Malloc(
+        (size_t)(schema->count > 0 ? schema->count : 1));
+    if (state->decisions == NULL) {
+        PyMem_Free(state);
+        return PyErr_NoMemory();
+    }
+    memset(state->decisions, -1, (size_t)schema->count);
+    state->schema_capsule = Py_NewRef(schema_capsule);
+    capsule = PyCapsule_New(
+        state, GRAPHQL_POLICY_STATE_CAPSULE, graphql_policy_state_destroy);
+    if (capsule == NULL) {
+        Py_DECREF(state->schema_capsule);
+        PyMem_Free(state->decisions);
+        PyMem_Free(state);
+    }
+    return capsule;
+}
+
+static int
+graphql_policy_same_schema(GraphqlPolicyState *state, PyObject *schema_capsule)
+{
+    if (state->schema_capsule == schema_capsule) return 1;
+    PyErr_SetString(PyExc_ValueError, "GraphQL policy state belongs to another schema");
+    return 0;
+}
+
+static int
+graphql_policy_plan_add_pending(GraphqlPolicyPlan *plan,
+                                GraphqlPolicyState *state, Py_ssize_t index,
+                                unsigned char *seen)
+{
+    if (seen[index]) return 0;
+    seen[index] = 1;
+    if (state->decisions[index] < 0)
+        plan->pending[plan->pending_count++] = index;
+    return 0;
+}
+
+PyObject *
+wreath_graphql_policy_prepare(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *schema_capsule, *state_capsule, *schema_fields;
+    PyObject *fields_object, *root_policy, *root_name;
+    PyObject *fields = NULL, *capsule = NULL;
+    GraphqlPolicySchema *schema;
+    GraphqlPolicyState *state;
+    GraphqlPolicyPlan *plan = NULL;
+    unsigned char *pending_seen = NULL, *field_seen = NULL;
+    if (!PyArg_ParseTuple(args, "OOOOOO:graphql_policy_prepare",
+                          &schema_capsule, &state_capsule, &schema_fields,
+                          &fields_object, &root_policy, &root_name)) return NULL;
+    schema = graphql_policy_schema_from(schema_capsule);
+    state = graphql_policy_state_from(state_capsule);
+    if (schema == NULL || state == NULL ||
+        !graphql_policy_same_schema(state, schema_capsule)) return NULL;
+    if (!PyDict_Check(schema_fields)) {
+        PyErr_SetString(PyExc_TypeError, "GraphQL schema fields must be a dict");
+        return NULL;
+    }
+    fields = PySequence_Fast(fields_object, "GraphQL fields must be a sequence");
+    if (fields == NULL) return NULL;
+    Py_ssize_t supplied = PySequence_Fast_GET_SIZE(fields);
+    if (supplied == PY_SSIZE_T_MAX ||
+        (size_t)supplied > SIZE_MAX / sizeof(*plan->field_indices) ||
+        (size_t)supplied > SIZE_MAX / sizeof(*plan->field_names) ||
+        (size_t)(supplied + 1) > SIZE_MAX / sizeof(*plan->pending)) {
+        Py_DECREF(fields);
+        return PyErr_NoMemory();
+    }
+    plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) goto memory;
+    plan->root_index = -1;
+    plan->schema_capsule = Py_NewRef(schema_capsule);
+    plan->root_name = root_name == Py_None ? NULL : Py_NewRef(root_name);
+    plan->field_indices = PyMem_Malloc(
+        (size_t)(supplied > 0 ? supplied : 1) * sizeof(*plan->field_indices));
+    plan->field_names = PyMem_Calloc(
+        (size_t)(supplied > 0 ? supplied : 1), sizeof(*plan->field_names));
+    plan->pending = PyMem_Malloc(
+        (size_t)(supplied + 1) * sizeof(*plan->pending));
+    pending_seen = PyMem_Calloc(
+        (size_t)(schema->count > 0 ? schema->count : 1), 1);
+    field_seen = PyMem_Calloc(
+        (size_t)(schema->count > 0 ? schema->count : 1), 1);
+    if (plan->field_indices == NULL || plan->field_names == NULL ||
+        plan->pending == NULL || pending_seen == NULL ||
+        field_seen == NULL) goto memory;
+    if (root_policy != Py_None) {
+        plan->root_index = graphql_policy_find(schema, root_policy);
+        if (plan->root_index == -2) goto error;
+        if (plan->root_index < 0) {
+            PyErr_SetObject(PyExc_KeyError, root_policy);
+            goto error;
+        }
+        graphql_policy_plan_add_pending(
+            plan, state, plan->root_index, pending_seen);
+    }
+    for (Py_ssize_t supplied_index = 0; supplied_index < supplied;
+         supplied_index++) {
+        PyObject *field = PySequence_Fast_GET_ITEM(fields, supplied_index);
+        PyObject *name = PyObject_GetAttrString(field, "name");
+        PyObject *schema_field = NULL, *policy = NULL;
+        Py_ssize_t policy_index;
+        if (name == NULL) goto error;
+        if (PyDict_GetItemRef(schema_fields, name, &schema_field) < 0) {
+            Py_DECREF(name);
+            goto error;
+        }
+        if (schema_field == NULL) {
+            PyErr_SetObject(PyExc_KeyError, name);
+            Py_DECREF(name);
+            goto error;
+        }
+        policy = PyObject_GetAttrString(schema_field, "policy");
+        Py_DECREF(schema_field);
+        if (policy == NULL) {
+            Py_DECREF(name);
+            goto error;
+        }
+        policy_index = graphql_policy_find(schema, policy);
+        Py_DECREF(policy);
+        if (policy_index == -2) {
+            Py_DECREF(name);
+            goto error;
+        }
+        if (policy_index < 0) {
+            PyErr_SetObject(PyExc_KeyError, name);
+            Py_DECREF(name);
+            goto error;
+        }
+        if (!field_seen[policy_index]) {
+            plan->field_indices[plan->field_count] = policy_index;
+            plan->field_names[plan->field_count] = name;
+            plan->field_count++;
+            field_seen[policy_index] = 1;
+            graphql_policy_plan_add_pending(
+                plan, state, policy_index, pending_seen);
+        }
+        else Py_DECREF(name);
+    }
+    PyMem_Free(field_seen);
+    PyMem_Free(pending_seen);
+    Py_DECREF(fields);
+    capsule = PyCapsule_New(
+        plan, GRAPHQL_POLICY_PLAN_CAPSULE, graphql_policy_plan_destroy);
+    if (capsule == NULL) graphql_policy_plan_free(plan);
+    return capsule;
+
+memory:
+    PyErr_NoMemory();
+error:
+    PyMem_Free(field_seen);
+    PyMem_Free(pending_seen);
+    Py_XDECREF(fields);
+    graphql_policy_plan_free(plan);
+    return NULL;
+}
+
+PyObject *
+wreath_graphql_policy_resources(PyObject *Py_UNUSED(self), PyObject *plan_capsule)
+{
+    GraphqlPolicyPlan *plan = graphql_policy_plan_from(plan_capsule);
+    GraphqlPolicySchema *schema;
+    PyObject *resources;
+    if (plan == NULL) return NULL;
+    schema = graphql_policy_schema_from(plan->schema_capsule);
+    if (schema == NULL) return NULL;
+    resources = PyTuple_New(plan->pending_count);
+    if (resources == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < plan->pending_count; index++)
+        PyTuple_SET_ITEM(resources, index,
+                         Py_NewRef(schema->entries[plan->pending[index]].resource));
+    return resources;
+}
+
+static PyObject *
+graphql_policy_path(GraphqlPolicyPlan *plan, Py_ssize_t policy_index)
+{
+    if (policy_index == plan->root_index && plan->root_name != NULL)
+        return PyTuple_Pack(1, plan->root_name);
+    for (Py_ssize_t index = 0; index < plan->field_count; index++) {
+        if (plan->field_indices[index] == policy_index) {
+            if (plan->root_name == NULL)
+                return PyTuple_Pack(1, plan->field_names[index]);
+            return PyTuple_Pack(2, plan->root_name, plan->field_names[index]);
+        }
+    }
+    PyErr_SetString(PyExc_RuntimeError, "GraphQL policy plan lost a selected resource");
+    return NULL;
+}
+
+PyObject *
+wreath_graphql_policy_items(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *plan_capsule, *action, *requirement_type;
+    GraphqlPolicyPlan *plan;
+    GraphqlPolicySchema *schema;
+    PyObject *items;
+    if (!PyArg_UnpackTuple(args, "graphql_policy_items", 3, 3,
+                           &plan_capsule, &action, &requirement_type)) return NULL;
+    plan = graphql_policy_plan_from(plan_capsule);
+    if (plan == NULL) return NULL;
+    schema = graphql_policy_schema_from(plan->schema_capsule);
+    if (schema == NULL) return NULL;
+    items = PyTuple_New(plan->pending_count);
+    if (items == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < plan->pending_count; index++) {
+        Py_ssize_t policy_index = plan->pending[index];
+        PyObject *requirement = PyObject_CallFunctionObjArgs(
+            requirement_type, action, schema->entries[policy_index].resource, NULL);
+        PyObject *path = NULL, *item = NULL;
+        if (requirement == NULL) goto error;
+        path = graphql_policy_path(plan, policy_index);
+        if (path == NULL) {
+            Py_DECREF(requirement);
+            goto error;
+        }
+        item = PyTuple_Pack(2, requirement, path);
+        Py_DECREF(requirement);
+        Py_DECREF(path);
+        if (item == NULL) goto error;
+        PyTuple_SET_ITEM(items, index, item);
+    }
+    return items;
+error:
+    Py_DECREF(items);
+    return NULL;
+}
+
+PyObject *
+wreath_graphql_policy_apply(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *plan_capsule, *state_capsule, *decisions_object;
+    PyObject *decisions = NULL;
+    GraphqlPolicyPlan *plan;
+    GraphqlPolicyState *state;
+    int stop_on_denied;
+    if (!PyArg_ParseTuple(args, "OOOp:graphql_policy_apply", &plan_capsule,
+                          &state_capsule, &decisions_object,
+                          &stop_on_denied)) return NULL;
+    plan = graphql_policy_plan_from(plan_capsule);
+    state = graphql_policy_state_from(state_capsule);
+    if (plan == NULL || state == NULL ||
+        !graphql_policy_same_schema(state, plan->schema_capsule)) return NULL;
+    decisions = PySequence_Fast(
+        decisions_object, "authorization decisions must be a sequence");
+    if (decisions == NULL) return NULL;
+    Py_ssize_t supplied = PySequence_Fast_GET_SIZE(decisions);
+    if (supplied > plan->pending_count) {
+        PyErr_SetString(PyExc_ValueError, "more authorization decisions than resources");
+        Py_DECREF(decisions);
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < supplied; index++) {
+        PyObject *decision = PySequence_Fast_GET_ITEM(decisions, index);
+        PyObject *allowed_object = NULL;
+        int found_allowed = PyObject_GetOptionalAttrString(
+            decision, "allowed", &allowed_object);
+        int allowed;
+        if (found_allowed < 0) {
+            Py_DECREF(decisions);
+            return NULL;
+        }
+        if (!found_allowed) allowed = 0;
+        else {
+            allowed = PyObject_IsTrue(allowed_object);
+            Py_DECREF(allowed_object);
+            if (allowed < 0) {
+                Py_DECREF(decisions);
+                return NULL;
+            }
+        }
+        state->decisions[plan->pending[index]] = (signed char)allowed;
+        if (!allowed && stop_on_denied) {
+            PyObject *reason = NULL;
+            int found_reason = PyObject_GetOptionalAttrString(
+                decision, "reason", &reason);
+            GraphqlPolicySchema *schema;
+            PyObject *path, *denial;
+            if (found_reason < 0) {
+                Py_DECREF(decisions);
+                return NULL;
+            }
+            if (!found_reason) reason = Py_NewRef(Py_None);
+            schema = graphql_policy_schema_from(plan->schema_capsule);
+            if (schema == NULL) {
+                Py_DECREF(reason);
+                Py_DECREF(decisions);
+                return NULL;
+            }
+            path = graphql_policy_path(plan, plan->pending[index]);
+            if (path == NULL) {
+                Py_DECREF(reason);
+                Py_DECREF(decisions);
+                return NULL;
+            }
+            denial = PyTuple_Pack(
+                3, reason, path,
+                schema->entries[plan->pending[index]].name);
+            Py_DECREF(reason);
+            Py_DECREF(path);
+            Py_DECREF(decisions);
+            return denial;
+        }
+    }
+    if (supplied != plan->pending_count) {
+        PyErr_SetString(PyExc_ValueError, "fewer authorization decisions than resources");
+        Py_DECREF(decisions);
+        return NULL;
+    }
+    Py_DECREF(decisions);
+    Py_RETURN_NONE;
+}
+
+PyObject *
+wreath_graphql_policy_result(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *plan_capsule, *state_capsule;
+    GraphqlPolicyPlan *plan;
+    GraphqlPolicyState *state;
+    int root_allowed = 1, projection_allowed = 1;
+    if (!PyArg_UnpackTuple(args, "graphql_policy_result", 2, 2,
+                           &plan_capsule, &state_capsule)) return NULL;
+    plan = graphql_policy_plan_from(plan_capsule);
+    state = graphql_policy_state_from(state_capsule);
+    if (plan == NULL || state == NULL ||
+        !graphql_policy_same_schema(state, plan->schema_capsule)) return NULL;
+    if (plan->root_index >= 0) {
+        if (state->decisions[plan->root_index] < 0) goto missing;
+        root_allowed = state->decisions[plan->root_index] != 0;
+    }
+    for (Py_ssize_t index = 0; index < plan->field_count; index++) {
+        signed char decision = state->decisions[plan->field_indices[index]];
+        if (decision < 0) goto missing;
+        if (!decision) projection_allowed = 0;
+    }
+    return PyLong_FromLong(root_allowed | (projection_allowed << 1));
+missing:
+    PyErr_SetString(PyExc_RuntimeError, "GraphQL policy result is incomplete");
+    return NULL;
+}
+
+static Py_ssize_t
+graphql_policy_lookup_pair(PyObject *schema_capsule, PyObject *state_capsule,
+                           PyObject *resource, GraphqlPolicyState **out_state)
+{
+    GraphqlPolicySchema *schema = graphql_policy_schema_from(schema_capsule);
+    GraphqlPolicyState *state = graphql_policy_state_from(state_capsule);
+    Py_ssize_t index;
+    if (schema == NULL || state == NULL ||
+        !graphql_policy_same_schema(state, schema_capsule)) return -2;
+    index = graphql_policy_find(schema, resource);
+    if (index == -1) PyErr_SetObject(PyExc_KeyError, resource);
+    if (index < 0) return -2;
+    *out_state = state;
+    return index;
+}
+
+PyObject *
+wreath_graphql_policy_cached(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *schema_capsule, *state_capsule, *resource;
+    GraphqlPolicyState *state;
+    Py_ssize_t index;
+    if (!PyArg_UnpackTuple(args, "graphql_policy_cached", 3, 3,
+                           &schema_capsule, &state_capsule, &resource)) return NULL;
+    index = graphql_policy_lookup_pair(
+        schema_capsule, state_capsule, resource, &state);
+    if (index < 0) return NULL;
+    return PyLong_FromLong(state->decisions[index]);
+}
+
+PyObject *
+wreath_graphql_policy_store(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *schema_capsule, *state_capsule, *resource;
+    GraphqlPolicyState *state;
+    Py_ssize_t index;
+    int allowed;
+    if (!PyArg_ParseTuple(args, "OOOp:graphql_policy_store", &schema_capsule,
+                          &state_capsule, &resource, &allowed)) return NULL;
+    index = graphql_policy_lookup_pair(
+        schema_capsule, state_capsule, resource, &state);
+    if (index < 0) return NULL;
+    state->decisions[index] = (signed char)allowed;
+    Py_RETURN_NONE;
+}
+
+PyObject *
+wreath_graphql_policy_resource(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *schema_capsule, *resource;
+    GraphqlPolicySchema *schema;
+    Py_ssize_t index;
+    if (!PyArg_UnpackTuple(args, "graphql_policy_resource", 2, 2,
+                           &schema_capsule, &resource)) return NULL;
+    schema = graphql_policy_schema_from(schema_capsule);
+    if (schema == NULL) return NULL;
+    index = graphql_policy_find(schema, resource);
+    if (index == -1) PyErr_SetObject(PyExc_KeyError, resource);
+    if (index < 0) return NULL;
+    return Py_NewRef(schema->entries[index].resource);
+}
+
+typedef struct {
     PyObject *key;
     PyObject **values;
 } GraphqlResultField;

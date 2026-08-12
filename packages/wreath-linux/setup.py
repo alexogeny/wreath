@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import os
+import sysconfig
 from pathlib import Path
+
+if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    raise RuntimeError(
+        "wreath-linux supports regular CPython 3.14; free-threaded CPython "
+        "3.14t is not supported. Use a regular CPython 3.14 interpreter."
+    )
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext

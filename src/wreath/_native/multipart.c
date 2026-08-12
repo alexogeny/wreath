@@ -10,8 +10,22 @@
 
 /* Parse "Name: value" header lines in [p, headers_end) into a list of
  * (lowercased-name-bytes, value-bytes) tuples. */
+static int
+multipart_ascii_equal(const uint8_t *value, Py_ssize_t length,
+                      const char *expected, Py_ssize_t expected_length)
+{
+    if (length != expected_length) return 0;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        uint8_t byte = value[index];
+        if (byte >= 'A' && byte <= 'Z') byte = (uint8_t)(byte + ('a' - 'A'));
+        if (byte != (uint8_t)expected[index]) return 0;
+    }
+    return 1;
+}
+
 static PyObject *
-parse_part_headers(const uint8_t *p, const uint8_t *headers_end)
+parse_part_headers(const uint8_t *p, const uint8_t *headers_end,
+                   const uint8_t **disposition, Py_ssize_t *disposition_length)
 {
     PyObject *headers = PyList_New(0);
     if (headers == NULL) {
@@ -58,6 +72,11 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end)
                (value_end[-1] == ' ' || value_end[-1] == '\t')) {
             value_end--;
         }
+        if (*disposition == NULL && multipart_ascii_equal(
+                p, name_len, "content-disposition", 19)) {
+            *disposition = value_start;
+            *disposition_length = value_end - value_start;
+        }
         PyObject *value =
             PyBytes_FromStringAndSize((const char *)value_start, value_end - value_start);
         PyObject *pair = (value != NULL) ? PyTuple_Pack(2, name, value) : NULL;
@@ -74,6 +93,131 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end)
     return headers;
 }
 
+static const uint8_t *
+multipart_trim_start(const uint8_t *start, const uint8_t *end)
+{
+    while (start < end && (*start == ' ' || *start == '\t')) start++;
+    return start;
+}
+
+static const uint8_t *
+multipart_trim_end(const uint8_t *start, const uint8_t *end)
+{
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    return end;
+}
+
+static PyObject *
+multipart_disposition_param(const uint8_t *value, Py_ssize_t length,
+                            const char *parameter, Py_ssize_t parameter_length)
+{
+    if (value == NULL) return Py_NewRef(Py_None);
+    const uint8_t *end = value + length;
+    for (const uint8_t *fragment = value; fragment <= end;) {
+        const uint8_t *fragment_end = memchr(fragment, ';', (size_t)(end - fragment));
+        if (fragment_end == NULL) fragment_end = end;
+        const uint8_t *start = multipart_trim_start(fragment, fragment_end);
+        const uint8_t *trimmed_end = multipart_trim_end(start, fragment_end);
+        const uint8_t *equals = memchr(start, '=', (size_t)(trimmed_end - start));
+        if (equals != NULL) {
+            const uint8_t *key_end = multipart_trim_end(start, equals);
+            const uint8_t *raw_start = multipart_trim_start(equals + 1, trimmed_end);
+            const uint8_t *raw_end = multipart_trim_end(raw_start, trimmed_end);
+            if (multipart_ascii_equal(
+                    start, key_end - start, parameter, parameter_length)) {
+                if (raw_end - raw_start >= 2 && raw_start[0] == '"' &&
+                    raw_end[-1] == '"') {
+                    raw_start++;
+                    raw_end--;
+                    Py_ssize_t raw_length = raw_end - raw_start;
+                    uint8_t *unescaped = raw_length != 0
+                        ? PyMem_Malloc((size_t)raw_length) : NULL;
+                    if (raw_length != 0 && unescaped == NULL) return PyErr_NoMemory();
+                    Py_ssize_t first_length = 0;
+                    for (Py_ssize_t index = 0; index < raw_length; index++) {
+                        if (raw_start[index] == '\\' && index + 1 < raw_length &&
+                            raw_start[index + 1] == '"') {
+                            unescaped[first_length++] = '"';
+                            index++;
+                        }
+                        else {
+                            unescaped[first_length++] = raw_start[index];
+                        }
+                    }
+                    Py_ssize_t second_length = 0;
+                    for (Py_ssize_t index = 0; index < first_length; index++) {
+                        if (unescaped[index] == '\\' && index + 1 < first_length &&
+                            unescaped[index + 1] == '\\') {
+                            unescaped[second_length++] = '\\';
+                            index++;
+                        }
+                        else {
+                            unescaped[second_length++] = unescaped[index];
+                        }
+                    }
+                    PyObject *decoded = PyUnicode_DecodeUTF8(
+                        raw_length != 0 ? (const char *)unescaped : "",
+                        second_length, "replace");
+                    PyMem_Free(unescaped);
+                    return decoded;
+                }
+                return PyUnicode_DecodeUTF8(
+                    (const char *)raw_start, raw_end - raw_start, "replace");
+            }
+        }
+        if (fragment_end == end) break;
+        fragment = fragment_end + 1;
+    }
+    return Py_NewRef(Py_None);
+}
+
+static PyObject *
+multipart_materialize_part(PyObject *part_type, PyObject *headers,
+                           const uint8_t *content_start, Py_ssize_t content_length,
+                           const uint8_t *disposition, Py_ssize_t disposition_length)
+{
+    PyObject *values[4] = {NULL};
+    values[0] = multipart_disposition_param(disposition, disposition_length, "name", 4);
+    values[1] = values[0] != NULL
+        ? multipart_disposition_param(
+            disposition, disposition_length, "filename", 8) : NULL;
+    values[2] = values[1] != NULL ? Py_NewRef(headers) : NULL;
+    values[3] = values[2] != NULL
+        ? PyBytes_FromStringAndSize(NULL, content_length) : NULL;
+    if (values[3] != NULL && content_length != 0) {
+        memcpy(PyBytes_AS_STRING(values[3]), content_start, (size_t)content_length);
+    }
+    PyObject *part = values[3] != NULL
+        ? PyObject_Vectorcall(part_type, values, 4, NULL) : NULL;
+    for (Py_ssize_t index = 0; index < 4; index++) Py_XDECREF(values[index]);
+    return part;
+}
+
+PyObject *
+wreath_multipart_part_info(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    Py_buffer block;
+    if (PyObject_GetBuffer(arg, &block, PyBUF_SIMPLE) < 0) return NULL;
+    const uint8_t *disposition = NULL;
+    Py_ssize_t disposition_length = 0;
+    const uint8_t *start = block.buf;
+    PyObject *headers = parse_part_headers(
+        start, start + block.len, &disposition, &disposition_length);
+    PyObject *name = headers != NULL
+        ? multipart_disposition_param(disposition, disposition_length, "name", 4)
+        : NULL;
+    PyObject *filename = name != NULL
+        ? multipart_disposition_param(disposition, disposition_length, "filename", 8)
+        : NULL;
+    PyObject *result = filename != NULL
+        ? PyTuple_Pack(3, headers, name, filename) : NULL;
+    Py_XDECREF(filename);
+    Py_XDECREF(name);
+    Py_XDECREF(headers);
+    PyBuffer_Release(&block);
+    return result;
+}
+
 PyObject *
 wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds)
 {
@@ -82,13 +226,21 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
     Py_ssize_t max_part_header_bytes = -1;
     Py_ssize_t max_part_bytes = -1;
     PyObject *part_factory = Py_None;
+    PyObject *part_type = Py_None;
     static char *kwlist[] = {"body", "boundary", "max_parts",
                              "max_part_header_bytes", "max_part_bytes",
-                             "part_factory", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*y*|nnnO:multipart_parse", kwlist,
+                             "part_factory", "part_type", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*y*|nnnOO:multipart_parse", kwlist,
                                      &body, &boundary, &max_parts,
                                      &max_part_header_bytes, &max_part_bytes,
-                                     &part_factory)) {
+                                     &part_factory, &part_type)) {
+        return NULL;
+    }
+    if (part_factory != Py_None && part_type != Py_None) {
+        PyBuffer_Release(&body);
+        PyBuffer_Release(&boundary);
+        PyErr_SetString(
+            PyExc_ValueError, "part_factory and part_type are mutually exclusive");
         return NULL;
     }
     if (boundary.len < 1 || boundary.len > 70) {
@@ -132,8 +284,8 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
     }
 
     parts = PyList_New(0);
-    body_view = PyMemoryView_FromObject(body.obj);
-    if (parts == NULL || body_view == NULL) {
+    body_view = part_type == Py_None ? PyMemoryView_FromObject(body.obj) : NULL;
+    if (parts == NULL || (part_type == Py_None && body_view == NULL)) {
         Py_CLEAR(parts);
         goto done;
     }
@@ -203,14 +355,22 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
             goto fail;
         }
 
-        PyObject *headers = parse_part_headers(pos, headers_end);
+        const uint8_t *disposition = NULL;
+        Py_ssize_t disposition_length = 0;
+        PyObject *headers = parse_part_headers(
+            pos, headers_end, &disposition, &disposition_length);
         if (headers == NULL) {
             goto fail;
         }
-        PyObject *content = PySequence_GetSlice(
-            body_view, body_start - data, next - data);
+        PyObject *content = part_type == Py_None
+            ? PySequence_GetSlice(body_view, body_start - data, next - data) : NULL;
         PyObject *part = NULL;
-        if (content != NULL) {
+        if (part_type != Py_None) {
+            part = multipart_materialize_part(
+                part_type, headers, body_start, next - body_start,
+                disposition, disposition_length);
+        }
+        else if (content != NULL) {
             part = part_factory == Py_None
                 ? PyTuple_Pack(2, headers, content)
                 : PyObject_CallFunctionObjArgs(part_factory, headers, content, NULL);

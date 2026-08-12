@@ -28,8 +28,8 @@ The public surface is three names, re-exported from
   satisfies the `CedarEngine` protocol, so
   `CedarAuthorizer(engine=CedarPolicies(source))` needs nothing else.
 
-Compiled value model (shared by both evaluators): `bool`, i64 `int`,
-`str`, an entity uid as a `(type, id)` string 2-tuple, a set as a
+Compiled value model consumed by the evaluator: `bool`, i64 `int`, `str`, an
+entity uid as a `(type, id)` string 2-tuple, a set as a
 duplicate-free `list`, and a record as a `dict`. Booleans are never
 integers — every check tests `bool` first, because Python's bool subclasses
 int and Cedar's type system does not.
@@ -142,6 +142,21 @@ def _reads_context(policies: Iterable[Any], attribute: str) -> bool:
     return False
 
 
+def _context_attributes(policies: Iterable[Any]) -> frozenset[str]:
+    """Every direct ``context.<attribute>`` read in these compiled policies."""
+    context = (_OP_VAR, _VARS["context"])
+    found: set[str] = set()
+    stack: list[Any] = list(policies)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, tuple | list):
+            continue
+        if len(node) == 3 and node[1] == context:
+            found.add(node[2])
+        stack.extend(node)
+    return frozenset(found)
+
+
 def _referenced_members(
     policies: Iterable[Any], attribute: str
 ) -> frozenset[str] | None:
@@ -250,101 +265,9 @@ class CedarEntity:
 # -- value conversion into the compiled model ---------------------------------
 
 
-def _cedar_eq(a: Any, b: Any) -> bool:
-    """Structural equality over the compiled value model; never an error."""
-    if type(a) is bool or type(b) is bool:
-        return type(a) is bool and type(b) is bool and a is b
-    if isinstance(a, int) and isinstance(b, int):
-        return a == b
-    if isinstance(a, str) and isinstance(b, str):
-        return a == b
-    if isinstance(a, tuple) and isinstance(b, tuple):
-        return a == b
-    if isinstance(a, list) and isinstance(b, list):
-        return all(any(_cedar_eq(x, y) for y in b) for x in a) and all(
-            any(_cedar_eq(y, x) for x in a) for y in b
-        )
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_cedar_eq(value, b[key]) for key, value in a.items())
-    return False
-
-
-def _dedupe_key(value: Any) -> tuple[str, object] | None:
-    """A hashable identity for a converted value, or None if it needs `_cedar_eq`.
-
-    The tag keeps kinds apart because `_cedar_eq` does: `True` and `1`
-    are *not* equal in Cedar's model, but in Python they compare equal and hash
-    alike, so an untagged set would silently merge them. Values of different
-    kinds are never `_cedar_eq`, so partitioning by kind loses nothing.
-    """
-    if type(value) is bool:
-        return ("b", value)
-    if isinstance(value, int):
-        return ("i", value)
-    if isinstance(value, str):
-        return ("s", value)
-    if isinstance(value, tuple):
-        # An entity uid, so (str, str) and hashable; guarded anyway rather than
-        # assuming, since falling back is merely slower and never wrong.
-        try:
-            hash(value)
-        except TypeError:
-            return None
-        return ("t", value)
-    return None  # records and nested sets: structural comparison only
-
-
 def _to_cedar_value(value: object, *, where: str) -> Any:
-    """Convert a Python value into the compiled value model, loudly or not at all."""
-    if type(value) is bool or isinstance(value, str):
-        return value
-    if isinstance(value, int):
-        if not _I64_MIN <= value <= _I64_MAX:
-            raise TypeError(f"{where}: integer {value} does not fit in Cedar's i64")
-        return value
-    if isinstance(value, EntityUid):
-        return (value.type, value.id)
-    if isinstance(value, Mapping):
-        converted: dict[str, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(
-                    f"{where}: record keys must be strings, got {type(key).__name__!r}"
-                )
-            converted[key] = _to_cedar_value(item, where=where)
-        return converted
-    if isinstance(value, list | tuple | set | frozenset):
-        # A Cedar set is unordered with structural equality, so duplicates have
-        # to go. Comparing every candidate against every kept one is O(N**2),
-        # and this runs on every `is_authorized` call -- once for the context
-        # and once per entity attribute -- so a policy carrying a few hundred
-        # group ids paid it per authorization. Measured before this change: 25
-        # elements 64us, 400 elements 14.4ms, a clean 4x per doubling.
-        #
-        # Scalars carry their own identity, so they dedupe through a set. Only
-        # records and nested sets, which are unhashable and need structural
-        # comparison, keep the pairwise scan -- and they compare against just
-        # the other unhashables rather than the whole result.
-        deduplicated: list[object] = []
-        seen: set[tuple[str, object]] = set()
-        structural: list[object] = []
-        for item in value:
-            candidate = _to_cedar_value(item, where=where)
-            key = _dedupe_key(candidate)
-            if key is not None:
-                if key in seen:
-                    continue
-                seen.add(key)
-            else:
-                if any(_cedar_eq(candidate, existing) for existing in structural):
-                    continue
-                structural.append(candidate)
-            deduplicated.append(candidate)
-        return deduplicated
-    raise TypeError(
-        f"{where}: {type(value).__name__!r} has no Cedar equivalent; "
-        "use bool, int, str, EntityUid, a mapping, or a sequence"
-    )
+    """Convert one complete value graph into the evaluator's value model."""
+    return _core.cedar_to_value(value, EntityUid, Mapping, where)
 
 
 # -- lexer --------------------------------------------------------------------
@@ -946,13 +869,34 @@ class CedarPolicies:
     per-request entities handed to `is_authorized` are merged over them.
     """
 
-    __slots__ = ("_dangling", "_entities", "_policies", "_source", "_store")
+    __slots__ = (
+        "_context_by_action",
+        "_context_default",
+        "_dangling",
+        "_entities",
+        "_policies",
+        "_source",
+        "_store",
+    )
 
     def __init__(self, source: str, *, entities: Iterable[CedarEntity] = ()) -> None:
         if not isinstance(source, str) or not source.strip():
             raise CedarParseError("policy source must be non-empty Cedar text")
         self._source = source
         self._policies = _Parser(_tokenize(source)).policies()
+        general = []
+        exact: dict[tuple[str, str], list[object]] = {}
+        for policy in self._policies:
+            action_scope = policy[3]
+            if action_scope[0] == _SCOPE_EQ:
+                exact.setdefault(action_scope[1], []).append(policy)
+            else:
+                general.append(policy)
+        self._context_default = _context_attributes(general)
+        self._context_by_action = {
+            action: self._context_default | _context_attributes(policies)
+            for action, policies in exact.items()
+        }
         self._entities = tuple(entities)
         self._store = _build_store(self._entities)
         # Parent uids the static hierarchy names but does not define. A
@@ -1062,6 +1006,16 @@ class CedarPolicies:
         """
         return _reads_context(self._policies, attribute)
 
+    def context_attributes_for_action(self, action: object) -> frozenset[str]:
+        """Context keys reachable by policies that can match this action.
+
+        Only a different exact-equality action scope proves irrelevance here.
+        Hierarchical and set scopes remain in the candidate set because request
+        entities can make them match even when their literal target differs.
+        """
+        action_uid = _as_uid_tuple(action, "action")
+        return self._context_by_action.get(action_uid, self._context_default)
+
     def is_authorized(
         self,
         *,
@@ -1108,6 +1062,38 @@ class CedarPolicies:
             store,
         )
         return AuthorizationDecision(allowed, reason, diagnostics)
+
+    def _is_authorized_many(
+        self,
+        *,
+        principal: object,
+        action: object,
+        resources: tuple[object, ...],
+        context: Mapping[str, object] | None,
+        entities: object,
+        stop_on_denied: bool,
+    ) -> tuple[AuthorizationDecision, ...]:
+        """Evaluate several resources against one compiled request context."""
+        request_entities = _as_entities(entities)
+        if request_entities:
+            store = _layer_store(
+                self._store, self._dangling, self._entities, request_entities
+            )
+        else:
+            store = self._store
+        principal_uid = _as_uid_tuple(principal, "principal")
+        action_uid = _as_uid_tuple(action, "action")
+        compiled_context = _to_cedar_value(dict(context or {}), where="context")
+        results = _core.cedar_is_authorized_many(
+            self._policies,
+            principal_uid,
+            action_uid,
+            tuple(_as_uid_tuple(resource, "resource") for resource in resources),
+            compiled_context,
+            store,
+            stop_on_denied,
+        )
+        return tuple(AuthorizationDecision(*result) for result in results)
 
 
 def _as_uid_tuple(value: object, name: str) -> tuple[str, str]:

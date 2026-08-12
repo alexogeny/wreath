@@ -64,6 +64,7 @@ from calendar import monthrange
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ._native import _core
 from ._series.compile import (
     CURRENT,
     PREVIOUS,
@@ -72,7 +73,7 @@ from ._series.compile import (
     compile_events,
     compile_series,
 )
-from ._series.envelope import aggregate_rows, cell_rows, fill, series_rows
+from ._series.envelope import aggregate_rows, cell_rows, fill
 from ._series.settle import (
     Seal,
     SealState,
@@ -119,6 +120,7 @@ from .temporal import (
     parse_duration,
     wall_clock,
 )
+from .temporal import _tzinfo as _temporal_tzinfo
 from .temporal import now as _now
 from .temporal import zone as _zone_of
 
@@ -143,7 +145,13 @@ __all__ = [
     "count",
     "max_",
     "min_",
+    "nice_ticks",
+    "project_chart",
+    "project_chart_spine",
+    "reconcile",
+    "series_path",
     "sum_",
+    "lttb",
 ]
 
 
@@ -164,9 +172,7 @@ _TEMPORAL_TYPES = frozenset({TimestampTz.name, Timestamp.name, Date.name})
 #: Columns a measure can aggregate. Deliberately no `numeric`/`decimal`
 #: entry yet: the ORM does not ship one, and listing a type nothing can declare
 #: would be a promise rather than a check.
-_NUMERIC_TYPES = frozenset(
-    {Int16.name, Int32.name, Int64.name, Float32.name, Float64.name}
-)
+_NUMERIC_TYPES = frozenset({Int16.name, Int32.name, Int64.name, Float32.name, Float64.name})
 
 #: How many series a grouped view keeps before folding the rest together. Past
 #: roughly seven, colour stops telling series apart and the honest form is a
@@ -200,6 +206,131 @@ DEFAULT_GROUP_LIMIT = 50
 #: the rows that matched. 10 000 is a 100x100 map, which is already more cells
 #: than a screen has room to distinguish.
 DEFAULT_CELL_LIMIT = 10_000
+
+
+def reconcile(
+    buckets: Any,
+    sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
+    fills: dict[str, Any],
+) -> tuple[tuple[tuple[Any, bool], str, tuple[Any, ...]], ...]:
+    """Reconcile sparse measured values against a dense bucket run.
+
+    This is the storage-neutral series kernel. `buckets` may be any ordered
+    iterable; `sparse` maps a stable `(key, other)` series identity to its
+    measured buckets; and `fills` gives each measure's absent value in output
+    order. It accepts no declaration, model, connection, ORM type or SQL, so an
+    in-memory producer and the PostgreSQL envelope use the same operation.
+    """
+    return _core.series_reconcile(buckets, sparse, fills)
+
+
+def lttb(x: Any, y: Any, threshold: int) -> tuple[int, ...]:
+    """Indices selected by Largest-Triangle-Three-Buckets downsampling.
+
+    Inputs are finite numeric arrays of equal length. Returning indices keeps
+    the operation independent of the caller's point type and lets one selection
+    address parallel arrays such as labels, confidence bounds and tooltips.
+    """
+    return _core.series_lttb(x, y, threshold)
+
+
+def nice_ticks(minimum: float, maximum: float, target: int = 6) -> tuple[float, ...]:
+    """Readable 1/2/5 × 10ⁿ ticks covering an inclusive numeric extent."""
+    return _core.series_nice_ticks(minimum, maximum, target)
+
+
+def series_path(x: Any, y: Any) -> str:
+    """An SVG line path whose `None` values begin a new segment.
+
+    Missing measurements are gaps, never zeroes and never bridges. The output
+    therefore emits `M` after every gap and `L` only within a contiguous
+    run of finite numeric values.
+    """
+    return _core.series_path(x, y)
+
+
+def project_chart(
+    buckets: Any,
+    sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
+    fills: dict[str, Any],
+    *,
+    downsample_rows: Any,
+    full_rows: Any = (),
+    threshold: int = 128,
+    tick_target: int = 9,
+) -> tuple[
+    int,
+    tuple[tuple[Any, bool], ...],
+    tuple[str, ...],
+    tuple[tuple[float, ...], ...],
+]:
+    """Project sparse series data directly to compact chart outputs.
+
+    Row indices address the stable series-major, measure-minor order produced
+    by `reconcile`. The operation retains dense cells, LTTB selections and path
+    buffers for the call; only identities, final SVG paths and tick axes cross
+    into Python.
+    """
+    return _core.series_chart(
+        buckets,
+        sparse,
+        fills,
+        downsample_rows,
+        full_rows,
+        threshold,
+        tick_target,
+    )
+
+
+def project_chart_spine(
+    start: Any,
+    end: Any,
+    *,
+    bucket: Bucket,
+    in_zone: Any,
+    sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
+    fills: dict[str, Any],
+    downsample_rows: Any,
+    full_rows: Any = (),
+    threshold: int = 128,
+    tick_target: int = 9,
+) -> tuple[
+    int,
+    tuple[tuple[Any, bool], ...],
+    tuple[str, ...],
+    tuple[tuple[float, ...], ...],
+]:
+    """Project a local-wall-clock dense range without materialising its spine.
+
+    Sparse bucket keys are mapped directly to ordinal positions in the native
+    dense run. The range, unit, zone, sparse values and fill values are all
+    data: no series declaration, model, connection, ORM type or SQL enters the
+    operation. Use `project_chart` when the dense run already exists as
+    an iterable, and this form when the run is defined by a temporal range.
+    """
+    if not isinstance(bucket, Bucket):
+        raise SeriesError(
+            "project_chart_spine(bucket=) takes a bucket such as Day, "
+            f"got {bucket!r}"
+        )
+    start_instant = Instant.of(start)
+    end_instant = Instant.of(end)
+    tz = _temporal_tzinfo(in_zone)
+    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(
+        bucket.name
+    )
+    return _core.series_chart_spine(
+        start_instant,
+        end_instant,
+        unit,
+        tz,
+        sparse,
+        fills,
+        downsample_rows,
+        full_rows,
+        threshold,
+        tick_target,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +396,7 @@ def max_(column: Any, *, unit: str | None = None) -> Measure:
 
 def _numeric(column: Any, name: str) -> ColumnExpr:
     if not isinstance(column, ColumnExpr):
-        raise SeriesError(
-            f"{name}() takes a model column such as Trek.distance_km, got {column!r}"
-        )
+        raise SeriesError(f"{name}() takes a model column such as Trek.distance_km, got {column!r}")
     if column.column.pg_type.name not in _NUMERIC_TYPES:
         raise SeriesError(
             f"{name}() cannot aggregate {column.column.python_name}, which is "
@@ -296,9 +425,7 @@ class Range:
                     f"single instant, and assuming UTC is the popular wrong guess"
                 )
         if self.end <= self.start:
-            raise SeriesError(
-                f"Range is empty: end {self.end} is not after start {self.start}"
-            )
+            raise SeriesError(f"Range is empty: end {self.end} is not after start {self.start}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,8 +767,7 @@ class _Builder:
         for name, item in measures.items():
             if not isinstance(item, Measure):
                 raise SeriesError(
-                    f"measure {name}= takes count(), sum_(), avg(), min_() or "
-                    f"max_(), got {item!r}"
+                    f"measure {name}= takes count(), sum_(), avg(), min_() or max_(), got {item!r}"
                 )
             if name in dict(self._d.measures):
                 raise SeriesError(f"measure {name!r} is declared twice")
@@ -676,9 +802,7 @@ class _Builder:
 
     def _grouped_by(self, column: Any) -> Any:
         if not isinstance(column, ColumnExpr):
-            raise SeriesError(
-                f"by() takes a model column such as Trek.paddock_id, got {column!r}"
-            )
+            raise SeriesError(f"by() takes a model column such as Trek.paddock_id, got {column!r}")
         if self._d.group is not None:
             raise SeriesError(
                 "by() is already declared; one grouping key per view, because a "
@@ -857,8 +981,7 @@ class Cells(_Builder):
         for name, column in (("lat", lat), ("lon", lon)):
             if not isinstance(column, ColumnExpr):
                 raise SeriesError(
-                    f"over({name}=...) takes a model column such as "
-                    f"Sighting.{name}, got {column!r}"
+                    f"over({name}=...) takes a model column such as Sighting.{name}, got {column!r}"
                 )
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise SeriesError(f"over(limit=) must be a positive integer, got {limit!r}")
@@ -879,8 +1002,7 @@ class Cells(_Builder):
             raise SeriesError("this view declares no measures; there is nothing to compute")
         if self._d.cell is None:
             raise SeriesError(
-                "this view declares no spatial axis; call over(lat, lon, "
-                "metres=..., extent=...)"
+                "this view declares no spatial axis; call over(lat, lon, metres=..., extent=...)"
             )
         predicates = self._bind(values)
         sql, args, _oids = compile_cells(session.registry, self, predicates)
@@ -904,10 +1026,7 @@ class Cells(_Builder):
     def __repr__(self) -> str:
         lattice = self.grid
         shape = "-" if lattice is None else f"{lattice.rows}x{lattice.columns}"
-        return (
-            f"<Cells {self._d.model.__name__} "
-            f"measures={len(self._d.measures)} grid={shape}>"
-        )
+        return f"<Cells {self._d.model.__name__} measures={len(self._d.measures)} grid={shape}>"
 
 
 class Aggregate(_Builder):
@@ -931,8 +1050,9 @@ class Aggregate(_Builder):
 
     __slots__ = ("_limit",)
 
-    def __init__(self, model: type, *, _state: _Declaration | None = None,
-                 _limit: int = DEFAULT_GROUP_LIMIT) -> None:
+    def __init__(
+        self, model: type, *, _state: _Declaration | None = None, _limit: int = DEFAULT_GROUP_LIMIT
+    ) -> None:
         self._d = _state if _state is not None else _Declaration(model=model)
         self._limit = _limit
 
@@ -1001,8 +1121,14 @@ class Series(_Builder):
     """
 
     __slots__ = (
-        "_at", "_bucket", "_compare", "_events", "_seal", "_stored_in",
-        "_tiers", "_top",
+        "_at",
+        "_bucket",
+        "_compare",
+        "_events",
+        "_seal",
+        "_stored_in",
+        "_tiers",
+        "_top",
     )
 
     def __init__(
@@ -1214,8 +1340,7 @@ class Series(_Builder):
             )
         if not isinstance(label, ColumnExpr):
             raise SeriesError(
-                f"events(label=) takes a model column such as Deploy.version, "
-                f"got {label!r}"
+                f"events(label=) takes a model column such as Deploy.version, got {label!r}"
             )
         predicates = tuple(where) if isinstance(where, (tuple, list)) else (where,)
         for item in predicates:
@@ -1440,9 +1565,7 @@ class Series(_Builder):
                 session, predicates, range, zone_name, values, now, allow_coarsening
             )
         elif self._seal is not None:
-            result = await self._run_sealed(
-                session, predicates, range, zone_name, values, now
-            )
+            result = await self._run_sealed(session, predicates, range, zone_name, values, now)
         else:
             sql, args, _oids = compile_series(
                 session.registry,
@@ -1478,9 +1601,12 @@ class Series(_Builder):
             compare=None,
         )
         rows = await session.declared(sql, args)
-        buckets, found = series_rows(self, rows)
-        by_bucket = found.get((None, False), {})
-        return {item: dict(by_bucket.get(item, {})) for item in buckets}
+        buckets, dense = self._dense_rows(rows)
+        by_measure = {name: values for _key, name, values in dense}
+        return {
+            bucket: {name: by_measure[name][index] for name, _measure in self._d.measures}
+            for index, bucket in enumerate(buckets)
+        }
 
     async def _run_sealed(
         self,
@@ -1511,7 +1637,7 @@ class Series(_Builder):
             zone=zone_name,
             bucket=self._bucket.name,
             buckets=tuple(buckets),
-            series=self._series_of(buckets, found),
+            series=self._series_from_sparse(buckets, found),
             state=state,
         )
 
@@ -1545,9 +1671,7 @@ class Series(_Builder):
         settled: dict[Any, dict[str, Any]] = {}
         corrected: list[Any] = []
         if sealed_end > start:
-            stored = await session.declared(
-                select_settled(), (view, params, start, sealed_end)
-            )
+            stored = await session.declared(select_settled(), (view, params, start, sealed_end))
             for row in stored:
                 bucket, measures, delta = row[0], row[1], row[2]
                 settled[bucket] = fold(_as_mapping(measures), _as_mapping(delta))
@@ -1560,9 +1684,7 @@ class Series(_Builder):
             # `end_of` rather than adding the bucket's nominal length, because
             # the last stored bucket may have been a 23- or 25-hour day and
             # stepping by 24 would start the gap in the middle of one.
-            gap_from = (
-                self._bucket.end_of(max(settled), zone_name) if settled else start
-            )
+            gap_from = self._bucket.end_of(max(settled), zone_name) if settled else start
             if gap_from < sealed_end:
                 # Computed and returned, deliberately **not** stored. Reading is
                 # a read: a `GET` serving a sealed view runs on a read-workload
@@ -1573,9 +1695,7 @@ class Series(_Builder):
                 # application can see. `settle()` is the write half, and it is
                 # a job. The number is identical either way -- what changes is
                 # whether the next reader recomputes it.
-                fresh = await self._compute(
-                    session, predicates, gap_from, sealed_end, zone_name
-                )
+                fresh = await self._compute(session, predicates, gap_from, sealed_end, zone_name)
                 for bucket, measures in fresh.items():
                     if bucket in settled:
                         continue
@@ -1617,9 +1737,7 @@ class Series(_Builder):
         assert self._tiers is not None
         instant = _instant(now) if now is not None else _now()
         start, end = _instant(range.start), _instant(range.end)
-        stored_zone = (
-            _zone_name(self._stored_in) if self._stored_in is not None else zone_name
-        )
+        stored_zone = _zone_name(self._stored_in) if self._stored_in is not None else zone_name
         segments = _plan_tiers(
             ladder=self._tiers,
             requested=self._bucket,
@@ -1663,7 +1781,7 @@ class Series(_Builder):
             zone=zone_name,
             bucket=self._bucket.name,
             buckets=tuple(buckets),
-            series=self._series_of(buckets, {(None, False): merged}),
+            series=self._series_from_sparse(buckets, {(None, False): merged}),
             state=SealState(
                 sealed_through=edge,
                 settled=tuple(sorted(settled)),
@@ -1734,8 +1852,7 @@ class Series(_Builder):
         """
         if self._tiers is None:
             raise SeriesError(
-                "rollup() needs retain(): with no ladder there is no coarser "
-                "grain to materialise"
+                "rollup() needs retain(): with no ladder there is no coarser grain to materialise"
             )
         assert self._seal is not None  # retain() refuses coarser tiers without it
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
@@ -1748,9 +1865,7 @@ class Series(_Builder):
         for tier in self._tiers.materialised:
             grain = tier.grain
             assert grain is not None
-            edge = watermark(
-                instant, bucket=grain, zone_name=zone_name, after=self._seal.after
-            )
+            edge = watermark(instant, bucket=grain, zone_name=zone_name, after=self._seal.after)
             end = min(_instant(range.end), edge)
             if end <= start:
                 written[tier.name] = ()
@@ -1787,9 +1902,7 @@ class Series(_Builder):
         for bucket, measures in sorted(fresh.items()):
             if bucket in already:
                 continue
-            await session.declared(
-                insert_settled(), (view, params, bucket, _as_jsonb(measures))
-            )
+            await session.declared(insert_settled(), (view, params, bucket, _as_jsonb(measures)))
             added.append(bucket)
         return tuple(added)
 
@@ -1835,17 +1948,13 @@ class Series(_Builder):
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         predicates = self._bind(values)
         instant = _instant(now) if now is not None else _now()
-        edge = watermark(
-            instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after
-        )
+        edge = watermark(instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after)
         start = _instant(range.start)
         sealed_end = min(_instant(range.end), edge)
         if sealed_end <= start:
             return ()
         view, params = self._identity(zone_name, values)
-        stored = await session.declared(
-            select_settled(), (view, params, start, sealed_end)
-        )
+        stored = await session.declared(select_settled(), (view, params, start, sealed_end))
         known = {row[0] for row in stored}
         # The same suffix argument the read path makes: sealing advances
         # forwards, so what is missing starts just past the last stored bucket.
@@ -1908,17 +2017,13 @@ class Series(_Builder):
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         predicates = self._bind(values)
         instant = _instant(now) if now is not None else _now()
-        edge = watermark(
-            instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after
-        )
+        edge = watermark(instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after)
         start = _instant(range.start)
         sealed_end = min(_instant(range.end), edge)
         if sealed_end <= start:
             return ()
         view, params = self._identity(zone_name, values)
-        stored = await session.declared(
-            select_settled(), (view, params, start, sealed_end)
-        )
+        stored = await session.declared(select_settled(), (view, params, start, sealed_end))
         settled = {row[0]: _as_mapping(row[1]) for row in stored}
         if not settled:
             return ()
@@ -1942,9 +2047,7 @@ class Series(_Builder):
                 )
         return tuple(sorted(moved))
 
-    async def _markers(
-        self, session: Any, range: Range, zone_name: str
-    ) -> tuple[SeriesEvent, ...]:
+    async def _markers(self, session: Any, range: Range, zone_name: str) -> tuple[SeriesEvent, ...]:
         """The annotation layer, over the same range and in the same zone."""
         declared = self._events
         assert declared is not None
@@ -1969,55 +2072,72 @@ class Series(_Builder):
                 f"{declared.limit} would annotate the chart with a subset nothing "
                 f"in it explains"
             )
-        return tuple(
-            SeriesEvent(at=row[0], bucket=row[1], label=row[2]) for row in rows
+        return tuple(SeriesEvent(at=row[0], bucket=row[1], label=row[2]) for row in rows)
+
+    def _dense_rows(self, rows: Any, *, periods: bool = False) -> Any:
+        """Own backend row reconciliation until final bucket/value tuples."""
+        measures = dict(self._d.measures)
+        fills = self._fill_values()
+        labels = (CURRENT, PREVIOUS) if periods else None
+        return _core.series_dense_rows(
+            rows,
+            tuple(measures),
+            tuple(fills.values()),
+            self._d.group is not None,
+            labels,
         )
 
-    def _series_of(self, buckets: list[Any], found: dict[Any, Any]) -> tuple[SeriesData, ...]:
-        blank: dict[str, Any] = {}
+    def _fill_values(self) -> dict[str, Any]:
+        return {
+            name: fill(self, name, self._d.fills.get(name))
+            for name, _measure in self._d.measures
+        }
+
+    def _series_from_sparse(self, buckets: Any, sparse: dict[Any, Any]) -> tuple[SeriesData, ...]:
+        """Materialize a sparse map at a settlement or tier boundary."""
+        return self._series_of(reconcile(buckets, sparse, self._fill_values()))
+
+    def _series_of(self, dense: Any) -> tuple[SeriesData, ...]:
+        measures = dict(self._d.measures)
         series: list[SeriesData] = []
-        for (key, other), by_bucket in found.items():
-            for name, measure in self._d.measures:
-                empty = fill(self, name, self._d.fills.get(name))
-                series.append(
-                    SeriesData(
-                        measure=name,
-                        key=key,
-                        label=_label(key, other=other, measure=name),
-                        unit=measure.unit,
-                        kind=measure.kind,
-                        other=other,
-                        values=tuple(
-                            _or_fill(by_bucket.get(item, blank).get(name), empty)
-                            for item in buckets
-                        ),
-                    )
+        for (key, other), name, values in dense:
+            measure = measures[name]
+            series.append(
+                SeriesData(
+                    measure=name,
+                    key=key,
+                    label=_label(key, other=other, measure=name),
+                    unit=measure.unit,
+                    kind=measure.kind,
+                    other=other,
+                    values=values,
                 )
+            )
         return tuple(series)
 
     def _envelope(self, rows: list[Any], range: Range, zone_name: str) -> SeriesResult:
         if self._compare is None:
-            buckets, found = series_rows(self, rows)
+            buckets, dense = self._dense_rows(rows)
             return SeriesResult(
                 range=range,
                 zone=zone_name,
                 bucket=self._bucket.name,
                 buckets=tuple(buckets),
-                series=self._series_of(buckets, found),
+                series=self._series_of(dense),
             )
-        periods = series_rows(self, rows, periods=True)
-        current_buckets, current = periods[CURRENT]
-        previous_buckets, previous = periods[PREVIOUS]
+        current, previous = self._dense_rows(rows, periods=True)
+        current_buckets, current_dense = current
+        previous_buckets, previous_dense = previous
         return SeriesResult(
             range=range,
             zone=zone_name,
             bucket=self._bucket.name,
             buckets=tuple(current_buckets),
-            series=self._series_of(current_buckets, current),
+            series=self._series_of(current_dense),
             comparison=SeriesComparison(
                 previous=self._compare.name,
                 buckets=tuple(previous_buckets),
-                series=self._series_of(previous_buckets, previous),
+                series=self._series_of(previous_dense),
             ),
         )
 
@@ -2123,9 +2243,7 @@ def _refuse_unrollable(
         )
 
 
-def _refuse_unreopenable(
-    seal: Seal | None, ladder: Ladder | None, bucket: Bucket
-) -> None:
+def _refuse_unreopenable(seal: Seal | None, ladder: Ladder | None, bucket: Bucket) -> None:
     """Refuse `on_late="reopen"` when raw cannot outlive the seal window.
 
     §7.2's rule. Reopening a sealed bucket means **recomputing it from the
@@ -2230,10 +2348,6 @@ def _refuse_overlap(range: Range, previous: Bucket, zone_name: str) -> None:
         )
 
 
-def _or_fill(value: Any, empty: Any) -> Any:
-    return empty if value is None else value
-
-
 def _label(key: Any, *, other: bool = False, measure: str | None = None) -> str:
     if other:
         return "other"
@@ -2244,9 +2358,7 @@ def _label(key: Any, *, other: bool = False, measure: str | None = None) -> str:
 
 def _temporal(column: Any) -> ColumnExpr:
     if not isinstance(column, ColumnExpr):
-        raise SeriesError(
-            f"at= takes a model column such as Trek.started_at, got {column!r}"
-        )
+        raise SeriesError(f"at= takes a model column such as Trek.started_at, got {column!r}")
     if column.column.pg_type.name not in _TEMPORAL_TYPES:
         raise SeriesError(
             f"at= cannot bucket {column.column.python_name}, which is "
@@ -2268,9 +2380,7 @@ def _zone_name(value: Any) -> str:
     name = getattr(value, "key", None)
     if isinstance(name, str):
         return name
-    raise SeriesError(
-        f"zone= takes an IANA name or a wreath.temporal.zone(...), got {value!r}"
-    )
+    raise SeriesError(f"zone= takes an IANA name or a wreath.temporal.zone(...), got {value!r}")
 
 
 def _instant(value: Any) -> Any:
@@ -2299,8 +2409,7 @@ def _lateness(value: Any) -> float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise SeriesError(
-            f"seal(after=) takes a duration like '2h' or a number of seconds, "
-            f"got {value!r}"
+            f"seal(after=) takes a duration like '2h' or a number of seconds, got {value!r}"
         )
     if isinstance(value, str):
         match = _COMPACT_DURATION.fullmatch(value)
@@ -2318,8 +2427,7 @@ def _lateness(value: Any) -> float:
         seconds = float(value)
     if seconds < 0:
         raise SeriesError(
-            f"seal(after={value!r}) is negative, which would seal a bucket "
-            f"before it closed"
+            f"seal(after={value!r}) is negative, which would seal a bucket before it closed"
         )
     return seconds
 

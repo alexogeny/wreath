@@ -6,7 +6,7 @@
 #include "server_policy.h"
 
 #define WREATH_REQUEST_CAPI_NAME "wreath._native._server._REQUEST_C_API"
-#define WREATH_REQUEST_CAPI_VERSION 3
+#define WREATH_REQUEST_CAPI_VERSION 4
 
 typedef struct {
     uint32_t version;
@@ -21,6 +21,8 @@ typedef struct {
     int (*seed_flight)(PyObject *, const wreath_nfr_context *);
     void (*set_policy)(PyObject *, const WreathPolicyState *);
     void (*update_policy)(PyObject *, const WreathPolicyState *);
+    PyObject *(*header_block_new_objects)(Py_ssize_t);
+    int (*header_block_append_objects)(PyObject *, PyObject *, PyObject *);
 } WreathRequestCAPI;
 
 #endif

@@ -18,13 +18,8 @@ import sys
 import time
 from typing import Any
 
-from ._metricdelta import DeltaTracker
-from ._prometheus import (
-    _PROJECTOR_LOSS_FIELDS,
-    RouteLabels,
-    _loss_reason_name,
-    _resolve_route_labels,
-)
+from ._native import _core
+from ._prometheus import RouteLabels
 
 __all__ = ["EmfBridge", "activate_cloudwatch_emf"]
 
@@ -58,61 +53,23 @@ class EmfBridge:
         self._dims = {k: str(v) for k, v in (dimensions or {}).items()}
         self._route_labels = route_labels
         self._cumulative = cumulative
-        self._deltas = DeltaTracker()
-
-    def _counter(self, key: tuple, value: float) -> float:
-        if self._cumulative:
-            return value
-        return self._deltas.delta(key, value)
-
-    def _blob(self, timestamp_ms: int, dims: dict[str, str],
-              metrics: list[tuple[str, str, float]]) -> dict:
-        body: dict[str, Any] = dict(dims)
-        definitions = []
-        for name, unit, value in metrics[:_MAX_METRICS_PER_BLOB]:
-            body[name] = value
-            definitions.append({"Name": name, "Unit": unit})
-        body["_aws"] = {
-            "Timestamp": int(timestamp_ms),
-            "CloudWatchMetrics": [{
-                "Namespace": self._namespace,
-                "Dimensions": [list(dims.keys())],
-                "Metrics": definitions,
-            }],
-        }
-        return body
+        self._deltas = _core.metric_delta_state()
 
     def blobs(self, snapshot: Any, *, timestamp_ms: int,
               recorder_loss: dict | None = None) -> list[dict]:
-        """The list of EMF blobs for one snapshot (pure; testable)."""
-        out: list[dict] = []
-        for r in tuple(getattr(snapshot, "routes", ()) or ()):
-            lbl = _resolve_route_labels(self._route_labels, r.route_id)
-            dims = {**self._dims, **{k: str(v) for k, v in lbl.items()}}
-            out.append(self._blob(timestamp_ms, dims, [
-                ("Requests", "Count", self._counter(("req", r.route_id), int(r.count))),
-                ("Errors", "Count", self._counter(("err", r.route_id), int(r.errors))),
-                ("DurationSum", "Milliseconds",
-                 self._counter(("dsum", r.route_id), r.duration_us_sum / 1000.0)),
-                ("DurationMax", "Milliseconds", r.duration_us_max / 1000.0),
-            ]))
-
-        gmetrics: list[tuple[str, str, float]] = [
-            ("TracesAssembled", "Count",
-             self._counter(("assembled",), int(getattr(snapshot, "assembled", 0)))),
-            ("Pending", "Count", int(getattr(snapshot, "pending", 0))),
-        ]
-        loss = getattr(snapshot, "loss", None)
-        for field in _PROJECTOR_LOSS_FIELDS:
-            gmetrics.append((f"ProjectorLoss_{field}", "Count",
-                             self._counter(("ploss", field), int(getattr(loss, field, 0)))))
-        if recorder_loss:
-            for reason, count in recorder_loss.items():
-                name = _loss_reason_name(reason)
-                gmetrics.append((f"RecorderLoss_{name}", "Count",
-                                 self._counter(("rloss", name), int(count))))
-        out.append(self._blob(timestamp_ms, dict(self._dims), gmetrics))
-        return out
+        """The list of EMF blobs for one snapshot."""
+        rendered = _core.emf_render(
+            snapshot,
+            timestamp_ms,
+            recorder_loss,
+            self._namespace,
+            self._dims,
+            self._route_labels,
+            self._cumulative,
+            self._deltas,
+            _MAX_METRICS_PER_BLOB,
+        )
+        return [json.loads(line) for line in rendered.splitlines()]
 
     def render(self, *, timestamp_ms: int | None = None) -> str:
         """Newline-separated EMF JSON blobs for the current snapshot."""
@@ -122,8 +79,17 @@ class EmfBridge:
         getter = getattr(self._source, "recorder_loss", None)
         if callable(getter):
             recorder_loss = getter()
-        blobs = self.blobs(snapshot, timestamp_ms=ts, recorder_loss=recorder_loss)
-        return "\n".join(json.dumps(b, separators=(",", ":")) for b in blobs)
+        return _core.emf_render(
+            snapshot,
+            ts,
+            recorder_loss,
+            self._namespace,
+            self._dims,
+            self._route_labels,
+            self._cumulative,
+            self._deltas,
+            _MAX_METRICS_PER_BLOB,
+        )
 
     def emit(self, *, timestamp_ms: int | None = None, sink: Any = None) -> None:
         """Write the EMF blobs to `sink` (default stdout), newline-terminated."""
