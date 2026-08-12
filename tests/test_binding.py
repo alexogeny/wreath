@@ -1475,8 +1475,6 @@ class _PlanAliasedField:
 @pytest.mark.parametrize(
     "annotation",
     [
-        Annotated[int, SchemaField(gt=0)],
-        _PlanAliasedField,
         Decimal,
         Literal["one", "two"],
         tuple[int, int],
@@ -1489,6 +1487,16 @@ def test_native_plan_falls_back_for_shapes_it_cannot_represent(
 
     with pytest.raises(_PlanUnsupported):
         _compile_plan(annotation, frozenset())
+
+
+def test_native_plan_represents_field_constraints_and_wire_aliases() -> None:
+    from wreath.binding import _compile_plan
+
+    constrained = _compile_plan(Annotated[int, SchemaField(gt=0)], frozenset())
+    aliased = _compile_plan(_PlanAliasedField, frozenset())
+
+    assert constrained[0] != 10
+    assert aliased[0] != 10
 
 
 def _plan_payload(**overrides: Any) -> bytes:

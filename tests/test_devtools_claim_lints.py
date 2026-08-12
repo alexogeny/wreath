@@ -78,6 +78,34 @@ def test_an_artifact_newer_than_its_sources_is_clean(tmp_path: Path) -> None:
     assert build_lint.scan(root) == []
 
 
+def test_a_stale_free_threaded_artifact_is_reported_beside_a_fresh_one(
+    tmp_path: Path,
+) -> None:
+    """Every built artifact is checked, not whichever one the glob sorts first.
+
+    A tree carries one `.so` per interpreter that has built it, and
+    free-threading is a separately swept execution mode. `sorted()` puts
+    `cpython-314` before `cpython-314t`, so checking only the first reports a
+    clean build while the free-threaded artifact is importable and does not
+    contain the sources -- the failure this module exists to catch, one ABI tag
+    over. The assertion names the free-threaded suffix, because a finding for
+    the fresh artifact would satisfy a bare `BUILD001` check.
+    """
+    root = _extension_tree(tmp_path, sources=("demo.c",), build=True)
+    native = root / "src/wreath/_native"
+    stale = native / "_demo.cpython-314t-x86_64-linux-gnu.so"
+    stale.write_bytes(b"\x7fELF")
+
+    _touch(stale, 1_000_000)
+    _touch(native / "demo.c", 2_000_000)
+    _touch(native / "demo.h", 2_000_000)
+    _touch(native / "_demo.cpython-314-x86_64-linux-gnu.so", 3_000_000)
+
+    findings = build_lint.scan(root)
+    assert [f.code for f in findings] == ["BUILD001"]
+    assert "cpython-314t" in findings[0].where
+
+
 def test_an_unbuilt_extension_is_not_stale(tmp_path: Path) -> None:
     """Absent is not stale.
 

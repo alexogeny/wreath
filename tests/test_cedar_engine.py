@@ -101,6 +101,57 @@ def test_forbid_overrides_permit() -> None:
     assert any("forbid" in line and "matched" in line for line in decision.diagnostics)
 
 
+def test_batched_decisions_match_scalar_resource_and_context_semantics() -> None:
+    engine = CedarPolicies(
+        'permit(principal in Role::"reader", action == Action::"read", resource) '
+        'when { context.enabled && resource.active };'
+        'forbid(principal, action, resource == Document::"blocked");'
+    )
+    resources = (
+        EntityUid("Document", "allowed"),
+        EntityUid("Document", "blocked"),
+        EntityUid("Document", "later"),
+    )
+    arguments = {
+        "principal": ALICE,
+        "action": READ,
+        "context": {"enabled": True},
+        "entities": (
+            CedarEntity(ALICE, parents=(EntityUid("Role", "reader"),)),
+            *(CedarEntity(resource, attrs={"active": True}) for resource in resources),
+        ),
+    }
+    expected = tuple(
+        engine.is_authorized(resource=resource, **arguments)
+        for resource in resources
+    )
+    assert engine._is_authorized_many(
+        resources=resources, stop_on_denied=False, **arguments
+    ) == expected
+    assert engine._is_authorized_many(
+        resources=resources, stop_on_denied=True, **arguments
+    ) == expected[:2]
+
+    context_free = CedarPolicies("permit(principal, action, resource);")
+    assert context_free._is_authorized_many(
+        principal=ALICE,
+        action=READ,
+        resources=(DOC,),
+        context=None,
+        entities=(),
+        stop_on_denied=False,
+    ) == (context_free.is_authorized(principal=ALICE, action=READ, resource=DOC),)
+
+
+def test_action_context_inventory_excludes_entity_attributes() -> None:
+    engine = CedarPolicies(
+        'permit(principal, action == Action::"read", resource) '
+        'when { principal.active && resource.active && context.enabled };'
+    )
+
+    assert engine.context_attributes_for_action(READ) == frozenset({"enabled"})
+
+
 def test_principal_in_group_uses_the_transitive_hierarchy() -> None:
     entities = (
         CedarEntity(ALICE, parents=(EntityUid("Group", "staff"),)),
@@ -460,6 +511,29 @@ async def test_request_time_is_lazy_and_shared_by_every_policy_on_the_request() 
         return "allowed"
 
     assert (await invoke(untimed, "account", "/untimed"))[0]["status"] == 200
+    assert calls == 0
+
+    action_untimed = Wreath()
+    action_untimed.configure_auth(
+        BearerTokenBackend(verify),
+        CedarAuthorizer(
+            engine=CedarPolicies(
+                'permit(principal, action == Action::"read", resource);'
+                'permit(principal, action == Action::"audit", resource) '
+                'when { context.now == 150 };'
+            ),
+            clock=clock,
+        ),
+    )
+
+    @action_untimed.get("/action-untimed")
+    @authorize(action="read", resource=EntityUid("Document", "1"))
+    async def without_time_for_this_action(request):
+        return "allowed"
+
+    assert (
+        await invoke(action_untimed, "account", "/action-untimed")
+    )[0]["status"] == 200
     assert calls == 0
 
     timed = Wreath()

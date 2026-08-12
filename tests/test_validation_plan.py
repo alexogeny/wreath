@@ -3,18 +3,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
 from wreath._native import _core
-from wreath.binding import _body_validator, _compile_plan, _PlanUnsupported
+from wreath.binding import (
+    Field,
+    ValidationError,
+    _body_validator,
+    _compile_plan,
+    _PlanUnsupported,
+    validate,
+)
 
 
 @dataclass
 class Node:
     value: int
     children: list[Node] = field(default_factory=list)
+
+
+@dataclass
+class ConstrainedLine:
+    sku: Annotated[
+        str,
+        Field(alias="stockCode", min_length=3, max_length=12, pattern=r"^[a-z0-9-]+$"),
+    ]
+    quantity: Annotated[int, Field(gt=0, ge=1, lt=101, le=100)]
+
+
+@dataclass
+class ConstrainedPayload:
+    lines: Annotated[list[ConstrainedLine], Field(min_length=1, max_length=3)]
 
 
 def test_any_mapping_validation_preserves_an_unchanged_value() -> None:
@@ -51,3 +72,36 @@ def test_recursive_dataclass_is_evaluated_without_a_flat_plan() -> None:
     result = validator({"value": 1, "children": [{"value": 2}]}, ("body",))
 
     assert result == Node(value=1, children=[Node(value=2)])
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        (Annotated[int, Field(gt=0, ge=1, lt=11, le=10)], 5),
+        (Annotated[int, Field(gt=0)], 0),
+        (Annotated[Any, Field(gt=0)], "not-comparable"),
+        (Annotated[list[int], Field(min_length=1, max_length=2)], []),
+        (Annotated[Any, Field(min_length=1)], 7),
+        (Annotated[str, Field(pattern=r"^[a-z]+$")], "BAD"),
+        (Annotated[Any, Field(pattern=r"^[a-z]+$")], 7),
+        (
+            ConstrainedPayload,
+            {"lines": [{"stockCode": "alpha-1", "quantity": 2}]},
+        ),
+        (
+            ConstrainedPayload,
+            {"lines": [{"stockCode": "X", "quantity": 101}]},
+        ),
+    ],
+)
+def test_field_plan_matches_the_reference_validator(annotation: Any, value: Any) -> None:
+    plan = _compile_plan(annotation, frozenset())
+    actual, actual_errors = _core.run_validation(plan, value, ("body",))
+    try:
+        expected = validate(annotation, value, ("body",))
+    except ValidationError as error:
+        assert actual_errors == error.errors
+    else:
+        assert actual_errors == []
+        assert actual == expected
+        assert type(actual) is type(expected)

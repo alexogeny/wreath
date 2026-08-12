@@ -15,6 +15,19 @@ def _toml(path: str) -> dict:
         return tomllib.load(stream)
 
 
+def _action_uses(value: object) -> set[str]:
+    if isinstance(value, dict):
+        found = {
+            action
+            for key, action in value.items()
+            if key == "uses" and isinstance(action, str)
+        }
+        return found | set().union(*map(_action_uses, value.values()))
+    if isinstance(value, list):
+        return set().union(*map(_action_uses, value))
+    return set()
+
+
 def test_release_distributions_share_version_and_explicit_extras() -> None:
     base = _toml("pyproject.toml")
     linux = _toml("packages/wreath-linux/pyproject.toml")
@@ -26,6 +39,9 @@ def test_release_distributions_share_version_and_explicit_extras() -> None:
     assert base["project"]["dependencies"] == []
     assert linux["project"]["dependencies"] == []
     assert http3["project"]["dependencies"] == []
+    assert base["project"]["requires-python"] == "==3.14.*"
+    assert linux["project"]["requires-python"] == "==3.14.*"
+    assert http3["project"]["requires-python"] == "==3.14.*"
 
     extras = base["project"]["optional-dependencies"]
     assert extras == {
@@ -51,6 +67,24 @@ def test_base_wheel_smoke_is_portable_and_companions_are_linux_only() -> None:
     assert http3["tool"]["cibuildwheel"]["test-command"].endswith(
         "wheel_smoke.py --http3"
     )
+
+
+def test_release_is_regular_cpython_314_and_wheel_only() -> None:
+    distributions = (
+        ROOT,
+        ROOT / "packages/wreath-linux",
+        ROOT / "packages/wreath-http3",
+    )
+    for distribution in distributions:
+        project = _toml(str(distribution.relative_to(ROOT) / "pyproject.toml"))
+        assert project["tool"]["cibuildwheel"]["build"] == "cp314-*"
+        setup = (distribution / "setup.py").read_text()
+        assert 'sysconfig.get_config_var("Py_GIL_DISABLED")' in setup
+        assert "Use a regular CPython 3.14 interpreter." in setup
+
+    workflow_text = (ROOT / ".github/workflows/publish.yml").read_text()
+    assert "python -m build --sdist" not in workflow_text
+    assert "Build sdist" not in workflow_text
 
 
 def test_base_build_cleans_stale_capability_outputs() -> None:
@@ -103,13 +137,40 @@ def test_publish_follows_the_exact_successful_main_ci_commit() -> None:
         "${{ github.event.workflow_run.head_sha || github.sha }}"
     )
 
-    for job_name in ("wheels", "linux-wheels", "http3-wheels", "release", "pypi"):
+    for job_name in ("wheels", "linux-wheels", "http3-wheels", "release"):
         checkout = next(
             step
             for step in jobs[job_name]["steps"]
             if step.get("uses", "").startswith("actions/checkout@")
         )
         assert checkout["with"]["ref"] == "${{ needs.detect.outputs.sha }}"
+
+
+def test_workflow_javascript_actions_use_node24_releases() -> None:
+    uses: set[str] = set()
+    for path in (ROOT / ".github/workflows").glob("*.yml"):
+        uses |= _action_uses(yaml.safe_load(path.read_text()))
+
+    assert {
+        "actions/checkout@v7",
+        "actions/configure-pages@v6",
+        "actions/deploy-pages@v5",
+        "actions/download-artifact@v8",
+        "actions/setup-python@v7",
+        "actions/upload-artifact@v7",
+        "actions/upload-pages-artifact@v5",
+        "astral-sh/setup-uv@v9.0.0",
+    } <= uses
+    assert not {
+        "actions/checkout@v4",
+        "actions/configure-pages@v5",
+        "actions/deploy-pages@v4",
+        "actions/download-artifact@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/upload-pages-artifact@v3",
+        "astral-sh/setup-uv@v5",
+    } & uses
 
 
 def test_publish_matrix_covers_native_linux_macos_and_windows() -> None:
@@ -145,7 +206,7 @@ def test_publish_matrix_covers_native_linux_macos_and_windows() -> None:
         download = next(
             step
             for step in job["steps"]
-            if step.get("uses") == "actions/download-artifact@v4"
+            if step.get("uses") == "actions/download-artifact@v8"
         )
         assert download["with"]["pattern"] == artifact_pattern
 

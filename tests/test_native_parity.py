@@ -41,6 +41,8 @@ from typing import Any
 
 import pytest
 
+from wreath._multipart import Part
+from wreath._multipart import parse as multipart_parts
 from wreath._native import _core
 
 native = pytest.mark.skipif(_core is None, reason="native extension not built")
@@ -385,6 +387,71 @@ def test_multipart_parse_matches_the_stdlib_email_parser() -> None:
     expected = _email_multipart_parse(body, b"BOUNDARY")
     for label, multipart_parse in _twins("multipart_parse"):
         assert multipart_parse(body, b"BOUNDARY") == expected, label
+
+
+@pytest.mark.parametrize(
+    ("disposition", "name", "filename"),
+    [
+        (b'form-data; name="field"', "field", None),
+        (
+            b'form-data; NAME = "field"; FILENAME="a\\\\b\\\"c.txt"',
+            "field",
+            'a\\b"c.txt',
+        ),
+        (b"form-data; name=raw; filename=plain.txt", "raw", "plain.txt"),
+        (b'form-data; name="bad-\xff"', "bad-\ufffd", None),
+        (b"form-data", None, None),
+    ],
+)
+def test_multipart_part_info_materializes_disposition_parameters(
+    disposition: bytes, name: str | None, filename: str | None
+) -> None:
+    headers, actual_name, actual_filename = _core.multipart_part_info(
+        b"Content-Disposition:\t" + disposition + b"\r\nX-Value:  kept  "
+    )
+
+    assert headers == [
+        (b"content-disposition", disposition),
+        (b"x-value", b"kept"),
+    ]
+    assert actual_name == name
+    assert actual_filename == filename
+
+
+def test_multipart_part_info_uses_the_first_disposition_header() -> None:
+    headers, name, filename = _core.multipart_part_info(
+        b'Content-Disposition: form-data; name="first"\r\n'
+        b'Content-Disposition: form-data; name="second"; filename="ignored"'
+    )
+
+    assert len(headers) == 2
+    assert name == "first"
+    assert filename is None
+
+
+def test_multipart_public_parser_materializes_parts_in_the_native_scan() -> None:
+    body = _multipart_body(b"BOUNDARY")
+
+    assert multipart_parts(body, b"BOUNDARY") == [
+        Part(
+            "field",
+            None,
+            [(b"content-disposition", b'form-data; name="field"')],
+            b"value",
+        ),
+        Part(
+            "file",
+            "a.txt",
+            [
+                (
+                    b"content-disposition",
+                    b'form-data; name="file"; filename="a.txt"',
+                ),
+                (b"content-type", b"text/plain"),
+            ],
+            b"line1\r\n\r\nline2",
+        ),
+    ]
 
 
 # --- substring search: repetitive haystacks and overlapping prefixes --------
