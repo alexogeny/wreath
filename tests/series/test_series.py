@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.queries import Param
-from wreath.series import Range, Series, SeriesError, avg, count, sum_
+from wreath.series import Range, Series, SeriesError, avg, count, reconcile, sum_
 from wreath.temporal import Day, Month, zone
 
 from .conftest import Herd, Trek, utc
@@ -159,6 +159,26 @@ class TestTopN:
 
 
 class TestFill:
+    def test_plain_iterables_use_the_same_dense_sparse_kernel(self):
+        buckets = (item for item in ("mon", "tue", "wed"))
+        sparse = {
+            ("north", False): {
+                "mon": {"count": 3, "mean": 1.5},
+                "wed": {"count": None, "mean": 2.5},
+            },
+            (None, True): {"tue": {"count": 4}},
+        }
+        assert reconcile(buckets, sparse, {"count": 0, "mean": None}) == (
+            (("north", False), "count", (3, 0, 0)),
+            (("north", False), "mean", (1.5, None, 2.5)),
+            ((None, True), "count", (0, 4, 0)),
+            ((None, True), "mean", (None, None, None)),
+        )
+
+    def test_a_malformed_sparse_bucket_names_the_required_shape(self):
+        with pytest.raises(TypeError, match="values must be a dict keyed by bucket"):
+            reconcile((1,), {(None, False): []}, {"count": 0})
+
     async def test_a_count_fills_an_empty_bucket_with_zero(self, session, database):
         rows = [
             (utc(2026, 1, 1), 3),

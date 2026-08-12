@@ -50,7 +50,17 @@ from wreath.orm.types import Float64, Int64, Text, TimestampTz
 from wreath.postgres import Database
 from wreath.queries import Param
 from wreath.series import Range, Series, count, sum_
-from wreath.temporal import Day, Hour, Instant, Month, Week, from_wall_clock, zone
+from wreath.temporal import (
+    Day,
+    Hour,
+    Instant,
+    Month,
+    Week,
+    from_wall_clock,
+    spine,
+    spine_length,
+    zone,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("WREATH_TEST_POSTGRES_DSN"),
@@ -104,8 +114,8 @@ async def fetchval(database, sql, *args):
 #: boundary fails here rather than in production.
 MOMENTS = [
     datetime.datetime(2026, 4, 4, 12, tzinfo=datetime.UTC),
-    datetime.datetime(2026, 4, 4, 13, tzinfo=datetime.UTC),   # 2026-04-05 02:00 NZDT
-    datetime.datetime(2026, 4, 4, 14, tzinfo=datetime.UTC),   # after the clock went back
+    datetime.datetime(2026, 4, 4, 13, tzinfo=datetime.UTC),  # 2026-04-05 02:00 NZDT
+    datetime.datetime(2026, 4, 4, 14, tzinfo=datetime.UTC),  # after the clock went back
     datetime.datetime(2026, 4, 5, 6, tzinfo=datetime.UTC),
     datetime.datetime(2026, 9, 26, 13, tzinfo=datetime.UTC),
     datetime.datetime(2026, 9, 26, 14, tzinfo=datetime.UTC),  # into the gap
@@ -119,16 +129,13 @@ class TestFloorMatchesDateTrunc:
 
     @pytest.mark.parametrize("unit", [Hour, Day, Week, Month])
     @pytest.mark.parametrize("moment", MOMENTS)
-    async def test_python_and_postgres_agree_on_the_boundary(
-        self, database, unit, moment
-    ):
+    async def test_python_and_postgres_agree_on_the_boundary(self, database, unit, moment):
         # `date_trunc` on the wall clock, converted back the same way the spine
         # converts -- so this compares the whole round trip, not just the
         # truncation.
         theirs = await fetchval(
             database,
-            f"SELECT date_trunc('{unit.trunc}', $1::timestamptz AT TIME ZONE $2) "
-            "AT TIME ZONE $2",
+            f"SELECT date_trunc('{unit.trunc}', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2",
             moment,
             AUCKLAND,
         )
@@ -150,6 +157,16 @@ class TestFloorMatchesDateTrunc:
 
 
 class TestTheSpineStepsACalendarDay:
+    @pytest.mark.parametrize(
+        ("width", "unit"), [(Hour, "hour"), (Day, "day"), (Week, "week"), (Month, "month")]
+    )
+    async def test_native_spine_is_the_generate_series_result(self, database, width, unit):
+        start, end = local("2026-03-28"), local("2026-04-09")
+        theirs = await _spine(database, "2026-03-28", "2026-04-09", unit)
+        ours = spine(start, end, bucket=width, in_zone=AUCKLAND)
+        assert [item.astimezone(datetime.UTC) for item in ours] == theirs
+        assert spine_length(start, end, bucket=width, in_zone=AUCKLAND) == len(theirs)
+
     async def test_a_dst_day_is_twenty_five_hours_of_real_time(self, database):
         """Auckland leaves daylight saving on 2026-04-05: that day runs 25 hours.
 
@@ -201,10 +218,8 @@ class TestTheComparisonShift:
     """`compare(previous=...)` shifts the local bounds, and only a real server
     can confirm what `interval '1 month'` does to a naive local timestamp."""
 
-    async def test_a_month_shift_is_calendar_arithmetic_not_thirty_days(
-        self, database
-    ):
-        """"The same day last month" has to land on the same day number.
+    async def test_a_month_shift_is_calendar_arithmetic_not_thirty_days(self, database):
+        """ "The same day last month" has to land on the same day number.
 
         Subtracting a fixed number of days walks backwards through the calendar;
         `interval '1 month'` on a naive local timestamp does not.
@@ -215,17 +230,14 @@ class TestTheComparisonShift:
         moment = local("2026-03-31", hour=12)
         shifted = await fetchval(
             database,
-            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') "
-            "AT TIME ZONE $2",
+            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') AT TIME ZONE $2",
             moment,
             AUCKLAND,
         )
         there = shifted.astimezone(zone(AUCKLAND))
         assert (there.month, there.day) == (2, 28), "clamped to February's last day"
 
-    async def test_the_shift_preserves_the_wall_clock_across_a_transition(
-        self, database
-    ):
+    async def test_the_shift_preserves_the_wall_clock_across_a_transition(self, database):
         """Shifting a local bound and converting back keeps the wall time and
         moves the instant, which is what makes a comparison period comparable.
 
@@ -238,8 +250,7 @@ class TestTheComparisonShift:
         moment = datetime.datetime(2026, 4, 19, 12, tzinfo=datetime.UTC)
         shifted = await fetchval(
             database,
-            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') "
-            "AT TIME ZONE $2",
+            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') AT TIME ZONE $2",
             moment,
             AUCKLAND,
         )
@@ -310,9 +321,7 @@ class TestSealedBucketBoundaries:
     the two days a year the answer is interesting.
     """
 
-    async def test_the_watermark_lands_on_a_boundary_date_trunc_agrees_with(
-        self, database
-    ):
+    async def test_the_watermark_lands_on_a_boundary_date_trunc_agrees_with(self, database):
         """A settled bucket start and a freshly computed one must be one instant.
 
         If they disagree even once, a settled row files itself under a bucket
@@ -325,14 +334,11 @@ class TestSealedBucketBoundaries:
         ):
             theirs = await fetchval(
                 database,
-                "SELECT date_trunc('day', $1::timestamptz AT TIME ZONE $2) "
-                "AT TIME ZONE $2",
+                "SELECT date_trunc('day', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2",
                 moment,
                 AUCKLAND,
             )
-            ours = watermark(
-                Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=0
-            )
+            ours = watermark(Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=0)
             assert ours == theirs, f"python and postgres disagree at {moment}"
 
     async def test_the_lateness_allowance_is_elapsed_time(self, database):
@@ -350,14 +356,10 @@ class TestSealedBucketBoundaries:
             moment,
             AUCKLAND,
         )
-        ours = watermark(
-            Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=7200
-        )
+        ours = watermark(Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=7200)
         assert ours == theirs
 
-    async def test_the_gap_step_lands_on_the_next_bucket_across_a_short_day(
-        self, database
-    ):
+    async def test_the_gap_step_lands_on_the_next_bucket_across_a_short_day(self, database):
         """Stepping past the last settled bucket is `end_of`, not plus 24 hours.
 
         On a 23-hour day, adding a nominal day would start the gap an hour into
@@ -372,8 +374,7 @@ class TestSealedBucketBoundaries:
         )
         theirs = await fetchval(
             database,
-            "SELECT (($1::timestamptz AT TIME ZONE $2) + interval '1 day') "
-            "AT TIME ZONE $2",
+            "SELECT (($1::timestamptz AT TIME ZONE $2) + interval '1 day') AT TIME ZONE $2",
             start,
             AUCKLAND,
         )
@@ -419,8 +420,7 @@ class TestRollupAgreesWithTheDatabase:
         ):
             theirs = await fetchval(
                 database,
-                "SELECT date_trunc('month', $1::timestamptz AT TIME ZONE $2) "
-                "AT TIME ZONE $2",
+                "SELECT date_trunc('month', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2",
                 moment,
                 AUCKLAND,
             )
@@ -668,9 +668,7 @@ class TestSealingPersists:
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
 
-        result = await sealed_view().run(
-            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
-        )
+        result = await sealed_view().run(session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER)
 
         assert result.series[0].values == (2,), "two treks in the sealed day"
         assert result.state is not None and result.state.settled == (SEAL_DAY,)
@@ -703,15 +701,11 @@ class TestSealingPersists:
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
         # `settle`, not `run`: only the write half puts the value where the
         # second read can find it once the source rows are gone.
-        await sealed_view().settle(
-            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
-        )
+        await sealed_view().settle(session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER)
 
         await _execute(database, f'DELETE FROM "{SEAL_SCHEMA}"."treks"')
 
-        result = await sealed_view().run(
-            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
-        )
+        result = await sealed_view().run(session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER)
         assert result.series[0].values == (2,), (
             "a settled bucket must not need the rows it was computed from"
         )
@@ -730,9 +724,7 @@ class TestSealingPersists:
         # a day that was final, and then moved. `reconcile` runs `settle`
         # itself, so without this it would simply store 3 and there would be no
         # delta to record.
-        await sealed_view().settle(
-            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
-        )
+        await sealed_view().settle(session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER)
 
         # The card comes out of the camera in April, carrying March's rows.
         await _add_treks(database, (3, 5.0, 14))
@@ -750,9 +742,7 @@ class TestSealingPersists:
             "the settled value stays immutable; the delta lives beside it"
         )
 
-        result = await sealed_view().run(
-            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
-        )
+        result = await sealed_view().run(session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER)
         assert result.series[0].values == (3,), "the correction folds in on read"
         assert result.state.corrections == (SEAL_DAY,), (
             "late data looks like late data arriving, not like a discrepancy"

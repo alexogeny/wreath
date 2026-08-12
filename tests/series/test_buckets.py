@@ -25,6 +25,8 @@ from wreath.temporal import (
     Week,
     Year,
     bucket,
+    spine,
+    spine_length,
     zone,
 )
 
@@ -42,9 +44,9 @@ class TestFloor:
         # 2026-03-01 10:00 UTC is 2026-03-01 23:00 in Auckland, so the
         # Auckland day began 13 hours before the UTC one.
         moment = at(2026, 3, 1, 10)
-        assert Day.floor(moment, AUCKLAND) == Instant.of(
-            at(2026, 2, 28, 11)
-        ), "the day containing this moment starts at Auckland midnight"
+        assert Day.floor(moment, AUCKLAND) == Instant.of(at(2026, 2, 28, 11)), (
+            "the day containing this moment starts at Auckland midnight"
+        )
 
     def test_each_unit_truncates_to_its_own_boundary(self):
         moment = at(2026, 5, 14, 15, 47)
@@ -127,6 +129,36 @@ class TestEndOf:
         assert Month.end_of(at(2026, 12, 9), UTC) == Instant.of(at(2027, 1, 1))
         assert Quarter.end_of(at(2026, 11, 9), UTC) == Instant.of(at(2027, 1, 1))
         assert Year.end_of(at(2026, 6, 9), UTC) == Instant.of(at(2027, 1, 1))
+
+
+class TestSpine:
+    def test_it_is_half_open_and_materializes_instants(self):
+        assert spine(at(2026, 3, 1, 12), at(2026, 3, 4), bucket=Day, in_zone=UTC) == (
+            Instant.of(at(2026, 3, 1)),
+            Instant.of(at(2026, 3, 2)),
+            Instant.of(at(2026, 3, 3)),
+        )
+
+    def test_it_walks_the_local_clock_across_both_dst_directions(self):
+        buckets = spine(at(2026, 4, 3), at(2026, 4, 8), bucket=Day, in_zone=AUCKLAND)
+        gaps = [
+            elapsed(left, right)
+            for left, right in zip(buckets, buckets[1:], strict=False)
+        ]
+        assert datetime.timedelta(hours=25) in gaps
+
+    def test_an_empty_range_is_an_empty_spine(self):
+        moment = at(2026, 3, 1)
+        assert spine(moment, moment, bucket=Day, in_zone=UTC) == ()
+
+    @pytest.mark.parametrize("unit", [Minute, Hour, Day, Week, Month, Quarter, Year])
+    @pytest.mark.parametrize("timezone", [UTC, AUCKLAND, LONDON])
+    def test_length_agrees_without_materializing_the_spine(self, unit, timezone):
+        start = at(2025, 9, 20, 7, 17)
+        end = at(2027, 4, 20, 18, 41)
+        assert spine_length(start, end, bucket=unit, in_zone=timezone) == len(
+            spine(start, end, bucket=unit, in_zone=timezone)
+        )
 
     def test_the_end_of_one_bucket_is_the_start_of_the_next(self):
         """Half-open, so these have to be the same instant and not merely close."""
