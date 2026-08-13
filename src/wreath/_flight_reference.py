@@ -20,7 +20,6 @@ import zlib
 from dataclasses import dataclass
 
 from ._flight_schema import (
-    _U64,
     BYTE_ORDER,
     CELL_SIZE,
     IMAGE_HASH_BYTES,
@@ -32,6 +31,8 @@ from ._flight_schema import (
     decode_metadata_image,
     siphash24,
 )
+
+_U64 = 0xFFFFFFFFFFFFFFFF
 
 #: Container magic. The trailing digit is the container (not schema) version.
 MAGIC = b"WFR0"
