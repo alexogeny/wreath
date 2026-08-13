@@ -899,6 +899,50 @@ error:
     return NULL;
 }
 
+PyObject *
+wreath_http_parse_chunk_size(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    const uint8_t *line;
+    Py_ssize_t length;
+    Py_ssize_t digits;
+    char number[1025];
+
+    if (!PyBytes_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "response chunk line must be bytes");
+        return NULL;
+    }
+    line = (const uint8_t *)PyBytes_AS_STRING(arg);
+    length = PyBytes_GET_SIZE(arg);
+    if (length > 1024) {
+        PyErr_SetString(PyExc_ValueError, "response chunk line exceeds limit");
+        return NULL;
+    }
+    if (length < 3 || line[length - 2] != '\r' || line[length - 1] != '\n') {
+        PyErr_SetString(PyExc_ValueError, "invalid response chunk size");
+        return NULL;
+    }
+
+    digits = 0;
+    while (digits < length - 2 && line[digits] != ';') {
+        uint8_t byte = line[digits];
+        if (!((byte >= '0' && byte <= '9') ||
+              (byte >= 'a' && byte <= 'f') ||
+              (byte >= 'A' && byte <= 'F'))) {
+            PyErr_SetString(PyExc_ValueError, "invalid response chunk size");
+            return NULL;
+        }
+        digits++;
+    }
+    if (digits == 0) {
+        PyErr_SetString(PyExc_ValueError, "invalid response chunk size");
+        return NULL;
+    }
+
+    memcpy(number, line, (size_t)digits);
+    number[digits] = '\0';
+    return PyLong_FromString(number, NULL, 16);
+}
+
 static int
 http_add_size(Py_ssize_t *total, Py_ssize_t amount)
 {

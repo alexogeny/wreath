@@ -98,6 +98,76 @@ loc_pop(PyObject *loc)
     }
 }
 
+/* Whether validation can only accept/reject this value graph and can never
+ * change one of its nodes.  The answer is derived from the immutable plan, not
+ * from the value, so container validators can walk once and return the decoded
+ * graph they were handed instead of allocating an identical second graph. */
+static int
+plan_is_passthrough(PyObject *plan)
+{
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    if (opcode == -1 && PyErr_Occurred()) return -1;
+    switch (opcode) {
+    case OP_ANY:
+    case OP_INT:
+    case OP_BOOL:
+    case OP_STR:
+    case OP_UNSUPPORTED:
+        return 1;
+    case OP_NULL:
+    case OP_FLOAT:
+    case OP_DATACLASS:
+        return 0;
+    case OP_LIST:
+    case OP_DICT:
+        return plan_is_passthrough(PyTuple_GET_ITEM(plan, 1));
+    case OP_UNION: {
+        PyObject *options = PyTuple_GET_ITEM(plan, 2);
+        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(options); index++) {
+            int child = plan_is_passthrough(PyTuple_GET_ITEM(options, index));
+            if (child <= 0) return child;
+        }
+        return 1;
+    }
+    case OP_FIELD:
+        return plan_is_passthrough(PyTuple_GET_ITEM(plan, 1));
+    default:
+        PyErr_Format(PyExc_ValueError, "unknown validation opcode %ld", opcode);
+        return -1;
+    }
+}
+
+/* Validate one homogeneous scalar without recursion or location objects.
+ *
+ *  1: accepted by a scalar plan; 0: rejected by that plan;
+ * -1: not a plan this shortcut handles; -2: C-API failure.
+ *
+ * A rejection deliberately falls back to validate_node(), which owns the
+ * exact error spelling and location.  Successful JSON arrays are the hot path:
+ * their indices never need to become Python integers merely to be discarded
+ * after every accepted item. */
+static int
+flat_scalar_accepts(PyObject *plan, PyObject *value)
+{
+    if (!PyTuple_Check(plan) || PyTuple_GET_SIZE(plan) != 1) return -1;
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    if (opcode == -1 && PyErr_Occurred()) return -2;
+    switch (opcode) {
+    case OP_ANY:
+        return 1;
+    case OP_NULL:
+        return value == Py_None;
+    case OP_INT:
+        return PyLong_Check(value) && !PyBool_Check(value);
+    case OP_BOOL:
+        return PyBool_Check(value);
+    case OP_STR:
+        return PyUnicode_Check(value);
+    default:
+        return -1;
+    }
+}
+
 /* Returns a new reference to the validated value, or NULL only on a hard
  * C-API failure (exception set). Validation failures are accumulated into
  * errors and still return a (new-reference) value, mirroring the Python code. */
@@ -184,10 +254,27 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
         }
         PyObject *item_plan = PyTuple_GET_ITEM(plan, 1);
         Py_ssize_t count = PyList_GET_SIZE(value);
-        PyObject *result = PyList_New(count);
-        if (result == NULL) {
-            return NULL;
+        int flat = flat_scalar_accepts(
+            item_plan, count == 0 ? Py_None : PyList_GET_ITEM(value, 0));
+        if (flat == -2) return NULL;
+        if (flat >= 0 && count <= *steps) {
+            Py_ssize_t index = flat ? 1 : 0;
+            for (; index < count; index++) {
+                flat = flat_scalar_accepts(
+                    item_plan, PyList_GET_ITEM(value, index));
+                if (flat == -2) return NULL;
+                if (flat != 1) break;
+            }
+            if (index == count) {
+                *steps -= (long)count;
+                return Py_NewRef(value);
+            }
         }
+        int passthrough = plan_is_passthrough(item_plan);
+        PyObject *result;
+        if (passthrough < 0) return NULL;
+        result = passthrough ? Py_NewRef(value) : PyList_New(count);
+        if (result == NULL) return NULL;
         for (Py_ssize_t index = 0; index < count; index++) {
             PyObject *key = PyLong_FromSsize_t(index);
             if (key == NULL || loc_push(loc, key) < 0) {
@@ -203,7 +290,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 Py_DECREF(result);
                 return NULL;
             }
-            PyList_SET_ITEM(result, index, item); /* steals reference */
+            if (passthrough) Py_DECREF(item);
+            else PyList_SET_ITEM(result, index, item); /* steals reference */
         }
         return result;
     }
@@ -220,19 +308,37 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
          * enforce once the outer value is a dict.  Rebuilding every key/value
          * pair into an identical dict was work whose answer cannot differ;
          * response projection and JSON conversion remain separate stages. */
-        long value_opcode = PyLong_AsLong(PyTuple_GET_ITEM(value_plan, 0));
-        if (value_opcode == -1 && PyErr_Occurred()) {
-            return NULL;
+        Py_ssize_t count = PyDict_GET_SIZE(value);
+        int flat_supported = -1;
+        int flat_clean = 1;
+        PyObject *key, *item;
+        Py_ssize_t pos = 0;
+        if (count <= *steps) {
+            while (PyDict_Next(value, &pos, &key, &item)) {
+                int accepted = flat_scalar_accepts(value_plan, item);
+                if (accepted == -2) return NULL;
+                if (accepted == -1) {
+                    flat_supported = -1;
+                    break;
+                }
+                flat_supported = 1;
+                if (!accepted) {
+                    flat_clean = 0;
+                    break;
+                }
+            }
+            if ((count == 0 || flat_supported == 1) && flat_clean) {
+                *steps -= (long)count;
+                return Py_NewRef(value);
+            }
         }
-        if (value_opcode == OP_ANY) {
-            return Py_NewRef(value);
-        }
-        PyObject *result = PyDict_New();
+        int passthrough = plan_is_passthrough(value_plan);
+        if (passthrough < 0) return NULL;
+        PyObject *result = passthrough ? Py_NewRef(value) : PyDict_New();
         if (result == NULL) {
             return NULL;
         }
-        PyObject *key, *item;
-        Py_ssize_t pos = 0;
+        pos = 0;
         while (PyDict_Next(value, &pos, &key, &item)) {
             if (loc_push(loc, key) < 0) {
                 Py_DECREF(result);
@@ -244,7 +350,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 Py_DECREF(result);
                 return NULL;
             }
-            int rc = PyDict_SetItem(result, key, validated);
+            int rc = passthrough ? 0 : PyDict_SetItem(result, key, validated);
             Py_DECREF(validated);
             if (rc < 0) {
                 Py_DECREF(result);

@@ -8,6 +8,7 @@
 #include "header_block.h"
 #include "record_api.h"
 #include "bytes_writer.h"
+#include "sparse_vector.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -36,7 +37,12 @@ PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args
 
 /* cedar.c */
 PyObject *wreath_cedar_is_authorized(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_route_denial(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_is_authorized_many(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_is_authorized_many_native(PyObject *self, PyObject *args);
+int wreath_cedar_decision_batch_read(PyObject *object, Py_ssize_t *count,
+                                     const unsigned char **allowed,
+                                     const unsigned char **reason);
 PyObject *wreath_cedar_to_value(PyObject *self, PyObject *args);
 
 /* env.c */
@@ -45,6 +51,57 @@ PyObject *wreath_read_osenv(PyObject *self, PyObject *ignored);
 
 /* codecs.c */
 PyObject *wreath_cache_key_selected(PyObject *self, PyObject *args);
+PyObject *wreath_float_sequence(PyObject *self, PyObject *args);
+PyObject *wreath_array_coerce(PyObject *self, PyObject *args);
+PyObject *wreath_map_nullable(PyObject *self, PyObject *args);
+PyObject *wreath_sparsevector_parts(PyObject *self, PyObject *args);
+PyObject *wreath_sparsevector_data(PyObject *self, PyObject *args);
+PyObject *wreath_sparsevector_dim(PyObject *self, PyObject *arg);
+PyObject *wreath_sparsevector_len(PyObject *self, PyObject *arg);
+PyObject *wreath_sparsevector_indices(PyObject *self, PyObject *arg);
+PyObject *wreath_sparsevector_values(PyObject *self, PyObject *arg);
+PyObject *wreath_sparsevector_dict(PyObject *self, PyObject *arg);
+PyObject *wreath_sparsevector_equal(PyObject *self, PyObject *args);
+PyObject *wreath_sparsevector_hash(PyObject *self, PyObject *arg);
+PyObject *wreath_cookie_header(PyObject *self, PyObject *args);
+PyObject *wreath_parse_cookie_data_raw(const uint8_t *data, Py_ssize_t len);
+PyObject *wreath_log_batch(PyObject *self, PyObject *args);
+PyObject *wreath_local_walk(PyObject *self, PyObject *args);
+PyObject *wreath_recurrence_plan(PyObject *self, PyObject *args);
+PyObject *wreath_recurrence_next(PyObject *self, PyObject *args);
+PyObject *wreath_attempt_encode(PyObject *self, PyObject *args);
+PyObject *wreath_attempt_decode(PyObject *self, PyObject *args);
+int wreath_register_zip_builder(PyObject *module);
+PyObject *wreath_sigv4_headers(PyObject *self, PyObject *headers);
+PyObject *wreath_sigv4_canonical(PyObject *self, PyObject *args);
+
+/* data_kernels.c */
+PyObject *wreath_fused_order(PyObject *self, PyObject *args);
+PyObject *wreath_rank_indices(PyObject *self, PyObject *args);
+PyObject *wreath_normalise_argument(PyObject *self, PyObject *args);
+PyObject *wreath_transport_decode_parts(PyObject *self, PyObject *args);
+PyObject *wreath_fault_encode_parts(PyObject *self, PyObject *args);
+PyObject *wreath_fault_decode_parts(PyObject *self, PyObject *args);
+PyObject *wreath_dns_parse_txt(PyObject *self, PyObject *args);
+PyObject *wreath_siphash24(PyObject *self, PyObject *args);
+PyObject *wreath_log_cell_encode(PyObject *self, PyObject *args);
+PyObject *wreath_log_cell_decode(PyObject *self, PyObject *args);
+PyObject *wreath_capture_slab_decode(PyObject *self, PyObject *args);
+PyObject *wreath_step_encode(PyObject *self, PyObject *args);
+PyObject *wreath_step_decode(PyObject *self, PyObject *args);
+PyObject *wreath_metrics_flatten(PyObject *self, PyObject *args);
+PyObject *wreath_locale_preference(PyObject *self, PyObject *args);
+PyObject *wreath_normalize_host(PyObject *self, PyObject *args);
+PyObject *wreath_parse_accept(PyObject *self, PyObject *arg);
+PyObject *wreath_negotiate_media(PyObject *self, PyObject *args);
+PyObject *wreath_bearer_token(PyObject *self, PyObject *arg);
+PyObject *wreath_cacheable_headers(PyObject *self, PyObject *arg);
+PyObject *wreath_sync_version(PyObject *self, PyObject *arg);
+PyObject *wreath_sync_state(PyObject *self, PyObject *arg);
+PyObject *wreath_sync_state_diff(PyObject *self, PyObject *args);
+PyObject *wreath_sync_state_keys(PyObject *self, PyObject *arg);
+PyObject *wreath_sync_state_size(PyObject *self, PyObject *arg);
+int wreath_register_data_kernels(PyObject *module);
 
 /* security.c */
 PyObject *wreath_host_allowed(PyObject *self, PyObject *args);
@@ -123,21 +180,30 @@ PyObject *wreath_curve_p256_sign(PyObject *self, PyObject *args);
 PyObject *wreath_request_id_valid(PyObject *self, PyObject *args);
 PyObject *wreath_format_server_timing(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_route_blocks(PyObject *self, PyObject *args);
+PyObject *wreath_prometheus_global_block(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_counter_block(PyObject *self, PyObject *args);
+PyObject *wreath_prometheus_document(PyObject *self, PyObject *args);
 PyObject *wreath_statsd_lines(PyObject *self, PyObject *args);
 PyObject *wreath_emf_render(PyObject *self, PyObject *args);
 PyObject *wreath_metric_delta_state(PyObject *self, PyObject *arg);
 
 /* series.c */
 PyObject *wreath_series_reconcile(PyObject *self, PyObject *args);
+PyObject *wreath_series_cell_rows(PyObject *self, PyObject *args);
 PyObject *wreath_series_dense_rows(PyObject *self, PyObject *args);
 PyObject *wreath_series_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_spine_length(PyObject *self, PyObject *args);
+PyObject *wreath_series_spine_lengths(PyObject *self, PyObject *args);
+PyObject *wreath_format_duration_parts(PyObject *self, PyObject *args);
+PyObject *wreath_relative_english(PyObject *self, PyObject *args);
 PyObject *wreath_series_lttb(PyObject *self, PyObject *args);
 PyObject *wreath_series_path(PyObject *self, PyObject *args);
 PyObject *wreath_series_nice_ticks(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
+PyObject *wreath_series_data(PyObject *self, PyObject *args);
+PyObject *wreath_series_data_chart(PyObject *self, PyObject *args);
+PyObject *wreath_series_data_chart_text(PyObject *self, PyObject *args);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
 int wreath_register_proxy(PyObject *module);
@@ -179,7 +245,10 @@ PyObject *wreath_orm_collect_values(PyObject *self, PyObject *args);
 /* codecs.c */
 PyObject *wreath_percent_decode(PyObject *self, PyObject *args, PyObject *kwargs);
 PyObject *wreath_parse_qs(PyObject *self, PyObject *args);
+PyObject *wreath_page_params(PyObject *self, PyObject *args);
+PyObject *wreath_parse_form_urlencoded(PyObject *self, PyObject *args);
 PyObject *wreath_parse_cookies(PyObject *self, PyObject *args);
+PyObject *wreath_parse_cookie_headers(PyObject *self, PyObject *args);
 
 /* sql.c */
 PyObject *wreath_sql_renumber(PyObject *self, PyObject *args);
@@ -224,6 +293,10 @@ typedef struct {
     /* XOR (un)mask src into dst with the 4-byte key. dst may equal src. */
     void (*ws_unmask)(uint8_t *dst, const uint8_t *src, Py_ssize_t len,
                       const uint8_t *key);
+    /* Parse a complete Cookie field after the caller has joined split lines.
+     * The returned dict is the public Python boundary; scanning and joining
+     * stay in the sibling extension that owns its native header block. */
+    PyObject *(*parse_cookie_data)(const uint8_t *data, Py_ssize_t len);
 } WreathCoreCAPI;
 
 #define WREATH_CORE_CAPI_NAME "wreath._native._core._C_API"
@@ -314,6 +387,7 @@ PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
 PyObject *wreath_http_response_framing(PyObject *self, PyObject *args);
 PyObject *wreath_http_response_keeps_alive(PyObject *self, PyObject *args);
+PyObject *wreath_http_parse_chunk_size(PyObject *self, PyObject *arg);
 PyObject *wreath_http_serialize_request(PyObject *self, PyObject *args);
 int wreath_register_http_client_protocol(PyObject *module);
 

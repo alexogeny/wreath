@@ -851,6 +851,17 @@ heap_before(const WreathHeapEntry *a, const WreathHeapEntry *b)
     return a->sequence < b->sequence;
 }
 
+static int
+heap_entry_compare(const void *left_pointer, const void *right_pointer)
+{
+    const WreathHeapEntry *left = left_pointer;
+    const WreathHeapEntry *right = right_pointer;
+    if (left->priority < right->priority) return -1;
+    if (left->priority > right->priority) return 1;
+    if (left->sequence < right->sequence) return -1;
+    return left->sequence != right->sequence;
+}
+
 static void
 heap_sift_up(WreathHeap *self, size_t index)
 {
@@ -1210,19 +1221,12 @@ heap_snapshot(WreathHeap *self, PyObject *Py_UNUSED(ignored))
         PyMem_Free(copy);
         return NULL;
     }
-    /* Selection over the copy, using the same ordering the heap uses. */
+    /* Sequence is the stable tie-breaker, so qsort's own stability is
+     * irrelevant and the copied heap reaches get order in O(n log n).  The
+     * former repeated minimum selection scanned n + (n-1) + ... entries. */
+    qsort(copy, held, sizeof(*copy), heap_entry_compare);
     while (taken < held) {
-        size_t best = taken;
-        WreathHeapEntry swap;
         PyObject *pair;
-        for (size_t i = taken + 1; i < held; i++) {
-            if (heap_before(&copy[i], &copy[best])) {
-                best = i;
-            }
-        }
-        swap = copy[taken];
-        copy[taken] = copy[best];
-        copy[best] = swap;
         pair = Py_BuildValue("(dO)", copy[taken].priority, copy[taken].item);
         if (pair == NULL) {
             for (size_t i = taken; i < held; i++) {

@@ -84,9 +84,8 @@ wreath_format_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
 }
 
 typedef struct {
-    PyObject *route_id;
-    const char *route_data;
-    Py_ssize_t route_length;
+    char *labels;
+    Py_ssize_t labels_length;
     PyObject *count;
     PyObject *errors;
     PyObject *duration_sum;
@@ -99,14 +98,233 @@ prom_routes_clear(PromRoute *routes, Py_ssize_t count)
 {
     if (routes == NULL) return;
     for (Py_ssize_t index = 0; index < count; index++) {
+        PyMem_Free(routes[index].labels);
         Py_XDECREF(routes[index].buckets);
         Py_XDECREF(routes[index].duration_max);
         Py_XDECREF(routes[index].duration_sum);
         Py_XDECREF(routes[index].errors);
         Py_XDECREF(routes[index].count);
-        Py_XDECREF(routes[index].route_id);
     }
     PyMem_Free(routes);
+}
+
+typedef struct {
+    char *data;
+    Py_ssize_t length;
+    Py_ssize_t capacity;
+} PromLabelBuffer;
+
+static void
+prom_label_buffer_clear(PromLabelBuffer *buffer)
+{
+    PyMem_Free(buffer->data);
+    buffer->data = NULL;
+    buffer->length = 0;
+    buffer->capacity = 0;
+}
+
+static int
+prom_label_buffer_reserve(PromLabelBuffer *buffer, Py_ssize_t extra)
+{
+    if (extra < 0 || buffer->length > PY_SSIZE_T_MAX - extra) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t needed = buffer->length + extra;
+    if (needed <= buffer->capacity) return 0;
+    Py_ssize_t capacity = buffer->capacity == 0 ? 64 : buffer->capacity;
+    while (capacity < needed) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            capacity = needed;
+            break;
+        }
+        capacity *= 2;
+    }
+    char *grown = PyMem_Realloc(buffer->data, (size_t)capacity);
+    if (grown == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    buffer->data = grown;
+    buffer->capacity = capacity;
+    return 0;
+}
+
+static int
+prom_label_buffer_write(PromLabelBuffer *buffer, const char *data,
+                        Py_ssize_t length)
+{
+    if (prom_label_buffer_reserve(buffer, length) < 0) return -1;
+    memcpy(buffer->data + buffer->length, data, (size_t)length);
+    buffer->length += length;
+    return 0;
+}
+
+static int
+prom_label_buffer_byte(PromLabelBuffer *buffer, char value)
+{
+    if (prom_label_buffer_reserve(buffer, 1) < 0) return -1;
+    buffer->data[buffer->length++] = value;
+    return 0;
+}
+
+static int
+prom_label_buffer_value(PromLabelBuffer *buffer, const char *data,
+                        Py_ssize_t length)
+{
+    Py_ssize_t start = 0;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        const char *escape;
+        if (data[index] == '\\') escape = "\\\\";
+        else if (data[index] == '"') escape = "\\\"";
+        else if (data[index] == '\n') escape = "\\n";
+        else continue;
+        if (prom_label_buffer_write(buffer, data + start, index - start) < 0 ||
+            prom_label_buffer_write(buffer, escape, 2) < 0) return -1;
+        start = index + 1;
+    }
+    return prom_label_buffer_write(buffer, data + start, length - start);
+}
+
+static inline int
+prom_label_char(Py_UCS4 character)
+{
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_';
+}
+
+static inline int
+prom_label_lead(Py_UCS4 character)
+{
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') || character == '_';
+}
+
+static int
+prom_label_buffer_name(PromLabelBuffer *buffer, PyObject *name)
+{
+    if (!PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "Prometheus label names must be strings");
+        return -1;
+    }
+    Py_ssize_t length = PyUnicode_GetLength(name);
+    if (length < 0) return -1;
+    if (length == 0) return prom_label_buffer_byte(buffer, '_');
+    Py_UCS4 first = PyUnicode_ReadChar(name, 0);
+    if (first == (Py_UCS4)-1 && PyErr_Occurred()) return -1;
+    if (!prom_label_lead(first) && prom_label_buffer_byte(buffer, '_') < 0)
+        return -1;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        Py_UCS4 character = PyUnicode_ReadChar(name, index);
+        if (character == (Py_UCS4)-1 && PyErr_Occurred()) return -1;
+        if (prom_label_buffer_byte(
+                buffer, prom_label_char(character) ? (char)character : '_') < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int
+prom_label_buffer_item(PromLabelBuffer *buffer, PyObject *key, PyObject *value,
+                       int first)
+{
+    PyObject *text = NULL;
+    const char *data;
+    Py_ssize_t length;
+    if (!first && prom_label_buffer_byte(buffer, ',') < 0) return -1;
+    if (prom_label_buffer_name(buffer, key) < 0 ||
+        prom_label_buffer_write(buffer, "=\"", 2) < 0) return -1;
+    text = PyObject_Str(value);
+    if (text == NULL) return -1;
+    data = PyUnicode_AsUTF8AndSize(text, &length);
+    if (data == NULL || prom_label_buffer_value(buffer, data, length) < 0 ||
+        prom_label_buffer_byte(buffer, '"') < 0) {
+        Py_DECREF(text);
+        return -1;
+    }
+    Py_DECREF(text);
+    return 0;
+}
+
+static int
+prom_route_default_labels(PromRoute *route, PyObject *route_id)
+{
+    PromLabelBuffer buffer = {0};
+    PyObject *text = PyObject_Str(route_id);
+    const char *data;
+    Py_ssize_t length;
+    if (text == NULL) return -1;
+    data = PyUnicode_AsUTF8AndSize(text, &length);
+    if (data == NULL ||
+        prom_label_buffer_write(&buffer, "route_id=\"", 10) < 0 ||
+        prom_label_buffer_value(&buffer, data, length) < 0 ||
+        prom_label_buffer_byte(&buffer, '"') < 0) {
+        Py_DECREF(text);
+        prom_label_buffer_clear(&buffer);
+        return -1;
+    }
+    Py_DECREF(text);
+    route->labels = buffer.data;
+    route->labels_length = buffer.length;
+    return 0;
+}
+
+static int
+prom_route_custom_labels(PromRoute *route, PyObject *labels)
+{
+    PromLabelBuffer buffer = {0};
+    PyObject *iterator = PyObject_GetIter(labels);
+    PyObject *key;
+    int first = 1;
+    if (iterator == NULL) return -1;
+    while ((key = PyIter_Next(iterator)) != NULL) {
+        PyObject *value = PyObject_GetItem(labels, key);
+        if (value == NULL ||
+            prom_label_buffer_item(&buffer, key, value, first) < 0) {
+            Py_XDECREF(value);
+            Py_DECREF(key);
+            Py_DECREF(iterator);
+            prom_label_buffer_clear(&buffer);
+            return -1;
+        }
+        first = 0;
+        Py_DECREF(value);
+        Py_DECREF(key);
+    }
+    Py_DECREF(iterator);
+    if (PyErr_Occurred()) {
+        prom_label_buffer_clear(&buffer);
+        return -1;
+    }
+    route->labels = buffer.data;
+    route->labels_length = buffer.length;
+    return 0;
+}
+
+static int
+prom_route_labels(PromRoute *route, PyObject *route_id,
+                  PyObject *resolver, int resolver_is_mapping)
+{
+    PyObject *labels;
+    int truth;
+    if (resolver == Py_None) return prom_route_default_labels(route, route_id);
+    labels = resolver_is_mapping
+        ? PyObject_CallMethod(resolver, "get", "O", route_id)
+        : PyObject_CallOneArg(resolver, route_id);
+    if (labels == NULL) return -1;
+    truth = PyObject_IsTrue(labels);
+    if (truth < 0) {
+        Py_DECREF(labels);
+        return -1;
+    }
+    if (!truth) {
+        Py_DECREF(labels);
+        return prom_route_default_labels(route, route_id);
+    }
+    int result = prom_route_custom_labels(route, labels);
+    Py_DECREF(labels);
+    return result;
 }
 
 static PyObject *
@@ -182,14 +400,17 @@ prom_write_sample_head(WreathBytesWriter *writer,
     if (wreath_writer_write(writer, name, name_length) < 0 ||
         (name_suffix[0] != '\0' && wreath_writer_write(
             writer, name_suffix, (Py_ssize_t)strlen(name_suffix)) < 0) ||
-        wreath_writer_write(writer, "{route_id=\"", 11) < 0 ||
-        prom_write_label_value(
-            writer, route->route_data, route->route_length) < 0) return -1;
+        wreath_writer_byte(writer, '{') < 0 ||
+        wreath_writer_write(writer, route->labels, route->labels_length) < 0)
+        return -1;
     if (bound != NULL) {
-        if (wreath_writer_write(writer, "\",le=\"", 6) < 0 ||
+        if (wreath_writer_write(writer, ",le=\"", 5) < 0 ||
             prom_write_unicode(writer, bound) < 0) return -1;
     }
-    return wreath_writer_write(writer, "\"} ", 3);
+    else if (wreath_writer_byte(writer, '}') < 0 ||
+             wreath_writer_byte(writer, ' ') < 0) return -1;
+    if (bound != NULL) return wreath_writer_write(writer, "\"} ", 3);
+    return 0;
 }
 
 static int
@@ -478,15 +699,17 @@ error:
 PyObject *
 wreath_prometheus_route_blocks(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *routes_object, *names;
+    PyObject *routes_object, *names, *resolver = Py_None;
+    int resolver_is_mapping = 0;
     PyObject *routes = NULL, *groups = NULL;
     PromRoute *plan = NULL;
     WreathBytesWriter writers[4] = {{0}};
     const char *name_data[4];
     Py_ssize_t name_lengths[4];
     Py_ssize_t count = 0;
-    if (!PyArg_ParseTuple(args, "OO!:prometheus_route_blocks", &routes_object,
-                          &PyTuple_Type, &names)) return NULL;
+    if (!PyArg_ParseTuple(args, "OO!|Op:prometheus_route_blocks", &routes_object,
+                          &PyTuple_Type, &names, &resolver,
+                          &resolver_is_mapping)) return NULL;
     if (PyTuple_GET_SIZE(names) != 4) {
         PyErr_SetString(PyExc_ValueError,
                         "Prometheus route names must contain four strings");
@@ -513,15 +736,13 @@ wreath_prometheus_route_blocks(PyObject *Py_UNUSED(self), PyObject *args)
     for (Py_ssize_t index = 0; index < count; index++) {
         PyObject *route = PySequence_Fast_GET_ITEM(routes, index);
         PyObject *route_id = PyObject_GetAttrString(route, "route_id");
-        PyObject *route_id_text = NULL;
         if (route_id == NULL) goto error;
-        route_id_text = PyObject_Str(route_id);
+        if (prom_route_labels(
+                &plan[index], route_id, resolver, resolver_is_mapping) < 0) {
+            Py_DECREF(route_id);
+            goto error;
+        }
         Py_DECREF(route_id);
-        if (route_id_text == NULL) goto error;
-        plan[index].route_id = route_id_text;
-        plan[index].route_data = PyUnicode_AsUTF8AndSize(
-            route_id_text, &plan[index].route_length);
-        if (plan[index].route_data == NULL) goto error;
         plan[index].count = PyObject_GetAttrString(route, "count");
         plan[index].errors = PyObject_GetAttrString(route, "errors");
         plan[index].duration_sum = PyObject_GetAttrString(route, "duration_us_sum");
@@ -679,6 +900,250 @@ error:
     prom_routes_clear(plan, count);
     Py_XDECREF(groups);
     Py_XDECREF(routes);
+    return NULL;
+}
+
+static int
+prom_write_family(WreathBytesWriter *writer, PyObject *family,
+                  const char *kind, const char *help)
+{
+    if (writer->len != 0 && wreath_writer_byte(writer, '\n') < 0) return -1;
+    return wreath_writer_write(writer, "# HELP ", 7) < 0 ||
+           prom_write_unicode(writer, family) < 0 ||
+           wreath_writer_byte(writer, ' ') < 0 ||
+           wreath_writer_write(writer, help, (Py_ssize_t)strlen(help)) < 0 ||
+           wreath_writer_write(writer, "\n# TYPE ", 8) < 0 ||
+           prom_write_unicode(writer, family) < 0 ||
+           wreath_writer_byte(writer, ' ') < 0 ||
+           wreath_writer_write(writer, kind, (Py_ssize_t)strlen(kind)) < 0
+        ? -1 : 0;
+}
+
+static int
+prom_write_number_value(WreathBytesWriter *writer, PyObject *value)
+{
+    uint64_t compact;
+    if (prom_as_uint64(value, &compact))
+        return prom_write_uint64(writer, compact);
+    PyObject *number = PyNumber_Long(value);
+    PyObject *text;
+    int result;
+    if (number == NULL) return -1;
+    text = prom_number(number);
+    Py_DECREF(number);
+    if (text == NULL) return -1;
+    result = prom_write_unicode(writer, text);
+    Py_DECREF(text);
+    return result;
+}
+
+static int
+prom_write_plain_number(WreathBytesWriter *writer, PyObject *value)
+{
+    return wreath_writer_byte(writer, ' ') < 0
+        ? -1 : prom_write_number_value(writer, value);
+}
+
+static PyObject *
+prom_optional_number(PyObject *object, const char *name)
+{
+    PyObject *value = NULL;
+    int found = object != Py_None
+        ? PyObject_GetOptionalAttrString(object, name, &value) : 0;
+    if (found < 0) return NULL;
+    if (!found) return PyLong_FromLong(0);
+    PyObject *number = PyNumber_Long(value);
+    Py_DECREF(value);
+    return number;
+}
+
+static int
+prom_write_reason_sample(WreathBytesWriter *writer, PyObject *sample,
+                         const char *reason, PyObject *value)
+{
+    return wreath_writer_byte(writer, '\n') < 0 ||
+           prom_write_unicode(writer, sample) < 0 ||
+           wreath_writer_write(writer, "{reason=\"", 9) < 0 ||
+           prom_write_label_value(
+               writer, reason, (Py_ssize_t)strlen(reason)) < 0 ||
+           wreath_writer_write(writer, "\"} ", 3) < 0 ||
+           prom_write_number_value(writer, value) < 0
+        ? -1 : 0;
+}
+
+static int
+prom_write_reason_value(WreathBytesWriter *writer, PyObject *sample,
+                        PyObject *reason, PyObject *value)
+{
+    PyObject *name = NULL, *text = NULL, *lower = NULL;
+    int found = PyObject_GetOptionalAttrString(reason, "name", &name);
+    const char *data;
+    Py_ssize_t length;
+    int result;
+    if (found < 0) return -1;
+    if (found) text = PyObject_Str(name);
+    else text = PyObject_Str(reason);
+    Py_XDECREF(name);
+    if (text == NULL) return -1;
+    lower = PyObject_CallMethod(text, "lower", NULL);
+    Py_DECREF(text);
+    if (lower == NULL) return -1;
+    data = PyUnicode_AsUTF8AndSize(lower, &length);
+    if (data == NULL || wreath_writer_byte(writer, '\n') < 0 ||
+        prom_write_unicode(writer, sample) < 0 ||
+        wreath_writer_write(writer, "{reason=\"", 9) < 0 ||
+        prom_write_label_value(writer, data, length) < 0 ||
+        wreath_writer_write(writer, "\"} ", 3) < 0) {
+        Py_DECREF(lower);
+        return -1;
+    }
+    Py_DECREF(lower);
+    result = prom_write_number_value(writer, value);
+    return result;
+}
+
+PyObject *
+wreath_prometheus_global_block(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    static const char *loss_fields[] = {
+        "orphan_phase", "orphan_correlation", "pending_evicted",
+        "decode_error", "export_error", "recent_evicted",
+    };
+    PyObject *snapshot, *recorder_loss, *names;
+    PyObject *assembled = NULL, *pending = NULL, *loss = NULL;
+    PyObject *recorder_items = NULL;
+    WreathBytesWriter writer = {0};
+    if (!PyArg_ParseTuple(args, "OOO!:prometheus_global_block", &snapshot,
+                          &recorder_loss, &PyTuple_Type, &names)) return NULL;
+    if (PyTuple_GET_SIZE(names) != 7) {
+        PyErr_SetString(PyExc_ValueError,
+                        "Prometheus global names must contain seven strings");
+        return NULL;
+    }
+    assembled = prom_optional_number(snapshot, "assembled");
+    pending = prom_optional_number(snapshot, "pending");
+    if (assembled == NULL || pending == NULL ||
+        PyObject_GetOptionalAttrString(snapshot, "loss", &loss) < 0) goto error;
+    if (loss == NULL) loss = Py_NewRef(Py_None);
+    if (wreath_writer_init(&writer, 1024) < 0) goto error;
+    PyObject *assembled_family = PyTuple_GET_ITEM(names, 0);
+    PyObject *assembled_sample = PyTuple_GET_ITEM(names, 1);
+    PyObject *pending_name = PyTuple_GET_ITEM(names, 2);
+    PyObject *projector_family = PyTuple_GET_ITEM(names, 3);
+    PyObject *projector_sample = PyTuple_GET_ITEM(names, 4);
+    PyObject *recorder_family = PyTuple_GET_ITEM(names, 5);
+    PyObject *recorder_sample = PyTuple_GET_ITEM(names, 6);
+    if (prom_write_family(
+            &writer, assembled_family, "counter",
+            "Total request traces the projector has finalized.") < 0 ||
+        wreath_writer_byte(&writer, '\n') < 0 ||
+        prom_write_unicode(&writer, assembled_sample) < 0 ||
+        prom_write_plain_number(&writer, assembled) < 0 ||
+        prom_write_family(
+            &writer, pending_name, "gauge",
+            "Completions awaiting their trailing correlation/phase cells.") < 0 ||
+        wreath_writer_byte(&writer, '\n') < 0 ||
+        prom_write_unicode(&writer, pending_name) < 0 ||
+        prom_write_plain_number(&writer, pending) < 0 ||
+        prom_write_family(
+            &writer, projector_family, "counter",
+            "Telemetry items the projector dropped, by reason.") < 0)
+        goto error;
+    for (size_t index = 0; index < sizeof(loss_fields) / sizeof(loss_fields[0]);
+         index++) {
+        PyObject *value = prom_optional_number(loss, loss_fields[index]);
+        if (value == NULL || prom_write_reason_sample(
+                &writer, projector_sample, loss_fields[index], value) < 0) {
+            Py_XDECREF(value);
+            goto error;
+        }
+        Py_DECREF(value);
+    }
+    if (recorder_loss != Py_None) {
+        if (prom_write_family(
+                &writer, recorder_family, "counter",
+                "Items the recorder dropped before the projector saw them, by reason.") < 0)
+            goto error;
+        recorder_items = PyMapping_Items(recorder_loss);
+        if (recorder_items == NULL) goto error;
+        Py_ssize_t count = PyList_GET_SIZE(recorder_items);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *item = PyList_GET_ITEM(recorder_items, index);
+            if (prom_write_reason_value(
+                    &writer, recorder_sample, PyTuple_GET_ITEM(item, 0),
+                    PyTuple_GET_ITEM(item, 1)) < 0) goto error;
+        }
+    }
+    Py_XDECREF(recorder_items);
+    Py_DECREF(loss);
+    Py_DECREF(pending);
+    Py_DECREF(assembled);
+    return prom_finish_block(&writer);
+error:
+    Py_XDECREF(writer.bytes);
+    Py_XDECREF(recorder_items);
+    Py_XDECREF(loss);
+    Py_XDECREF(pending);
+    Py_XDECREF(assembled);
+    return NULL;
+}
+
+static int
+prom_append_block(WreathBytesWriter *writer, PyObject *block)
+{
+    if (!PyUnicode_Check(block)) {
+        PyErr_SetString(PyExc_TypeError, "Prometheus block must be str");
+        return -1;
+    }
+    if (PyUnicode_GetLength(block) == 0) return 0;
+    return wreath_writer_byte(writer, '\n') < 0 ||
+           prom_write_unicode(writer, block) < 0 ? -1 : 0;
+}
+
+/* Join the independently useful exposition kernels in one native-owned output
+ * buffer.  The blocks are already final boundary text; keeping their framing
+ * here removes the Python Writer/list/f-string graph without coupling route,
+ * recorder or subsystem declarations to one another. */
+PyObject *
+wreath_prometheus_document(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    static const char *kinds[4] = {"counter", "counter", "histogram", "gauge"};
+    static const char *helps[4] = {
+        "Requests finalized by the flight projector, by route.",
+        "Failed requests (non-OK terminal, 5xx, or promoted), by route.",
+        "Request duration in seconds (base-2 log buckets), by route.",
+        "Maximum observed request duration in seconds, by route.",
+    };
+    PyObject *route_blocks, *global_block, *counter_block, *families;
+    int openmetrics;
+    WreathBytesWriter writer = {0};
+    if (!PyArg_ParseTuple(
+            args, "O!UUO!p:prometheus_document", &PyTuple_Type, &route_blocks,
+            &global_block, &counter_block, &PyTuple_Type, &families,
+            &openmetrics)) return NULL;
+    if (PyTuple_GET_SIZE(route_blocks) != 4 || PyTuple_GET_SIZE(families) != 4) {
+        PyErr_SetString(PyExc_ValueError,
+                        "Prometheus document needs four route blocks and families");
+        return NULL;
+    }
+    if (wreath_writer_init(&writer, 4096) < 0) return NULL;
+    for (Py_ssize_t index = 0; index < 4; index++) {
+        PyObject *family = PyTuple_GET_ITEM(families, index);
+        if (!PyUnicode_Check(family)) {
+            PyErr_SetString(PyExc_TypeError, "Prometheus family name must be str");
+            goto error;
+        }
+        if (prom_write_family(&writer, family, kinds[index], helps[index]) < 0 ||
+            prom_append_block(&writer, PyTuple_GET_ITEM(route_blocks, index)) < 0)
+            goto error;
+    }
+    if (prom_append_block(&writer, global_block) < 0 ||
+        prom_append_block(&writer, counter_block) < 0 ||
+        wreath_writer_byte(&writer, '\n') < 0) goto error;
+    if (openmetrics && wreath_writer_write(&writer, "# EOF\n", 6) < 0) goto error;
+    return prom_finish_block(&writer);
+error:
+    Py_XDECREF(writer.bytes);
     return NULL;
 }
 

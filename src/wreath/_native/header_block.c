@@ -300,8 +300,14 @@ wreath_headers_view(
                 const char *raw = PyBytes_AS_STRING(self->raw);
                 *name = raw + span->name_offset;
                 *name_size = span->name_size;
-                *value = raw + span->value_offset;
-                *value_size = span->value_size;
+                if (self->values[index] != NULL) {
+                    *value = PyBytes_AS_STRING(self->values[index]);
+                    *value_size = PyBytes_GET_SIZE(self->values[index]);
+                }
+                else {
+                    *value = raw + span->value_offset;
+                    *value_size = span->value_size;
+                }
             }
             return 0;
         }
@@ -434,4 +440,81 @@ wreath_headers_materialize(PyObject *headers)
     }
     self->materialized = Py_NewRef(list);
     return list;
+}
+
+int
+wreath_headers_set_first(PyObject *headers, PyObject *name, PyObject *value)
+{
+    if (!PyBytes_Check(name) || !PyBytes_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "header names and values must be bytes");
+        return -1;
+    }
+    PyObject *list = headers;
+    if (wreath_headers_is_block(headers)) {
+        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
+        if (self->materialized == NULL) {
+            const char *wanted = PyBytes_AS_STRING(name);
+            Py_ssize_t wanted_size = PyBytes_GET_SIZE(name);
+            for (Py_ssize_t index = 0; index < self->count; index++) {
+                const char *candidate;
+                const char *ignored_value;
+                Py_ssize_t candidate_size;
+                Py_ssize_t ignored_value_size;
+                if (wreath_headers_view(
+                        headers, index, &candidate, &candidate_size,
+                        &ignored_value, &ignored_value_size) < 0) return -1;
+                if (candidate_size == wanted_size &&
+                    memcmp(candidate, wanted, (size_t)wanted_size) == 0) {
+                    Py_XSETREF(self->values[index], Py_NewRef(value));
+                    return 0;
+                }
+            }
+            if (self->object_mode) {
+                return wreath_header_block_append_objects(headers, name, value);
+            }
+            list = wreath_headers_materialize(headers);
+            if (list == NULL) return -1;
+        }
+        else {
+            list = Py_NewRef(self->materialized);
+        }
+    }
+    else {
+        if (!PyList_Check(headers)) {
+            PyErr_SetString(PyExc_TypeError, "headers must be a list of byte pairs");
+            return -1;
+        }
+        Py_INCREF(list);
+    }
+    Py_ssize_t count = PyList_GET_SIZE(list);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *pair = PyList_GET_ITEM(list, index);
+        if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2 ||
+            !PyBytes_Check(PyTuple_GET_ITEM(pair, 0)) ||
+            !PyBytes_Check(PyTuple_GET_ITEM(pair, 1))) {
+            Py_DECREF(list);
+            PyErr_SetString(PyExc_TypeError, "header must be a pair of bytes");
+            return -1;
+        }
+        int equal = PyObject_RichCompareBool(PyTuple_GET_ITEM(pair, 0), name, Py_EQ);
+        if (equal < 0) {
+            Py_DECREF(list);
+            return -1;
+        }
+        if (equal == 1) {
+            PyObject *replacement = PyTuple_Pack(2, name, value);
+            if (replacement == NULL) {
+                Py_DECREF(list);
+                return -1;
+            }
+            int rc = PyList_SetItem(list, index, replacement);
+            Py_DECREF(list);
+            return rc;
+        }
+    }
+    PyObject *pair = PyTuple_Pack(2, name, value);
+    int rc = pair == NULL ? -1 : PyList_Append(list, pair);
+    Py_XDECREF(pair);
+    Py_DECREF(list);
+    return rc;
 }
