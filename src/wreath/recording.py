@@ -24,6 +24,7 @@ from enum import StrEnum
 from typing import Any
 
 from ._flight_schema import CaptureDisposition, CaptureFieldClass
+from ._native import _core
 from ._recording_format import (
     AttemptOutcome,
     AttemptRecord,
@@ -853,14 +854,6 @@ class AttemptPolicy:
         return False
 
 
-#: Values an argument may be made of. Deliberately the JSON scalars and nothing
-#: else: `args jsonb` is what the queue stored, so anything outside this set
-#: arrived by some other route and its `repr` is not a thing to write to a
-#: forensic file. `bool` is checked before `int` everywhere below, because it is
-#: a subclass of one.
-_ARGUMENT_SCALARS = (str, bool, int, float)
-
-
 #: Stands in for a leading parameter the runner supplies. Never recorded: it is
 #: dropped by name before any value is looked at.
 _FRAMEWORK_ARGUMENT = object()
@@ -914,85 +907,12 @@ def _normalise_argument(value: Any, limits: RedactionPolicy) -> str:
     a list of three from the first three of nine, and a replay driven off the
     short one reports a different failure from the one that happened.
 
-    Immutable by construction: the normalised copy is built out of new lists
-    and dicts and then serialised immediately, so a handler that mutates its
-    own argument after this returns cannot change what was recorded.
+    The native walk writes into an operation-owned byte buffer and materialises
+    only the final text, so no mutable intermediate object can escape.
     """
-    import json
-
-    try:
-        copied = _copy_bounded(value, limits, depth=0, seen=set(), budget=[limits.max_fields])
-    except _ArgumentRefused as refusal:
-        return json.dumps({"withheld": str(refusal)})
-    text = json.dumps({"value": copied}, separators=(",", ":"), allow_nan=False)
-    if len(text.encode("utf-8")) > limits.max_body_bytes:
-        return json.dumps(
-            {"withheld": f"over the {limits.max_body_bytes}-byte argument budget"}
-        )
-    return text
-
-
-class _ArgumentRefused(Exception):
-    """Why one argument could not be normalised. Never escapes this module."""
-
-
-def _copy_bounded(
-    value: Any, limits: RedactionPolicy, *, depth: int, seen: set[int], budget: list[int]
-) -> Any:
-    """An immutable-by-construction copy, or a refusal naming what stopped it."""
-    if value is None or isinstance(value, _ARGUMENT_SCALARS):
-        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-            # JSON has no NaN or infinity and `allow_nan=False` would raise from
-            # inside `json.dumps`, past the refusal path that records a reason.
-            raise _ArgumentRefused("a non-finite number has no JSON form")
-        return value
-    if depth >= limits.max_depth:
-        raise _ArgumentRefused(f"nested deeper than the {limits.max_depth}-level limit")
-    if isinstance(value, list | tuple):
-        # Identity, not equality: a cycle is what this catches, and two equal
-        # sibling lists are not one. Removed on the way out so a value that
-        # appears twice side by side is not mistaken for a cycle.
-        if id(value) in seen:
-            raise _ArgumentRefused("contains a cycle")
-        seen.add(id(value))
-        try:
-            return [
-                _copy_bounded(item, limits, depth=depth + 1, seen=seen, budget=_spend(budget))
-                for item in value
-            ]
-        finally:
-            seen.discard(id(value))
-    if isinstance(value, dict):
-        if id(value) in seen:
-            raise _ArgumentRefused("contains a cycle")
-        seen.add(id(value))
-        try:
-            copied: dict[str, Any] = {}
-            for key, item in value.items():
-                if not isinstance(key, str):
-                    raise _ArgumentRefused(
-                        f"a mapping keyed by {type(key).__name__} has no JSON form"
-                    )
-                copied[key] = _copy_bounded(
-                    item, limits, depth=depth + 1, seen=seen, budget=_spend(budget)
-                )
-            return copied
-        finally:
-            seen.discard(id(value))
-    raise _ArgumentRefused(f"unsupported type {type(value).__name__}")
-
-
-def _spend(budget: list[int]) -> list[int]:
-    """Charge one field against the shared budget, or refuse.
-
-    A single mutable cell rather than a per-level count, because the limit that
-    matters is the size of the whole recorded value: a thousand one-element
-    lists is the same file as one thousand-element list.
-    """
-    budget[0] -= 1
-    if budget[0] < 0:
-        raise _ArgumentRefused("more fields than the policy's max_fields allows")
-    return budget
+    return _core.normalise_argument(
+        value, limits.max_fields, limits.max_depth, limits.max_body_bytes
+    )
 
 
 class BoundaryTrace:
