@@ -172,21 +172,32 @@ def order_children_first(
         for _edge, parent in graph.outbound.get(child, ()):
             if parent in members and parent is not child:
                 after[parent].add(child)
+    # Kahn's walk, indexed in the direction a removal unlocks.  The former
+    # implementation rescanned every remaining dependency set after each
+    # layer; a chain has one ready model per layer and therefore took Θ(V²).
+    # Here each model is settled once and each distinct edge is decremented
+    # once.  Sorting is confined to ready layers to retain stable plan output.
+    parents_by_child: dict[type, set[type]] = {model: set() for model in members}
+    waiting = {model: len(children) for model, children in after.items()}
+    for parent, children in after.items():
+        for child in children:
+            parents_by_child[child].add(parent)
+
+    def key(model: type) -> str:
+        return graph.nodes[model].qualified
+
+    ready = sorted((model for model in members if waiting[model] == 0), key=key)
     ordered: list[type] = []
-    remaining = dict(after)
-    while remaining:
-        ready = sorted(
-            (model for model, deps in remaining.items() if not deps),
-            key=lambda model: graph.nodes[model].qualified,
-        )
-        if not ready:
-            break
+    while ready:
+        following: list[type] = []
         for model in ready:
             ordered.append(model)
-            del remaining[model]
-        for deps in remaining.values():
-            deps.difference_update(ready)
-    cycles = _cycles(graph, set(remaining))
+            for parent in parents_by_child[model]:
+                waiting[parent] -= 1
+                if waiting[parent] == 0:
+                    following.append(parent)
+        ready = sorted(following, key=key)
+    cycles = _cycles(graph, {model for model, count in waiting.items() if count != 0})
     return ordered, cycles
 
 
