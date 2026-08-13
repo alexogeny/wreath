@@ -22,51 +22,16 @@ Both read the request scheme and `Host`, so behind a proxy both belong after
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from ipaddress import AddressValueError, IPv6Address
 
 from .._native import _core
 from .._webpolicy import append_missing_headers, normalize_origin, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
 
-_HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
-
-
-def _port_valid(value: str) -> bool:
-    """Whether an optional authority port is syntactically and numerically valid."""
-    return not value or (value.isascii() and value.isdigit() and int(value) <= 65535)
-
 
 def _normalize_host(value: str, *, pattern: bool = False) -> str | None:
     """Return the host in a valid Host authority, stripped of its optional port."""
-    value = value.strip().lower()
-    if not value or not value.isascii():
-        return None
-    if value.startswith("["):
-        end = value.find("]")
-        if end < 0:
-            return None
-        rest = value[end + 1 :]
-        if rest and (not rest.startswith(":") or not _port_valid(rest[1:])):
-            return None
-        try:
-            address = IPv6Address(value[1:end])
-        except AddressValueError:
-            return None
-        return f"[{address}]"
-    if "[" in value or "]" in value:
-        return None
-    host, separator, port = value.partition(":")
-    if separator and not _port_valid(port):
-        return None
-    if pattern and host == "*":
-        return host
-    candidate = host[2:] if pattern and host.startswith("*.") else host
-    if not candidate or candidate.startswith("."):
-        return None
-    if any(character not in _HOST_CHARS for character in candidate):
-        return None
-    return host
+    return _core.normalize_host(value, pattern)
 
 
 #: `host_allowed(host, patterns)` -- whether a Host value matches the compiled

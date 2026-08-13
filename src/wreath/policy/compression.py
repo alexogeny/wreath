@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator
 
-from .._headers import find_header
 from .._webpolicy import (
     NO_TRANSFORM,
     append_vary,
@@ -206,7 +205,7 @@ class CompressionPolicy:
         if request.identity is not None and not self.compress_authenticated:
             return response
         headers = response.headers
-        accepted = find_header(request.headers, b"accept-encoding")
+        accepted = request._header_bytes(b"accept-encoding")
         coding = select_content_encoding(accepted) if accepted is not None else None
         if coding is None:
             return response
