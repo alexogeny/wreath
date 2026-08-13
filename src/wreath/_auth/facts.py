@@ -22,8 +22,10 @@ get subtly wrong:
   for `organizations` it saves a database round trip on the authorization path,
   which is the difference between the fact being free and being the most
   expensive thing in the request.
-* **Fail-closed.** The empty set is *always supplied*, even with no provider —
-  see `always_supplied` below for why absence is not a neutral default. The
+* **Fail-closed.** The empty set is supplied to every action partition whose
+  candidate policies read the fact, even with no provider — see
+  `always_supplied` below for why absence is not a neutral default. A partition
+  proven not to read it carries no value through the request boundary. The
   empty set only fails *closed* for a fact a policy reads to **permit**; for one
   read to **forbid** the same empty set fails open, so those declare
   `refusal=True` and refuse to boot without a provider — see `require_provider`.
@@ -71,9 +73,7 @@ def referenced_names(engine: Any, capability: str) -> frozenset[str] | None:
     return None if names is None else frozenset(names)
 
 
-def references_key(
-    engine: Any, attribute: str, vocabulary: frozenset[str] | None
-) -> bool | None:
+def references_key(engine: Any, attribute: str, vocabulary: frozenset[str] | None) -> bool | None:
     """Whether any policy reads `context.<attribute>` at all. None for unknowable.
 
     A *presence* question, not a member walk, so `reads_context` answers it when
@@ -302,6 +302,4 @@ class SetFact:
             # Returning here is what keeps a store-backed fact off the request
             # path entirely for the applications that do not use it.
             return EMPTY
-        return resolve_once(
-            request, self._slot, lambda: self._resolve(request, vocabulary)
-        )
+        return resolve_once(request, self._slot, lambda: self._resolve(request, vocabulary))
