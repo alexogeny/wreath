@@ -25,6 +25,7 @@ SOURCES = (
     "env.c",
     "headers.c",
     "codecs.c",
+    "data_kernels.c",
     "sql.c",
     "dkim.c",
     "scim.c",

@@ -33,6 +33,8 @@ import socket
 import struct
 from dataclasses import dataclass
 
+from ._native import _core
+
 __all__ = ["DnsAnswer", "resolve_txt"]
 
 _TYPE_TXT = 16
@@ -101,61 +103,8 @@ def _encode_name(name: str) -> bytes:
     return bytes(out)
 
 
-def _skip_name(data: bytes, offset: int) -> int:
-    """Advance past a (possibly compressed) name, returning the next offset."""
-    while True:
-        if offset >= len(data):
-            raise ValueError("truncated DNS name")
-        length = data[offset]
-        if length == 0:
-            return offset + 1
-        if length & 0xC0 == 0xC0:
-            # A compression pointer is always the last thing in a name, and is
-            # two octets. We never follow it: nothing here needs the name back,
-            # only the position after it.
-            return offset + 2
-        offset += 1 + length
-
-
 def _parse(response: bytes, query_id: int) -> tuple[str, ...]:
-    if len(response) < 12:
-        raise ValueError("DNS response shorter than a header")
-    ident, flags, questions, answers, _, _ = struct.unpack("!HHHHHH", response[:12])
-    if ident != query_id:
-        raise ValueError("DNS response id does not match the query")
-    rcode = flags & 0xF
-    if rcode == 3:
-        return ()  # NXDOMAIN: a definite "there is no such name".
-    if rcode != 0:
-        raise ValueError(f"DNS server returned rcode {rcode}")
-    offset = 12
-    for _ in range(questions):
-        offset = _skip_name(response, offset) + 4
-    found: list[str] = []
-    for _ in range(answers):
-        offset = _skip_name(response, offset)
-        if offset + 10 > len(response):
-            raise ValueError("truncated DNS answer")
-        rtype, _, _, rdlength = struct.unpack("!HHIH", response[offset : offset + 10])
-        offset += 10
-        rdata = response[offset : offset + rdlength]
-        if len(rdata) != rdlength:
-            raise ValueError("truncated DNS rdata")
-        offset += rdlength
-        if rtype != _TYPE_TXT:
-            continue
-        # A TXT record is a sequence of length-prefixed character-strings, each
-        # at most 255 octets. A 2048-bit DKIM key arrives as several and means
-        # nothing until they are concatenated -- splitting on the wrong boundary
-        # is why a published key sometimes reads as malformed.
-        parts: list[str] = []
-        cursor = 0
-        while cursor < len(rdata):
-            size = rdata[cursor]
-            parts.append(rdata[cursor + 1 : cursor + 1 + size].decode("utf-8", "replace"))
-            cursor += 1 + size
-        found.append("".join(parts))
-    return tuple(found)
+    return _core.dns_parse_txt(response, query_id)
 
 
 def resolve_txt(name: str, *, timeout: float = 3.0, server: str | None = None) -> DnsAnswer:

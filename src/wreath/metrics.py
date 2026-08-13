@@ -35,6 +35,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from ._native import _core
+
 __all__ = ["Counters", "CounterSource", "collect", "flatten"]
 
 
@@ -140,8 +142,4 @@ def flatten(readings: Iterable[Counters], namespace: str = "wreath") -> dict[str
     **summed** — which is the only honest thing a dimensionless sink can do with
     them, and is why `Counters.prefixed` leaves the choice to the caller.
     """
-    out: dict[str, int] = {}
-    for reading in readings:
-        for name, value in reading.prefixed(namespace).items():
-            out[name] = out.get(name, 0) + value
-    return out
+    return _core.metrics_flatten(readings, namespace)

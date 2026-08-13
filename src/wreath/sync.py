@@ -94,11 +94,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from hashlib import blake2b
 from typing import Any, Final
 
 from ._json import dumps as _json_dumps
 from ._livedoc import DEFAULT_KEEPALIVE, LiveDocument, Subscription
+from ._native import _core
+from ._native import _postgres as _storage
+from .orm.model import Model
 from .response import ServerSentEvent, SSEResponse
 
 __all__ = [
@@ -121,12 +123,6 @@ __all__ = [
 #: thousand is comfortably more than a client renders and comfortably less than
 #: a leak.
 DEFAULT_MAX_ROWS: Final = 5000
-
-#: Bytes of digest in a row version. Not a security boundary -- it detects a
-#: change between two values this process produced moments apart -- so it is
-#: sized for collision resistance across one bounded shape, not for forgery.
-_VERSION_BYTES: Final = 16
-
 
 class SyncError(RuntimeError):
     """A shape or a subscription that cannot be honoured."""
@@ -177,6 +173,9 @@ def _loaded_values(row: Any) -> dict[str, Any]:
     not select a column has not told us it is empty, and a client that stored
     the null would have been handed a fact the query never established.
     """
+    owned = getattr(row, "_orm_loaded_values", None)
+    if owned is not None:
+        return owned()
     values: dict[str, Any] = {}
     for spec in type(row).__wreath_columns__:
         if not row._orm_is_loaded(spec.index):
@@ -196,13 +195,7 @@ def _version_of(values: Mapping[str, Any]) -> str:
     disagree about whether a row moved and a client hopping between them would
     see spurious upserts forever.
     """
-    digest = blake2b(digest_size=_VERSION_BYTES)
-    for name in sorted(values):
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\x00")
-        digest.update(repr(values[name]).encode("utf-8", "replace"))
-        digest.update(b"\x00")
-    return digest.hexdigest()
+    return _core.sync_version(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +232,12 @@ class Snapshot:
 
     def as_dict(self) -> dict[str, Any]:
         return {"rows": list(self.rows), "keys": list(self.keys)}
+
+    def __jsonable__(self) -> dict[str, Any]:
+        # Tuples and lists have the same JSON spelling.  Keep the immutable
+        # snapshot intact until egress rather than allocating two throwaway
+        # lists only for the encoder to consume them immediately.
+        return {"rows": self.rows, "keys": self.keys}
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +279,15 @@ class Sync:
     one; lower it in a test that cannot wait fifteen seconds for a tick.
     """
 
-    __slots__ = ("_document", "_key", "_max_rows", "_model", "_shapes", "_stale")
+    __slots__ = (
+        "_document",
+        "_key",
+        "_max_rows",
+        "_model",
+        "_native_snapshot",
+        "_shapes",
+        "_stale",
+    )
 
     def __init__(
         self,
@@ -298,6 +305,12 @@ class Sync:
         if max_rows <= 0:
             raise ValueError("Sync(max_rows=...) must be positive")
         self._model = model
+        self._native_snapshot = (
+            key is None
+            and isinstance(model, type)
+            and issubclass(model, Model)
+            and model._orm_primary_key is Model._orm_primary_key
+        )
         self._key = key or _default_key
         self._max_rows = max_rows
         self._shapes: dict[str, Shape] = {}
@@ -415,6 +428,9 @@ class Sync:
         return self._snapshot(rows[: shape.limit])
 
     def _snapshot(self, rows: Sequence[Any]) -> Snapshot:
+        if self._native_snapshot and rows:
+            payload, keys = _storage.sync_snapshot_rows(rows, SyncError)
+            return Snapshot(payload, keys)
         payload: list[Mapping[str, Any]] = []
         keys: list[str] = []
         for row in rows:
@@ -521,7 +537,7 @@ class SyncSubscription:
         self._shape = shape
         self._slot = slot
         self.principal = principal
-        self._held: dict[str, str] = {}
+        self._held = _core.sync_state(())
 
     @property
     def shape(self) -> Shape:
@@ -530,7 +546,7 @@ class SyncSubscription:
     @property
     def held(self) -> frozenset[str]:
         """The keys this client is believed to hold. Bounded by the shape."""
-        return frozenset(self._held)
+        return _core.sync_state_keys(self._held)
 
     @property
     def keepalive(self) -> float:
@@ -549,9 +565,7 @@ class SyncSubscription:
     async def snapshot(self, session: Any) -> Snapshot:
         """Evaluate the shape and adopt the result as what the client holds."""
         result = await self._sync.evaluate(session, self._shape.name, self.principal)
-        self._held = {
-            str(row["key"]): _version_of(row["values"]) for row in result.rows
-        }
+        self._held = _core.sync_state(result.rows)
         return result
 
     async def poll(self, session: Any) -> Delta:
@@ -565,17 +579,10 @@ class SyncSubscription:
         correct to send.
         """
         result = await self._sync.evaluate(session, self._shape.name, self.principal)
-        upserted: list[Mapping[str, Any]] = []
-        current: dict[str, str] = {}
-        for row in result.rows:
-            key = str(row["key"])
-            version = _version_of(row["values"])
-            current[key] = version
-            if self._held.get(key) != version:
-                upserted.append(row)
-        removed = tuple(sorted(set(self._held) - set(current)))
-        self._held = current
-        return Delta(tuple(upserted), removed)
+        self._held, upserted, removed = _core.sync_state_diff(
+            self._held, result.rows
+        )
+        return Delta(upserted, removed)
 
     async def wait(self) -> bool:
         """Block until something may have moved. `False` once closed."""
@@ -588,7 +595,7 @@ class SyncSubscription:
     def __repr__(self) -> str:
         return (
             f"<SyncSubscription shape={self._shape.name!r} "
-            f"held={len(self._held)} closed={self.closed}>"
+            f"held={_core.sync_state_size(self._held)} closed={self.closed}>"
         )
 
 

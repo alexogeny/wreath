@@ -62,6 +62,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from xml.etree import ElementTree as _ET
 
+from ._native import _core
+
 if TYPE_CHECKING:
     # In any real install the module is there, and assuming so keeps `_sigv4.sign`
     # and friends precisely typed at the S3 call sites below.
@@ -1144,16 +1146,7 @@ class LocalObjectStore:
                     continue
 
     def _walk(self) -> _List[str]:
-        keys: list[str] = []
-        for dirpath, _dirnames, filenames in os.walk(self._root, followlinks=False):
-            rel = os.path.relpath(dirpath, self._root)
-            for fn in filenames:
-                full = os.path.join(dirpath, fn)
-                if os.path.islink(full) or _TMP_NAME.fullmatch(fn):
-                    continue
-                key = fn if rel == "." else f"{rel.replace(os.sep, '/')}/{fn}"
-                keys.append(key)
-        return sorted(keys)
+        return _core.local_walk(self._root, os.scandir, os.path.join)
 
     async def delete(self, key: str) -> None:
         """Remove `key`. Not an error when it is already gone.
@@ -1325,53 +1318,18 @@ async def zip_stream(storage: ObjectStore, keys: Iterable[str]) -> AsyncIterator
     Raises:
         ObjectError: for a key that is not there, possibly mid-stream.
     """
-    offset = 0
-    central: list[tuple[bytes, int, int, int]] = []
+    builder = _core.ZipBuilder(zlib.crc32)
     for key in keys:
         name = normalize_key(key).encode("utf-8")
-        local_off = offset
-        lfh = struct.pack(
-            "<IHHHHHIIIHH", 0x04034B50, 45, _ZIP_FLAGS, 0, 0, _DOS_DATE, 0, 0, 0, len(name), 0
-        ) + name
-        yield lfh
-        offset += len(lfh)
-        crc = 0
-        size = 0
+        yield builder.begin(name)
         async for chunk in storage.read_stream(key):
             if not chunk:
                 continue
-            crc = zlib.crc32(chunk, crc)
-            size += len(chunk)
+            builder.feed(chunk)
             yield chunk
-            offset += len(chunk)
-        crc &= 0xFFFFFFFF
-        dd = struct.pack("<IIQQ", 0x08074B50, crc, size, size)
-        yield dd
-        offset += len(dd)
-        central.append((name, crc, size, local_off))
-
-    cd_start = offset
-    cd = bytearray()
-    for name, crc, size, local_off in central:
-        extra = struct.pack("<HHQQQ", 0x0001, 24, size, size, local_off)
-        cd += struct.pack(
-            "<IHHHHHHIIIHHHHHII",
-            0x02014B50, 45, 45, _ZIP_FLAGS, 0, 0, _DOS_DATE,
-            crc, 0xFFFFFFFF, 0xFFFFFFFF, len(name), len(extra), 0, 0, 0, 0, 0xFFFFFFFF,
-        ) + name + extra
-    yield bytes(cd)
-    cd_size = len(cd)
-    count = len(central)
-    z64_off = cd_start + cd_size
-    yield struct.pack(
-        "<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0, count, count, cd_size, cd_start
-    )
-    yield struct.pack("<IIQI", 0x07064B50, 0, z64_off, 1)
-    yield struct.pack(
-        "<IHHHHIIH",
-        0x06054B50, 0, 0, min(count, 0xFFFF), min(count, 0xFFFF),
-        min(cd_size, 0xFFFFFFFF), min(cd_start, 0xFFFFFFFF), 0,
-    )
+        yield builder.end()
+    for trailer in builder.finish():
+        yield trailer
 
 
 def _zip_entry_count(raw: bytes, limit: int) -> int | None:

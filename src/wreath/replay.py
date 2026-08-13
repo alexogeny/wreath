@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, cast
 
-from ._native import _server
+from ._native import _core, _server
 from ._recording_format import AttemptRecord, _build_id
 from ._replay_adapters import (
     AdapterFault,
@@ -224,13 +224,6 @@ def _encode_addr(addr: tuple[str, int]) -> bytes:
     return struct.pack("<HH", len(host), int(addr[1])) + host
 
 
-def _decode_addr(payload: bytes, offset: int) -> tuple[tuple[str, int], int]:
-    host_len, port = struct.unpack_from("<HH", payload, offset)
-    offset += 4
-    host = payload[offset : offset + host_len].decode("utf-8")
-    return (host, port), offset + host_len
-
-
 # --- transport recording model ----------------------------------------------
 
 
@@ -293,21 +286,10 @@ class TransportRecording:
         chunks = _chunk_map(data, 5, container="WTR1", recover_tail=True)
         if b"HEAD" not in chunks or b"SEGS" not in chunks:
             raise ReplayError("transport recording is missing a required chunk")
-        head = chunks[b"HEAD"]
-        build_id, _reserved = struct.unpack_from("<QQ", head, 0)
-        peername, off = _decode_addr(head, 16)
-        sockname, _ = _decode_addr(head, off)
-        segs = chunks[b"SEGS"]
-        (count,) = struct.unpack_from("<I", segs, 0)
-        offset = 4
-        parsed: list[TransportSegment] = []
-        for _ in range(count):
-            arrival, kind, length = struct.unpack_from("<QBI", segs, offset)
-            offset += struct.calcsize("<QBI")
-            payload = segs[offset : offset + length]
-            offset += length
-            parsed.append(TransportSegment(arrival, kind, bytes(payload)))
-        return cls(tuple(parsed), peername, sockname, build_id)
+        parsed, peername, sockname, build_id = _core.transport_decode_parts(
+            chunks[b"HEAD"], chunks[b"SEGS"], TransportSegment, ReplayError
+        )
+        return cls(parsed, peername, sockname, build_id)
 
 
 def record_transport_segments(
@@ -828,17 +810,6 @@ class AdapterFaultDescriptor:
     coordinate: int = 0
 
 
-def _encode_str(text: str) -> bytes:
-    raw = text.encode("utf-8")
-    return struct.pack("<H", len(raw)) + raw
-
-
-def _decode_str(data: bytes, offset: int) -> tuple[str, int]:
-    (length,) = struct.unpack_from("<H", data, offset)
-    offset += 2
-    return data[offset : offset + length].decode("utf-8"), offset + length
-
-
 @dataclass(frozen=True, slots=True)
 class FaultSchedule:
     """An ordered, checksummed set of faults — a first-class replay input that
@@ -851,16 +822,10 @@ class FaultSchedule:
     adapter_faults: tuple[AdapterFaultDescriptor, ...] = ()
 
     def to_bytes(self) -> bytes:
-        body = bytearray(struct.pack("<I", len(self.faults)))
-        for fault in self.faults:
-            body += struct.pack("<BiI", fault.kind, fault.segment_index, fault.value)
-        out = _MAGIC_FAULTS + bytes((_CONTAINER_VERSION,)) + _chunk(b"FALT", bytes(body))
-        if self.adapter_faults:
-            adapt = bytearray(struct.pack("<I", len(self.adapter_faults)))
-            for fault in self.adapter_faults:
-                adapt += struct.pack("<Bi", fault.seam, fault.coordinate)
-                adapt += _encode_str(fault.target) + _encode_str(fault.kind)
-            out += _chunk(b"ADPT", bytes(adapt))
+        body, adapt = _core.fault_encode_parts(self.faults, self.adapter_faults)
+        out = _MAGIC_FAULTS + bytes((_CONTAINER_VERSION,)) + _chunk(b"FALT", body)
+        if adapt is not None:
+            out += _chunk(b"ADPT", adapt)
         return out
 
     @classmethod
@@ -872,26 +837,14 @@ class FaultSchedule:
         chunks = _chunk_map(data, 5, container="WFS1", recover_tail=False, known=_FAULT_CHUNKS)
         if b"FALT" not in chunks:
             raise ReplayError("fault schedule is missing its FALT chunk")
-        body = chunks[b"FALT"]
-        (count,) = struct.unpack_from("<I", body, 0)
-        offset = 4
-        faults: list[FaultDescriptor] = []
-        for _ in range(count):
-            kind, index, value = struct.unpack_from("<BiI", body, offset)
-            offset += struct.calcsize("<BiI")
-            faults.append(FaultDescriptor(kind, index, value))
-        adapter_faults: list[AdapterFaultDescriptor] = []
-        adapt = chunks.get(b"ADPT")
-        if adapt is not None:
-            (acount,) = struct.unpack_from("<I", adapt, 0)
-            offset = 4
-            for _ in range(acount):
-                seam, coordinate = struct.unpack_from("<Bi", adapt, offset)
-                offset += struct.calcsize("<Bi")
-                target, offset = _decode_str(adapt, offset)
-                kind, offset = _decode_str(adapt, offset)
-                adapter_faults.append(AdapterFaultDescriptor(seam, target, kind, coordinate))
-        return cls(tuple(faults), tuple(adapter_faults))
+        faults, adapter_faults = _core.fault_decode_parts(
+            chunks[b"FALT"],
+            chunks.get(b"ADPT"),
+            FaultDescriptor,
+            AdapterFaultDescriptor,
+            ReplayError,
+        )
+        return cls(faults, adapter_faults)
 
 
 class _TransportFaultPlan:

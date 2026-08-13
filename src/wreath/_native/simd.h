@@ -679,6 +679,139 @@ wreath_value_run(const char *data, ptrdiff_t len)
 }
 
 /* ======================================================================== */
+/* DKIM relaxed bodies: the first horizontal whitespace or line ending.      */
+/*                                                                           */
+/* Ordinary body text is copied as one native run.  The canonicalizer handles */
+/* the four stop bytes and never asks a vector arm to construct Python state. */
+/* ======================================================================== */
+
+static inline ptrdiff_t
+wreath_dkim_run_scalar(const char *data, ptrdiff_t len)
+{
+    ptrdiff_t i = 0;
+    for (; i < len; i++) {
+        uint8_t c = (uint8_t)data[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
+    }
+    return i;
+}
+
+static inline ptrdiff_t
+wreath_dkim_run_swar(const char *data, ptrdiff_t len)
+{
+    ptrdiff_t i = 0;
+    while (len - i >= 8) {
+        uint64_t word;
+        memcpy(&word, data + i, 8);
+        if (wreath_swar_eq(word, ' ') | wreath_swar_eq(word, '\t') |
+            wreath_swar_eq(word, '\r') | wreath_swar_eq(word, '\n')) {
+            ptrdiff_t stop = wreath_dkim_run_scalar(data + i, 8);
+            if (stop < 8) return i + stop;
+        }
+        i += 8;
+    }
+    return i + wreath_dkim_run_scalar(data + i, len - i);
+}
+
+#if defined(WREATH_HAVE_SSE2)
+static inline ptrdiff_t
+wreath_dkim_run_sse2(const char *data, ptrdiff_t len)
+{
+    const __m128i space = _mm_set1_epi8(' ');
+    const __m128i tab = _mm_set1_epi8('\t');
+    const __m128i cr = _mm_set1_epi8('\r');
+    const __m128i lf = _mm_set1_epi8('\n');
+    ptrdiff_t i = 0;
+    while (len - i >= 16) {
+        __m128i value = _mm_loadu_si128(
+            (const __m128i *)(const void *)(data + i));
+        __m128i stop = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi8(value, space),
+                         _mm_cmpeq_epi8(value, tab)),
+            _mm_or_si128(_mm_cmpeq_epi8(value, cr),
+                         _mm_cmpeq_epi8(value, lf)));
+        unsigned mask = (unsigned)_mm_movemask_epi8(stop);
+        if (mask != 0) return i + (ptrdiff_t)__builtin_ctz(mask);
+        i += 16;
+    }
+    return i + wreath_dkim_run_swar(data + i, len - i);
+}
+#endif
+
+#if defined(WREATH_HAVE_AVX2)
+WREATH_TARGET_AVX2 static inline ptrdiff_t
+wreath_dkim_run_avx2(const char *data, ptrdiff_t len)
+{
+    const __m256i space = _mm256_set1_epi8(' ');
+    const __m256i tab = _mm256_set1_epi8('\t');
+    const __m256i cr = _mm256_set1_epi8('\r');
+    const __m256i lf = _mm256_set1_epi8('\n');
+    ptrdiff_t i = 0;
+    while (len - i >= 32) {
+        __m256i value = _mm256_loadu_si256(
+            (const __m256i *)(const void *)(data + i));
+        __m256i stop = _mm256_or_si256(
+            _mm256_or_si256(_mm256_cmpeq_epi8(value, space),
+                            _mm256_cmpeq_epi8(value, tab)),
+            _mm256_or_si256(_mm256_cmpeq_epi8(value, cr),
+                            _mm256_cmpeq_epi8(value, lf)));
+        unsigned mask = (unsigned)_mm256_movemask_epi8(stop);
+        if (mask != 0) return i + (ptrdiff_t)__builtin_ctz(mask);
+        i += 32;
+    }
+    return i + wreath_dkim_run_sse2(data + i, len - i);
+}
+#endif
+
+#if defined(WREATH_HAVE_NEON)
+static inline ptrdiff_t
+wreath_dkim_run_neon(const char *data, ptrdiff_t len)
+{
+    const uint8x16_t space = vdupq_n_u8(' ');
+    const uint8x16_t tab = vdupq_n_u8('\t');
+    const uint8x16_t cr = vdupq_n_u8('\r');
+    const uint8x16_t lf = vdupq_n_u8('\n');
+    ptrdiff_t i = 0;
+    while (len - i >= 16) {
+        uint8x16_t value = vld1q_u8((const uint8_t *)(data + i));
+        uint8x16_t stop = vorrq_u8(
+            vorrq_u8(vceqq_u8(value, space), vceqq_u8(value, tab)),
+            vorrq_u8(vceqq_u8(value, cr), vceqq_u8(value, lf)));
+        if (vmaxvq_u8(stop) != 0)
+            return i + wreath_neon_first_lane(stop);
+        i += 16;
+    }
+    return i + wreath_dkim_run_swar(data + i, len - i);
+}
+#endif
+
+static inline ptrdiff_t
+wreath_dkim_run(const char *data, ptrdiff_t len)
+{
+    if (len < 16) return wreath_dkim_run_scalar(data, len);
+    {
+        uint64_t first;
+        memcpy(&first, data, 8);
+        if (wreath_swar_eq(first, ' ') | wreath_swar_eq(first, '\t') |
+            wreath_swar_eq(first, '\r') | wreath_swar_eq(first, '\n')) {
+            ptrdiff_t stop = wreath_dkim_run_scalar(data, 8);
+            if (stop < 8) return stop;
+        }
+    }
+#if defined(WREATH_HAVE_AVX2)
+    if (len >= 32 && wreath_simd_has_avx2())
+        return wreath_dkim_run_avx2(data, len);
+#endif
+#if defined(WREATH_HAVE_NEON)
+    return wreath_dkim_run_neon(data, len);
+#elif defined(WREATH_HAVE_SSE2)
+    return wreath_dkim_run_sse2(data, len);
+#else
+    return wreath_dkim_run_swar(data, len);
+#endif
+}
+
+/* ======================================================================== */
 /* WebSocket payload masking: XOR against a repeating four-byte key.          */
 /* ======================================================================== */
 

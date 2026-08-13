@@ -274,7 +274,7 @@ async def test_client_sends_request_and_reads_fixed_response() -> None:
 
     assert response.status == 202
     assert response.body == b"{}"
-    assert response.header(b"content-type") == b"application/json"
+    assert response.header(b"Content-Type") == b"application/json"
     assert received[0].startswith(b"POST /events HTTP/1.1\r\n")
     assert received[1] == b"{}"
 

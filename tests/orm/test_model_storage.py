@@ -206,6 +206,14 @@ def test_a_model_with_more_than_64_columns_uses_multiple_bitmap_words() -> None:
     assert instance._orm_get(100) == 7
 
 
+def test_loaded_values_materialize_only_the_public_boundary() -> None:
+    instance = Wide._orm_new()
+    instance._orm_set_loaded(0, 7)
+    instance._orm_set_loaded(1, True)
+    instance._orm_set_loaded(3, None)
+    assert instance._orm_loaded_values() == {"id": 7, "flag": True, "label": None}
+
+
 # -- garbage collection --------------------------------------------------------
 
 

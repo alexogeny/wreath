@@ -37,7 +37,7 @@ INTERESTING = bytes(
     ]
 )
 
-KINDS = ("json", "html", "value")
+KINDS = ("json", "html", "value", "dkim")
 
 
 @pytest.fixture(scope="module")
@@ -121,6 +121,8 @@ def test_run_never_passes_a_stop(kind: str, arms: tuple[str, ...]) -> None:
             return byte < 0x20 or byte in (0x22, 0x5C)
         if kind == "html":
             return byte in (0x26, 0x3C, 0x3E, 0x22, 0x27)
+        if kind == "dkim":
+            return byte in (0x20, 0x09, 0x0D, 0x0A)
         return (byte < 0x20 and byte != 0x09) or byte == 0x7F
 
     for data in CASES:

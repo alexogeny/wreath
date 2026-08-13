@@ -783,10 +783,7 @@ class StreamingClientResponse:
 
     def header(self, name: bytes) -> bytes | None:
         """The first value for `name`, or None. Names are lowercase on the wire."""
-        for key, value in self.headers:
-            if key == name:
-                return value
-        return None
+        return cast(bytes | None, _native_core.find_header(self.headers, name))
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,11 +818,9 @@ class ClientResponse:
         A header sent more than once resolves to the first occurrence; iterate
         `headers` for the rest, which matters for `Set-Cookie`.
         """
-        lowered = name.lower()
-        for key, value in self.headers:
-            if key == lowered:
-                return value
-        return None
+        return cast(
+            bytes | None, _native_core.find_header(self.headers, name.lower())
+        )
 
     def raise_for_status(self) -> None:
         """Raise `ClientError` when the status is 400 or above; otherwise return None.
@@ -1882,12 +1877,10 @@ class HTTPClient:
             line = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
             if len(line) > 1024:
                 raise ProtocolError("response chunk line exceeds limit")
-            size_data = line[:-2].split(b";", 1)[0]
-            if not size_data or any(
-                byte not in b"0123456789abcdefABCDEF" for byte in size_data
-            ):
-                raise ProtocolError("invalid response chunk size")
-            size = int(size_data, 16)
+            try:
+                size = _client_codec.parse_chunk_size(line)
+            except ValueError as error:
+                raise ProtocolError(str(error)) from error
             if size == 0:
                 trailer_bytes = 0
                 while True:

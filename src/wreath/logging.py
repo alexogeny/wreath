@@ -44,19 +44,19 @@ if DENIED:              # only where a benchmark says it pays
 Formatting is deferred: the record holds arguments, the registry holds the
 template, and `render` puts them together off the request path.
 
-**A published record is packed in C** -- `wreath_nfr_log` writes it straight
-into a ring cell, with no intermediate object. The Python packer beside it runs
-when there is no ring to pack into, when a record is buffered for a possible
-promotion, and when the caller is not the loop. Which is which, and why, is
-written once: the head of the log-record section in
+**Published and request-buffered records are packed in C.** `wreath_nfr_log`
+writes a published record straight into a ring cell; a request buffer owns its
+held cells in native memory and materializes them only when the request promotes
+them. The Python packer remains for sinks without a ring and callers outside the
+loop. Which is which, and why, is written once: the head of the log-record section in
 `wreath._flight_schema`, immediately above `Severity`.
 `docs/plans/first-class-logging.md` is the longer form, with the measurements.
 
 Measured on CPython 3.14, 2026-07-28 (`benchmarks/bench_logging.py`; medians,
 interleaved arms, A/A floor): a two-argument `SITE(a, b)` costs **0.42us**
-against structlog's 2.59us and stdlib's 2.85-3.88us, a *disabled* `DEBUG(...)`
-costs **0.07us**, and a record buffered for promotion costs **3.0us** -- which
-is the one number here that is not good, and the plan says so plainly.
+against structlog's 2.59us and stdlib's 2.85-3.88us, and a *disabled*
+`DEBUG(...)` costs **0.07us**. Current instruction measurements for the
+request-owned buffer live with the performance report rather than this module.
 
 See `docs/guides/observability.md` and `docs/reference/logging.md`.
 """
@@ -916,12 +916,23 @@ class LogEvent:
         flags = 0
         if len(args) != len(specs):
             runtime.counters.arity_mismatch += 1
-        if not buffered and runtime.publish(
+        if buffered:
+            if buffer is None:
+                return
+            k0, k1 = runtime.registry.key
+            runtime.counters.type_mismatch += buffer.add_values(
+                site_id,
+                severity,
+                self.site.specs,
+                args,
+                k0,
+                k1,
+            )
+            return
+        if runtime.publish(
             self.site, 0 if buffer is None else buffer.request_id, severity, args
         ):
-            # Packed straight into a ring cell in C. A buffered record cannot
-            # take this path: it has to survive as an object until the request
-            # decides whether to promote it.
+            # Packed straight into a ring cell in C.
             return
         packed: list[LogArg] = []
         for index, spec in enumerate(specs):
@@ -940,12 +951,8 @@ class LogEvent:
             severity=severity,
             args=tuple(packed),
             flags=flags,
-            dropped_siblings=0 if buffered else runtime.limiter.take_dropped(site_id),
+            dropped_siblings=runtime.limiter.take_dropped(site_id),
         )
-        if buffered:
-            if buffer is not None:  # guaranteed above; narrows for the checker
-                buffer.add(cell)
-            return
         runtime.emit(cell)
 
 

@@ -24,8 +24,9 @@ difference that is only ever found in production.
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._native import _core
 
 #: pgvector's `SPARSEVEC_MAX_DIM`. Far beyond `vector`'s 16,000, which is the
 #: reason the type exists: a bag-of-words over a real vocabulary is mostly zero.
@@ -68,50 +69,29 @@ class SparseVector:
         values: The stored values, positionally paired with `indices`.
     """
 
-    __slots__ = ("_pg_oid", "dim", "indices", "values")
+    __slots__ = ("_data", "_pg_oid")
 
     def __init__(self, dim: Any, elements: Any = ()) -> None:
-        if dim.__class__ is not int:
-            raise TypeError(
-                f"SparseVector dimension must be int, not {type(dim).__name__}"
-            )
-        if not 1 <= dim <= MAX_SPARSEVEC_DIM:
-            raise ValueError(
-                f"SparseVector({dim}) is out of range; pgvector allows 1 to "
-                f"{MAX_SPARSEVEC_DIM} dimensions"
-            )
-        mapping = elements if isinstance(elements, dict) else dict(elements)
-        indices: list[int] = []
-        values: list[float] = []
-        for index in sorted(mapping):
-            if index.__class__ is not int:
-                raise TypeError(
-                    f"sparsevec index {index!r} must be int, not "
-                    f"{type(index).__name__}"
-                )
-            if not 1 <= index <= dim:
-                raise ValueError(
-                    f"sparsevec index {index} is outside 1..{dim}; indices are "
-                    "1-based, the way pgvector writes them"
-                )
-            number = _as_element(mapping[index], index)
-            if number == 0.0:
-                continue
-            indices.append(index)
-            values.append(number)
-        if len(indices) > MAX_SPARSEVEC_NNZ:
-            raise ValueError(
-                f"a sparsevec holds at most {MAX_SPARSEVEC_NNZ} non-zero elements; "
-                f"this one has {len(indices)}. A value that dense wants `Vector` "
-                "or `Halfvec`, which store every position and index far better"
-            )
-        self.dim = dim
-        self.indices = tuple(indices)
-        self.values = tuple(values)
+        self._data = _core.sparsevector_data(dim, elements, MAX_SPARSEVEC_NNZ)
         #: Set by `Sparsevec.to_wire`, read by the driver's parameter-OID
         #: inference. Zero means "not bound to a database yet"; see `WireList`
         #: in `orm/types.py`, which solves the same problem for `vector`.
         self._pg_oid = 0
+
+    @property
+    def dim(self) -> int:
+        """The declared dimension."""
+        return _core.sparsevector_dim(self._data)
+
+    @property
+    def indices(self) -> tuple[int, ...]:
+        """The stored 1-based positions, materialized at the Python boundary."""
+        return _core.sparsevector_indices(self._data)
+
+    @property
+    def values(self) -> tuple[float, ...]:
+        """The stored values, materialized at the Python boundary."""
+        return _core.sparsevector_values(self._data)
 
     @classmethod
     def from_dense(cls, values: Any) -> SparseVector:
@@ -126,7 +106,7 @@ class SparseVector:
 
     def to_dict(self) -> dict[int, float]:
         """The non-zero elements, 1-based index to value."""
-        return dict(zip(self.indices, self.values, strict=True))
+        return _core.sparsevector_dict(self._data)
 
     def _with_oid(self, oid: int) -> SparseVector:
         """A copy that names its own PostgreSQL OID, for parameter inference.
@@ -136,42 +116,21 @@ class SparseVector:
         against two databases must not have the first one's OID written into it.
         """
         twin = SparseVector.__new__(SparseVector)
-        twin.dim = self.dim
-        twin.indices = self.indices
-        twin.values = self.values
+        twin._data = self._data
         twin._pg_oid = oid
         return twin
 
     def __len__(self) -> int:
         """How many elements are stored -- pgvector's `nnz`, not the dimension."""
-        return len(self.indices)
+        return _core.sparsevector_len(self._data)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SparseVector):
             return NotImplemented
-        return (
-            self.dim == other.dim
-            and self.indices == other.indices
-            and self.values == other.values
-        )
+        return _core.sparsevector_equal(self._data, other._data)
 
     def __hash__(self) -> int:
-        return hash((self.dim, self.indices, self.values))
+        return _core.sparsevector_hash(self._data)
 
     def __repr__(self) -> str:
         return f"SparseVector({self.dim}, {self.to_dict()!r})"
-
-
-def _as_element(value: Any, index: int) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(
-            f"sparsevec value at index {index} must be int or float, not "
-            f"{type(value).__name__}"
-        )
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(
-            f"sparsevec value at index {index} is {number!r}; pgvector stores "
-            "neither NaN nor infinity"
-        )
-    return number

@@ -141,6 +141,69 @@ async def test_versioned_http_arms_cover_distinct_surfaces(monkeypatch: Any) -> 
 
 
 @pytest.mark.asyncio
+async def test_additional_declarative_http_arms_are_real_success_paths(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(holistic_e2e, "_e2e_ensure", _dependencies)
+    async with TestClient(holistic_e2e.app) as client:
+        series = await _request(client, "series-live")
+        enterprise = await _request(client, "enterprise")
+        admin = await _request(client, "admin-detail")
+        scim = await _request(client, "scim-search")
+        sync = await _request(client, "sync-snapshot")
+        workflow = await _request(client, "workflow")
+        readiness = await _request(client, "readiness")
+        metrics = await _request(client, "metrics")
+        openapi = await _request(client, "openapi")
+
+    assert series.status == 200
+    assert b'"bucket":"day"' in series.body
+    assert b'"measure":"requests"' in series.body
+    assert enterprise.status == 200
+    assert b'"tenant":"acme"' in enterprise.body
+    assert b'"acme:admin"' in enterprise.body
+    assert admin.status == 200
+    assert b"Acme operational intelligence" in admin.body
+    assert b"Operations view 42" in admin.body
+    assert scim.status == 200
+    assert b'"userName":"holistic-user@example.com"' in scim.body
+    assert sync.status == 200
+    assert sync.body.count(b'"key":') == 12
+    assert workflow.status == 200
+    assert b'"state":"completed"' in workflow.body
+    assert b'"publish_report"' in workflow.body
+    assert readiness.status == 200
+    assert b'"status":"ready"' in readiness.body
+    assert metrics.status == 200
+    assert b"wreath_holistic_http_requests_total" in metrics.body
+    assert openapi.status == 200
+    assert b'"/v1/sync/accounts/mine"' in openapi.body
+
+
+@pytest.mark.asyncio
+async def test_signed_webhook_arm_verifies_and_dispatches(monkeypatch: Any) -> None:
+    monkeypatch.setattr(holistic_e2e, "_e2e_ensure", _dependencies)
+    async with TestClient(holistic_e2e.app) as client:
+        response = await _request(client, "signed-webhook")
+
+    assert response.status == 204
+
+
+@pytest.mark.asyncio
+async def test_versioned_websocket_room_arm_joins_broadcasts_and_leaves(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(holistic_e2e, "_e2e_ensure", _dependencies)
+    arm = holistic_e2e.ARMS["websocket-room"]
+    async with TestClient(holistic_e2e.app) as client:
+        async with client.websocket(arm.path, headers=arm.headers) as websocket:
+            await websocket.send_text(arm.body.decode())
+            assert await websocket.receive_text() == arm.body.decode()
+
+    assert holistic_e2e._ROOMS.members("account:42") == 0
+
+
+@pytest.mark.asyncio
 async def test_versioned_mcp_arms_share_an_authenticated_session(
     monkeypatch: Any,
 ) -> None:

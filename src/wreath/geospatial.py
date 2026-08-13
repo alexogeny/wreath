@@ -42,6 +42,7 @@ saying which model produced the number.
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Callable, Iterable, Sequence
 from math import ceil, cos, floor, isfinite, radians
 from typing import Any
@@ -56,6 +57,7 @@ from ._native import _core as _core_module
 #: `geo_haversine(lat1, lon1, lat2, lon2)` -- great-circle metres on the sphere
 #: `wreath._geodesy.EARTH_RADIUS_M` names.
 _haversine: Callable[[float, float, float, float], float] = _core_module.geo_haversine
+_DATETIME_CAPI = datetime.datetime_CAPI
 
 __all__ = [
     "EARTH_RADIUS_M",
@@ -633,26 +635,13 @@ class Trajectory:
     _native: Any
 
     def __init__(self, fixes: Iterable[tuple[Any, Coordinate]]) -> None:
-        collected = list(fixes)
-        for index, fix in enumerate(collected):
-            if not isinstance(fix, tuple) or len(fix) != 2:
-                raise GeospatialError(
-                    f"fix {index} must be a (timestamp, Coordinate) pair"
-                )
-            when, where = fix
-            if not isinstance(where, Coordinate):
-                raise GeospatialError(
-                    f"fix {index} must carry a Coordinate, got "
-                    f"{type(where).__name__}"
-                )
-            if getattr(when, "tzinfo", None) is None:
-                raise GeospatialError(
-                    f"fix {index} has a timestamp with no timezone; a trajectory "
-                    f"derives durations and speeds from these, and a naive "
-                    f"timestamp makes both wrong across a DST boundary. Use "
-                    f"wreath.temporal.Instant."
-                )
-        object.__setattr__(self, "_native", _core_module.geo_trajectory_compile(collected))
+        object.__setattr__(
+            self,
+            "_native",
+            _core_module.geo_trajectory_compile(
+                fixes, GeospatialError, Coordinate, _DATETIME_CAPI
+            ),
+        )
 
     @classmethod
     def _from_native(cls, native: Any) -> Trajectory:
@@ -725,7 +714,9 @@ class Trajectory:
         if end < start:
             raise GeospatialError(f"between() end {end!r} is before start {start!r}")
         return self._from_native(
-            _core_module.geo_trajectory_between(self._native, start, end)
+            _core_module.geo_trajectory_between(
+                self._native, start, end, _DATETIME_CAPI
+            )
         )
 
     def grid_summary(
@@ -758,6 +749,7 @@ class Trajectory:
             lattice.lon_step,
             lattice.rows,
             lattice.columns,
+            _DATETIME_CAPI,
         )
 
     def __repr__(self) -> str:

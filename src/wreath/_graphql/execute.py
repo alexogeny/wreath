@@ -215,11 +215,17 @@ class _Run:
         authorize_resources = getattr(self._authorizer, "_authorize_resources", None)
         authorize_many = getattr(self._authorizer, "_authorize_many", None)
         if resources and callable(authorize_resources):
+            native = callable(getattr(
+                getattr(self._authorizer, "_engine", None),
+                "_is_authorized_many_native",
+                None,
+            ))
             decisions = await authorize_resources(
                 self._request,
                 self._action,
                 resources,
                 stop_on_denied=self._on_denied == "error",
+                **({"native": True} if native else {}),
             )
         elif len(resources) > 1 and callable(authorize_many):
             decisions = await authorize_many(

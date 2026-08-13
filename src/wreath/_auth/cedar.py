@@ -500,6 +500,7 @@ class CedarAuthorizer:
         "_flag_names",
         "_flags",
         "_location",
+        "_native_engine_authorize",
         "_principal",
         "_region_names",
         "_regions",
@@ -537,6 +538,14 @@ class CedarAuthorizer:
         self._flags = flags
         self._regions = regions
         self._location = location
+        native_engine_authorize = getattr(engine, "_route_denial", None)
+        self._native_engine_authorize = (
+            native_engine_authorize
+            if callable(native_engine_authorize)
+            and resource is _default_resource
+            and resource_entities is None
+            else None
+        )
         # Every set-valued context key, declared once. Adding a fact is adding a
         # row here -- the caching rule, the laziness rule, the fail-closed empty
         # and the startup validation are the `SetFact`'s, not a sixth copy of
@@ -734,21 +743,34 @@ class CedarAuthorizer:
         """Map the resource-independent half of one or more engine queries."""
         principal = await _resolve(self._principal(identity))
         action = await _resolve(self._action(action_name, request))
-        entities = await _resolve(self._entities(request))
-        context = dict(await _resolve(self._context(request)))
-        action_attributes = getattr(
-            self._engine, "context_attributes_for_action", None
-        )
+        action_attributes = getattr(self._engine, "context_attributes_for_action", None)
         needed = action_attributes(action) if callable(action_attributes) else None
+        principal_entity = getattr(self._engine, "principal_entity_for_action", None)
+        entities = (
+            None
+            if self._entities is _default_entities
+            and callable(principal_entity)
+            and not principal_entity(action)
+            else await _resolve(self._entities(request))
+        )
+        if self._context is _default_context and needed is not None:
+            context: dict[str, object] = {}
+            if "method" in needed:
+                context["method"] = request.method
+            if "path" in needed:
+                context["path"] = request.path
+            if "second_factor_age" in needed:
+                age = second_factor_age(identity, time.time())
+                if age is not None:
+                    context["second_factor_age"] = age
+        else:
+            context = dict(await _resolve(self._context(request)))
         needs_now = self._reads_now is not False if needed is None else "now" in needed
         if needs_now:
             context["now"] = _request_now(request, self._clock)
         for fact in self._facts:
-            context[fact.attribute] = (
-                EMPTY
-                if needed is not None and fact.attribute not in needed
-                else fact.for_request(request)
-            )
+            if needed is None or fact.attribute in needed:
+                context[fact.attribute] = fact.for_request(request)
         context["delegated"] = False
         return principal, action, entities, context
 
@@ -759,7 +781,8 @@ class CedarAuthorizer:
         resources: tuple[object, ...],
         *,
         stop_on_denied: bool,
-    ) -> tuple[AuthorizationDecision, ...]:
+        native: bool = False,
+    ) -> tuple[AuthorizationDecision, ...] | object:
         """Evaluate precompiled resources materialized at an internal boundary.
 
         GraphQL owns its selected resources and decision state natively. This
@@ -777,9 +800,7 @@ class CedarAuthorizer:
         if narrowing is not None:
             decisions: list[AuthorizationDecision] = []
             for resource in resources:
-                decision = await self.authorize(
-                    request, PolicyRequirement(action_name, resource)
-                )
+                decision = await self.authorize(request, PolicyRequirement(action_name, resource))
                 decisions.append(decision)
                 if stop_on_denied and not decision.allowed:
                     break
@@ -793,16 +814,31 @@ class CedarAuthorizer:
             and self._resource_entities is None
             and not any(isinstance(resource, CedarEntity) for resource in resources)
         ):
+            if native:
+                authorize_native = getattr(self._engine, "_is_authorized_many_native", None)
+                if callable(authorize_native):
+                    return await _resolve(
+                        authorize_native(
+                            principal=principal,
+                            action=action,
+                            resources=resources,
+                            context=context,
+                            entities=base_entities,
+                            stop_on_denied=stop_on_denied,
+                        )
+                    )
             authorize_many = getattr(self._engine, "_is_authorized_many", None)
             if callable(authorize_many):
-                results = await _resolve(authorize_many(
-                    principal=principal,
-                    action=action,
-                    resources=resources,
-                    context=context,
-                    entities=base_entities,
-                    stop_on_denied=stop_on_denied,
-                ))
+                results = await _resolve(
+                    authorize_many(
+                        principal=principal,
+                        action=action,
+                        resources=resources,
+                        context=context,
+                        entities=base_entities,
+                        stop_on_denied=stop_on_denied,
+                    )
+                )
                 normalize = _core.normalize_authorization_decision
                 return tuple(
                     cast(AuthorizationDecision, normalize(result, AuthorizationDecision))
@@ -818,9 +854,7 @@ class CedarAuthorizer:
             if self._resource_entities is not None:
                 additions = await _resolve(self._resource_entities(resource, request))
                 entities = _with_entities(entities, additions)
-            decision = await self._evaluate(
-                principal, action, resource, context, entities
-            )
+            decision = await self._evaluate(principal, action, resource, context, entities)
             decisions.append(decision)
             if stop_on_denied and not decision.allowed:
                 break
@@ -837,9 +871,8 @@ class CedarAuthorizer:
         if not requirements:
             return ()
         action_name = requirements[0].action
-        if (
-            any(requirement.action != action_name for requirement in requirements)
-            or any(callable(requirement.resource) for requirement in requirements)
+        if any(requirement.action != action_name for requirement in requirements) or any(
+            callable(requirement.resource) for requirement in requirements
         ):
             decisions: list[AuthorizationDecision] = []
             for requirement in requirements:
@@ -848,11 +881,14 @@ class CedarAuthorizer:
                 if stop_on_denied and not decision.allowed:
                     break
             return tuple(decisions)
-        return await self._authorize_resources(
-            request,
-            action_name,
-            tuple(requirement.resource for requirement in requirements),
-            stop_on_denied=stop_on_denied,
+        return cast(
+            tuple[AuthorizationDecision, ...],
+            await self._authorize_resources(
+                request,
+                action_name,
+                tuple(requirement.resource for requirement in requirements),
+                stop_on_denied=stop_on_denied,
+            ),
         )
 
     async def authorize(
@@ -924,6 +960,59 @@ class CedarAuthorizer:
             return delegated
         return AuthorizationDecision(False, delegated.reason or "denied to the delegated actor")
 
+    async def _authorize_route(
+        self, request: Request, requirement: PolicyRequirement
+    ) -> str | None:
+        """Return only a route denial, retaining an allowed decision natively."""
+        identity = request.identity
+        raw_resource = requirement.resource
+        if (
+            identity is None
+            or getattr(identity, "narrowing", None) is not None
+            or callable(raw_resource)
+            or isinstance(raw_resource, CedarEntity)
+            or (isinstance(raw_resource, str) and "::" not in raw_resource)
+            or self._native_engine_authorize is None
+        ):
+            decision = await self.authorize(request, requirement)
+            return None if decision.allowed else decision.reason or "Forbidden"
+        principal, action, entities, context = await self._query_base(
+            request, identity, requirement.action
+        )
+        return cast(
+            str | None,
+            await _resolve(
+                self._native_engine_authorize(
+                    principal=principal,
+                    action=action,
+                    resource=raw_resource,
+                    context=context,
+                    entities=entities,
+                )
+            ),
+        )
+
+    def _compile_route_requirement(self, requirement: PolicyRequirement) -> PolicyRequirement:
+        """Parse a static native resource once while the route table compiles."""
+        resource = requirement.resource
+        if (
+            self._native_engine_authorize is None
+            or callable(resource)
+            or isinstance(resource, CedarEntity | EntityUid)
+        ):
+            return requirement
+        if isinstance(resource, str) and "::" in resource:
+            return PolicyRequirement(requirement.action, EntityUid.parse(resource))
+        if isinstance(resource, str) and resource.isidentifier():
+            return requirement
+        if isinstance(resource, str):
+            EntityUid.parse(resource)
+            return requirement
+        raise TypeError(
+            "Cedar route resource must be an EntityUid, CedarEntity, "
+            f"a 'Type::\"id\"' string, or a callable, got {type(resource).__name__!r}"
+        )
+
     async def _evaluate(
         self,
         principal: object,
@@ -942,9 +1031,7 @@ class CedarAuthorizer:
                 entities=entities,
             )
         )
-        normalize = (
-            _core.normalize_authorization_decision
-        )
+        normalize = _core.normalize_authorization_decision
         return cast(AuthorizationDecision, normalize(result, AuthorizationDecision))
 
 

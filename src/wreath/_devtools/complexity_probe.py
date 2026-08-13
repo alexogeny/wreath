@@ -170,7 +170,8 @@ def probe(name: str, *, expect: float | None = None, sizes: tuple[int, ...],
             f"todo= (a recorded defect)"
         )
     bound = todo.degree if todo is not None else expect
-    assert bound is not None
+    if bound is None:
+        raise RuntimeError(f"{name}: complexity bound was not resolved")
 
     def register(fn: ProbeFn) -> ProbeFn:
         doc = (fn.__doc__ or "").strip()
@@ -378,10 +379,14 @@ def _wheel_parked_rotation(n: int):
     w = _wheel()
     for i in range(n):
         w.schedule(30.0 + (i % _WHEEL_SLOTS) * _WHEEL_RES, _noop)
+    batch = 2000
     start = time.perf_counter()
-    due = w.advance(_WHEEL_SLOTS * _WHEEL_RES)
+    due = ()
+    for _ in range(batch):
+        due = w.advance(_WHEEL_SLOTS * _WHEEL_RES)
     elapsed = time.perf_counter() - start
-    assert len(due) == 0, len(due)
+    if len(due) != 0:
+        raise RuntimeError(f"parked timing wheel emitted {len(due)} timers")
     return elapsed
 
 
@@ -1805,9 +1810,9 @@ def _result_document(result: Result) -> dict[str, Any]:
 
 @probe("cedar-set-dedupe", expect=1.0, sizes=(200, 400, 800, 1600),
        stage="handler", group="web",
-       assumption="Building a Cedar set of n scalars is linear in n.")
+       assumption="The same-size flat-value control is linear in n.")
 def _cedar_set_dedupe(n: int):
-    """Converting an n-element Cedar set: O(n), not O(n**2).
+    """Same-size scalar control for nested Cedar structural deduplication.
 
     A Cedar set is unordered with structural equality, so `_to_cedar_value`
     drops duplicates. Comparing each candidate against every kept one is
@@ -1819,6 +1824,30 @@ def _cedar_set_dedupe(n: int):
     from wreath._auth.cedar_engine import _to_cedar_value
 
     values = [f"group-{index}" for index in range(n)]
+    loops = 5
+    start = time.perf_counter()
+    for _ in range(loops):
+        _to_cedar_value(values, where="probe")
+    return (time.perf_counter() - start) / loops
+
+
+@probe(
+    "cedar-nested-set-dedupe", expect=1.0, sizes=(200, 400, 800, 1600),
+    stage="handler", group="web",
+    axis="singleton nested sets in one Cedar value",
+    assumption="structural identities make nested-set deduplication linear",
+)
+def _cedar_nested_set_dedupe(n: int):
+    """Nested structural values do not restore the former pairwise scan.
+
+    This is the adversarial arm for `cedar-set-dedupe`: both carry n outer
+    members, but every member here needs a structural identity.  Before the
+    native identity table this measured quadratic, reaching about 70 million
+    retired instructions at n=800.
+    """
+    from wreath._auth.cedar_engine import _to_cedar_value
+
+    values = [[f"group-{index}"] for index in range(n)]
     loops = 5
     start = time.perf_counter()
     for _ in range(loops):
@@ -2192,6 +2221,1340 @@ def _trajectory_grid_outside_control(fix_count: int):
     return _trajectory_grid_harness(fix_count, inside=False)
 
 
+def _validation_list_harness(n: int, *, typed: bool, response: bool) -> float:
+    """Price a homogeneous list contract beside an Any-item control."""
+    import json
+
+    from wreath import binding
+    from wreath._native import _core
+
+    plan = binding._compile_plan(list[int] if typed else list[Any], frozenset())
+    value = list(range(n))
+    wire = json.dumps(value).encode()
+    loops = 20
+    start = time.perf_counter()
+    for _ in range(loops):
+        if response:
+            body, errors = _core.run_validation_json(plan, value, ("response",))
+            if body is None:
+                raise RuntimeError(errors)
+        else:
+            result, errors = _core.decode_json_validation_tape(
+                wire, plan, ("body",)
+            )
+            if len(result) != n:
+                raise RuntimeError(errors)
+        if errors:
+            raise RuntimeError(errors)
+    return (time.perf_counter() - start) / loops
+
+
+@probe(
+    "validation-json-int-list", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="integers in one typed JSON request array",
+    assumption="fused decode and homogeneous scalar validation are linear",
+    stage="validation", group="web",
+)
+def _validation_json_int_list(n: int):
+    """Typed request arrays validate without per-item location objects."""
+    return _validation_list_harness(n, typed=True, response=False)
+
+
+@probe(
+    "validation-json-any-list-control", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="values in one untyped JSON request array",
+    assumption="the same-size decode-only control is linear",
+    stage="validation", group="web",
+)
+def _validation_json_any_list_control(n: int):
+    """Same-size control: identical wire data with no scalar type predicate."""
+    return _validation_list_harness(n, typed=False, response=False)
+
+
+@probe(
+    "validation-response-int-list", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="integers in one typed JSON response array",
+    assumption="successful scalar validation and JSON emission are linear",
+    stage="egress", group="web",
+)
+def _validation_response_int_list(n: int):
+    """Typed response arrays do not build a duplicate Python object graph."""
+    return _validation_list_harness(n, typed=True, response=True)
+
+
+@probe(
+    "validation-response-any-list-control", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="values in one untyped JSON response array",
+    assumption="the same-size encode control is linear",
+    stage="egress", group="web",
+)
+def _validation_response_any_list_control(n: int):
+    """Same-size control: identical values with no scalar type predicate."""
+    return _validation_list_harness(n, typed=False, response=True)
+
+
+def _sync_state_harness(n: int, *, changed: bool) -> float:
+    """Price native subscription-state reconciliation at one row bound."""
+    from wreath._native import _core
+
+    rows = tuple(
+        {"key": f"row-{index}", "values": {"value": index, "active": True}}
+        for index in range(n)
+    )
+    current = tuple(
+        {
+            "key": f"row-{index}",
+            "values": {"value": index + int(changed), "active": True},
+        }
+        for index in range(n)
+    )
+    held = _core.sync_state(rows)
+    loops = 10
+    start = time.perf_counter()
+    for _ in range(loops):
+        state, upserted, removed = _core.sync_state_diff(held, current)
+        expected = n if changed else 0
+        if len(upserted) != expected or removed:
+            raise RuntimeError("native sync diff returned the wrong delta")
+        del state
+    return (time.perf_counter() - start) / loops
+
+
+@probe(
+    "sync-state-all-changed", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="bounded rows whose values all changed",
+    assumption="native digest comparison and upsert selection are linear",
+    stage="sync", group="web",
+)
+def _sync_state_all_changed(n: int):
+    """Every row changes, so the public Delta materializes n row references."""
+    return _sync_state_harness(n, changed=True)
+
+
+@probe(
+    "sync-state-unchanged-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="bounded rows whose values are unchanged",
+    assumption="the same-size no-delta control is linear",
+    stage="sync", group="web",
+)
+def _sync_state_unchanged_control(n: int):
+    """Same-size control: hashes and lookups remain, materialization does not."""
+    return _sync_state_harness(n, changed=False)
+
+
+def _trajectory_compile_harness(n: int, *, reversed_order: bool) -> float:
+    """Price one-pass validation and packed trajectory construction."""
+    import datetime
+
+    from wreath.geospatial import Coordinate, Trajectory
+
+    start_at = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    fixes = [
+        (
+            start_at + datetime.timedelta(seconds=index),
+            Coordinate(lat=-27.5 + (index % 13) * 0.0001, lon=153.0),
+        )
+        for index in range(n)
+    ]
+    if reversed_order:
+        fixes.reverse()
+    loops = 3
+    before = time.perf_counter()
+    for _ in range(loops):
+        trajectory = Trajectory(fixes)
+        if len(trajectory) != n:
+            raise RuntimeError("trajectory compiler dropped fixes")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "trajectory-compile-ordered", expect=1.0, tolerance=0.6,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="ordered fixes copied into packed trajectory storage",
+    assumption="boundary validation, sorting and distance accumulation are near-linear",
+    stage="geospatial", group="web",
+)
+def _trajectory_compile_ordered(n: int):
+    """The common ordered-fix construction path validates each pair once."""
+    return _trajectory_compile_harness(n, reversed_order=False)
+
+
+@probe(
+    "trajectory-compile-reversed-control", expect=1.0, tolerance=0.6,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="reverse-ordered fixes copied into packed trajectory storage",
+    assumption="the same-size adversarial sort control remains near-linear",
+    stage="geospatial", group="web",
+)
+def _trajectory_compile_reversed_control(n: int):
+    """Same-size control: qsort receives reverse order before the same scan."""
+    return _trajectory_compile_harness(n, reversed_order=True)
+
+
+def _series_cell_rows_harness(n: int, *, populated: bool) -> float:
+    """Price final heatmap cell materialization with a null-fill control."""
+    from wreath._native import _core
+
+    names = ("events", "errors", "latency", "load")
+    fills = (0, 0, None, None)
+    if populated:
+        rows = tuple(
+            (index // 100, index % 100, index, index & 3, index / 10, index / 100)
+            for index in range(n)
+        )
+    else:
+        rows = tuple((index // 100, index % 100, None, None, None, None)
+                     for index in range(n))
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _core.series_cell_rows(rows, names, fills)
+        if len(result) != n:
+            raise RuntimeError("cell materializer changed cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "series-cell-rows-populated", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="dense heatmap cells with four populated measures",
+    assumption="boundary materialization is linear in emitted cells",
+    stage="series", group="web",
+)
+def _series_cell_rows_populated(n: int):
+    """Every measure takes its database value at the result boundary."""
+    return _series_cell_rows_harness(n, populated=True)
+
+
+@probe(
+    "series-cell-rows-empty-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="dense heatmap cells with four null measures",
+    assumption="the same-size fill-value control is linear",
+    stage="series", group="web",
+)
+def _series_cell_rows_empty_control(n: int):
+    """Same-size control: identical output shape, every value takes its fill."""
+    return _series_cell_rows_harness(n, populated=False)
+
+
+def _scim_filter_harness(n: int, *, match: bool) -> float:
+    """Price a compiled SCIM predicate over same-shaped resources."""
+    from wreath._scim.filters import parse, select
+
+    resources = tuple(
+        {"id": str(index), "active": True, "userName": f"user-{index}"}
+        for index in range(n)
+    )
+    node = parse('active eq true' if match else 'active eq false')
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        selected = select(node, resources)
+        if len(selected) != (n if match else 0):
+            raise RuntimeError("SCIM selection returned the wrong cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "scim-filter-all-match", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="SCIM resources selected by one predicate",
+    assumption="predicate evaluation and result collection are linear",
+    stage="scim", group="web",
+)
+def _scim_filter_all_match(n: int):
+    """Every resource matches and materializes at the response boundary."""
+    return _scim_filter_harness(n, match=True)
+
+
+@probe(
+    "scim-filter-none-match-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="SCIM resources rejected by one predicate",
+    assumption="the same-size no-result control is linear",
+    stage="scim", group="web",
+)
+def _scim_filter_none_match_control(n: int):
+    """Same-size control: every predicate runs, no result list entries survive."""
+    return _scim_filter_harness(n, match=False)
+
+
+def _scim_values_wide_harness(n: int, *, target_first: bool) -> float:
+    """Price case-insensitive lookup across one wide resource mapping."""
+    from wreath._scim.filters import values_at
+
+    resource = {f"unused-{index}": index for index in range(n)}
+    if target_first:
+        resource = {"wanted": -1, **resource}
+    else:
+        resource["wanted"] = -1
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = values_at(resource, "WANTED")
+        if result != [-1]:
+            raise RuntimeError("SCIM path lookup returned the wrong value")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "scim-values-wide-last-key", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="mapping keys visited before a case-insensitive SCIM path match",
+    assumption="wide path lookup is one forward mapping pass",
+    stage="scim", group="web",
+)
+def _scim_values_wide_last_key(n: int):
+    """The wanted key follows n irrelevant keys in insertion order."""
+    return _scim_values_wide_harness(n, target_first=False)
+
+
+@probe(
+    "scim-values-wide-first-key-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="same wide mapping with the SCIM path match first",
+    assumption="the same-size mapping control stays bounded by one pass",
+    stage="scim", group="web",
+)
+def _scim_values_wide_first_key_control(n: int):
+    """Same-size control: target order changes without changing resource width."""
+    return _scim_values_wide_harness(n, target_first=True)
+
+
+def _template_loop_harness(n: int, *, escaped: bool) -> float:
+    """Price a compiled template loop with and without HTML escaping."""
+    from wreath.templates import Markup, Template
+
+    template = Template.from_string(
+        "{% for item in items %}{{ item }}{% endfor %}", "complexity-probe"
+    )
+    values: Any = tuple("<&value>" for _ in range(n))
+    if not escaped:
+        values = tuple(Markup("&lt;&amp;value&gt;") for _ in range(n))
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        output = template.render_bytes({"items": values}, max_output=n * 32 + 1)
+        if not output:
+            raise RuntimeError("template loop emitted no output")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "template-loop-escaped", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    axis="escaped values emitted by one compiled template loop",
+    assumption="loop execution and escaping are linear in emitted values",
+    stage="egress", group="web",
+)
+def _template_loop_escaped(n: int):
+    """Every value takes the ordinary HTML-escaping path."""
+    return _template_loop_harness(n, escaped=True)
+
+
+@probe(
+    "template-loop-markup-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="trusted values emitted by one compiled template loop",
+    assumption="the same-size already-safe control is linear",
+    stage="egress", group="web",
+)
+def _template_loop_markup_control(n: int):
+    """Same-size control: loop and output remain, character escaping does not."""
+    return _template_loop_harness(n, escaped=False)
+
+
+def _graphql_results_field_harness(n: int, *, distinct: bool) -> float:
+    """Price native column-plan insertion beside an overwrite control."""
+    from wreath._native import _core
+
+    instances = (None,)
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        results = _core.graphql_new_results(instances)
+        for index in range(n):
+            key = f"field-{index}" if distinct else "field"
+            _core.graphql_project_constant(results, key, index)
+        rows = _core.graphql_finish_results(results)
+        if len(rows[0]) != (n if distinct else 1):
+            raise RuntimeError("GraphQL result storage lost a field")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "graphql-results-distinct-fields", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="distinct fields accumulated in one native result plan",
+    assumption="field-plan insertion is O(1) amortized per distinct key",
+    stage="graphql-projection", group="web",
+)
+def _graphql_results_distinct_fields(n: int):
+    """Distinct response keys must not linearly rescan all earlier columns."""
+    return _graphql_results_field_harness(n, distinct=True)
+
+
+@probe(
+    "graphql-results-overwrite-control", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="writes to one repeated native result key",
+    assumption="the same-size overwrite control is linear",
+    stage="graphql-projection", group="web",
+)
+def _graphql_results_overwrite_control(n: int):
+    """Same-size control: n stores resolve to one existing field slot."""
+    return _graphql_results_field_harness(n, distinct=False)
+
+
+def _graphql_projection_harness(n: int, *, attributes: bool) -> float:
+    """Price row-wise native projection with a direct-value control."""
+    from types import SimpleNamespace
+
+    from wreath._native import _core
+
+    values = tuple(range(n))
+    instances = tuple(SimpleNamespace(value=value) for value in values)
+    loops = 30
+    before = time.perf_counter()
+    for _ in range(loops):
+        results = _core.graphql_new_results(instances)
+        if attributes:
+            _core.graphql_project_attribute(results, instances, "value", "value")
+        else:
+            _core.graphql_project_values(results, "value", values)
+        rows = _core.graphql_finish_results(results)
+        if len(rows) != n:
+            raise RuntimeError("GraphQL projection changed row cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "graphql-project-attributes", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="object attributes projected into GraphQL result rows",
+    assumption="attribute materialization is linear in response rows",
+    stage="graphql-projection", group="web",
+)
+def _graphql_project_attributes(n: int):
+    """The native result plan reads one boundary attribute per row."""
+    return _graphql_projection_harness(n, attributes=True)
+
+
+@probe(
+    "graphql-project-values-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="already-resolved values projected into GraphQL result rows",
+    assumption="the same-size direct-value control is linear",
+    stage="graphql-projection", group="web",
+)
+def _graphql_project_values_control(n: int):
+    """Same-size control: result ownership remains, attribute lookup does not."""
+    return _graphql_projection_harness(n, attributes=False)
+
+
+_PROTOBUF_COMPLEXITY_FIXTURE: Any = None
+
+
+def _protobuf_complexity_fixture() -> Any:
+    """One compiled declaration carrying packed and unpacked repeated ints."""
+    global _PROTOBUF_COMPLEXITY_FIXTURE
+    if _PROTOBUF_COMPLEXITY_FIXTURE is None:
+        from wreath.protobuf import field, message
+
+        @message
+        class RepeatedProbe:
+            packed: list[int] = field(1)
+            unpacked: list[int] = field(2, packed=False)
+
+        _PROTOBUF_COMPLEXITY_FIXTURE = RepeatedProbe
+    return _PROTOBUF_COMPLEXITY_FIXTURE
+
+
+def _protobuf_repeated_harness(n: int, *, packed: bool, decode: bool) -> float:
+    """Price repeated-field wire work with the alternate wire form as control."""
+    from wreath.protobuf import decode as protobuf_decode
+    from wreath.protobuf import encode as protobuf_encode
+
+    cls = _protobuf_complexity_fixture()
+    values = list(range(n))
+    instance = cls(packed=values) if packed else cls(unpacked=values)
+    wire = protobuf_encode(instance)
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        if decode:
+            result = protobuf_decode(cls, wire)
+            field = result.packed if packed else result.unpacked
+            if len(field) != n:
+                raise RuntimeError("protobuf decoder changed cardinality")
+        elif not protobuf_encode(instance):
+            raise RuntimeError("protobuf encoder emitted no repeated field")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "protobuf-encode-packed-repeated", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="varints in one packed repeated protobuf field",
+    assumption="packed size and emission passes are linear in item count",
+    stage="protobuf", group="web",
+)
+def _protobuf_encode_packed_repeated(n: int):
+    """Packed values share one tag and length prefix."""
+    return _protobuf_repeated_harness(n, packed=True, decode=False)
+
+
+@probe(
+    "protobuf-encode-unpacked-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="varints in one unpacked repeated protobuf field",
+    assumption="the same-size per-item-tag control is linear",
+    stage="protobuf", group="web",
+)
+def _protobuf_encode_unpacked_control(n: int):
+    """Same-size control: each value carries its own field tag."""
+    return _protobuf_repeated_harness(n, packed=False, decode=False)
+
+
+@probe(
+    "protobuf-decode-packed-repeated", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="varints decoded from one packed protobuf field",
+    assumption="packed decoding visits each payload byte a bounded number of times",
+    stage="protobuf", group="web",
+)
+def _protobuf_decode_packed_repeated(n: int):
+    """One length-delimited packed field grows one native-owned decode array."""
+    return _protobuf_repeated_harness(n, packed=True, decode=True)
+
+
+@probe(
+    "protobuf-decode-unpacked-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="varints decoded from repeated unpacked protobuf fields",
+    assumption="the same-size tag-heavy control is linear",
+    stage="protobuf", group="web",
+)
+def _protobuf_decode_unpacked_control(n: int):
+    """Same-size control: each value re-enters field dispatch from its tag."""
+    return _protobuf_repeated_harness(n, packed=False, decode=True)
+
+
+def _protobuf_compile_harness(n: int, *, one_descriptor: bool) -> float:
+    """Price descriptor compilation at the same total field cardinality."""
+    from wreath._native import _core
+    from wreath._protobuf_plan import KIND_INT64
+
+    row = (1, KIND_INT64, 0, None)
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        if one_descriptor:
+            plan = tuple((index + 1, KIND_INT64, 0, None) for index in range(n))
+            names = tuple(f"field_{index}" for index in range(n))
+            result = _core.protobuf_compile(plan, names, (None,) * n, {})
+            if result is None:
+                raise RuntimeError("protobuf compiler produced no descriptor")
+        else:
+            for index in range(n):
+                result = _core.protobuf_compile(
+                    (row,), (f"field_{index}",), (None,), {},
+                )
+                if result is None:
+                    raise RuntimeError("protobuf compiler produced no descriptor")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "protobuf-compile-wide-descriptor", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="fields compiled into one protobuf descriptor",
+    assumption="field lookup and JSON-name uniqueness are O(n log n) or better",
+    stage="protobuf-startup", group="web",
+)
+def _protobuf_compile_wide_descriptor(n: int):
+    """Distinct camel names must not be compared with every prior field."""
+    return _protobuf_compile_harness(n, one_descriptor=True)
+
+
+@probe(
+    "protobuf-compile-single-field-control", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="fields compiled across one-field protobuf descriptors",
+    assumption="the same total-field control scales linearly",
+    stage="protobuf-startup", group="web",
+)
+def _protobuf_compile_single_field_control(n: int):
+    """Same-size control: compile n fields without an intra-plan uniqueness set."""
+    return _protobuf_compile_harness(n, one_descriptor=False)
+
+
+def _msgpack_collection_harness(n: int, *, mapping: bool) -> float:
+    """Price MessagePack container traversal at equal element counts."""
+    from wreath._native import _core
+
+    value: Any = ({f"k{index}": index for index in range(n)} if mapping
+                  else list(range(n)))
+    loops = 30
+    before = time.perf_counter()
+    for _ in range(loops):
+        encoded = _core.msgpack_dumps(value)
+        if not encoded:
+            raise RuntimeError("MessagePack encoder emitted no container")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "msgpack-map", expect=1.0, sizes=(1000, 2000, 4000, 8000),
+    axis="entries in one MessagePack mapping",
+    assumption="mapping encoding is linear in keys plus values",
+    stage="msgpack", group="web",
+)
+def _msgpack_map(n: int):
+    """Distinct keys exercise mapping iteration and string encoding."""
+    return _msgpack_collection_harness(n, mapping=True)
+
+
+@probe(
+    "msgpack-array-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="items in one MessagePack array",
+    assumption="the same-size scalar-array control is linear",
+    stage="msgpack", group="web",
+)
+def _msgpack_array_control(n: int):
+    """Same-size control: container growth remains, key encoding does not."""
+    return _msgpack_collection_harness(n, mapping=False)
+
+
+def _xml_wide_harness(n: int, *, attributes: bool, canonical: bool) -> float:
+    """Price native XML parsing/canonicalization over a wide sibling set."""
+    from wreath._native import _core
+
+    child = b'<item a="v">text</item>' if attributes else b"<item>text-value</item>"
+    wire = b"<root>" + child * n + b"</root>"
+    limits = (len(wire) + 1, 16, n + 2, n + 2, max(64, n * 8))
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        if canonical:
+            result = _core.xml_c14n(wire, 0, len(wire), (), (), *limits)
+        else:
+            result = _core.xml_parse(wire, *limits)
+        if result is None:
+            raise RuntimeError("XML operation produced no result")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "xml-parse-wide-attributes", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="wide sibling elements each carrying one attribute",
+    assumption="XML parsing is linear in elements and attributes",
+    stage="xml", group="web",
+)
+def _xml_parse_wide_attributes(n: int):
+    """Every sibling exercises attribute-name and value parsing."""
+    return _xml_wide_harness(n, attributes=True, canonical=False)
+
+
+@probe(
+    "xml-parse-wide-text-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="wide sibling elements carrying text only",
+    assumption="the same-size no-attribute control is linear",
+    stage="xml", group="web",
+)
+def _xml_parse_wide_text_control(n: int):
+    """Same-size control: element and text ownership remain, attributes do not."""
+    return _xml_wide_harness(n, attributes=False, canonical=False)
+
+
+@probe(
+    "xml-c14n-wide-attributes", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="wide attributed siblings in exclusive canonicalization",
+    assumption="namespace and attribute ordering stay linear for fixed width",
+    stage="xml", group="web",
+)
+def _xml_c14n_wide_attributes(n: int):
+    """Canonicalization repeats a fixed one-attribute scope n times."""
+    return _xml_wide_harness(n, attributes=True, canonical=True)
+
+
+@probe(
+    "xml-c14n-wide-text-control", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="wide text-only siblings in exclusive canonicalization",
+    assumption="the same-size no-sort control is linear",
+    stage="xml", group="web",
+)
+def _xml_c14n_wide_text_control(n: int):
+    """Same-size control: tag and text emission remain, attribute sorting does not."""
+    return _xml_wide_harness(n, attributes=False, canonical=True)
+
+
+def _sql_renumber_harness(n: int, *, parameters: bool) -> float:
+    """Price SQL lexical renumbering beside inert dollar text."""
+    from wreath._native import _core
+
+    if parameters:
+        sql = "SELECT " + ",".join(f"${index + 1}" for index in range(n))
+    else:
+        sql = "SELECT " + ",".join(f"'{index + 1}'" for index in range(n))
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _core.sql_renumber(sql, 10)
+        if not result:
+            raise RuntimeError("SQL renumbering emitted no statement")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "sql-renumber-parameters", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="positional parameters in one SQL fragment",
+    assumption="parameter recognition and decimal rewriting are linear",
+    stage="database", group="web",
+)
+def _sql_renumber_parameters(n: int):
+    """Every token is an active placeholder whose number changes."""
+    return _sql_renumber_harness(n, parameters=True)
+
+
+@probe(
+    "sql-renumber-quoted-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="quoted numeric tokens in one SQL fragment",
+    assumption="the same-size quote-state control is linear",
+    stage="database", group="web",
+)
+def _sql_renumber_quoted_control(n: int):
+    """Same-size control: lexer state remains, no placeholder is rewritten."""
+    return _sql_renumber_harness(n, parameters=False)
+
+
+def _dkim_body_harness(n: int, *, whitespace: bool) -> float:
+    """Price relaxed body canonicalization at equal line counts."""
+    from wreath._native import _core
+
+    line = b"alpha   beta \t gamma   \r\n" if whitespace else b"alpha beta gamma value\r\n"
+    body = line * n
+    loops = 30
+    before = time.perf_counter()
+    for _ in range(loops):
+        canonical = _core.dkim_canonicalize_body(body)
+        if not canonical:
+            raise RuntimeError("DKIM canonicalizer emitted no body")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "dkim-relaxed-whitespace", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="body lines with repeated horizontal whitespace",
+    assumption="relaxed whitespace folding is one forward pass",
+    stage="egress", group="web",
+)
+def _dkim_relaxed_whitespace(n: int):
+    """Every line exercises compression and trailing-space deletion."""
+    return _dkim_body_harness(n, whitespace=True)
+
+
+@probe(
+    "dkim-relaxed-plain-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="body lines already in relaxed form",
+    assumption="the same-size copy control is linear",
+    stage="egress", group="web",
+)
+def _dkim_relaxed_plain_control(n: int):
+    """Same-size control: line scanning remains, whitespace folding does not."""
+    return _dkim_body_harness(n, whitespace=False)
+
+
+def _sse_frame_harness(n: int, *, multiline: bool) -> float:
+    """Price event-stream line splitting beside one-line output."""
+    from wreath._native import _core
+
+    data = ("x\n" * n) if multiline else ("xx" * n)
+    loops = 100
+    before = time.perf_counter()
+    for _ in range(loops):
+        frame = _core.sse_frame(None, None, None, None, data)
+        if not frame:
+            raise RuntimeError("SSE framer emitted no event")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "sse-multiline-data", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="newline-delimited values in one SSE data field",
+    assumption="prefix insertion and newline normalization are linear",
+    stage="egress", group="web",
+)
+def _sse_multiline_data(n: int):
+    """Every two input bytes produce another data-field prefix."""
+    return _sse_frame_harness(n, multiline=True)
+
+
+@probe(
+    "sse-single-line-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="same bytes in one SSE data line",
+    assumption="the same-size no-split control is linear",
+    stage="egress", group="web",
+)
+def _sse_single_line_control(n: int):
+    """Same-size control: UTF-8 copying remains, line prefixes do not."""
+    return _sse_frame_harness(n, multiline=False)
+
+
+def _websocket_frame_harness(n: int, *, masked: bool) -> float:
+    """Price native WebSocket framing and parsing at one payload size."""
+    from wreath._native import _core
+
+    payload = bytes((index * 17) & 255 for index in range(n))
+    key = b"\x37\xfa\x21\x3d" if masked else None
+    frame = _core.ws_build_frame(2, payload, key)
+    loops = 100
+    batch = 16
+    before = time.perf_counter()
+    for _ in range(loops):
+        for _ in range(batch):
+            parsed = _core.ws_parse_frame(frame)
+            if parsed is None or len(parsed[2]) != n:
+                raise RuntimeError("WebSocket parser changed payload length")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "websocket-parse-masked", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="masked WebSocket payload bytes",
+    assumption="frame parsing and unmasking are linear in payload bytes",
+    stage="websocket", group="web",
+)
+def _websocket_parse_masked(n: int):
+    """The parser copies and unmasks the complete payload."""
+    return _websocket_frame_harness(n, masked=True)
+
+
+@probe(
+    "websocket-parse-unmasked-control", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="unmasked WebSocket payload bytes",
+    assumption="the same-size copy-only control is linear",
+    stage="websocket", group="web",
+)
+def _websocket_parse_unmasked_control(n: int):
+    """Same-size control: framing and payload ownership remain, XOR does not."""
+    return _websocket_frame_harness(n, masked=False)
+
+
+def _queue_drain_harness(n: int, *, priority: bool) -> float:
+    """Price native bounded queue insertion and complete draining."""
+    from wreath.queue import PriorityQueue, Queue
+
+    queue: Any = (PriorityQueue(capacity=n + 1) if priority
+                  else Queue(capacity=n + 1))
+    before = time.perf_counter()
+    if priority:
+        for index in range(n):
+            queue.offer(index, priority=(index * 7919) % max(n, 1))
+    else:
+        for index in range(n):
+            queue.offer(index)
+    for _ in range(n):
+        queue.get_nowait()
+    elapsed = time.perf_counter() - before
+    if len(queue) != 0:
+        raise RuntimeError("queue drain retained items")
+    return elapsed
+
+
+@probe(
+    "priority-queue-offer-drain", expect=1.0, tolerance=0.65,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="items offered to and drained from a native priority queue",
+    assumption="heap maintenance is O(n log n), not quadratic",
+    stage="queue", group="web",
+)
+def _priority_queue_offer_drain(n: int):
+    """A varied-priority heap executes one logarithmic adjustment per item."""
+    return _queue_drain_harness(n, priority=True)
+
+
+@probe(
+    "fifo-queue-offer-drain-control", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="items offered to and drained from a native FIFO queue",
+    assumption="the same-size ring-buffer control is linear",
+    stage="queue", group="web",
+)
+def _fifo_queue_offer_drain_control(n: int):
+    """Same-size control: queue ownership remains, heap ordering does not."""
+    return _queue_drain_harness(n, priority=False)
+
+
+def _queue_snapshot_harness(n: int, *, priority: bool) -> float:
+    """Price a non-destructive ordered snapshot at one held size."""
+    from wreath.queue import PriorityQueue, Queue
+
+    queue: Any = (PriorityQueue(capacity=n + 1) if priority
+                  else Queue(capacity=n + 1))
+    if priority:
+        for index in range(n):
+            queue.offer(index, priority=(index * 7919) % max(n, 1))
+    else:
+        for index in range(n):
+            queue.offer(index)
+    loops = 5
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = queue.snapshot()
+        if len(result) != n:
+            raise RuntimeError("queue snapshot changed cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "priority-queue-snapshot", expect=1.0, tolerance=0.65,
+    sizes=(500, 1000, 2000, 4000),
+    axis="held priority-queue entries copied in get order",
+    assumption="snapshot ordering is O(n log n), not selection-sort quadratic",
+    stage="queue", group="web",
+)
+def _priority_queue_snapshot(n: int):
+    """The copied heap must be ordered without repeatedly scanning its tail."""
+    return _queue_snapshot_harness(n, priority=True)
+
+
+@probe(
+    "fifo-queue-snapshot-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="held FIFO entries copied in get order",
+    assumption="the same-size ring snapshot control is linear",
+    stage="queue", group="web",
+)
+def _fifo_queue_snapshot_control(n: int):
+    """Same-size control: owned references are copied without ordering."""
+    return _queue_snapshot_harness(n, priority=False)
+
+
+def _rank_indices_harness(n: int, *, sorted_input: bool) -> float:
+    """Price numeric ranking under ordered and disordered inputs."""
+    from wreath._native import _core
+
+    scores = ([float(index) for index in range(n)] if sorted_input else
+              [float((index * 7919) % max(n, 1)) for index in range(n)])
+    loops = 30
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _core.rank_indices(scores, 0, n, False)
+        if len(result) != n:
+            raise RuntimeError("rank kernel changed cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "rank-indices-disordered", expect=1.0, tolerance=0.65,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="disordered numeric scores ranked into indices",
+    assumption="native ranking is O(n log n), not quadratic",
+    stage="query", group="web",
+)
+def _rank_indices_disordered(n: int):
+    """A deterministic permutation exercises the general qsort path."""
+    return _rank_indices_harness(n, sorted_input=False)
+
+
+@probe(
+    "rank-indices-sorted-control", expect=1.0, tolerance=0.65,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="already-sorted numeric scores ranked into indices",
+    assumption="the same-size ordered control remains O(n log n) or better",
+    stage="query", group="web",
+)
+def _rank_indices_sorted_control(n: int):
+    """Same-size control: conversion and output remain, comparisons simplify."""
+    return _rank_indices_harness(n, sorted_input=True)
+
+
+def _fused_order_harness(n: int, *, overlap: bool) -> float:
+    """Price reciprocal-rank fusion at equal ranking-cell counts."""
+    from wreath._native import _core
+
+    if overlap:
+        base = tuple(f"item-{index}" for index in range(n))
+        rankings = (base, base[::-1], base)
+    else:
+        rankings = tuple(
+            tuple(f"arm-{arm}-item-{index}" for index in range(n))
+            for arm in range(3)
+        )
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _core.fused_order(rankings, 60)
+        expected = n if overlap else n * 3
+        if len(result) != expected:
+            raise RuntimeError("rank fusion changed unique cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "rank-fusion-overlap", expect=1.0, tolerance=0.65,
+    sizes=(500, 1000, 2000, 4000),
+    axis="ranking cells resolving to an overlapping key set",
+    assumption="hash accumulation plus final sort are O(n log n)",
+    stage="query", group="web",
+)
+def _rank_fusion_overlap(n: int):
+    """Three arms update the same n native hash slots."""
+    return _fused_order_harness(n, overlap=True)
+
+
+@probe(
+    "rank-fusion-disjoint-control", expect=1.0, tolerance=0.65,
+    sizes=(500, 1000, 2000, 4000),
+    axis="same ranking cells resolving to disjoint key sets",
+    assumption="the same-size maximum-output control remains O(n log n)",
+    stage="query", group="web",
+)
+def _rank_fusion_disjoint_control(n: int):
+    """Same-size input cell count: three times as many unique result slots."""
+    return _fused_order_harness(n, overlap=False)
+
+
+def _accept_sort_harness(n: int, *, ascending: bool) -> float:
+    """Price Accept parsing under adverse and already-ranked quality order."""
+    from wreath._native import _core
+
+    indices = range(n) if ascending else range(n - 1, -1, -1)
+    header = ",".join(
+        f"application/x-{index};q={(index + 1) / (n + 1):.8f}"
+        for index in indices
+    )
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        ranges = _core.parse_accept(header)
+        if len(ranges) != n:
+            raise RuntimeError("Accept parser changed range cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "accept-ranges-reverse-quality", expect=1.0, tolerance=0.45,
+    sizes=(250, 500, 1000, 2000),
+    axis="Accept ranges arriving opposite their negotiated quality order",
+    assumption="range ordering is O(n log n), never insertion-sort quadratic",
+    stage="ingress", group="web",
+)
+def _accept_ranges_reverse_quality(n: int):
+    """Each later range sorts ahead of every earlier one."""
+    return _accept_sort_harness(n, ascending=True)
+
+
+@probe(
+    "accept-ranges-ranked-control", expect=1.0, tolerance=0.65,
+    sizes=(250, 500, 1000, 2000),
+    axis="Accept ranges arriving in negotiated quality order",
+    assumption="the same-size already-ranked control is O(n log n) or better",
+    stage="ingress", group="web",
+)
+def _accept_ranges_ranked_control(n: int):
+    """Same-size control: tokenization and output remain, ordering is pre-sorted."""
+    return _accept_sort_harness(n, ascending=False)
+
+
+def _media_negotiation_harness(n: int, *, adversarial: bool) -> float:
+    """Price media selection with equally wide range and offer sets."""
+    from wreath._native import _core
+
+    offers = tuple(f"application/x-{index}" for index in range(n))
+    if adversarial:
+        accepted = ["application/*;q=0.5"] * n
+        denied = [f"application/x-{index};q=0" for index in range(n)]
+        header = ",".join((*accepted, *denied))
+    else:
+        header = ",".join(
+            f"application/missing-{index};q=0" for index in range(n * 2)
+        )
+    loops = 5
+    before = time.perf_counter()
+    for _ in range(loops):
+        selected = _core.negotiate_media(header, offers)
+        if selected is not None:
+            raise RuntimeError("excluded media negotiation unexpectedly matched")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "media-negotiation-excluded-wildcards", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="accepted wildcards, denied exact ranges, and offered media types",
+    assumption="exclusions and candidates are indexed per call, not cross-scanned",
+    stage="ingress", group="web",
+)
+def _media_negotiation_excluded_wildcards(n: int):
+    """Every wildcard matches every offer, all of which exact ranges exclude."""
+    return _media_negotiation_harness(n, adversarial=True)
+
+
+@probe(
+    "media-negotiation-denied-control", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="same count of denied ranges beside the same offered media set",
+    assumption="the same-size parse and normalization control is linear",
+    stage="ingress", group="web",
+)
+def _media_negotiation_denied_control(n: int):
+    """Same-size control: no positive range enters candidate selection."""
+    return _media_negotiation_harness(n, adversarial=False)
+
+
+def _argument_normalization_harness(n: int, *, nested: bool) -> float:
+    """Price bounded JSON normalization at equal container-edge counts."""
+    from wreath._native import _core
+
+    if nested:
+        value: Any = 0
+        for _ in range(n):
+            value = [value]
+    else:
+        value = [0] * n
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _core.normalise_argument(value, n + 2, n + 2, n * 8 + 64)
+        if not result:
+            raise RuntimeError("argument normalizer emitted no JSON")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "argument-normalize-deep", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="nested container edges in one bounded policy argument",
+    assumption="cycle detection uses an operation-owned active set, not ancestor rescans",
+    stage="authorization", group="web",
+)
+def _argument_normalize_deep(n: int):
+    """Acyclic singleton lists make depth equal the number of emitted edges."""
+    return _argument_normalization_harness(n, nested=True)
+
+
+@probe(
+    "argument-normalize-flat-control", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="flat scalar items in one bounded policy argument",
+    assumption="the same-size JSON-emission control is linear",
+    stage="authorization", group="web",
+)
+def _argument_normalize_flat_control(n: int):
+    """Same-size control: output and field accounting remain without deep ancestry."""
+    return _argument_normalization_harness(n, nested=False)
+
+
+def _sparsevector_compile_harness(n: int, *, ordered: bool) -> float:
+    """Price conversion of a Python declaration into native sparse storage."""
+    from wreath._native import _core
+
+    indices = (range(1, n + 1) if ordered else
+               sorted(range(1, n + 1), key=lambda index: (index * 7919) % n))
+    elements = {index: float(index) for index in indices}
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        data = _core.sparsevector_data(n + 1, elements, n + 1)
+        if _core.sparsevector_len(data) != n:
+            raise RuntimeError("sparse-vector compiler changed cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "sparsevector-compile-disordered", expect=1.0, tolerance=0.65,
+    sizes=(500, 1000, 2000, 4000),
+    axis="disordered sparse-vector declaration entries",
+    assumption="native storage compilation is O(n log n), never quadratic",
+    stage="database", group="web",
+)
+def _sparsevector_compile_disordered(n: int):
+    """A deterministic key permutation exercises the general ordering path."""
+    return _sparsevector_compile_harness(n, ordered=False)
+
+
+@probe(
+    "sparsevector-compile-ordered-control", expect=1.0, tolerance=0.65,
+    sizes=(500, 1000, 2000, 4000),
+    axis="already-ordered sparse-vector declaration entries",
+    assumption="the same-size native-storage control is O(n log n) or better",
+    stage="database", group="web",
+)
+def _sparsevector_compile_ordered_control(n: int):
+    """Same-size control: conversion and native filling remain with one sorted run."""
+    return _sparsevector_compile_harness(n, ordered=True)
+
+
+def _prometheus_routes_harness(n: int, *, populated: bool) -> float:
+    """Price native route-metric rendering at equal route cardinality."""
+    from types import SimpleNamespace
+
+    from wreath._native import _core
+
+    buckets = tuple(1 if populated else 0 for _ in range(64))
+    routes = tuple(
+        SimpleNamespace(
+            route_id=index, count=64, errors=0,
+            duration_us_sum=4096.0, duration_us_max=128.0,
+            buckets=buckets,
+        )
+        for index in range(n)
+    )
+    names = ("requests", "errors", "duration", "maximum")
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        blocks = _core.prometheus_route_blocks(routes, names, None, False)
+        if len(blocks) != 4:
+            raise RuntimeError("Prometheus renderer changed family cardinality")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "prometheus-routes-full-histograms", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="route metric rows with every fixed histogram bucket populated",
+    assumption="route planning and bounded histogram emission are linear in routes",
+    stage="observability", group="web",
+)
+def _prometheus_routes_full_histograms(n: int):
+    """Every route emits all 64 duration buckets plus scalar families."""
+    return _prometheus_routes_harness(n, populated=True)
+
+
+@probe(
+    "prometheus-routes-empty-control", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="same route metric rows with empty fixed histograms",
+    assumption="the same-size route-planning control is linear",
+    stage="observability", group="web",
+)
+def _prometheus_routes_empty_control(n: int):
+    """Same-size control: attributes and scalar families remain, buckets omit."""
+    return _prometheus_routes_harness(n, populated=False)
+
+
+def _flight_metadata_harness(n: int, *, ordered: bool) -> float:
+    """Price canonical native metadata emission under row ordering changes."""
+    from wreath._flight_schema import SCHEMA_VERSION, MetadataImage, NamedMeta
+
+    indices = (range(n) if ordered else range(n - 1, -1, -1))
+    dependencies = tuple(NamedMeta(index + 1, f"dependency-{index}")
+                         for index in indices)
+    image = MetadataImage(
+        version=SCHEMA_VERSION,
+        routes=(), plans=(), dependencies=dependencies, middleware=(),
+        auth_policies=(), serializers=(), validators=(), limits=(),
+        clients=(), databases=(), models=(),
+    )
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        wire = image.canonical_bytes()
+        if not wire:
+            raise RuntimeError("flight metadata encoder emitted no image")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "flight-metadata-reverse-rows", expect=1.0, tolerance=0.65,
+    sizes=(250, 500, 1000, 2000),
+    axis="reverse-ID native-flight metadata rows",
+    assumption="canonical row ordering is O(n log n), never quadratic",
+    stage="observability", group="web",
+)
+def _flight_metadata_reverse_rows(n: int):
+    """Rows arrive opposite their canonical ID order."""
+    return _flight_metadata_harness(n, ordered=False)
+
+
+@probe(
+    "flight-metadata-ordered-control", expect=1.0, tolerance=0.65,
+    sizes=(250, 500, 1000, 2000),
+    axis="already-ID-ordered native-flight metadata rows",
+    assumption="the same-size canonical-emission control is O(n log n) or better",
+    stage="observability", group="web",
+)
+def _flight_metadata_ordered_control(n: int):
+    """Same-size control: field reads and wire output remain in canonical order."""
+    return _flight_metadata_harness(n, ordered=True)
+
+
+def _privacy_topology_harness(n: int, *, chain: bool) -> float:
+    """Price the privacy planner's children-first graph calculation."""
+    from wreath._privacy.graph import Graph, Node, order_children_first
+    from wreath._privacy.model import Edge
+
+    models: tuple[type, ...] = tuple(
+        type(f"PrivacyProbe{index}", (), {}) for index in range(n)
+    )
+    nodes: dict[type, Node] = {
+        model: Node(model, model.__name__, "public", f"t{index:06d}", (), {})
+        for index, model in enumerate(models)
+    }
+    edge = Edge("child", "parent_id", "parent", "id", "r")
+    outbound: dict[type, tuple[tuple[Edge, type], ...]] = (
+        {
+            models[index]: ((edge, models[index - 1]),)
+            for index in range(1, n)
+        }
+        if chain
+        else {}
+    )
+    graph = Graph(nodes, outbound, {})
+    members: set[type] = set(models)
+    loops = 10
+    before = time.perf_counter()
+    for _ in range(loops):
+        ordered, cycles = order_children_first(graph, members)
+        if len(ordered) != n or cycles:
+            raise RuntimeError("privacy topology probe produced an invalid order")
+    return (time.perf_counter() - before) / loops
+
+
+@probe(
+    "privacy-topology-chain", expect=1.0,
+    sizes=(200, 400, 800, 1600),
+    axis="models in one foreign-key chain",
+    assumption="children-first ordering visits each model and edge once",
+    stage="privacy", group="extended",
+)
+def _privacy_topology_chain(n: int):
+    """A chain unlocks exactly one parent at each topological layer."""
+    return _privacy_topology_harness(n, chain=True)
+
+
+@probe(
+    "privacy-topology-disconnected-control", expect=1.0,
+    sizes=(200, 400, 800, 1600),
+    axis="disconnected models in one privacy graph",
+    assumption="the same-size deterministic-ordering control is linear",
+    stage="privacy", group="extended",
+)
+def _privacy_topology_disconnected_control(n: int):
+    """Same-size control: model ordering remains while dependency edges do not."""
+    return _privacy_topology_harness(n, chain=False)
+
+
 def _todo_document(todo: Todo | None) -> dict[str, Any] | None:
     if todo is None:
         return None
@@ -2237,9 +3600,9 @@ def _write_baseline(names: list[str]) -> int:
     payload = {
         "version": BASELINE_VERSION,
         "note": (
-            "Checked complexity assumptions for the metal request path. Timings are "
-            "observations, not absolute performance gates; --check reruns each probe "
-            "and enforces its declared global and tail exponent bound."
+            "Checked complexity assumptions for native and request-hot paths. "
+            "Timings are observations, not absolute performance gates; --check "
+            "reruns each probe and enforces its declared global and tail exponent bound."
         ),
         "probes": {
             result.probe.name: {
@@ -2268,7 +3631,8 @@ def _print_todo_summary(names: list[str]) -> None:
         return
     by_degree: dict[float, int] = {}
     for p in marked:
-        assert p.todo is not None
+        if p.todo is None:
+            raise RuntimeError(f"{p.name}: marked probe lost its defect contract")
         by_degree[p.todo.degree] = by_degree.get(p.todo.degree, 0) + 1
     tally = ", ".join(
         f"{count} {degree_name(degree)}"
@@ -2276,7 +3640,8 @@ def _print_todo_summary(names: list[str]) -> None:
     )
     print(f"\n=== fix-later marks: {len(marked)} ({tally}) ===")
     for p in sorted(marked, key=lambda q: (-(q.todo.degree if q.todo else 0), q.name)):
-        assert p.todo is not None
+        if p.todo is None:
+            raise RuntimeError(f"{p.name}: marked probe lost its defect contract")
         print(f"  {p.name:<36} n^{p.todo.degree:g} -> n^{p.todo.target:g}  "
               f"[{p.todo.owner}]")
         print(f"  {'':<36} {p.todo.reason}")

@@ -220,6 +220,7 @@ ext_modules = [
                 "src/wreath/_native/env.c",
                 "src/wreath/_native/headers.c",
                 "src/wreath/_native/codecs.c",
+                "src/wreath/_native/data_kernels.c",
                 "src/wreath/_native/sql.c",
                 "src/wreath/_native/dkim.c",
                 "src/wreath/_native/recording.c",

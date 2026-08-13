@@ -1,11 +1,10 @@
-"""The native log emitter against the Python packer, byte for byte.
+"""Every log-cell packing boundary against the wire definition, byte for byte.
 
 `wreath_nfr_log` packs a record straight into a ring cell in C. `pack_value`
-plus `LogCell.encode` do the same work in Python, and both ship: the Python one
-runs when there is no ring, when a record is buffered for a possible promotion,
-and when the caller is not the loop. So the contract is not "both produce
+plus `LogCell.encode` define the sink/off-loop boundary, and the request-owned
+buffer packs held records into request-owned cells. The contract is not "all produce
 something readable" -- it is that the 64 bytes are *identical*, for every shape
-either can be handed, because a reader cannot tell which packed a given cell.
+each boundary can be handed, because a reader cannot tell which packed a cell.
 
 The corpus below is deliberately weighted towards the cases where two
 independent implementations drift apart: a bool that is also an int, an int one
@@ -30,11 +29,12 @@ from wreath._flight_schema import (
     Severity,
 )
 from wreath._logsite import LogField, SiteRegistry, pack_value, spec_blob
+from wreath._native import _core
 
 _flight = pytest.importorskip("wreath._native._flight", exc_type=ImportError)
 
 
-def _pure_cell(
+def _wire_cell(
     registry: SiteRegistry,
     site_id: int,
     severity: Severity,
@@ -44,7 +44,7 @@ def _pure_cell(
     flags: int = 0,
     dropped: int = 0,
 ) -> bytes:
-    """What the Python packer produces: the oracle these bytes are compared to."""
+    """Encode the public cell definition used at Python sink boundaries."""
     packed = []
     for index, spec in enumerate(fields):
         value = values[index] if index < len(values) else None
@@ -90,6 +90,34 @@ def _native_cell(
     drained = recorder.drain(1)
     assert len(drained) == 64
     return bytes(drained), outcome >> 1
+
+
+def _buffered_cell(
+    registry: SiteRegistry,
+    site_id: int,
+    severity: Severity,
+    request_id: int,
+    fields: tuple[LogField, ...],
+    values: tuple[object, ...],
+    flags: int = 0,
+    dropped: int = 0,
+) -> tuple[bytes, int]:
+    """The operation-owned request buffer, materialized only on promotion."""
+    buffer = _core.LogBuffer(request_id=request_id, budget=1)
+    key = registry.key
+    mismatches = buffer.add_values(
+        site_id,
+        int(severity),
+        spec_blob(fields),
+        values,
+        key[0],
+        key[1],
+        flags,
+        dropped,
+    )
+    cells = buffer.finish(True)
+    assert len(cells) == 1
+    return cells[0], mismatches
 
 
 def _field(type_: type, disposition: CaptureDisposition) -> LogField:
@@ -205,20 +233,20 @@ CORPUS: tuple[tuple[str, tuple[LogField, ...], tuple[object, ...]], ...] = (
 
 
 @pytest.mark.parametrize("label,fields,values", CORPUS, ids=[row[0] for row in CORPUS])
-def test_the_native_emitter_packs_what_the_pure_one_packs(
+def test_the_emitter_matches_the_wire_definition(
     label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
 ) -> None:
     registry = SiteRegistry()
-    pure = _pure_cell(registry, 7, Severity.WARN, 99, fields, values)
+    wire = _wire_cell(registry, 7, Severity.WARN, 99, fields, values)
     native, _mismatches = _native_cell(registry, 7, Severity.WARN, 99, fields, values)
-    assert native == pure, (
-        f"{label}: the native emitter and the Python packer disagree.\n"
-        f"  pure   {pure.hex(' ', 4)}\n  native {native.hex(' ', 4)}"
+    assert native == wire, (
+        f"{label}: the emitter and the cell definition disagree.\n"
+        f"  wire   {wire.hex(' ', 4)}\n  emitted {native.hex(' ', 4)}"
     )
 
 
 @pytest.mark.parametrize("label,fields,values", CORPUS, ids=[row[0] for row in CORPUS])
-def test_both_halves_decode_to_the_same_record(
+def test_emitted_cells_decode_to_the_same_record(
     label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
 ) -> None:
     """Identical bytes are necessary; decoding without raising is the point."""
@@ -231,7 +259,7 @@ def test_both_halves_decode_to_the_same_record(
 
 
 @pytest.mark.parametrize("label,fields,values", CORPUS, ids=[row[0] for row in CORPUS])
-def test_both_halves_count_the_same_type_mismatches(
+def test_emission_boundaries_count_the_same_type_mismatches(
     label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
 ) -> None:
     """A mismatch is counted on both paths, never raised on either.
@@ -241,12 +269,37 @@ def test_both_halves_count_the_same_type_mismatches(
     would be a silent regression in the only signal there is.
     """
     registry = SiteRegistry()
-    pure = sum(
+    expected = sum(
         pack_value(registry, values[i] if i < len(values) else None, spec)[1]
         for i, spec in enumerate(fields)
     )
     _native, mismatches = _native_cell(registry, 7, Severity.WARN, 99, fields, values)
-    assert mismatches == pure, f"{label}: {mismatches} native vs {pure} pure"
+    assert mismatches == expected, f"{label}: {mismatches} emitted vs {expected} expected"
+
+
+@pytest.mark.parametrize("label,fields,values", CORPUS, ids=[row[0] for row in CORPUS])
+def test_the_request_buffer_packs_the_same_promoted_record(
+    label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
+) -> None:
+    registry = SiteRegistry()
+    expected = _wire_cell(
+        registry,
+        7,
+        Severity.DEBUG,
+        99,
+        fields,
+        values,
+        flags=0x01,
+    )
+    buffered, mismatches = _buffered_cell(
+        registry, 7, Severity.DEBUG, 99, fields, values
+    )
+    expected_mismatches = sum(
+        pack_value(registry, values[i] if i < len(values) else None, spec)[1]
+        for i, spec in enumerate(fields)
+    )
+    assert buffered == expected, f"{label}: buffered cell differs from its wire contract"
+    assert mismatches == expected_mismatches
 
 
 def test_the_fingerprint_key_is_the_registrys_own() -> None:
@@ -262,7 +315,7 @@ def test_the_fingerprint_key_is_the_registrys_own() -> None:
     second = SiteRegistry()
 
     same = _native_cell(first, 7, Severity.WARN, 99, fields, ("tenant",))[0]
-    also_same = _pure_cell(first, 7, Severity.WARN, 99, fields, ("tenant",))
+    also_same = _wire_cell(first, 7, Severity.WARN, 99, fields, ("tenant",))
     assert same == also_same
 
     different = _native_cell(second, 7, Severity.WARN, 99, fields, ("tenant",))[0]

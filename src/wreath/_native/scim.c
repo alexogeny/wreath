@@ -581,6 +581,27 @@ done:
     return node;
 }
 
+static int
+scim_key_equal_ci(PyObject *key, PyObject *wanted)
+{
+    if (!PyUnicode_Check(key) ||
+        PyUnicode_GET_LENGTH(key) != PyUnicode_GET_LENGTH(wanted)) return 0;
+    for (Py_ssize_t at = 0; at < PyUnicode_GET_LENGTH(key); at++) {
+        if (Py_UNICODE_TOLOWER(PyUnicode_READ_CHAR(key, at)) !=
+            Py_UNICODE_TOLOWER(PyUnicode_READ_CHAR(wanted, at))) return 0;
+    }
+    return 1;
+}
+
+static int
+scim_append_value(PyObject *found, PyObject *value)
+{
+    if (PyList_Check(value))
+        return PyList_SetSlice(found, PyList_GET_SIZE(found),
+                               PyList_GET_SIZE(found), value);
+    return PyList_Append(found, value);
+}
+
 static PyObject *
 scim_values(PyObject *resource, PyObject *path, PyObject *types)
 {
@@ -610,10 +631,18 @@ scim_values(PyObject *resource, PyObject *path, PyObject *types)
         for (Py_ssize_t i = 0; i < PyList_GET_SIZE(current); i++) {
             PyObject *item = PyList_GET_ITEM(current, i);
             int mapping = PyObject_IsInstance(item, SCIM_MAPPING(types));
-            PyObject *pairs;
             if (mapping < 0) goto values_error;
             if (!mapping) continue;
-            pairs = PyMapping_Items(item);
+            if (PyDict_Check(item)) {
+                Py_ssize_t position = 0;
+                PyObject *key, *value;
+                while (PyDict_Next(item, &position, &key, &value)) {
+                    if (scim_key_equal_ci(key, wanted) &&
+                        scim_append_value(found, value) < 0) goto values_error;
+                }
+                continue;
+            }
+            PyObject *pairs = PyMapping_Items(item);
             if (pairs == NULL) goto values_error;
             PyObject *fast = PySequence_Fast(pairs, "mapping items must be a sequence");
             Py_DECREF(pairs);
@@ -623,44 +652,18 @@ scim_values(PyObject *resource, PyObject *path, PyObject *types)
                 PyObject *pair = PySequence_Fast_GET_ITEM(fast, pair_index);
                 PyObject *key = PySequence_GetItem(pair, 0);
                 PyObject *value = PySequence_GetItem(pair, 1);
-                int equal = 0;
                 if (key == NULL || value == NULL) {
                     Py_XDECREF(key);
                     Py_XDECREF(value);
                     Py_DECREF(fast);
                     goto values_error;
                 }
-                if (PyUnicode_Check(key) &&
-                    PyUnicode_GET_LENGTH(key) == PyUnicode_GET_LENGTH(wanted)) {
-                    equal = 1;
-                    for (Py_ssize_t at = 0; at < PyUnicode_GET_LENGTH(key); at++) {
-                        if (Py_UNICODE_TOLOWER(PyUnicode_READ_CHAR(key, at)) !=
-                            Py_UNICODE_TOLOWER(PyUnicode_READ_CHAR(wanted, at))) {
-                            equal = 0;
-                            break;
-                        }
-                    }
-                }
+                int equal = scim_key_equal_ci(key, wanted);
                 Py_DECREF(key);
-                if (equal < 0) {
+                if (equal && scim_append_value(found, value) < 0) {
                     Py_DECREF(value);
                     Py_DECREF(fast);
                     goto values_error;
-                }
-                if (equal) {
-                    if (PyList_Check(value)) {
-                        if (PyList_SetSlice(found, PyList_GET_SIZE(found),
-                                            PyList_GET_SIZE(found), value) < 0) {
-                            Py_DECREF(value);
-                            Py_DECREF(fast);
-                            goto values_error;
-                        }
-                    }
-                    else if (PyList_Append(found, value) < 0) {
-                        Py_DECREF(value);
-                        Py_DECREF(fast);
-                        goto values_error;
-                    }
                 }
                 Py_DECREF(value);
             }

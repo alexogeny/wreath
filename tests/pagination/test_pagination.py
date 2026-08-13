@@ -13,6 +13,17 @@ from wreath.pagination import (
 )
 
 
+def test_numeric_rank_workspace_returns_only_the_requested_indices() -> None:
+    from wreath.pagination import _rank_indices
+
+    scores = (0.5, 2.0, 2.0, -1.0, 1.0)
+    assert _rank_indices(scores, page=1, size=3, descending=False) == (3, 0, 4)
+    # Reversing a stable ascending order puts the later equal-score item first,
+    # matching sorted(...).reverse(), which this kernel replaces.
+    assert _rank_indices(scores, page=1, size=3, descending=True) == (2, 1, 4)
+    assert _rank_indices(scores, page=2, size=3, descending=True) == (0, 3)
+
+
 def test_page_math():
     page = Page(items=[1, 2, 3], total=25, page=2, size=10)
     assert page.pages == 3

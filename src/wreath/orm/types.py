@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import math
 import re
 import struct
 import uuid
@@ -24,6 +23,7 @@ from typing import Any
 
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
+from .._native import _core
 from .._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 from ..geospatial import Coordinate
 from .errors import DeclarationError, ExtensionNotInstalledError
@@ -581,26 +581,15 @@ def Array(element: PgType, *, nullable_elements: bool = False) -> _ArrayType:
         raise TypeError(f"{element.name} has no array type")
 
     def coerce(value: Any) -> list[Any]:
-        if not isinstance(value, (list, tuple)):
-            raise _type_error("list or tuple", value)
-        out: list[Any] = []
-        for item in value:
-            if item is None:
-                if not nullable_elements:
-                    raise TypeError(
-                        f"{element.name}[] elements are not nullable; pass "
-                        "nullable_elements=True to allow NULL entries"
-                    )
-                out.append(None)
-            else:
-                out.append(element.coerce(item))
-        return out
+        return _core.array_coerce(
+            value, nullable_elements, element.name, element.oid, element.coerce
+        )
 
     def to_wire(value: list[Any]) -> list[Any]:
-        return [None if item is None else element.to_wire(item) for item in value]
+        return _core.map_nullable(value, element.to_wire)
 
     def from_wire(value: list[Any]) -> list[Any]:
-        return [None if item is None else element.from_wire(item) for item in value]
+        return _core.map_nullable(value, element.from_wire)
 
     return _ArrayType(
         element,
@@ -651,24 +640,7 @@ def Vector(dim: int) -> ExtensionType:
         )
 
     def coerce(value: Any) -> list[float]:
-        if not isinstance(value, (list, tuple)):
-            raise _type_error("list or tuple of floats", value)
-        if len(value) != dim:
-            raise ValueError(
-                f"vector({dim}) requires exactly {dim} values, got {len(value)}"
-            )
-        out: list[float] = []
-        for item in value:
-            if isinstance(item, bool) or not isinstance(item, (int, float)):
-                raise _type_error("float", item)
-            number = float(item)
-            if not math.isfinite(number):
-                raise ValueError(
-                    "a vector element must be finite; pgvector stores neither NaN "
-                    "nor infinity and every distance involving one is undefined"
-                )
-            out.append(number)
-        return out
+        return _core.float_sequence(value, dim, False)
 
     return ExtensionType(
         "vector", "vector", f"vector({dim})", coerce, kind=EXT_KIND_VECTOR
@@ -731,30 +703,7 @@ def Halfvec(dim: int) -> ExtensionType:
         )
 
     def coerce(value: Any) -> list[float]:
-        if not isinstance(value, (list, tuple)):
-            raise _type_error("list or tuple of floats", value)
-        if len(value) != dim:
-            raise ValueError(
-                f"halfvec({dim}) requires exactly {dim} values, got {len(value)}"
-            )
-        out: list[float] = []
-        for item in value:
-            if isinstance(item, bool) or not isinstance(item, (int, float)):
-                raise _type_error("float", item)
-            number = float(item)
-            if not math.isfinite(number):
-                raise ValueError(
-                    "a halfvec element must be finite; pgvector stores neither NaN "
-                    "nor infinity and every distance involving one is undefined"
-                )
-            if not -MAX_HALF_MAGNITUDE <= number <= MAX_HALF_MAGNITUDE:
-                raise ValueError(
-                    f"halfvec element {number!r} is outside binary16's range of "
-                    f"+/-{MAX_HALF_MAGNITUDE}; it would round to an infinity, which "
-                    "pgvector refuses. Use Vector() for values this large."
-                )
-            out.append(number)
-        return out
+        return _core.float_sequence(value, dim, True)
 
     # The extension is `vector`, not `halfvec`: one `CREATE EXTENSION vector`
     # provides both types. Naming the type here would make the not-installed error

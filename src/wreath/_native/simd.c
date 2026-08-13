@@ -127,6 +127,22 @@ run_kind(const char *kind, int arm, const char *data, ptrdiff_t len, unsigned *s
             default: return -1;
         }
     }
+    if (strcmp(kind, "dkim") == 0) {
+        switch (arm) {
+            case WREATH_ARM_SCALAR: return wreath_dkim_run_scalar(data, len);
+            case WREATH_ARM_SWAR: return wreath_dkim_run_swar(data, len);
+#if defined(WREATH_HAVE_SSE2)
+            case WREATH_ARM_SSE2: return wreath_dkim_run_sse2(data, len);
+#endif
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2: return wreath_dkim_run_avx2(data, len);
+#endif
+#if defined(WREATH_HAVE_NEON)
+            case WREATH_ARM_NEON: return wreath_dkim_run_neon(data, len);
+#endif
+            default: return -1;
+        }
+    }
     return -2;
 }
 

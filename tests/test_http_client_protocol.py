@@ -181,6 +181,26 @@ def test_the_two_request_serializers_agree() -> None:
 def test_client_module_exports_the_bound_codecs() -> None:
     assert callable(_client.serialize_request)
     assert callable(_client.parse_response_head)
+    assert callable(_client.parse_chunk_size)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    (
+        (b"0\r\n", 0),
+        (b"A;name=value\r\n", 10),
+        (b"7fffffffffffffff\r\n", 0x7FFFFFFFFFFFFFFF),
+        (b"10000000000000000\r\n", 0x10000000000000000),
+    ),
+)
+def test_chunk_size_parser_accepts_the_wire_forms(line: bytes, expected: int) -> None:
+    assert _client.parse_chunk_size(line) == expected
+
+
+@pytest.mark.parametrize("line", (b"\r\n", b"zz\r\n", b";x\r\n", b"1"))
+def test_chunk_size_parser_refuses_an_ambiguous_boundary(line: bytes) -> None:
+    with pytest.raises(ValueError, match="invalid response chunk size"):
+        _client.parse_chunk_size(line)
 
 
 def test_native_client_codec_randomized_parity() -> None:

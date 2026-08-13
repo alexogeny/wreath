@@ -410,10 +410,11 @@ def pack_value(
     """Convert one Python value into a packed argument.
 
     This is half of the Python packing; the other half is `LogCell.encode`.
-    Together they are what runs when there is no ring, when a record is
-    buffered, or when the caller is not the loop -- `wreath_nfr_log` packs
-    every other record straight into a cell. **Which is which, and why, is
-    written once at the head of the log-record section in `_flight_schema.py`.**
+    Together they serve sinks without a ring and off-loop staging.
+    `wreath_nfr_log` packs published loop records straight into a cell, while
+    request-buffered records live in a request-owned cell array.
+    **Which is which, and why, is written once at the head of the log-record
+    section in `_flight_schema.py`.**
 
     Returns the argument and whether the value failed its declared type. A
     mismatch is *counted*, never raised: a log call that can break the request

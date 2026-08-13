@@ -42,6 +42,13 @@ def test_release_distributions_share_version_and_explicit_extras() -> None:
     assert base["project"]["requires-python"] == "==3.14.*"
     assert linux["project"]["requires-python"] == "==3.14.*"
     assert http3["project"]["requires-python"] == "==3.14.*"
+    assert (ROOT / "docs" / "release_notes" / f"{version}.md").is_file()
+
+    expected_base_install = (
+        f"pip install --no-index --find-links {{package}}/wheel-deps wreath=={version}"
+    )
+    assert linux["tool"]["cibuildwheel"]["before-test"] == expected_base_install
+    assert http3["tool"]["cibuildwheel"]["before-test"] == expected_base_install
 
     extras = base["project"]["optional-dependencies"]
     assert extras == {

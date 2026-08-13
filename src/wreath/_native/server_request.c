@@ -21,6 +21,10 @@ typedef struct {
     PyObject *policy_request_id;
     PyObject *policy_csrf_token;
     PyObject *policy_csrf_config;
+    Py_ssize_t *header_index;
+    Py_ssize_t header_index_capacity;
+    Py_ssize_t header_unique_count;
+    int header_scanned;
     uint64_t policy_elapsed_ns;
     int policy_native;
     WreathPolicyState *policy_state; /* borrowed for this request lifetime */
@@ -94,6 +98,11 @@ context_clear(WreathRequestContext *self)
     Py_CLEAR(self->policy_request_id);
     Py_CLEAR(self->policy_csrf_token);
     Py_CLEAR(self->policy_csrf_config);
+    PyMem_Free(self->header_index);
+    self->header_index = NULL;
+    self->header_index_capacity = 0;
+    self->header_unique_count = 0;
+    self->header_scanned = 0;
     self->policy_state = NULL;
     return 0;
 }
@@ -166,6 +175,418 @@ context_get_headers(WreathRequestContext *self, void *closure)
 {
     (void)closure;
     return wreath_headers_materialize(self->headers);
+}
+
+static uint64_t
+context_header_hash(const char *data, Py_ssize_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (Py_ssize_t index = 0; index < length; index++) {
+        hash = (hash ^ (unsigned char)data[index]) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static uint64_t
+context_header_name_hash(PyObject *key, Py_ssize_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (Py_ssize_t index = 0; index < length; index++) {
+        unsigned char value = PyBytes_Check(key)
+            ? (unsigned char)PyBytes_AS_STRING(key)[index]
+            : (unsigned char)PyUnicode_READ_CHAR(key, index);
+        if (value >= 'A' && value <= 'Z') value += (unsigned char)('a' - 'A');
+        hash = (hash ^ value) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static int
+context_header_name_length(PyObject *key, Py_ssize_t *length)
+{
+    if (PyBytes_Check(key)) {
+        *length = PyBytes_GET_SIZE(key);
+        return 0;
+    }
+    if (!PyUnicode_Check(key)) {
+        PyErr_SetString(PyExc_TypeError, "header name must be str or bytes");
+        return -1;
+    }
+    *length = PyUnicode_GET_LENGTH(key);
+    for (Py_ssize_t index = 0; index < *length; index++) {
+        if (PyUnicode_READ_CHAR(key, index) > 255) {
+            PyObject *encoded = PyUnicode_AsLatin1String(key);
+            Py_XDECREF(encoded);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+context_header_name_equal(const char *candidate, Py_ssize_t length,
+                          PyObject *key)
+{
+    for (Py_ssize_t index = 0; index < length; index++) {
+        unsigned char wanted = PyBytes_Check(key)
+            ? (unsigned char)PyBytes_AS_STRING(key)[index]
+            : (unsigned char)PyUnicode_READ_CHAR(key, index);
+        if (wanted >= 'A' && wanted <= 'Z') wanted += (unsigned char)('a' - 'A');
+        if ((unsigned char)candidate[index] != wanted) return 0;
+    }
+    return 1;
+}
+
+static int
+context_build_header_index(WreathRequestContext *self)
+{
+    if (self->header_index != NULL) return 0;
+    Py_ssize_t count = wreath_headers_count(self->headers);
+    if (count < 0) return -1;
+    Py_ssize_t capacity = 8;
+    if (count > PY_SSIZE_T_MAX / 2) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t wanted = count * 2;
+    while (capacity < wanted) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        capacity *= 2;
+    }
+    if ((size_t)capacity > SIZE_MAX / sizeof(Py_ssize_t)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t *slots = PyMem_Malloc((size_t)capacity * sizeof(Py_ssize_t));
+    if (slots == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memset(slots, 0, (size_t)capacity * sizeof(Py_ssize_t));
+    Py_ssize_t unique = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(self->headers, index, &name, &name_size,
+                                &value, &value_size) < 0) {
+            PyMem_Free(slots);
+            return -1;
+        }
+        (void)value;
+        (void)value_size;
+        Py_ssize_t slot = (Py_ssize_t)(
+            context_header_hash(name, name_size) & (uint64_t)(capacity - 1));
+        for (;;) {
+            Py_ssize_t stored = slots[slot];
+            if (stored == 0) {
+                slots[slot] = index + 1;
+                unique++;
+                break;
+            }
+            const char *candidate;
+            const char *ignored_value;
+            Py_ssize_t candidate_size;
+            Py_ssize_t ignored_value_size;
+            if (wreath_headers_view(
+                    self->headers, stored - 1, &candidate, &candidate_size,
+                    &ignored_value, &ignored_value_size) < 0) {
+                PyMem_Free(slots);
+                return -1;
+            }
+            if (candidate_size == name_size &&
+                memcmp(candidate, name, (size_t)name_size) == 0) break;
+            slot = (slot + 1) & (capacity - 1);
+        }
+    }
+    self->header_index = slots;
+    self->header_index_capacity = capacity;
+    self->header_unique_count = unique;
+    return 0;
+}
+
+static int
+context_find_header(WreathRequestContext *self, PyObject *key,
+                    Py_ssize_t *found)
+{
+    if (!PyBytes_Check(key)) {
+        *found = -1;
+        return 0;
+    }
+    if (context_build_header_index(self) < 0) return -1;
+    const char *wanted = PyBytes_AS_STRING(key);
+    Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
+    Py_ssize_t slot = (Py_ssize_t)(
+        context_header_hash(wanted, wanted_size) &
+        (uint64_t)(self->header_index_capacity - 1));
+    for (;;) {
+        Py_ssize_t stored = self->header_index[slot];
+        if (stored == 0) {
+            *found = -1;
+            return 0;
+        }
+        const char *candidate;
+        const char *ignored_value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t ignored_value_size;
+        if (wreath_headers_view(
+                self->headers, stored - 1, &candidate, &candidate_size,
+                &ignored_value, &ignored_value_size) < 0) return -1;
+        if (candidate_size == wanted_size &&
+            memcmp(candidate, wanted, (size_t)wanted_size) == 0) {
+            *found = stored - 1;
+            return 0;
+        }
+        slot = (slot + 1) & (self->header_index_capacity - 1);
+    }
+}
+
+static int
+context_find_header_name(WreathRequestContext *self, PyObject *key,
+                         Py_ssize_t wanted_size, Py_ssize_t *found)
+{
+    if (context_build_header_index(self) < 0) return -1;
+    Py_ssize_t slot = (Py_ssize_t)(
+        context_header_name_hash(key, wanted_size) &
+        (uint64_t)(self->header_index_capacity - 1));
+    for (;;) {
+        Py_ssize_t stored = self->header_index[slot];
+        if (stored == 0) {
+            *found = -1;
+            return 0;
+        }
+        const char *candidate;
+        const char *ignored_value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t ignored_value_size;
+        if (wreath_headers_view(
+                self->headers, stored - 1, &candidate, &candidate_size,
+                &ignored_value, &ignored_value_size) < 0) return -1;
+        if (candidate_size == wanted_size &&
+            context_header_name_equal(candidate, wanted_size, key)) {
+            *found = stored - 1;
+            return 0;
+        }
+        slot = (slot + 1) & (self->header_index_capacity - 1);
+    }
+}
+
+static PyObject *
+context_header_text(WreathRequestContext *self, PyObject *const *args,
+                    Py_ssize_t nargs)
+{
+    if (nargs < 1 || nargs > 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_header_text expected 1 or 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    PyObject *key = args[0];
+    Py_ssize_t wanted_size;
+    if (context_header_name_length(key, &wanted_size) < 0) return NULL;
+    Py_ssize_t found = -1;
+    if (self->header_index == NULL && !self->header_scanned) {
+        self->header_scanned = 1;
+        Py_ssize_t count = wreath_headers_count(self->headers);
+        if (count < 0) return NULL;
+        for (Py_ssize_t index = 0; index < count; index++) {
+            const char *candidate;
+            const char *value;
+            Py_ssize_t candidate_size;
+            Py_ssize_t value_size;
+            if (wreath_headers_view(self->headers, index, &candidate,
+                                    &candidate_size, &value, &value_size) < 0) {
+                return NULL;
+            }
+            if (candidate_size == wanted_size &&
+                context_header_name_equal(candidate, wanted_size, key)) {
+                return PyUnicode_DecodeLatin1(value, value_size, NULL);
+            }
+        }
+    } else {
+        if (context_find_header_name(self, key, wanted_size, &found) < 0) return NULL;
+        if (found >= 0) {
+            const char *name;
+            const char *value;
+            Py_ssize_t name_size;
+            Py_ssize_t value_size;
+            if (wreath_headers_view(self->headers, found, &name, &name_size,
+                                    &value, &value_size) < 0) return NULL;
+            return PyUnicode_DecodeLatin1(value, value_size, NULL);
+        }
+    }
+    return Py_NewRef(nargs == 2 ? args[1] : Py_None);
+}
+
+static PyObject *
+context_header(WreathRequestContext *self, PyObject *key)
+{
+    if (!PyBytes_Check(key)) {
+        PyErr_SetString(PyExc_TypeError, "header name must be bytes");
+        return NULL;
+    }
+    const char *wanted = PyBytes_AS_STRING(key);
+    Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
+    Py_ssize_t count = wreath_headers_count(self->headers);
+    if (count < 0) return NULL;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *candidate;
+        const char *ignored_value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t ignored_value_size;
+        if (wreath_headers_view(
+                self->headers, index, &candidate, &candidate_size,
+                &ignored_value, &ignored_value_size) < 0) return NULL;
+        if (candidate_size != wanted_size ||
+            memcmp(candidate, wanted, (size_t)wanted_size) != 0) continue;
+        PyObject *value = wreath_headers_value_borrowed(self->headers, index);
+        return value == NULL ? NULL : Py_NewRef(value);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+context_header_index(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
+{
+    if (context_build_header_index(self) < 0) return NULL;
+    return Py_NewRef((PyObject *)self);
+}
+
+static PyObject *
+context_header_get(WreathRequestContext *self, PyObject *const *args,
+                   Py_ssize_t nargs)
+{
+    if (nargs < 1 || nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "get expected 1 or 2 arguments, got %zd", nargs);
+        return NULL;
+    }
+    Py_ssize_t found;
+    if (context_find_header(self, args[0], &found) < 0) return NULL;
+    if (found < 0) return Py_NewRef(nargs == 2 ? args[1] : Py_None);
+    PyObject *value = wreath_headers_value_borrowed(self->headers, found);
+    return value == NULL ? NULL : Py_NewRef(value);
+}
+
+static PyObject *
+context_set_header(WreathRequestContext *self, PyObject *args)
+{
+    PyObject *name;
+    PyObject *value;
+    if (!PyArg_UnpackTuple(args, "_set_header", 2, 2, &name, &value)) return NULL;
+    if (wreath_headers_set_first(self->headers, name, value) < 0) return NULL;
+    PyMem_Free(self->header_index);
+    self->header_index = NULL;
+    self->header_index_capacity = 0;
+    self->header_unique_count = 0;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+context_parse_cookies(WreathRequestContext *self, PyObject *args)
+{
+    Py_ssize_t limit;
+    PyObject *error_type;
+    if (!PyArg_ParseTuple(args, "nO:_parse_cookies", &limit, &error_type)) return NULL;
+    Py_ssize_t count = wreath_headers_count(self->headers);
+    if (count < 0) return NULL;
+    Py_ssize_t total = 0;
+    Py_ssize_t cookie_count = 0;
+    const char *single = NULL;
+    Py_ssize_t single_size = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(self->headers, index, &name, &name_size,
+                                &value, &value_size) < 0) return NULL;
+        if (name_size != 6 || memcmp(name, "cookie", 6) != 0) continue;
+        Py_ssize_t separator = cookie_count == 0 ? 0 : 2;
+        if (value_size > PY_SSIZE_T_MAX - total - separator) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+        total += separator + value_size;
+        cookie_count++;
+        single = value;
+        single_size = value_size;
+        if (total > limit) {
+            PyErr_Format(error_type, "Cookie headers are %zd bytes; the limit is %zd",
+                         total, limit);
+            return NULL;
+        }
+    }
+    if (cookie_count == 0) return PyDict_New();
+    if (cookie_count == 1) {
+        return core_capi->parse_cookie_data(
+            (const uint8_t *)single, single_size);
+    }
+    uint8_t *joined = PyMem_Malloc((size_t)total);
+    if (joined == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t used = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(self->headers, index, &name, &name_size,
+                                &value, &value_size) < 0) {
+            PyMem_Free(joined);
+            return NULL;
+        }
+        if (name_size != 6 || memcmp(name, "cookie", 6) != 0) continue;
+        if (used != 0) {
+            joined[used++] = ';';
+            joined[used++] = ' ';
+        }
+        memcpy(joined + used, value, (size_t)value_size);
+        used += value_size;
+    }
+    PyObject *result = core_capi->parse_cookie_data(joined, used);
+    PyMem_Free(joined);
+    return result;
+}
+
+static Py_ssize_t
+context_header_length(WreathRequestContext *self)
+{
+    if (context_build_header_index(self) < 0) return -1;
+    return self->header_unique_count;
+}
+
+static PyObject *
+context_header_subscript(WreathRequestContext *self, PyObject *key)
+{
+    Py_ssize_t found;
+    if (context_find_header(self, key, &found) < 0) return NULL;
+    if (found < 0) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    PyObject *value = wreath_headers_value_borrowed(self->headers, found);
+    return value == NULL ? NULL : Py_NewRef(value);
+}
+
+static int
+context_header_ass_subscript(WreathRequestContext *self, PyObject *key,
+                             PyObject *value)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "request headers cannot be deleted");
+        return -1;
+    }
+    if (wreath_headers_set_first(self->headers, key, value) < 0) return -1;
+    PyMem_Free(self->header_index);
+    self->header_index = NULL;
+    self->header_index_capacity = 0;
+    self->header_unique_count = 0;
+    return 0;
 }
 
 static PyObject *
@@ -461,6 +882,13 @@ static PyMethodDef context_methods[] = {
     {"_asgi_scope", (PyCFunction)context_scope, METH_NOARGS, NULL},
     {"_bearer_token", (PyCFunction)context_bearer_token, METH_NOARGS, NULL},
     {"_bearer_verify", (PyCFunction)context_bearer_verify, METH_O, NULL},
+    {"_header", (PyCFunction)context_header, METH_O, NULL},
+    {"_header_text", (PyCFunction)(void (*)(void))context_header_text,
+     METH_FASTCALL, NULL},
+    {"_header_index", (PyCFunction)context_header_index, METH_NOARGS, NULL},
+    {"get", (PyCFunction)(void (*)(void))context_header_get, METH_FASTCALL, NULL},
+    {"_set_header", (PyCFunction)context_set_header, METH_VARARGS, NULL},
+    {"_parse_cookies", (PyCFunction)context_parse_cookies, METH_VARARGS, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
     {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
@@ -501,6 +929,9 @@ static PyType_Slot context_slots[] = {
     {Py_tp_methods, (void *)context_methods},
     {Py_tp_members, (void *)context_members},
     {Py_tp_getset, (void *)context_getset},
+    {Py_mp_length, (void *)context_header_length},
+    {Py_mp_subscript, (void *)context_header_subscript},
+    {Py_mp_ass_subscript, (void *)context_header_ass_subscript},
     {0, NULL},
 };
 
@@ -632,6 +1063,10 @@ wreath_request_context_new(
     self->policy_request_id = NULL;
     self->policy_csrf_token = NULL;
     self->policy_csrf_config = NULL;
+    self->header_index = NULL;
+    self->header_index_capacity = 0;
+    self->header_unique_count = 0;
+    self->header_scanned = 0;
     self->policy_elapsed_ns = 0;
     self->policy_native = 0;
     self->policy_state = NULL;

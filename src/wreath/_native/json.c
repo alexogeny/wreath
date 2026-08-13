@@ -359,6 +359,42 @@ wreath_json_write_value(WreathBytesWriter *w, PyObject *obj, int depth)
         }
     }
 
+    /* An explicitly JSON-aware result crosses into its declared wire shape at
+     * the encoder boundary.  This used to fail the first native pass, rebuild
+     * the complete result recursively in Python through temporal.jsonable,
+     * then encode that second graph.  Looking the hook up on the type preserves
+     * the public contract (and deliberately ignores instance __getattr__), but
+     * keeps the recursive walk in this request-owned writer.  The hook is the
+     * materialization boundary: its returned Python value is consumed
+     * immediately and never cached or mutated here.  Temporal values stay
+     * above this lookup because they are common leaves and already have a
+     * resolved formatter; asking every datetime type for a missing hook added
+     * one class lookup per bucket. */
+    PyObject *hook = NULL;
+    int has_hook = PyObject_GetOptionalAttrString(
+        (PyObject *)type, "__jsonable__", &hook);
+    if (has_hook < 0) {
+        return -1;
+    }
+    if (has_hook) {
+        PyObject *materialized = PyObject_CallOneArg(hook, obj);
+        Py_DECREF(hook);
+        if (materialized == NULL) {
+            return -1;
+        }
+        if (materialized == obj) {
+            Py_DECREF(materialized);
+            PyErr_Format(
+                PyExc_TypeError,
+                "object of type %.200s returned itself from __jsonable__",
+                type->tp_name);
+            return -1;
+        }
+        int rc = wreath_json_write_value(w, materialized, depth + 1);
+        Py_DECREF(materialized);
+        return rc;
+    }
+
     PyErr_Format(PyExc_TypeError, "object of type %.100s is not JSON serializable",
                  type->tp_name);
     return -1;

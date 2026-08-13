@@ -2,6 +2,7 @@
 
 #include "../simd.h"
 #include "../byteorder.h"
+#include "../sparse_vector.h"
 
 #include "buffer.h"
 
@@ -685,62 +686,37 @@ check_sparsevec(PyObject *value)
 static PyObject *
 encode_sparsevec(PyObject *value)
 {
-    PyObject *dim_object = NULL, *indices = NULL, *values = NULL;
-    PyObject *index_seq = NULL, *value_seq = NULL, *result = NULL;
-    Py_ssize_t count;
-    long dim;
+    PyObject *capsule = NULL, *result = NULL;
+    WreathSparseVector *data;
     unsigned char *out;
 
     if (check_sparsevec(value) < 0) return NULL;
-    dim_object = PyObject_GetAttrString(value, "dim");
-    indices = PyObject_GetAttrString(value, "indices");
-    values = PyObject_GetAttrString(value, "values");
-    if (dim_object == NULL || indices == NULL || values == NULL) goto done;
-    dim = PyLong_AsLong(dim_object);
-    if (dim == -1 && PyErr_Occurred()) goto done;
-    index_seq = PySequence_Fast(indices, "sparsevec indices must be a sequence");
-    value_seq = PySequence_Fast(values, "sparsevec values must be a sequence");
-    if (index_seq == NULL || value_seq == NULL) goto done;
-    count = PySequence_Fast_GET_SIZE(index_seq);
-    if (count != PySequence_Fast_GET_SIZE(value_seq)) {
-        PyErr_SetString(PyExc_ValueError,
-                        "sparsevec indices and values differ in length");
-        goto done;
-    }
-    result = PyBytes_FromStringAndSize(NULL, 12 + count * 8);
+    capsule = PyObject_GetAttrString(value, "_data");
+    if (capsule == NULL) return NULL;
+    data = wreath_sparse_vector_get(capsule);
+    if (data == NULL) goto done;
+    result = PyBytes_FromStringAndSize(NULL, 12 + data->count * 8);
     if (result == NULL) goto done;
     out = (unsigned char *)PyBytes_AS_STRING(result);
-    wreath_store_u32_be(out, (uint32_t)dim);
-    wreath_store_u32_be(out + 4, (uint32_t)count);
+    wreath_store_u32_be(out, (uint32_t)data->dimension);
+    wreath_store_u32_be(out + 4, (uint32_t)data->count);
     wreath_store_u32_be(out + 8, 0);
-    for (Py_ssize_t index = 0; index < count; index++) {
-        long position = PyLong_AsLong(PySequence_Fast_GET_ITEM(index_seq, index));
-        double number;
-        if (position == -1 && PyErr_Occurred()) {
-            Py_CLEAR(result);
-            goto done;
-        }
-        wreath_store_u32_be(out + 12 + index * 4, (uint32_t)(position - 1));
-        number = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(value_seq, index));
-        if (number == -1.0 && PyErr_Occurred()) {
-            Py_CLEAR(result);
-            goto done;
-        }
+    for (Py_ssize_t index = 0; index < data->count; index++) {
+        wreath_store_u32_be(
+            out + 12 + index * 4, (uint32_t)(data->indices[index] - 1));
 #ifdef WREATH_PG_FAST_FLOAT4
-        write_be_float4((char *)out + 12 + count * 4 + index * 4, number);
+        write_be_float4((char *)out + 12 + data->count * 4 + index * 4,
+                        data->values[index]);
 #else
-        if (PyFloat_Pack4(number, (char *)out + 12 + count * 4 + index * 4, 0) < 0) {
+        if (PyFloat_Pack4(data->values[index],
+                          (char *)out + 12 + data->count * 4 + index * 4, 0) < 0) {
             Py_CLEAR(result);
             goto done;
         }
 #endif
     }
 done:
-    Py_XDECREF(dim_object);
-    Py_XDECREF(indices);
-    Py_XDECREF(values);
-    Py_XDECREF(index_seq);
-    Py_XDECREF(value_seq);
+    Py_XDECREF(capsule);
     return result;
 }
 

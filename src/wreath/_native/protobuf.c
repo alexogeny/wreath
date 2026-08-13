@@ -1835,6 +1835,7 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *names;
     PyObject *holders;
     PyObject *oneofs;
+    PyObject *camel_names = NULL;
     PbDescriptor *descriptor = NULL;
     PyObject *capsule = NULL;
 
@@ -1866,6 +1867,8 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
         return PyErr_NoMemory();
     }
     descriptor->names = Py_NewRef(names);
+    camel_names = PyDict_New();
+    if (camel_names == NULL) goto error;
 
     for (Py_ssize_t index = 0; index < descriptor->count; index++) {
         PyObject *row = PyTuple_GET_ITEM(plan, index);
@@ -1885,6 +1888,16 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
         field->name = Py_NewRef(PyTuple_GET_ITEM(names, index));
         field->camel = pb_camel_name(field->name);
         if (field->camel == NULL) goto error;
+        PyObject *prior_name = PyDict_GetItemWithError(camel_names, field->camel);
+        if (prior_name == NULL && PyErr_Occurred()) goto error;
+        if (prior_name != NULL) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "protobuf fields %R and %R share OTLP/JSON name %R",
+                prior_name, field->name, field->camel);
+            goto error;
+        }
+        if (PyDict_SetItem(camel_names, field->camel, field->name) < 0) goto error;
         field->holder = Py_NewRef(holder);
         field->subplan = Py_NewRef(PyTuple_GET_ITEM(row, 3));
         field->map_key_kind = -1;
@@ -1920,23 +1933,7 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
                 goto error;
         }
     }
-    for (Py_ssize_t index = 0; index < descriptor->count; index++) {
-        for (Py_ssize_t prior = 0; prior < index; prior++) {
-            int equal = PyObject_RichCompareBool(
-                descriptor->fields[prior].camel,
-                descriptor->fields[index].camel, Py_EQ);
-            if (equal < 0) goto error;
-            if (equal) {
-                PyErr_Format(
-                    PyExc_ValueError,
-                    "protobuf fields %R and %R share OTLP/JSON name %R",
-                    descriptor->fields[prior].name,
-                    descriptor->fields[index].name,
-                    descriptor->fields[index].camel);
-                goto error;
-            }
-        }
-    }
+    Py_CLEAR(camel_names);
     qsort(descriptor->lookup, (size_t)descriptor->count,
           sizeof(*descriptor->lookup), pb_lookup_compare);
     for (Py_ssize_t index = 1; index < descriptor->count; index++) {
@@ -1998,6 +1995,7 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
     return capsule;
 
 error:
+    Py_XDECREF(camel_names);
     pb_descriptor_free(descriptor);
     return NULL;
 }

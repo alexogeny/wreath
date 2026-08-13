@@ -68,6 +68,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, NamedTuple
 
+from ._native import _core
 from .store import Column, rows_affected, sql_identifier
 
 __all__ = [
@@ -784,19 +785,8 @@ class PostgresLog:
         return self._batch(rows, after)
 
     def _batch(self, rows: Sequence[Any], after: Cursor) -> Batch:
-        names = [column.name for column in self._declaration.columns]
-        records = []
-        cursor = after
-        for row in rows:
-            cursor = Cursor(int(row[0]), int(row[1]))
-            records.append(
-                Record(
-                    cursor=cursor,
-                    stream=row[2],
-                    values={name: row[3 + index] for index, name in enumerate(names)},
-                )
-            )
-        return Batch(tuple(records), cursor)
+        names = tuple(column.name for column in self._declaration.columns)
+        return _core.log_batch(rows, names, after, Cursor, Record, Batch)
 
     async def horizon(self) -> int:
         """The transaction id below which every row has settled."""

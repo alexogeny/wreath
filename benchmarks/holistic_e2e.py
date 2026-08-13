@@ -36,6 +36,9 @@ from typing import Annotated, Any
 
 from wreath import Wreath
 from wreath._devtools.sample_app import CSRF_SECRET
+from wreath._projector import ProjectorLoss, ProjectorSnapshot, RouteMetric
+from wreath._prometheus import metrics_router
+from wreath.admin import Admin
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import (
     CedarAuthorizer,
@@ -53,9 +56,16 @@ from wreath.flags import FlagView, flags_dependency
 from wreath.geospatial import BoundingBox, Coordinate, Trajectory, distance, grid
 from wreath.graphql import GraphQL
 from wreath.grpc import GrpcService, frame_message
+from wreath.health import callable_check, health_router
 from wreath.mcp import MCP, PROTOCOL_VERSION
 from wreath.metrics import Counters, flatten
 from wreath.negotiation import MSGPACK, serialize
+from wreath.organizations import (
+    InMemoryOrganizationStore,
+    Memberships,
+    Organization,
+    scim_router,
+)
 from wreath.orm import FromORM, Mapped, Model, Session, column
 from wreath.orm.types import (
     Bool,
@@ -65,9 +75,10 @@ from wreath.orm.types import (
     Int64,
     Sparsevec,
     Text,
+    TimestampTz,
     Vector,
 )
-from wreath.pagination import Page, PageParams, page_params
+from wreath.pagination import Page, PageParams, _rank_indices, page_params
 from wreath.policy import HttpPolicy
 from wreath.policy.cache import CachePolicy
 from wreath.policy.compression import CompressionPolicy
@@ -87,8 +98,10 @@ from wreath.queries import Param, Queries, query
 from wreath.quota import Quotas
 from wreath.request import UploadedFile
 from wreath.response import HTMLResponse, SSEResponse
+from wreath.rooms import RoomRegistry
 from wreath.router import Router
-from wreath.series import project_chart_spine
+from wreath.series import ChartData, Range, Series, avg, count, sum_
+from wreath.sync import Sync
 from wreath.templates import Template
 from wreath.temporal import (
     Day,
@@ -101,12 +114,30 @@ from wreath.temporal import (
     format_iso,
     relative,
     spine_length,
+    spine_lengths,
     zone,
 )
 from wreath.temporal import (
     spine as _fixture_spine,
 )
+from wreath.tenancy import (
+    InMemoryTenantDirectory,
+    Tenancy,
+    TenancyMiddleware,
+    Tenant,
+    TenantHeader,
+    current_tenant,
+)
+from wreath.users import InMemoryUserStore
 from wreath.versioning import VersionedRouter
+from wreath.webhooks import (
+    HMACWebhookSigner,
+    HMACWebhookVerifier,
+    LocalReplayStore,
+    WebhookContext,
+    WebhookEnvelope,
+)
+from wreath.workflows import InMemoryWorkflowStore, Workflow
 
 from .apps import _e2e_ensure
 
@@ -141,6 +172,7 @@ class Arm:
     body: bytes = b""
     http_version: str = "1.1"
     setup: str | None = None
+    driver: str = "http"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +234,24 @@ class IncidentProjection(Model, table="incident_projections"):
     terms: Mapped[SparseVector] = column(
         Sparsevec(30_000), index="hnsw", index_ops="sparsevec_l2_ops"
     )
+
+
+class ActivityReading(Model, table="activity_readings"):
+    """Source rows for the declared calculated-series arm."""
+
+    id: Mapped[int] = column(Int64, primary_key=True)
+    account_id: Mapped[int] = column(Int64)
+    tenant: Mapped[str] = column(Text)
+    happened_at: Mapped[datetime.datetime] = column(TimestampTz)
+    requests: Mapped[float] = column(Float64)
+    latency: Mapped[float] = column(Float64)
+
+
+@dataclass(frozen=True, slots=True)
+class FieldObservation:
+    account_id: Annotated[int, Field(ge=1)]
+    station: Annotated[str, Field(min_length=3, max_length=32)]
+    severity: Annotated[int, Field(ge=1, le=5)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +340,7 @@ _SERIES_SPARSE = {
     }
     for tenant in range(48)
 }
+_SERIES_DATA = ChartData(_SERIES_BUCKETS, _SERIES_SPARSE, _SERIES_FILLS)
 _DEPOT = Coordinate(lat=-27.4698, lon=153.0251)
 _SITE = Coordinate(lat=-33.8688, lon=151.2093)
 _HOURLY_START = Instant.of(datetime.datetime(2026, 3, 20, 11, tzinfo=datetime.UTC))
@@ -310,6 +361,98 @@ _TRAJECTORY = Trajectory(
     for index, bucket in enumerate(_SERIES_BUCKETS)
 )
 
+_ACTIVITY_START = datetime.datetime(2026, 2, 1, tzinfo=datetime.UTC)
+_ACTIVITY_END = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
+_ACTIVITY_RANGE = Range(_ACTIVITY_START, _ACTIVITY_END)
+_ACTIVITY_VIEW = (
+    Series(
+        ActivityReading,
+        at=ActivityReading.happened_at,
+        bucket=Day,
+        stored_in=_SERIES_ZONE,
+    )
+    .where(ActivityReading.account_id == Param("account_id"))
+    .measure(
+        samples=count(),
+        requests=sum_(ActivityReading.requests, unit="requests"),
+        latency=avg(ActivityReading.latency, unit="ms"),
+    )
+    .by(ActivityReading.tenant, top=3)
+)
+_ACTIVITY_ROWS = tuple(
+    (
+        _ACTIVITY_START + datetime.timedelta(days=day),
+        f"tenant-{tenant:02d}",
+        False,
+        1,
+        float(800 + tenant * 37 + day * 11),
+        14.0 + tenant * 2.5 + math.sin(day / 3.0),
+    )
+    for day in range((_ACTIVITY_END - _ACTIVITY_START).days)
+    for tenant in range(3)
+)
+
+_TENANT_DIRECTORY = InMemoryTenantDirectory((Tenant("acme", "tenant_acme", "tenant_acme_role"),))
+_TENANCY = Tenancy(directory=_TENANT_DIRECTORY, source=TenantHeader("x-tenant"))
+_ORGANIZATIONS = InMemoryOrganizationStore(
+    roles={"admin", "member", "billing"},
+    organizations=(Organization("acme", "Acme Field Operations"),),
+)
+_USERS = InMemoryUserStore()
+_MEMBERSHIPS = Memberships(_ORGANIZATIONS)
+
+_REPORT_WORKFLOW = Workflow("operations-report")
+
+
+@_REPORT_WORKFLOW.step
+def validate_report(context: Any) -> dict[str, Any]:
+    return {"account_id": 42, "validated": True}
+
+
+@_REPORT_WORKFLOW.step
+async def reserve_projection(context: Any) -> dict[str, Any]:
+    return {"slots": 12, "region": "au-east"}
+
+
+@_REPORT_WORKFLOW.step
+def publish_report(context: Any) -> dict[str, Any]:
+    return {"published": True, "format": "operations-summary"}
+
+
+class _MetricSource:
+    """Stable projector snapshot for the operational metrics arm."""
+
+    __slots__ = ("_snapshot",)
+
+    def __init__(self) -> None:
+        buckets = [0] * 64
+        buckets[8] = 72_000
+        buckets[11] = 8_000
+        self._snapshot = ProjectorSnapshot(
+            assembled=80_000,
+            recent=(),
+            failures=(),
+            routes=(
+                RouteMetric(
+                    route_id=42,
+                    count=80_000,
+                    errors=17,
+                    duration_us_sum=48_000_000,
+                    duration_us_max=18_500,
+                    buckets=buckets,
+                ),
+            ),
+            loss=ProjectorLoss(),
+            pending=3,
+        )
+
+    def snapshot(self) -> ProjectorSnapshot:
+        return self._snapshot
+
+
+_METRIC_SOURCE = _MetricSource()
+_ROOMS = RoomRegistry()
+
 _CEDAR = CedarPolicies(
     """
     @id("authenticated-render")
@@ -325,14 +468,34 @@ _CEDAR = CedarPolicies(
     @id("mcp-inspect")
     permit(principal, action == Action::"Operations::inspect", resource);
 
+    @id("tenant-operations")
+    permit(principal, action == Action::"tenant_read", resource)
+      when { context.organizations.contains("acme") &&
+             context.org_roles.contains("acme:admin") };
+
+    @id("directory-read")
+    permit(principal == User::"operations-directory",
+           action == Action::"scim_read",
+           resource == Organization::"acme");
+
+    @id("directory-write")
+    permit(principal == User::"operations-directory",
+           action == Action::"scim_write",
+           resource == Organization::"acme");
+
     @id("post-only")
-    forbid(principal, action, resource)
+    forbid(principal, action == Action::"render", resource)
       unless { context.method == "POST" };
     """
 )
 
 
 async def _verify(token: str) -> Identity | None:
+    if token == "operations-directory":
+        return Identity(
+            "operations-directory",
+            permissions=frozenset({"operations:access"}),
+        )
     if token != "holistic-user":
         return None
     return Identity(
@@ -349,6 +512,8 @@ async def _verify(token: str) -> Identity | None:
                 "imports:write",
                 "mcp:use",
                 "operations:access",
+                "admin:read",
+                "sync:read",
             }
         ),
     )
@@ -387,6 +552,12 @@ class _HolisticDatabase:
 
 _QUOTAS = Quotas()
 _REQUEST_QUOTA = _QUOTAS.declare("operations_requests", limit=1_000_000_000, period="P30D")
+
+
+def _csrf_exempt(request: Any) -> bool:
+    return request.method == "POST" and request.path == "/v1/webhooks/field-observations"
+
+
 _HTTP_POLICY = HttpPolicy(
     proxy=ProxyPolicy(trusted=["127.0.0.1"]),
     trusted_host=TrustedHostPolicy(
@@ -401,7 +572,7 @@ _HTTP_POLICY = HttpPolicy(
     request_id=RequestIdPolicy(),
     server_timing=ServerTimingPolicy(),
     cors=CorsPolicy(allow_origins=["https://example.com"]),
-    csrf=CsrfPolicy(CSRF_SECRET, secure=False),
+    csrf=CsrfPolicy(CSRF_SECRET, secure=False, exempt=_csrf_exempt),
     security_headers=SecurityHeadersPolicy(
         content_security_policy="default-src 'self'; frame-ancestors 'none'",
         permissions_policy="geolocation=()",
@@ -418,12 +589,14 @@ _HTTP_POLICY = HttpPolicy(
     ),
 )
 app = Wreath(http_policy=_HTTP_POLICY)
+app.add_global_middleware(TenancyMiddleware(_TENANCY, optional=True))
 _FLAGS = app.flags(dense_dashboard=True, compact_exports="50%")
 _FLAGS_DEPENDENCY = flags_dependency(_FLAGS)
 _AUTHORIZER = CedarAuthorizer(
     engine=_CEDAR,
     flags=_FLAGS,
     quota=_QUOTAS,
+    organizations=_MEMBERSHIPS,
 )
 app.configure_auth(BearerTokenBackend(_verify), _AUTHORIZER)
 
@@ -434,8 +607,90 @@ _DATABASE = _HolisticDatabase()
 app._databases[_DATABASE.name] = _DATABASE
 _REGISTRY = app.orm(
     database=_DATABASE.name,
-    models=[OperationsAccount],
+    models=[OperationsAccount, ActivityReading],
     validate_schema="off",
+)
+
+
+@app.on_startup
+async def _seed_enterprise_fixtures(application: Wreath) -> None:
+    user = await _USERS.get_by_email("holistic-user@example.com")
+    if user is None:
+        user = await _USERS.create("holistic-user@example.com", "benchmark-disabled")
+    await _ORGANIZATIONS.add_member("acme", user.id, roles=("member",))
+    await _ORGANIZATIONS.add_member(
+        "acme",
+        "holistic-user",
+        roles=("admin", "billing"),
+    )
+
+
+class _SeriesSession:
+    """Declared SQL plus deterministic rows from the benchmark PostgreSQL peer."""
+
+    registry = _REGISTRY
+
+    async def declared(self, sql: str, values: tuple[Any, ...]) -> list[Any]:
+        state = await _e2e_ensure()
+        await state["connection"].fetch("select $1::int4", 42)
+        return list(_ACTIVITY_ROWS)
+
+
+class _AdminSession:
+    """One generated-admin read backed by the same measured wire round trip."""
+
+    async def get(self, model: type, primary_key: Any) -> HolisticView | None:
+        state = await _e2e_ensure()
+        rows = await state["connection"].fetch("select $1::int4", int(primary_key))
+        if not rows:
+            return None
+        return HolisticView(
+            id=int(primary_key),
+            account_id=42,
+            sequence=730,
+            title="Acme operational intelligence",
+            trace="admin-holistic-42",
+            session="operator-session",
+            active=True,
+            total=49.75,
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class _SyncSession:
+    """A bounded query answer for the declarative sync snapshot."""
+
+    async def fetch(self, query: Any) -> list[OperationsAccount]:
+        state = await _e2e_ensure()
+        await state["connection"].fetch("select $1::int4", 42)
+        return [OperationsAccount(id=index) for index in range(31, 43)]
+
+
+_ACCOUNT_SYNC = Sync(OperationsAccount, max_rows=64)
+
+
+@_ACCOUNT_SYNC.shape("mine")
+def _my_accounts(principal: Any) -> Any:
+    return OperationsAccount.select().limit(12)
+
+
+def _open_admin_session(request: Any) -> _AdminSession:
+    return _AdminSession()
+
+
+_ADMIN = Admin(
+    _open_admin_session,
+    authorize=Access.permissions("admin:read"),
+    title="Operations administration",
+)
+_ADMIN.register(
+    HolisticView,
+    slug="operations-view",
+    label="Operations view",
+    list_columns=("id", "account_id", "title", "active", "total"),
+    operations=("list", "retrieve"),
 )
 
 _API = VersionedRouter()
@@ -481,17 +736,15 @@ async def holistic(
         active=(payload.labels.get("active", False) and feature_flags.enabled("dense_dashboard")),
         total=total,
     )
-    daily_count = spine_length(_SERIES_START, _SERIES_END, bucket=Day, in_zone=_SERIES_ZONE)
+    daily_count = len(_SERIES_BUCKETS)
     hourly_count = spine_length(_HOURLY_START, _HOURLY_END, bucket=Hour, in_zone=_SERIES_ZONE)
-    weekly_count = spine_length(_SERIES_START, _SERIES_END, bucket=Week, in_zone=_SERIES_ZONE)
-    monthly_count = spine_length(_SERIES_START, _SERIES_END, bucket=Month, in_zone=_SERIES_ZONE)
-    series_count, series_keys, paths, ticks = project_chart_spine(
+    weekly_count, monthly_count = spine_lengths(
         _SERIES_START,
         _SERIES_END,
-        bucket=Day,
+        buckets=(Week, Month),
         in_zone=_SERIES_ZONE,
-        sparse=_SERIES_SPARSE,
-        fills=_SERIES_FILLS,
+    )
+    series_count, series_keys, paths, tick_text, tick_count = _SERIES_DATA.project_chart_text(
         downsample_rows=range(0, 24, 3),
         full_rows=(1, 3, 5),
         threshold=128,
@@ -516,24 +769,16 @@ async def holistic(
         compact_embedding=embedding,
         terms=terms,
     )
-    ranked = sorted(
-        (
-            {
-                "id": index + 1,
-                "score": abs(embedding[index % len(embedding)]),
-                "tenant": series_keys[index][0],
-            }
-            for index in range(48)
-        ),
-        key=lambda item: item["score"],
-    )
     reverse = pagination.sort == ("-score",)
-    if reverse:
-        ranked.reverse()
-    start = (pagination.page - 1) * pagination.size
+    candidate_count = 48
+    scores = tuple(abs(embedding[index]) for index in range(candidate_count))
+    selected = _rank_indices(scores, page=pagination.page, size=pagination.size, descending=reverse)
     incident_page = Page(
-        ranked[start : start + pagination.size],
-        total=len(ranked),
+        tuple(
+            {"id": index + 1, "score": scores[index], "tenant": series_keys[index][0]}
+            for index in selected
+        ),
+        total=candidate_count,
         page=pagination.page,
         size=pagination.size,
     )
@@ -566,13 +811,13 @@ async def holistic(
                 {
                     "dense_cells": daily_count * series_count,
                     "paths": len(paths),
-                    "ticks": sum(len(axis) for axis in ticks),
+                    "ticks": tick_count,
                 },
             ),
             Counters(
                 "retrieval",
                 "incidents",
-                {"candidates": len(ranked), "sparse_terms": len(projection.terms)},
+                {"candidates": candidate_count, "sparse_terms": len(projection.terms)},
             ),
         ),
         namespace="holistic",
@@ -603,13 +848,179 @@ async def holistic(
             "msgpack_bytes": len(messagepack_blob),
             "metric_count": len(counters),
             "chart_path": "".join(paths),
-            "chart_ticks": ";".join(",".join(f"{tick:g}" for tick in axis) for axis in ticks),
+            "chart_ticks": tick_text,
         }
     )
     return HTMLResponse(
         document,
         background=BackgroundTask(_record_report_projection, export),
     )
+
+
+# -- calculated series ------------------------------------------------------
+
+
+@_V1.get("/accounts/{account_id}/activity-series")
+@permissions("operations:access")
+async def account_activity_series(
+    request: Any,
+    account_id: Annotated[int, Path()],
+) -> dict[str, Any]:
+    result = await _ACTIVITY_VIEW.run(
+        _SeriesSession(),
+        account_id=account_id,
+        range=_ACTIVITY_RANGE,
+        zone=_SERIES_ZONE,
+    )
+    return result.as_dict()
+
+
+# -- tenancy and organizations ---------------------------------------------
+
+
+@_V1.get("/enterprise/accounts/{account_id}")
+@authorize(action="tenant_read", resource='Organization::"acme"')
+async def enterprise_account(
+    request: Any,
+    account_id: Annotated[int, Path()],
+) -> dict[str, Any]:
+    tenant = current_tenant()
+    memberships = _MEMBERSHIPS.for_request(request)
+    return {
+        "account_id": account_id,
+        "tenant": tenant.key,
+        "schema": tenant.schema,
+        "organizations": [membership.organization for membership in memberships],
+        "roles": sorted(
+            role for membership in memberships for role in membership.qualified_roles()
+        ),
+    }
+
+
+# -- generated administration ---------------------------------------------
+
+
+_V1.include_router(_ADMIN.router("/admin"))
+
+
+# -- organization provisioning ---------------------------------------------
+
+
+_V1.include_router(
+    scim_router(
+        app,
+        users=_USERS,
+        organizations=_ORGANIZATIONS,
+        organization="acme",
+        prefix="/scim/v2",
+        page_size=20,
+        max_page_size=100,
+    )
+)
+
+
+# -- bounded sync snapshot --------------------------------------------------
+
+
+@_V1.get("/sync/accounts/mine")
+@permissions("sync:read")
+async def sync_accounts(request: Any) -> Any:
+    snapshot = await _ACCOUNT_SYNC.evaluate(_SyncSession(), "mine", request.identity)
+    return snapshot
+
+
+# -- live room --------------------------------------------------------------
+
+
+@_V1.websocket("/live/accounts/{account_id}", permissions=("events:read",))
+async def live_account_room(websocket: Any) -> None:
+    room = f"account:{websocket.path_params['account_id']}"
+    await websocket.accept()
+    await _ROOMS.join(room, websocket)
+    try:
+        async for payload in websocket:
+            await _ROOMS.broadcast(room, payload)
+    finally:
+        await _ROOMS.leave(room, websocket)
+
+
+# -- workflow ---------------------------------------------------------------
+
+
+@_V1.post("/workflows/reports")
+@permissions("documents:render")
+async def run_report_workflow(request: Any) -> dict[str, Any]:
+    outcome = await _REPORT_WORKFLOW.run(
+        store=InMemoryWorkflowStore(),
+        key="operations-report:42",
+    )
+    return {
+        "key": outcome.key,
+        "state": outcome.state,
+        "completed": outcome.completed,
+        "results": outcome.results,
+    }
+
+
+# -- signed webhook ---------------------------------------------------------
+
+
+_WEBHOOK_KEYS = {"operations": b"holistic-webhook-secret-material-2026"}
+_WEBHOOK_HUB = app.webhooks("holistic-operations")
+_WEBHOOK_SOURCE = _WEBHOOK_HUB.source(
+    "field-units",
+    path="/v1/webhooks/field-observations",
+    verifier=HMACWebhookVerifier(_WEBHOOK_KEYS, max_age=10 * 365 * 24 * 60 * 60),
+    replay=LocalReplayStore(max_entries=100_000, ttl=10 * 60),
+)
+
+
+@_WEBHOOK_SOURCE.event("field.observation", payload=FieldObservation)
+async def receive_field_observation(
+    context: WebhookContext,
+    observation: FieldObservation,
+) -> None:
+    protobuf_encode(
+        OperationsExport(
+            account_id=observation.account_id,
+            bucket_count=observation.severity,
+            incident_ids=[],
+            similarity_scores=[],
+            generated_at=context.envelope.timestamp.isoformat(),
+        )
+    )
+
+
+# -- operational endpoints --------------------------------------------------
+
+
+async def _database_ready() -> dict[str, Any]:
+    state = await _e2e_ensure()
+    rows = await state["connection"].fetch("select $1::int4", 42)
+    return {"value": rows[0][0]}
+
+
+async def _upstream_ready() -> dict[str, Any]:
+    state = await _e2e_ensure()
+    response = await state["client"].get("/data")
+    return {"upstream_status": response.status}
+
+
+_V1.include_router(
+    health_router(
+        (
+            callable_check("postgres", _database_ready),
+            callable_check("operations-service", _upstream_ready, critical=False),
+        )
+    )
+)
+_V1.include_router(
+    metrics_router(
+        _METRIC_SOURCE,
+        namespace="wreath_holistic",
+        route_labels={42: {"method": "POST", "path": "/v1/holistic/{item_id}"}},
+    )
+)
 
 
 # -- GraphQL ---------------------------------------------------------------
@@ -821,6 +1232,15 @@ async def operation_events(request: Any) -> SSEResponse:
 # One access declaration covers the complete versioned surface. Individual
 # routes add the narrower role, permission and Cedar controls above.
 app.include_router(_API.router(), permissions=("operations:access",))
+app.enable_api_docs(
+    path="/v1/docs",
+    spec_path="/v1/openapi.json",
+    environments=None,
+    permissions=("operations:access",),
+    try_it_out=True,
+    title="Wreath operations intelligence",
+    version="1.0.0",
+)
 
 
 _COMMON_GET_HEADERS = {
@@ -869,6 +1289,26 @@ _MULTIPART_BODY = (
     b"--wreath-holistic-boundary--\r\n"
 )
 _GRPC_BODY = frame_message(protobuf_encode(OperationsQuery(account_id=42, include_vectors=True)))
+_WEBHOOK_BODY = b'{"account_id":42,"station":"field-unit-7","severity":3}'
+_WEBHOOK_ENVELOPE = WebhookEnvelope(
+    id="field-observation-baseline",
+    type="field.observation",
+    version="1",
+    timestamp=datetime.datetime(2026, 8, 13, 0, 0, tzinfo=datetime.UTC),
+    content_type="application/json",
+    body=_WEBHOOK_BODY,
+)
+_WEBHOOK_HEADERS = {
+    **_COMMON_GET_HEADERS,
+    "Content-Type": "application/json",
+    **{
+        name.decode("ascii"): value.decode("ascii")
+        for name, value in HMACWebhookSigner(
+            _WEBHOOK_KEYS,
+            key_id="operations",
+        ).headers(_WEBHOOK_ENVELOPE)
+    },
+}
 
 ARMS: dict[str, Arm] = {
     "dashboard": Arm(REQUEST_METHOD, REQUEST_PATH, REQUEST_HEADERS, REQUEST_BODY),
@@ -941,4 +1381,56 @@ ARMS: dict[str, Arm] = {
         http_version="2",
     ),
     "sse": Arm("GET", "/v1/events", _COMMON_GET_HEADERS),
+    "series-live": Arm(
+        "GET",
+        "/v1/accounts/42/activity-series",
+        _COMMON_GET_HEADERS,
+    ),
+    "enterprise": Arm(
+        "GET",
+        "/v1/enterprise/accounts/42",
+        {**_COMMON_GET_HEADERS, "X-Tenant": "acme"},
+    ),
+    "admin-detail": Arm(
+        "GET",
+        "/v1/admin/operations-view/42",
+        _COMMON_GET_HEADERS,
+    ),
+    "scim-search": Arm(
+        "GET",
+        "/v1/scim/v2/Users?filter=userName%20eq%20%22holistic-user@example.com%22",
+        {
+            "Authorization": "Bearer operations-directory",
+            "Accept": "application/scim+json",
+            "Host": "operations.example.com",
+        },
+    ),
+    "sync-snapshot": Arm(
+        "GET",
+        "/v1/sync/accounts/mine",
+        _COMMON_GET_HEADERS,
+    ),
+    "websocket-room": Arm(
+        "WEBSOCKET",
+        "/v1/live/accounts/42",
+        _COMMON_GET_HEADERS,
+        b'{"event":"status","sequence":730}',
+        driver="websocket",
+    ),
+    "signed-webhook": Arm(
+        "POST",
+        "/v1/webhooks/field-observations",
+        _WEBHOOK_HEADERS,
+        _WEBHOOK_BODY,
+        driver="signed-webhook",
+    ),
+    "workflow": Arm(
+        "POST",
+        "/v1/workflows/reports",
+        _COMMON_POST_HEADERS,
+        b"{}",
+    ),
+    "readiness": Arm("GET", "/v1/ready", _COMMON_GET_HEADERS),
+    "metrics": Arm("GET", "/v1/metrics", _COMMON_GET_HEADERS),
+    "openapi": Arm("GET", "/v1/openapi.json", _COMMON_GET_HEADERS),
 }

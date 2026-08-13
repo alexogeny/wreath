@@ -229,42 +229,25 @@ class AttemptRecord:
     arguments: tuple[tuple[str, str], ...] = ()
 
     def encode(self) -> bytes:
-        body = bytearray(
-            _ATTEMPT_FIXED.pack(
-                self.job_id,
-                self.fence,
-                self.attempt,
-                self.max_attempts,
-                self.argument_count,
-                len(self.boundaries),
-            )
+        return _core.attempt_encode(
+            self.job_id,
+            self.fence,
+            self.attempt,
+            self.max_attempts,
+            self.argument_count,
+            self.boundaries,
+            (
+                self.queue,
+                self.task,
+                self.tenant,
+                self.dedup_key,
+                self.trace_context,
+                str(self.outcome),
+                self.error_type,
+                self.error_message[:MAX_ERROR_MESSAGE],
+            ),
+            self.arguments,
         )
-        for text in (
-            self.queue,
-            self.task,
-            self.tenant,
-            self.dedup_key,
-            self.trace_context,
-            str(self.outcome),
-            self.error_type,
-            self.error_message[:MAX_ERROR_MESSAGE],
-        ):
-            body += _text(text)
-        for event in self.boundaries:
-            body += _BOUNDARY_FIXED.pack(event.seam, event.coordinate)
-            body += _text(event.target) + _text(event.error_type)
-        # Appended after the boundaries rather than folded into the fixed
-        # header, the same way the footer's attempt count was appended rather
-        # than widening the footer: a record written before argument capture
-        # existed simply runs out of bytes here, and the decoder below reads
-        # this section only when there are any.
-        if self.arguments:
-            body += struct.pack("<I", len(self.arguments))
-            for name, value in self.arguments:
-                body += _text(name) + _text(value)
-        total = _ATTEMPT_HEADER.size + len(body)
-        header = _ATTEMPT_HEADER.pack(_ATTEMPT_MAGIC, _ATTEMPT_VERSION, 0, 0, total)
-        return header + bytes(body)
 
     @classmethod
     def decode(cls, payload: bytes) -> AttemptRecord:
@@ -274,73 +257,7 @@ class AttemptRecord:
         refuses: every boundary after the tear is missing and nothing in the
         bytes says how many there were.
         """
-        if len(payload) < _ATTEMPT_HEADER.size:
-            raise SchemaError(
-                f"attempt recording is truncated: {len(payload)} bytes is shorter "
-                f"than its {_ATTEMPT_HEADER.size}-byte header"
-            )
-        magic, version, flags, _reserved, total = _ATTEMPT_HEADER.unpack_from(payload, 0)
-        if magic != _ATTEMPT_MAGIC:
-            raise SchemaError(f"not an attempt recording: bad record magic {magic!r}")
-        if version != _ATTEMPT_VERSION:
-            raise SchemaError(f"unsupported attempt record version {version}")
-        if flags & _ATTEMPT_FLAG_CONTINUED:
-            raise SchemaError(
-                "attempt recording is chunked across records; it is refused rather "
-                "than joined, because a partially assembled attempt reports fewer "
-                "boundaries than the attempt crossed and reads as complete"
-            )
-        if total != len(payload):
-            raise SchemaError(
-                f"attempt recording is truncated: it declares {total} bytes and "
-                f"holds {len(payload)}"
-            )
-        offset = _ATTEMPT_HEADER.size
-        (
-            job_id, fence, attempt, max_attempts, argument_count, boundary_count,
-        ) = _ATTEMPT_FIXED.unpack_from(payload, offset)
-        offset += _ATTEMPT_FIXED.size
-        texts: list[str] = []
-        for _ in range(8):
-            text, offset = _read_text(payload, offset)
-            texts.append(text)
-        queue, task, tenant, dedup_key, trace, outcome, error_type, message = texts
-        boundaries: list[BoundaryEvent] = []
-        for _ in range(boundary_count):
-            seam, coordinate = _BOUNDARY_FIXED.unpack_from(payload, offset)
-            offset += _BOUNDARY_FIXED.size
-            target, offset = _read_text(payload, offset)
-            failure, offset = _read_text(payload, offset)
-            boundaries.append(BoundaryEvent(seam, target, coordinate, failure))
-        arguments: list[tuple[str, str]] = []
-        if offset < len(payload):
-            if offset + 4 > len(payload):
-                raise SchemaError(
-                    "attempt recording is truncated inside its argument count"
-                )
-            (argument_fields,) = struct.unpack_from("<I", payload, offset)
-            offset += 4
-            for _ in range(argument_fields):
-                name, offset = _read_text(payload, offset)
-                captured, offset = _read_text(payload, offset)
-                arguments.append((name, captured))
-        return cls(
-            job_id=job_id,
-            queue=queue,
-            task=task,
-            attempt=attempt,
-            max_attempts=max_attempts,
-            tenant=tenant,
-            dedup_key=dedup_key,
-            fence=fence,
-            trace_context=trace,
-            boundaries=tuple(boundaries),
-            outcome=outcome,
-            error_type=error_type,
-            error_message=message,
-            argument_count=argument_count,
-            arguments=tuple(arguments),
-        )
+        return _core.attempt_decode(payload, SchemaError, BoundaryEvent, cls)
 
 
 # --- the workflow-step record kind -------------------------------------------
@@ -437,15 +354,11 @@ class WorkflowStepRecord:
     compensations: tuple[tuple[str, str], ...] = ()
 
     def encode(self) -> bytes:
-        body = bytearray(
-            _STEP_FIXED.pack(
-                self.position,
-                len(self.boundaries),
-                len(self.compensations),
-                self.completed_before,
-            )
-        )
-        for text in (
+        return _core.step_encode(
+            self.position,
+            self.boundaries,
+            self.completed_before,
+            self.compensations,
             self.instance,
             self.workflow,
             self.step,
@@ -455,15 +368,7 @@ class WorkflowStepRecord:
             str(self.outcome),
             self.error_type,
             self.error_message[:MAX_ERROR_MESSAGE],
-        ):
-            body += _text(text)
-        for event in self.boundaries:
-            body += _BOUNDARY_FIXED.pack(event.seam, event.coordinate)
-            body += _text(event.target) + _text(event.error_type)
-        for name, state in self.compensations:
-            body += _text(name) + _text(state)
-        total = _STEP_HEADER.size + len(body)
-        return _STEP_HEADER.pack(_STEP_MAGIC, _STEP_VERSION, 0, 0, total) + bytes(body)
+        )
 
     @classmethod
     def decode(cls, payload: bytes) -> WorkflowStepRecord:
@@ -474,64 +379,7 @@ class WorkflowStepRecord:
         compensation list is missing entries nobody can enumerate -- and *those*
         are the entries the record exists for.
         """
-        if len(payload) < _STEP_HEADER.size:
-            raise SchemaError(
-                f"workflow-step recording is truncated: {len(payload)} bytes is "
-                f"shorter than its {_STEP_HEADER.size}-byte header"
-            )
-        magic, version, flags, _reserved, total = _STEP_HEADER.unpack_from(payload, 0)
-        if magic != _STEP_MAGIC:
-            raise SchemaError(f"not a workflow-step recording: bad record magic {magic!r}")
-        if version != _STEP_VERSION:
-            raise SchemaError(f"unsupported workflow-step record version {version}")
-        if flags & _STEP_FLAG_CONTINUED:
-            raise SchemaError(
-                "workflow-step recording is chunked across records; it is refused "
-                "rather than joined, because a partially assembled step reports "
-                "fewer compensations than the saga ran and reads as complete"
-            )
-        if total != len(payload):
-            raise SchemaError(
-                f"workflow-step recording is truncated: it declares {total} bytes "
-                f"and holds {len(payload)}"
-            )
-        offset = _STEP_HEADER.size
-        position, boundary_count, compensation_count, completed_before = (
-            _STEP_FIXED.unpack_from(payload, offset)
-        )
-        offset += _STEP_FIXED.size
-        texts: list[str] = []
-        for _ in range(9):
-            text, offset = _read_text(payload, offset)
-            texts.append(text)
-        instance, workflow, step, after, tenant, trace, outcome, kind, message = texts
-        boundaries: list[BoundaryEvent] = []
-        for _ in range(boundary_count):
-            seam, coordinate = _BOUNDARY_FIXED.unpack_from(payload, offset)
-            offset += _BOUNDARY_FIXED.size
-            target, offset = _read_text(payload, offset)
-            failure, offset = _read_text(payload, offset)
-            boundaries.append(BoundaryEvent(seam, target, coordinate, failure))
-        compensations: list[tuple[str, str]] = []
-        for _ in range(compensation_count):
-            name, offset = _read_text(payload, offset)
-            state, offset = _read_text(payload, offset)
-            compensations.append((name, state))
-        return cls(
-            instance=instance,
-            workflow=workflow,
-            step=step,
-            position=position,
-            after=after,
-            tenant=tenant,
-            trace_context=trace,
-            boundaries=tuple(boundaries),
-            outcome=outcome,
-            error_type=kind,
-            error_message=message,
-            completed_before=completed_before,
-            compensations=tuple(compensations),
-        )
+        return _core.step_decode(payload, SchemaError, BoundaryEvent, cls)
 
 
 def read_step_recording(data: bytes) -> WorkflowStepRecord:

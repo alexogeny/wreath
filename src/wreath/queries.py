@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from typing import Any, TypeVar, get_args, get_origin
 
+from ._native import _core
 from .orm.compiler import (
     _bind_cached_plan,
     check_predicate_columns,
@@ -758,11 +759,7 @@ def _fused_order(rankings: tuple[tuple[Any, ...], ...], k: int) -> list[Any]:
     looking wrong: a scoring mistake still returns plausible rows in a plausible
     order, and only a hand-computed expectation catches it.
     """
-    scores: dict[Any, float] = {}
-    for ranking in rankings:
-        for rank, key in enumerate(ranking, 1):
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
-    return sorted(scores, key=lambda key: (-scores[key], key))
+    return _core.fused_order(rankings, k)
 
 
 def _check_named(

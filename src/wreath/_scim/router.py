@@ -409,9 +409,6 @@ def scim_router(
                 raise PatchError(
                     "invalidValue", "every group member needs a string 'value'"
                 )
-            # Appended without a de-duplication pass: `wanted` is only ever
-            # asked whether it *contains* an id, and a list that answers that
-            # correctly twice is not worth a second loop to shorten.
             wanted.append(value)
         held = await membership_map(org)
         for user_id in wanted:
@@ -421,8 +418,9 @@ def scim_router(
                     f"user {user_id!r} is not a member of this organization, so "
                     "they cannot be given a role in it; provision the user first",
                 )
+        wanted_ids = set(wanted)
         for user_id, roles in held.items():
-            should_hold = user_id in wanted
+            should_hold = user_id in wanted_ids
             if should_hold == (role in roles):
                 continue
             next_roles = (roles | {role}) if should_hold else (roles - {role})

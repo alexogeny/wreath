@@ -520,6 +520,39 @@ async def test_wreath_native_request_context_materializes_compatible_scope() -> 
     assert "wreath.response" in observed[0]["extensions"]
 
 
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_wreath_native_request_headers_stay_native_until_public_read() -> None:
+    app = Wreath()
+
+    @app.get("/headers")
+    async def header_handler(request: Any) -> Response:
+        assert request._scope is None
+        index = request._index_headers()
+        assert len(index) == 3
+        assert index[b"x-value"] == b"first"
+        assert index.get(b"missing") is None
+        assert request.cookies == {"a": "1", "b": "2"}
+        request._set_header(b"host", b"updated.example")
+        assert request.header("host") == "updated.example"
+        assert request._scope is None
+        assert request.headers[0] == (b"host", b"updated.example")
+        return Response(b"ok")
+
+    transport = await drive(
+        _NativeHttpProtocol,
+        app,
+        [
+            b"GET /headers HTTP/1.1\r\n"
+            b"Host: original.example\r\n"
+            b"X-Value: first\r\n"
+            b"X-Value: second\r\n"
+            b"Cookie: a=1; b=2\r\n\r\n"
+        ],
+    )
+    assert b"200 OK" in transport.buffer
+
+
 # --- fixed body -------------------------------------------------------------
 
 FIXED = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"

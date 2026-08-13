@@ -10,10 +10,8 @@ Dates, times, datetimes, and durations encode as ISO-8601 strings, so a handler
 never writes `.isoformat()` by hand and two endpoints cannot spell the same
 moment differently. An object that defines `__jsonable__` is asked how it
 would like to be encoded, which is how a result type goes back from a handler
-without the caller unwrapping it first. Both happen on a **retry**, not on the
-way in: the encoder is tried as-is first, and only a `TypeError` triggers the
-walk. A payload the encoders already understand therefore pays no walk at all —
-the cost lands only on the payloads that need it.
+without the caller unwrapping it first. Both are consumed at the native encoder
+boundary: no failed first pass and no recursively rebuilt Python document.
 
 What it does cost every JSON response is **one Python frame**, because this
 facade is now a function rather than a direct binding to the encoder. It adds
@@ -65,29 +63,7 @@ def dumps(obj: Any) -> bytes:
     """Encode `obj` as compact UTF-8 JSON, rendering temporal values as ISO-8601."""
     if not _temporal_installed:
         _install_temporal()
-    try:
-        return _dumps(obj)
-    except TypeError as first:
-        # Either a temporal value the encoders do not know, or something
-        # genuinely unserializable. `jsonable` rewrites the first and leaves the
-        # second alone, so the retry re-raises the encoder's own error for
-        # anything it could not help with -- the message stays accurate.
-        from .temporal import jsonable
-
-        try:
-            return _dumps(jsonable(obj))
-        except TypeError as second:
-            if str(second) == str(first):
-                # The walk changed nothing the encoder cared about, so the two
-                # errors are one error reported twice. Raising the retry would
-                # print the same message under "another exception occurred",
-                # which reads as a second, different problem -- on what is the
-                # commonest JSON failure there is, a handler returning an object
-                # nobody taught the encoder about. A __jsonable__ hook that
-                # raises its own TypeError says something the first error did
-                # not, so that one still propagates with the original as context.
-                raise first from None
-            raise
+    return _dumps(obj)
 
 
 __all__ = ["dumps", "loads"]

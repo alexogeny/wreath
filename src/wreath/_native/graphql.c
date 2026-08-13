@@ -485,6 +485,46 @@ wreath_graphql_policy_apply(PyObject *Py_UNUSED(self), PyObject *args)
     state = graphql_policy_state_from(state_capsule);
     if (plan == NULL || state == NULL ||
         !graphql_policy_same_schema(state, plan->schema_capsule)) return NULL;
+    Py_ssize_t native_count = 0;
+    const unsigned char *native_allowed = NULL;
+    const unsigned char *native_reason = NULL;
+    int native = wreath_cedar_decision_batch_read(
+        decisions_object, &native_count, &native_allowed, &native_reason);
+    if (native < 0) return NULL;
+    if (native) {
+        if (native_count > plan->pending_count) {
+            PyErr_SetString(
+                PyExc_ValueError, "more authorization decisions than resources");
+            return NULL;
+        }
+        for (Py_ssize_t index = 0; index < native_count; index++) {
+            int allowed = native_allowed[index] != 0;
+            state->decisions[plan->pending[index]] = (signed char)allowed;
+            if (!allowed && stop_on_denied) {
+                static const char *reasons[] = {
+                    "no permit policy matched", "cedar permit", "explicit forbid",
+                };
+                GraphqlPolicySchema *schema = graphql_policy_schema_from(
+                    plan->schema_capsule);
+                if (schema == NULL) return NULL;
+                PyObject *reason = PyUnicode_FromString(reasons[native_reason[index]]);
+                PyObject *path = reason != NULL
+                    ? graphql_policy_path(plan, plan->pending[index]) : NULL;
+                PyObject *denial = path != NULL ? PyTuple_Pack(
+                    3, reason, path,
+                    schema->entries[plan->pending[index]].name) : NULL;
+                Py_XDECREF(path);
+                Py_XDECREF(reason);
+                return denial;
+            }
+        }
+        if (native_count != plan->pending_count) {
+            PyErr_SetString(
+                PyExc_ValueError, "fewer authorization decisions than resources");
+            return NULL;
+        }
+        Py_RETURN_NONE;
+    }
     decisions = PySequence_Fast(
         decisions_object, "authorization decisions must be a sequence");
     if (decisions == NULL) return NULL;
@@ -648,6 +688,7 @@ wreath_graphql_policy_resource(PyObject *Py_UNUSED(self), PyObject *args)
 typedef struct {
     PyObject *key;
     PyObject **values;
+    Py_hash_t hash;
 } GraphqlResultField;
 
 typedef struct {
@@ -655,6 +696,8 @@ typedef struct {
     Py_ssize_t count;
     Py_ssize_t capacity;
     GraphqlResultField *fields;
+    Py_ssize_t table_size;
+    Py_ssize_t *slots;
 } GraphqlResults;
 
 #define GRAPHQL_RESULTS_CAPSULE "wreath.graphql.results"
@@ -677,6 +720,7 @@ graphql_results_free(GraphqlResults *results)
             results->fields[field].values, results->rows);
     }
     PyMem_Free(results->fields);
+    PyMem_Free(results->slots);
     PyMem_Free(results);
 }
 
@@ -712,22 +756,75 @@ graphql_result_values_new(Py_ssize_t rows)
     return values;
 }
 
+static int
+graphql_results_table_grow(GraphqlResults *results)
+{
+    Py_ssize_t next_size = results->table_size == 0 ? 8 : results->table_size * 2;
+    if (next_size < results->table_size ||
+        (size_t)next_size > SIZE_MAX / sizeof(*results->slots)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t *next = PyMem_Malloc((size_t)next_size * sizeof(*next));
+    if (next == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t slot = 0; slot < next_size; slot++) next[slot] = -1;
+    for (Py_ssize_t index = 0; index < results->count; index++) {
+        size_t slot = (size_t)results->fields[index].hash &
+                      ((size_t)next_size - 1);
+        while (next[slot] >= 0) slot = (slot + 1) & ((size_t)next_size - 1);
+        next[slot] = index;
+    }
+    PyMem_Free(results->slots);
+    results->slots = next;
+    results->table_size = next_size;
+    return 0;
+}
+
+static Py_ssize_t
+graphql_results_find(GraphqlResults *results, PyObject *key, Py_hash_t hash,
+                     size_t *empty_slot)
+{
+    size_t slot = (size_t)hash & ((size_t)results->table_size - 1);
+    for (;;) {
+        Py_ssize_t index = results->slots[slot];
+        if (index < 0) {
+            *empty_slot = slot;
+            return -1;
+        }
+        if (results->fields[index].hash == hash) {
+            int equal = results->fields[index].key == key ? 1 :
+                PyObject_RichCompareBool(results->fields[index].key, key, Py_EQ);
+            if (equal < 0) return -2;
+            if (equal) return index;
+        }
+        slot = (slot + 1) & ((size_t)results->table_size - 1);
+    }
+}
+
 /* Takes ownership of every value in `values`. Equal response keys overwrite
  * the earlier column, matching dict assignment without materializing a dict
  * for each row while asynchronous fields are still resolving. */
 static int
 graphql_results_store(GraphqlResults *results, PyObject *key, PyObject **values)
 {
-    for (Py_ssize_t field = 0; field < results->count; field++) {
-        int equal = PyObject_RichCompareBool(
-            results->fields[field].key, key, Py_EQ);
-        if (equal < 0) return -1;
-        if (equal) {
-            graphql_result_values_clear(
-                results->fields[field].values, results->rows);
-            results->fields[field].values = values;
-            return 0;
-        }
+    Py_hash_t hash = PyObject_Hash(key);
+    size_t empty_slot;
+    if (hash == -1) return -1;
+    Py_ssize_t found = graphql_results_find(results, key, hash, &empty_slot);
+    if (found == -2) return -1;
+    if (found >= 0) {
+        graphql_result_values_clear(
+            results->fields[found].values, results->rows);
+        results->fields[found].values = values;
+        return 0;
+    }
+    if ((results->count + 1) * 3 >= results->table_size * 2) {
+        if (graphql_results_table_grow(results) < 0) return -1;
+        found = graphql_results_find(results, key, hash, &empty_slot);
+        if (found == -2) return -1;
     }
     if (results->count == results->capacity) {
         Py_ssize_t capacity = results->capacity == 0 ? 8 : results->capacity * 2;
@@ -748,6 +845,8 @@ graphql_results_store(GraphqlResults *results, PyObject *key, PyObject **values)
     }
     results->fields[results->count].key = Py_NewRef(key);
     results->fields[results->count].values = values;
+    results->fields[results->count].hash = hash;
+    results->slots[empty_slot] = results->count;
     results->count++;
     return 0;
 }
@@ -779,6 +878,10 @@ wreath_graphql_new_results(PyObject *Py_UNUSED(self), PyObject *instances)
     results = PyMem_Calloc(1, sizeof(*results));
     if (results == NULL) return PyErr_NoMemory();
     results->rows = size;
+    if (graphql_results_table_grow(results) < 0) {
+        graphql_results_free(results);
+        return NULL;
+    }
     capsule = PyCapsule_New(
         results, GRAPHQL_RESULTS_CAPSULE, graphql_results_destroy);
     if (capsule == NULL) graphql_results_free(results);

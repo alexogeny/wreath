@@ -255,6 +255,9 @@ class ModelMeta(_MetaBase):
         bases = (storage, *bases)
 
         namespace["__wreath_columns__"] = tuple(bound_columns)
+        namespace["__wreath_column_names__"] = tuple(
+            item.python_name for item in bound_columns
+        )
         namespace["__wreath_relationships__"] = tuple(bound_relations)
         namespace["__wreath_by_prototype__"] = by_prototype
         namespace["__wreath_column_map__"] = column_map
@@ -483,6 +486,10 @@ class Model(metaclass=ModelMeta):
 
     def _orm_get(self, index: int) -> Any:
         """The value, None if null, raising if the column was never loaded."""
+        raise NotImplementedError
+
+    def _orm_loaded_values(self) -> dict[str, Any]:
+        """Materialize every loaded column into its public name/value mapping."""
         raise NotImplementedError
 
     def _orm_set(self, index: int, value: Any) -> None:

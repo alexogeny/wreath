@@ -155,14 +155,35 @@ def test_histogram_cumulative_and_inf():
 
 
 def test_route_labels_and_escaping():
+    calls = 0
+
     def labeller(route_id):
+        nonlocal calls
+        calls += 1
         return {"method": "GET", "path": 'a"b\\c\nd'}
 
     snap = _Snap(1, 0, [_Route(9, 1, 0, 0, 0, _bkts())], _Loss())
     text = prom.render_exposition(snap, route_labels=labeller)
     # quote, backslash, and newline in a label value are escaped.
     assert 'method="GET",path="a\\"b\\\\c\\nd"' in text
+    assert calls == 1
     _parse(text)  # still structurally valid
+
+
+def test_route_label_mapping_sanitizes_names_and_falls_back_by_id():
+    snap = _Snap(
+        2,
+        0,
+        [_Route(9, 1, 0, 0, 0, _bkts()), _Route(10, 1, 0, 0, 0, _bkts())],
+        _Loss(),
+    )
+    text = prom.render_exposition(
+        snap,
+        route_labels={9: {"9 bad-label": 12}},
+    )
+    assert '_9_bad_label="12"' in text
+    assert 'route_id="10"' in text
+    _parse(text)
 
 
 def test_native_default_route_rendering_matches_labelled_definition():

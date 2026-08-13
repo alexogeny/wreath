@@ -41,13 +41,15 @@ from __future__ import annotations
 
 import datetime
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ._native import _core
 from .protobuf import field as _protobuf_field
 from .protobuf import message as _message
+
+_DATETIME_CAPI = datetime.datetime_CAPI
 
 __all__ = [
     "BUCKETS",
@@ -82,6 +84,7 @@ __all__ = [
     "seconds",
     "spine",
     "spine_length",
+    "spine_lengths",
     "to_timestamp",
     "wall_clock",
     "weeks",
@@ -280,7 +283,8 @@ def wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.dateti
     on the timeline is where the choice actually happens -- see
     `from_wall_clock`.
     """
-    local = Instant.of(value).astimezone(tz)
+    instant = value if type(value) is Instant else Instant.of(value)
+    local = instant.astimezone(tz)
     return datetime.datetime(
         local.year,
         local.month,
@@ -494,11 +498,11 @@ def spine(
     )
     if width is None:
         raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
-    start_instant = Instant.of(start)
-    end_instant = Instant.of(end)
+    start_instant = start if type(start) is Instant else Instant.of(start)
+    end_instant = end if type(end) is Instant else Instant.of(end)
     tz = _tzinfo(in_zone)
     unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
-    return _core.series_spine(start_instant, end_instant, unit, tz)
+    return _core.series_spine(start_instant, end_instant, unit, tz, _DATETIME_CAPI)
 
 
 def spine_length(
@@ -521,11 +525,47 @@ def spine_length(
     )
     if width is None:
         raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
-    start_instant = Instant.of(start)
-    end_instant = Instant.of(end)
+    start_instant = start if type(start) is Instant else Instant.of(start)
+    end_instant = end if type(end) is Instant else Instant.of(end)
     tz = _tzinfo(in_zone)
     unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
-    return _core.series_spine_length(start_instant, end_instant, unit, tz)
+    return _core.series_spine_length(
+        start_instant, end_instant, unit, tz, _DATETIME_CAPI
+    )
+
+
+def spine_lengths(
+    start: datetime.datetime,
+    end: datetime.datetime,
+    *,
+    buckets: tuple[str | Bucket, ...],
+    in_zone: str | datetime.tzinfo,
+) -> tuple[int, ...]:
+    """Several cardinalities over one range with one zone conversion.
+
+    The result follows `buckets` order. This is the cardinality form for a
+    dashboard or retention planner that needs several calendar resolutions of
+    the same interval; no `Instant` spine is materialised.
+    """
+
+    widths: list[Bucket] = []
+    for bucket in buckets:
+        width = (
+            bucket
+            if isinstance(bucket, Bucket)
+            else (BUCKETS.get(bucket) if isinstance(bucket, str) else None)
+        )
+        if width is None:
+            raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
+        widths.append(width)
+    start_instant = start if type(start) is Instant else Instant.of(start)
+    end_instant = end if type(end) is Instant else Instant.of(end)
+    tz = _tzinfo(in_zone)
+    names = ("minute", "hour", "day", "week", "month", "quarter", "year")
+    units = tuple(names.index(width.name) for width in widths)
+    return _core.series_spine_lengths(
+        start_instant, end_instant, units, tz, _DATETIME_CAPI
+    )
 
 
 # --- durations -------------------------------------------------------------------
@@ -592,32 +632,7 @@ def format_duration(value: datetime.timedelta) -> str:
     """
     if not isinstance(value, datetime.timedelta):
         raise TemporalError(f"expected a timedelta, got {type(value).__name__}")
-    sign = ""
-    if value < datetime.timedelta(0):
-        sign, value = "-", -value
-    days = value.days
-    hours, rest = divmod(value.seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    micro = value.microseconds
-    out = [sign, "P"]
-    if days:
-        out.append(f"{days}D")
-    if hours or minutes or secs or micro or not days:
-        out.append("T")
-        if hours:
-            out.append(f"{hours}H")
-        if minutes:
-            out.append(f"{minutes}M")
-        if secs or micro or (not hours and not minutes):
-            out.append(f"{_seconds_text(secs, micro)}S")
-    return "".join(out)
-
-
-def _seconds_text(secs: int, micro: int) -> str:
-    """Whole seconds, or a fixed-point fraction — never scientific notation."""
-    if not micro:
-        return str(secs)
-    return f"{secs}.{micro:06d}".rstrip("0")
+    return _core.format_duration_parts(value.days, value.seconds, value.microseconds)
 
 
 # --- durations as a declared type ----------------------------------------------------
@@ -784,6 +799,22 @@ class Recurrence:
     weekday: frozenset[int]
     tz: datetime.tzinfo
     text: str
+    _plan: Any = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_plan",
+            _core.recurrence_plan(
+                self.minute,
+                self.hour,
+                self.day,
+                self.month,
+                self.weekday,
+                len(self.day) != 31,
+                len(self.weekday) != 7,
+            ),
+        )
 
     # -- construction --------------------------------------------------------
 
@@ -916,34 +947,18 @@ class Recurrence:
         which is what keeps this and `matches_at` answering the same question.
         """
         start = wall_clock(moment, self.tz).replace(second=0, microsecond=0)
-        hours = sorted(self.hour)
-        minutes_ = sorted(self.minute)
-        for offset in range(_SEARCH_DAYS):
-            date = (start + datetime.timedelta(days=offset)).date()
-            if date.month not in self.month:
-                continue
-            if not self._day_matches(date.day, date.weekday()):
-                continue
-            for hour in hours:
-                for minute in minutes_:
-                    local = datetime.datetime(date.year, date.month, date.day, hour, minute)
-                    if local <= start:
-                        continue
-                    candidate = from_wall_clock(local, self.tz)
-                    # A local time inside a spring-forward gap never occurs as a
-                    # wall-clock reading, so `matches_at` would not fire for it.
-                    # Reading the candidate back is what keeps the two agreeing.
-                    #
-                    # **Through UTC, and that is load-bearing.** `from_wall_clock`
-                    # returns a datetime already carrying `tz`, and `astimezone`
-                    # onto the zone a value already has is a no-op that preserves
-                    # the displayed fields rather than renormalising them -- so a
-                    # nonexistent 02:30 reads back as 02:30 and the check passes
-                    # while the instant it names is really 03:30. Normalising to
-                    # UTC first forces the conversion that catches it.
-                    if wall_clock(candidate.astimezone(datetime.UTC), self.tz) != local:
-                        continue
-                    return Instant.of(candidate)
+        candidate = _core.recurrence_next(
+            start,
+            self._plan,
+            self.tz,
+            from_wall_clock,
+            wall_clock,
+            datetime.UTC,
+            datetime.datetime,
+            _SEARCH_DAYS,
+        )
+        if candidate is not None:
+            return Instant.of(candidate)
         raise RecurrenceError(
             f"{self.text!r} has no occurrence within {_SEARCH_DAYS} days of "
             f"{moment.isoformat()}; it may name a date that never happens"
@@ -1224,13 +1239,16 @@ def relative(
     to a naive one is a `TypeError` waiting to fire on whichever request first
     supplies the other kind, so it is refused here with an explanation.
     """
-    moment = Instant.of(value)
-    reference = _utc_now() if now is None else Instant.of(now)
+    moment = value if type(value) is Instant else Instant.of(value)
+    reference = _utc_now() if now is None else now if type(now) is Instant else Instant.of(now)
     table = _locale_for(locale)
 
     seconds = (reference - moment).total_seconds()
     future = seconds < 0
     seconds = abs(seconds)
+
+    if table is _LOCALES["en"]:
+        return _core.relative_english(seconds, future)
 
     phrase = _phrase(seconds, table, future=future)
     if phrase is not None:

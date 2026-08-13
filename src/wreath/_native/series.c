@@ -8,6 +8,7 @@
 #undef _PY_DATETIME_IMPL
 
 #include <math.h>
+#include <stdio.h>
 
 static const char series_digit_pairs[] =
     "00010203040506070809"
@@ -253,15 +254,35 @@ series_wall_in_zone(const SeriesWallClock *wall, PyObject *tz,
     return first;
 }
 
+static PyObject *
+series_base_datetime(PyObject *value, PyDateTime_CAPI *api)
+{
+    return api->DateTime_FromDateAndTimeAndFold(
+        PyDateTime_GET_YEAR(value), PyDateTime_GET_MONTH(value),
+        PyDateTime_GET_DAY(value), PyDateTime_DATE_GET_HOUR(value),
+        PyDateTime_DATE_GET_MINUTE(value), PyDateTime_DATE_GET_SECOND(value),
+        PyDateTime_DATE_GET_MICROSECOND(value),
+        PyDateTime_DATE_GET_TZINFO(value), PyDateTime_DATE_GET_FOLD(value),
+        api->DateTimeType);
+}
+
+static PyDateTime_CAPI *
+series_datetime_api(PyObject *capsule)
+{
+    return capsule == NULL
+        ? (PyDateTime_CAPI *)PyCapsule_Import(PyDateTime_CAPSULE_NAME, 0)
+        : (PyDateTime_CAPI *)PyCapsule_GetPointer(capsule, PyDateTime_CAPSULE_NAME);
+}
+
 PyObject *
 wreath_series_spine(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *start, *end, *tz;
+    PyObject *start, *end, *tz, *capsule = NULL;
     int unit;
-    if (!PyArg_ParseTuple(args, "OOiO:series_spine", &start, &end, &unit, &tz))
+    if (!PyArg_ParseTuple(
+            args, "OOiO|O:series_spine", &start, &end, &unit, &tz, &capsule))
         return NULL;
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyDateTime_CAPI *api = series_datetime_api(capsule);
     if (api == NULL) return NULL;
     if (!PyObject_TypeCheck(start, api->DateTimeType) ||
         !_PyDateTime_HAS_TZINFO(start)) {
@@ -332,12 +353,13 @@ error:
 PyObject *
 wreath_series_spine_length(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *start, *end, *tz;
+    PyObject *start, *end, *tz, *capsule = NULL;
     int unit;
-    if (!PyArg_ParseTuple(args, "OOiO:series_spine_length", &start, &end, &unit, &tz))
+    if (!PyArg_ParseTuple(
+            args, "OOiO|O:series_spine_length",
+            &start, &end, &unit, &tz, &capsule))
         return NULL;
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyDateTime_CAPI *api = series_datetime_api(capsule);
     if (api == NULL) return NULL;
     if (!PyObject_TypeCheck(start, api->DateTimeType) ||
         !_PyDateTime_HAS_TZINFO(start)) {
@@ -357,8 +379,14 @@ wreath_series_spine_length(PyObject *Py_UNUSED(self), PyObject *args)
     }
     PyObject *offset_method = PyObject_GetAttrString(tz, "utcoffset");
     if (offset_method == NULL) return NULL;
-    PyObject *local_start = PyObject_CallMethod(start, "astimezone", "O", tz);
-    PyObject *local_end = PyObject_CallMethod(end, "astimezone", "O", tz);
+    PyObject *base_start = series_base_datetime(start, api);
+    PyObject *base_end = series_base_datetime(end, api);
+    PyObject *local_start = base_start == NULL ? NULL
+        : PyObject_CallMethod(base_start, "astimezone", "O", tz);
+    PyObject *local_end = base_end == NULL ? NULL
+        : PyObject_CallMethod(base_end, "astimezone", "O", tz);
+    Py_XDECREF(base_start);
+    Py_XDECREF(base_end);
     if (local_start == NULL || local_end == NULL) {
         Py_XDECREF(local_start);
         Py_XDECREF(local_end);
@@ -430,7 +458,7 @@ wreath_series_spine_length(PyObject *Py_UNUSED(self), PyObject *args)
      * datetimes for every element merely to answer len(). */
     if (count != 0) {
         PyObject *current = series_wall_in_zone(
-            &last, tz, offset_method, Py_TYPE(start), api);
+            &last, tz, offset_method, api->DateTimeType, api);
         if (current == NULL) {
             Py_DECREF(offset_method);
             return NULL;
@@ -445,6 +473,161 @@ wreath_series_spine_length(PyObject *Py_UNUSED(self), PyObject *args)
     }
     Py_DECREF(offset_method);
     return PyLong_FromSsize_t(count);
+}
+
+PyObject *
+wreath_series_spine_lengths(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *start, *end, *unit_source, *tz, *capsule = NULL;
+    if (!PyArg_ParseTuple(
+            args, "OOOO|O:series_spine_lengths",
+            &start, &end, &unit_source, &tz, &capsule))
+        return NULL;
+    PyDateTime_CAPI *api = series_datetime_api(capsule);
+    if (api == NULL) return NULL;
+    if (!PyObject_TypeCheck(start, api->DateTimeType) ||
+        !_PyDateTime_HAS_TZINFO(start)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "series spine lengths start must be an offset-aware datetime");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(end, api->DateTimeType) ||
+        !_PyDateTime_HAS_TZINFO(end)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "series spine lengths end must be an offset-aware datetime");
+        return NULL;
+    }
+    PyObject *units = PySequence_Fast(
+        unit_source, "series spine units must be an iterable of unit indices");
+    PyObject *offset_method = units == NULL ? NULL
+        : PyObject_GetAttrString(tz, "utcoffset");
+    PyObject *base_start = offset_method == NULL ? NULL
+        : series_base_datetime(start, api);
+    PyObject *base_end = base_start == NULL ? NULL
+        : series_base_datetime(end, api);
+    PyObject *local_start = base_start == NULL ? NULL
+        : PyObject_CallMethod(base_start, "astimezone", "O", tz);
+    PyObject *local_end = base_end == NULL ? NULL
+        : PyObject_CallMethod(base_end, "astimezone", "O", tz);
+    Py_XDECREF(base_start);
+    Py_XDECREF(base_end);
+    if (units == NULL || offset_method == NULL || local_start == NULL ||
+        local_end == NULL) {
+        Py_XDECREF(units);
+        Py_XDECREF(offset_method);
+        Py_XDECREF(local_start);
+        Py_XDECREF(local_end);
+        return NULL;
+    }
+    SeriesWallClock original_start = {
+        PyDateTime_GET_YEAR(local_start), PyDateTime_GET_MONTH(local_start),
+        PyDateTime_GET_DAY(local_start), PyDateTime_DATE_GET_HOUR(local_start),
+        PyDateTime_DATE_GET_MINUTE(local_start),
+        PyDateTime_DATE_GET_SECOND(local_start),
+        PyDateTime_DATE_GET_MICROSECOND(local_start),
+    };
+    SeriesWallClock end_wall = {
+        PyDateTime_GET_YEAR(local_end), PyDateTime_GET_MONTH(local_end),
+        PyDateTime_GET_DAY(local_end), PyDateTime_DATE_GET_HOUR(local_end),
+        PyDateTime_DATE_GET_MINUTE(local_end),
+        PyDateTime_DATE_GET_SECOND(local_end),
+        PyDateTime_DATE_GET_MICROSECOND(local_end),
+    };
+    Py_DECREF(local_start);
+    Py_DECREF(local_end);
+    Py_ssize_t unit_count = PySequence_Fast_GET_SIZE(units);
+    PyObject *result = PyTuple_New(unit_count);
+    if (result == NULL) goto error;
+    PyObject **unit_items = PySequence_Fast_ITEMS(units);
+    for (Py_ssize_t item = 0; item < unit_count; item++) {
+        long unit = PyLong_AsLong(unit_items[item]);
+        if ((unit == -1 && PyErr_Occurred()) || unit < 0 || unit > 6) {
+            if (!PyErr_Occurred()) PyErr_Format(
+                PyExc_ValueError,
+                "series spine unit %ld must be in range 0..6", unit);
+            Py_DECREF(result);
+            goto error;
+        }
+        SeriesWallClock wall = original_start;
+        series_wall_truncate(&wall, (int)unit);
+        int64_t count_value = 0;
+        if (series_wall_compare(&wall, &end_wall) < 0) {
+            int64_t day_delta =
+                series_wall_ordinal(&end_wall) - series_wall_ordinal(&wall);
+            int partial_day = end_wall.hour != 0 || end_wall.minute != 0 ||
+                              end_wall.second != 0 || end_wall.microsecond != 0;
+            if (unit == 0) {
+                count_value = day_delta * INT64_C(1440) +
+                              (end_wall.hour - wall.hour) * 60 +
+                              end_wall.minute - wall.minute;
+                if (end_wall.second != 0 || end_wall.microsecond != 0)
+                    count_value++;
+            }
+            else if (unit == 1) {
+                count_value = day_delta * INT64_C(24) +
+                              end_wall.hour - wall.hour;
+                if (end_wall.minute != 0 || end_wall.second != 0 ||
+                    end_wall.microsecond != 0) count_value++;
+            }
+            else if (unit == 2) count_value = day_delta + partial_day;
+            else if (unit == 3) {
+                count_value = day_delta / 7;
+                if (day_delta % 7 != 0 || partial_day) count_value++;
+            }
+            else {
+                int64_t months = (int64_t)(end_wall.year - wall.year) * 12 +
+                                 end_wall.month - wall.month;
+                int64_t stride = unit == 4 ? 1 : unit == 5 ? 3 : 12;
+                count_value = months / stride;
+                if (months % stride != 0 || end_wall.day != 1 || partial_day)
+                    count_value++;
+            }
+        }
+        if (count_value < 0 || count_value > PY_SSIZE_T_MAX) {
+            Py_DECREF(result);
+            PyErr_NoMemory();
+            goto error;
+        }
+        Py_ssize_t count = (Py_ssize_t)count_value;
+        SeriesWallClock last = end_wall;
+        series_wall_truncate(&last, (int)unit);
+        if (count != 0 && series_wall_compare(&last, &end_wall) == 0 &&
+            series_wall_retreat(&last, (int)unit) < 0) {
+            Py_DECREF(result);
+            goto error;
+        }
+        if (count != 0) {
+            PyObject *current = series_wall_in_zone(
+                &last, tz, offset_method, Py_TYPE(start), api);
+            if (current == NULL) {
+                Py_DECREF(result);
+                goto error;
+            }
+            int before_end = PyObject_RichCompareBool(current, end, Py_LT);
+            Py_DECREF(current);
+            if (before_end < 0) {
+                Py_DECREF(result);
+                goto error;
+            }
+            if (!before_end) count--;
+        }
+        PyObject *count_object = PyLong_FromSsize_t(count);
+        if (count_object == NULL) {
+            Py_DECREF(result);
+            goto error;
+        }
+        PyTuple_SET_ITEM(result, item, count_object);
+    }
+    Py_DECREF(units);
+    Py_DECREF(offset_method);
+    return result;
+
+error:
+    Py_DECREF(units);
+    Py_DECREF(offset_method);
+    return NULL;
 }
 
 static int
@@ -769,6 +952,131 @@ series_format_index(char out[32], Py_ssize_t value)
 }
 
 PyObject *
+wreath_format_duration_parts(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    int days;
+    int seconds;
+    int microseconds;
+    if (!PyArg_ParseTuple(
+            args, "iii:format_duration_parts", &days, &seconds, &microseconds))
+        return NULL;
+    if (days < -999999999 || days > 999999999 || seconds < 0 ||
+        seconds >= 86400 || microseconds < 0 || microseconds >= 1000000) {
+        PyErr_SetString(PyExc_ValueError, "invalid normalized timedelta components");
+        return NULL;
+    }
+    int negative = days < 0;
+    Py_ssize_t magnitude_days;
+    int magnitude_seconds = seconds;
+    int magnitude_microseconds = microseconds;
+    if (negative) {
+        magnitude_days = -(Py_ssize_t)days;
+        if (seconds != 0 || microseconds != 0) {
+            magnitude_days--;
+            int64_t remaining = INT64_C(86400000000) -
+                ((int64_t)seconds * INT64_C(1000000) + microseconds);
+            magnitude_seconds = (int)(remaining / INT64_C(1000000));
+            magnitude_microseconds = (int)(remaining % INT64_C(1000000));
+        }
+    }
+    else {
+        magnitude_days = days;
+    }
+    int hours = magnitude_seconds / 3600;
+    int rest = magnitude_seconds % 3600;
+    int minutes = rest / 60;
+    int secs = rest % 60;
+    char text[64];
+    Py_ssize_t length = 0;
+    if (negative) text[length++] = '-';
+    text[length++] = 'P';
+    if (magnitude_days != 0) {
+        length += series_format_index(text + length, magnitude_days);
+        text[length++] = 'D';
+    }
+    if (hours != 0 || minutes != 0 || secs != 0 ||
+        magnitude_microseconds != 0 || magnitude_days == 0) {
+        text[length++] = 'T';
+        if (hours != 0) {
+            length += series_format_index(text + length, hours);
+            text[length++] = 'H';
+        }
+        if (minutes != 0) {
+            length += series_format_index(text + length, minutes);
+            text[length++] = 'M';
+        }
+        if (secs != 0 || magnitude_microseconds != 0 ||
+            (hours == 0 && minutes == 0)) {
+            length += series_format_index(text + length, secs);
+            if (magnitude_microseconds != 0) {
+                text[length++] = '.';
+                int divisor = 100000;
+                for (int digit = 0; digit < 6; digit++) {
+                    text[length++] = (char)('0' + magnitude_microseconds / divisor % 10);
+                    divisor /= 10;
+                }
+                while (text[length - 1] == '0') length--;
+            }
+            text[length++] = 'S';
+        }
+    }
+    return PyUnicode_DecodeASCII(text, length, NULL);
+}
+
+PyObject *
+wreath_relative_english(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    double seconds;
+    int future;
+    if (!PyArg_ParseTuple(args, "dp:relative_english", &seconds, &future))
+        return NULL;
+    if (seconds < 0.0) seconds = -seconds;
+    if (seconds < 45.0) return PyUnicode_FromString("just now");
+    if (seconds >= 79200.0 && seconds < 129600.0)
+        return PyUnicode_FromString(future ? "tomorrow" : "yesterday");
+
+    long long amount;
+    const char *unit;
+    if (seconds < 90.0) {
+        amount = 1;
+        unit = "minute";
+    }
+    else {
+        double scaled = seconds / 60.0;
+        amount = (long long)round(scaled);
+        unit = "minute";
+        if (amount >= 45) {
+            scaled = seconds / 3600.0;
+            amount = (long long)round(scaled);
+            unit = "hour";
+            if (amount >= 22) {
+                scaled = seconds / 86400.0;
+                amount = (long long)round(scaled);
+                unit = "day";
+                if (amount >= 26) {
+                    scaled = seconds / 2629800.0;
+                    amount = (long long)round(scaled);
+                    unit = "month";
+                    if (amount >= 11) {
+                        amount = (long long)round(seconds / 31557600.0);
+                        unit = "year";
+                    }
+                }
+            }
+        }
+    }
+    char text[96];
+    int length = snprintf(
+        text, sizeof(text), future ? "in %lld %s%s" : "%lld %s%s ago",
+        amount, unit, amount == 1 ? "" : "s");
+    if (length < 0 || (size_t)length >= sizeof(text)) {
+        PyErr_SetString(PyExc_RuntimeError, "relative-time formatting overflowed");
+        return NULL;
+    }
+    return PyUnicode_DecodeASCII(text, length, NULL);
+}
+
+PyObject *
 wreath_series_path(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *x_source, *y_source;
@@ -917,10 +1225,48 @@ series_chart_ticks(double minimum, double maximum, Py_ssize_t target)
     return result;
 }
 
+static int
+series_chart_write_ticks(WreathBytesWriter *writer, double minimum,
+                         double maximum, Py_ssize_t target, int separate,
+                         Py_ssize_t *total)
+{
+    if (separate && wreath_writer_byte(writer, ';') < 0) return -1;
+    double first = minimum;
+    double step = 0.0;
+    Py_ssize_t count = 1;
+    if (minimum != maximum) {
+        double raw = (maximum - minimum) / (double)(target - 1);
+        double exponent = floor(log10(raw));
+        double magnitude = pow(10.0, exponent);
+        double fraction = raw / magnitude;
+        double nice = fraction <= 1.0 ? 1.0 : fraction <= 2.0 ? 2.0 :
+                      fraction <= 5.0 ? 5.0 : 10.0;
+        step = nice * magnitude;
+        first = floor(minimum / step) * step;
+        double last = ceil(maximum / step) * step;
+        count = (Py_ssize_t)(floor((last - first) / step + 0.5) + 1.0);
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (index != 0 && wreath_writer_byte(writer, ',') < 0) return -1;
+        double value = first + (double)index * step;
+        char *text = PyOS_double_to_string(
+            value == 0.0 ? 0.0 : value, 'g', 6, 0, NULL);
+        if (text == NULL) return -1;
+        Py_ssize_t length = (Py_ssize_t)strlen(text);
+        int written = wreath_writer_write(writer, text, length);
+        PyMem_Free(text);
+        if (written < 0) return -1;
+    }
+    *total += count;
+    return 0;
+}
+
 static PyObject *
 series_chart_path(const double *values, const unsigned char *present,
                   Py_ssize_t count, const Py_ssize_t *indices,
-                  Py_ssize_t index_count, const unsigned char *index_plan)
+                  Py_ssize_t index_count, const unsigned char *index_plan,
+                  const char *value_text, const size_t *value_offsets,
+                  const unsigned char *value_lengths)
 {
     Py_ssize_t points = indices != NULL ? index_count : count;
     if (points > PY_SSIZE_T_MAX / 37) return PyErr_NoMemory();
@@ -945,7 +1291,13 @@ series_chart_path(const double *values, const unsigned char *present,
         }
         else index_length = series_format_index(point + 1, index);
         point[index_length + 1] = ',';
-        Py_ssize_t value_length = series_format_double(
+        Py_ssize_t value_length;
+        if (value_lengths != NULL) {
+            value_length = value_lengths[index];
+            memcpy(point + index_length + 2,
+                   value_text + value_offsets[index], (size_t)value_length);
+        }
+        else value_length = series_format_double(
             point + index_length + 2, values[index]);
         if (value_length < 0) {
             Py_DECREF(result);
@@ -958,9 +1310,74 @@ series_chart_path(const double *values, const unsigned char *present,
     return result;
 }
 
+static void
+series_chart_minmax_scalar(const double *values, Py_ssize_t count,
+                           double *minimum_out, double *maximum_out)
+{
+    double minimum = count != 0 ? values[0] : 0.0;
+    double maximum = minimum;
+    for (Py_ssize_t index = 1; index < count; index++) {
+        if (values[index] < minimum) minimum = values[index];
+        if (values[index] > maximum) maximum = values[index];
+    }
+    *minimum_out = minimum;
+    *maximum_out = maximum;
+}
+
+#if defined(WREATH_HAVE_AVX2)
+WREATH_TARGET_AVX2 static void
+series_chart_minmax_avx2(const double *values, Py_ssize_t count,
+                         double *minimum_out, double *maximum_out)
+{
+    if (count < 4) {
+        series_chart_minmax_scalar(values, count, minimum_out, maximum_out);
+        return;
+    }
+    __m256d minimums = _mm256_loadu_pd(values);
+    __m256d maximums = minimums;
+    Py_ssize_t index = 4;
+    for (; index <= count - 4; index += 4) {
+        __m256d values4 = _mm256_loadu_pd(values + index);
+        minimums = _mm256_min_pd(minimums, values4);
+        maximums = _mm256_max_pd(maximums, values4);
+    }
+    double minimum_lanes[4];
+    double maximum_lanes[4];
+    _mm256_storeu_pd(minimum_lanes, minimums);
+    _mm256_storeu_pd(maximum_lanes, maximums);
+    double minimum = minimum_lanes[0];
+    double maximum = maximum_lanes[0];
+    for (int lane = 1; lane < 4; lane++) {
+        if (minimum_lanes[lane] < minimum) minimum = minimum_lanes[lane];
+        if (maximum_lanes[lane] > maximum) maximum = maximum_lanes[lane];
+    }
+    for (; index < count; index++) {
+        if (values[index] < minimum) minimum = values[index];
+        if (values[index] > maximum) maximum = values[index];
+    }
+    *minimum_out = minimum;
+    *maximum_out = maximum;
+}
+#endif
+
+static void
+series_chart_minmax(const double *values, Py_ssize_t count,
+                    double *minimum_out, double *maximum_out)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (count >= 16 && wreath_simd_has_avx2()) {
+        series_chart_minmax_avx2(values, count, minimum_out, maximum_out);
+        return;
+    }
+#endif
+    series_chart_minmax_scalar(values, count, minimum_out, maximum_out);
+}
+
 static Py_ssize_t *
-series_chart_lttb(const double *values, Py_ssize_t count,
-                  Py_ssize_t threshold, Py_ssize_t *selected_count,
+series_chart_lttb(const double *values, const double *prefix,
+                  const double *bounds, Py_ssize_t count,
+                  Py_ssize_t threshold, Py_ssize_t *workspace,
+                  Py_ssize_t *selected_count,
                   double *minimum_out, double *maximum_out)
 {
     Py_ssize_t output_count = threshold < count ? threshold : count;
@@ -968,19 +1385,22 @@ series_chart_lttb(const double *values, Py_ssize_t count,
         PyErr_NoMemory();
         return NULL;
     }
-    Py_ssize_t *selected = output_count != 0
+    Py_ssize_t *selected = workspace != NULL ? workspace : output_count != 0
         ? PyMem_Malloc((size_t)output_count * sizeof(*selected)) : NULL;
     if (output_count != 0 && selected == NULL) {
         PyErr_NoMemory();
         return NULL;
     }
-    double minimum = count != 0 ? values[0] : 0.0;
-    double maximum = minimum;
+    double minimum;
+    double maximum;
+    if (bounds != NULL) {
+        minimum = bounds[0];
+        maximum = bounds[1];
+    }
+    else series_chart_minmax(values, count, &minimum, &maximum);
     if (output_count == count) {
         for (Py_ssize_t index = 0; index < count; index++) {
             selected[index] = index;
-            if (values[index] < minimum) minimum = values[index];
-            if (values[index] > maximum) maximum = values[index];
         }
         *selected_count = output_count;
         *minimum_out = minimum;
@@ -994,18 +1414,20 @@ series_chart_lttb(const double *values, Py_ssize_t count,
         Py_ssize_t average_start = (Py_ssize_t)floor((bucket + 1) * every) + 1;
         Py_ssize_t average_end = (Py_ssize_t)floor((bucket + 2) * every) + 1;
         if (average_end > count) average_end = count;
-        double average_x = 0.0, average_y = 0.0;
-        for (Py_ssize_t index = average_start; index < average_end; index++) {
-            average_x += (double)index;
-            average_y += values[index];
+        double average_y = prefix == NULL ? 0.0
+                                          : prefix[average_end] - prefix[average_start];
+        if (prefix == NULL) {
+            for (Py_ssize_t index = average_start; index < average_end; index++)
+                average_y += values[index];
         }
         Py_ssize_t average_count = average_end - average_start;
+        double average_x;
         if (average_count == 0) {
             average_x = (double)(count - 1);
             average_y = values[count - 1];
         }
         else {
-            average_x /= (double)average_count;
+            average_x = ((double)average_start + (double)(average_end - 1)) * 0.5;
             average_y /= (double)average_count;
         }
         Py_ssize_t range_start = (Py_ssize_t)floor(bucket * every) + 1;
@@ -1013,12 +1435,13 @@ series_chart_lttb(const double *values, Py_ssize_t count,
         if (range_end > count - 1) range_end = count - 1;
         Py_ssize_t best = range_start;
         double best_area = -1.0;
+        double anchor_x = (double)anchor - average_x;
+        double average_y_delta = average_y - values[anchor];
+        double area_constant = -anchor_x * values[anchor] -
+                               (double)anchor * average_y_delta;
         for (Py_ssize_t index = range_start; index < range_end; index++) {
-            if (values[index] < minimum) minimum = values[index];
-            if (values[index] > maximum) maximum = values[index];
-            double area = fabs(
-                ((double)anchor - average_x) * (values[index] - values[anchor]) -
-                ((double)anchor - (double)index) * (average_y - values[anchor]));
+            double area = fabs(anchor_x * values[index] +
+                               (double)index * average_y_delta + area_constant);
             if (area > best_area) {
                 best_area = area;
                 best = index;
@@ -1026,10 +1449,6 @@ series_chart_lttb(const double *values, Py_ssize_t count,
         }
         selected[bucket + 1] = best;
         anchor = best;
-    }
-    if (count != 0) {
-        if (values[count - 1] < minimum) minimum = values[count - 1];
-        if (values[count - 1] > maximum) maximum = values[count - 1];
     }
     selected[threshold - 1] = count - 1;
     *selected_count = output_count;
@@ -1254,11 +1673,12 @@ series_chart_project(Py_ssize_t bucket_count, Py_ssize_t series_count,
         double minimum, maximum;
         Py_ssize_t selected_count = 0;
         Py_ssize_t *selected = series_chart_lttb(
-            values, bucket_count, threshold, &selected_count,
+            values, NULL, NULL, bucket_count, threshold, NULL, &selected_count,
             &minimum, &maximum);
         if (selected == NULL && bucket_count != 0) goto error;
         PyObject *path = series_chart_path(
-            values, present, bucket_count, selected, selected_count, NULL);
+            values, present, bucket_count, selected, selected_count, NULL,
+            NULL, NULL, NULL);
         PyMem_Free(selected);
         PyObject *axis = series_chart_ticks(minimum, maximum, tick_target);
         if (path == NULL || axis == NULL) {
@@ -1283,7 +1703,7 @@ series_chart_project(Py_ssize_t bucket_count, Py_ssize_t series_count,
                 &measures[row % measure_count], bucket_count,
                 values, present) < 0) goto error;
         PyObject *path = series_chart_path(
-            values, present, bucket_count, NULL, 0, NULL);
+            values, present, bucket_count, NULL, 0, NULL, NULL, NULL, NULL);
         if (path == NULL) goto error;
         PyTuple_SET_ITEM(paths, downsample_count + output, path);
     }
@@ -1311,6 +1731,511 @@ typedef struct {
     PyObject *key;
     Py_ssize_t index;
 } SeriesChartBucketEntry;
+
+typedef struct {
+    Py_ssize_t bucket_count;
+    Py_ssize_t series_count;
+    Py_ssize_t measure_count;
+    double *values;
+    unsigned char *present;
+    unsigned char *index_plan;
+    char *value_text;
+    size_t *value_offsets;
+    unsigned char *value_lengths;
+    char *path_text;
+    size_t *path_offsets;
+    double *prefix;
+    double *bounds;
+    PyObject *keys;
+} SeriesData;
+
+#define SERIES_DATA_CAPSULE_NAME "wreath.series_data"
+
+static void
+series_data_free(SeriesData *data)
+{
+    if (data == NULL) return;
+    PyMem_Free(data->values);
+    PyMem_Free(data->present);
+    PyMem_Free(data->index_plan);
+    PyMem_Free(data->value_text);
+    PyMem_Free(data->value_offsets);
+    PyMem_Free(data->value_lengths);
+    PyMem_Free(data->path_text);
+    PyMem_Free(data->path_offsets);
+    PyMem_Free(data->prefix);
+    PyMem_Free(data->bounds);
+    Py_XDECREF(data->keys);
+    PyMem_Free(data);
+}
+
+static void
+series_data_destroy(PyObject *capsule)
+{
+    SeriesData *data = PyCapsule_GetPointer(capsule, SERIES_DATA_CAPSULE_NAME);
+    if (data == NULL) {
+        PyErr_WriteUnraisable(capsule);
+        return;
+    }
+    series_data_free(data);
+}
+
+static SeriesData *
+series_data_get(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, SERIES_DATA_CAPSULE_NAME);
+}
+
+PyObject *
+wreath_series_data(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *bucket_source, *sparse, *fills;
+    if (!PyArg_ParseTuple(args, "OOO:series_data", &bucket_source, &sparse, &fills))
+        return NULL;
+    if (!PyDict_Check(sparse) || !PyDict_Check(fills)) {
+        PyErr_SetString(
+            PyExc_TypeError, "series data sparse values and fills must be dicts");
+        return NULL;
+    }
+    PyObject *buckets = PySequence_Fast(
+        bucket_source, "series data buckets must be an iterable dense run");
+    if (buckets == NULL) return NULL;
+    Py_ssize_t bucket_count = PySequence_Fast_GET_SIZE(buckets);
+    Py_ssize_t series_count = PyDict_GET_SIZE(sparse);
+    Py_ssize_t measure_count = PyDict_GET_SIZE(fills);
+    if (measure_count == 0) {
+        Py_DECREF(buckets);
+        PyErr_SetString(PyExc_ValueError, "series data needs at least one measure");
+        return NULL;
+    }
+    if (series_count > PY_SSIZE_T_MAX / measure_count) {
+        Py_DECREF(buckets);
+        return PyErr_NoMemory();
+    }
+    Py_ssize_t row_count = series_count * measure_count;
+    if (bucket_count != 0 &&
+        (size_t)row_count > SIZE_MAX / (size_t)bucket_count) {
+        Py_DECREF(buckets);
+        return PyErr_NoMemory();
+    }
+    size_t cell_count = (size_t)row_count * (size_t)bucket_count;
+    if ((size_t)row_count != 0 &&
+        (size_t)bucket_count + 1 > SIZE_MAX / (size_t)row_count) {
+        Py_DECREF(buckets);
+        return PyErr_NoMemory();
+    }
+    size_t prefix_count = (size_t)row_count * ((size_t)bucket_count + 1);
+    if (cell_count > SIZE_MAX / sizeof(double) ||
+        prefix_count > SIZE_MAX / sizeof(double) ||
+        (size_t)row_count > SIZE_MAX / (2 * sizeof(double)) ||
+        cell_count > SIZE_MAX / sizeof(size_t) ||
+        (size_t)bucket_count > SIZE_MAX / 21 ||
+        (size_t)measure_count > SIZE_MAX / sizeof(SeriesMeasure)) {
+        Py_DECREF(buckets);
+        return PyErr_NoMemory();
+    }
+
+    SeriesData *data = PyMem_Calloc(1, sizeof(*data));
+    SeriesMeasure *measures = PyMem_Malloc(
+        (size_t)measure_count * sizeof(*measures));
+    if (data == NULL || measures == NULL) {
+        PyMem_Free(data);
+        PyMem_Free(measures);
+        Py_DECREF(buckets);
+        return PyErr_NoMemory();
+    }
+    data->bucket_count = bucket_count;
+    data->series_count = series_count;
+    data->measure_count = measure_count;
+    data->values = cell_count != 0
+        ? PyMem_Malloc(cell_count * sizeof(*data->values)) : NULL;
+    data->present = cell_count != 0 ? PyMem_Malloc(cell_count) : NULL;
+    data->index_plan = bucket_count != 0
+        ? PyMem_Malloc((size_t)bucket_count * 21) : NULL;
+    data->prefix = prefix_count != 0
+        ? PyMem_Malloc(prefix_count * sizeof(*data->prefix)) : NULL;
+    data->bounds = row_count != 0
+        ? PyMem_Malloc((size_t)row_count * 2 * sizeof(*data->bounds)) : NULL;
+    data->keys = PyTuple_New(series_count);
+    if ((cell_count != 0 && (data->values == NULL || data->present == NULL)) ||
+        (prefix_count != 0 && data->prefix == NULL) ||
+        (row_count != 0 && data->bounds == NULL) ||
+        (bucket_count != 0 && data->index_plan == NULL) ||
+        data->keys == NULL) {
+        PyMem_Free(measures);
+        Py_DECREF(buckets);
+        series_data_free(data);
+        return PyErr_NoMemory();
+    }
+    for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+        unsigned char *planned = data->index_plan + (size_t)bucket * 21;
+        planned[0] = (unsigned char)series_format_index(
+            (char *)planned + 1, bucket);
+    }
+
+    Py_ssize_t position = 0, measure_index = 0;
+    PyObject *name, *empty;
+    while (PyDict_Next(fills, &position, &name, &empty)) {
+        measures[measure_index] = (SeriesMeasure){name, empty};
+        double number = 0.0;
+        unsigned char has_value = empty != Py_None;
+        if (has_value) {
+            number = series_as_double(empty);
+            if (PyErr_Occurred() || !isfinite(number)) {
+                if (!PyErr_Occurred()) PyErr_Format(
+                    PyExc_ValueError,
+                    "series fill for measure %R must be finite", name);
+                goto error;
+            }
+        }
+        for (Py_ssize_t series = 0; series < series_count; series++) {
+            size_t offset = ((size_t)series * (size_t)measure_count +
+                             (size_t)measure_index) * (size_t)bucket_count;
+            for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+                data->values[offset + (size_t)bucket] = number;
+                data->present[offset + (size_t)bucket] = has_value;
+            }
+        }
+        measure_index++;
+    }
+
+    PyObject **bucket_items = PySequence_Fast_ITEMS(buckets);
+    position = 0;
+    Py_ssize_t series_index = 0;
+    PyObject *key, *by_bucket;
+    while (PyDict_Next(sparse, &position, &key, &by_bucket)) {
+        if (!PyDict_Check(by_bucket)) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "series %R values must be a bucket dict", key);
+            goto error;
+        }
+        PyTuple_SET_ITEM(data->keys, series_index, Py_NewRef(key));
+        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+            PyObject *row = NULL;
+            int found = PyDict_GetItemRef(by_bucket, bucket_items[bucket], &row);
+            if (found < 0) goto error;
+            if (found == 0) continue;
+            if (!PyDict_Check(row)) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "series bucket %R values must be a measure dict, got %.200s",
+                    bucket_items[bucket], Py_TYPE(row)->tp_name);
+                Py_DECREF(row);
+                goto error;
+            }
+            for (Py_ssize_t measure = 0; measure < measure_count; measure++) {
+                PyObject *value = PyDict_GetItemWithError(
+                    row, measures[measure].name);
+                if (value == NULL) {
+                    if (PyErr_Occurred()) {
+                        Py_DECREF(row);
+                        goto error;
+                    }
+                    continue;
+                }
+                size_t cell = ((size_t)series_index *
+                               (size_t)measure_count + (size_t)measure) *
+                              (size_t)bucket_count + (size_t)bucket;
+                if (value == Py_None) {
+                    data->values[cell] = 0.0;
+                    data->present[cell] = 0;
+                    continue;
+                }
+                double number = series_as_double(value);
+                if (PyErr_Occurred() || !isfinite(number)) {
+                    if (!PyErr_Occurred()) PyErr_Format(
+                        PyExc_ValueError,
+                        "series chart value at bucket %zd must be finite", bucket);
+                    Py_DECREF(row);
+                    goto error;
+                }
+                data->values[cell] = number;
+                data->present[cell] = 1;
+            }
+            Py_DECREF(row);
+        }
+        series_index++;
+    }
+    for (Py_ssize_t row = 0; row < row_count; row++) {
+        size_t cell_offset = (size_t)row * (size_t)bucket_count;
+        double *row_prefix = data->prefix +
+            (size_t)row * ((size_t)bucket_count + 1);
+        row_prefix[0] = 0.0;
+        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++)
+            row_prefix[bucket + 1] = row_prefix[bucket] +
+                                     data->values[cell_offset + (size_t)bucket];
+        series_chart_minmax(data->values + cell_offset, bucket_count,
+                            &data->bounds[(size_t)row * 2],
+                            &data->bounds[(size_t)row * 2 + 1]);
+    }
+    data->value_offsets = cell_count != 0
+        ? PyMem_Malloc(cell_count * sizeof(*data->value_offsets)) : NULL;
+    data->value_lengths = cell_count != 0 ? PyMem_Malloc(cell_count) : NULL;
+    if (cell_count != 0 &&
+        (data->value_offsets == NULL || data->value_lengths == NULL)) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    size_t text_size = 0;
+    char formatted[32];
+    for (size_t cell = 0; cell < cell_count; cell++) {
+        data->value_offsets[cell] = text_size;
+        if (!data->present[cell]) {
+            data->value_lengths[cell] = 0;
+            continue;
+        }
+        Py_ssize_t length = series_format_double(formatted, data->values[cell]);
+        if (length < 0) goto error;
+        if ((size_t)length > SIZE_MAX - text_size) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        if (length > UCHAR_MAX) {
+            PyErr_SetString(PyExc_OverflowError,
+                            "series coordinate text exceeds 255 bytes");
+            goto error;
+        }
+        data->value_lengths[cell] = (unsigned char)length;
+        text_size += (size_t)length;
+    }
+    data->value_text = text_size != 0 ? PyMem_Malloc(text_size) : NULL;
+    if (text_size != 0 && data->value_text == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    for (size_t cell = 0; cell < cell_count; cell++) {
+        if (!data->present[cell]) continue;
+        Py_ssize_t length = series_format_double(
+            data->value_text + data->value_offsets[cell], data->values[cell]);
+        if (length < 0) goto error;
+    }
+    if ((size_t)row_count >
+        SIZE_MAX / sizeof(*data->path_offsets) - 1) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    data->path_offsets = PyMem_Malloc(
+        ((size_t)row_count + 1) * sizeof(*data->path_offsets));
+    if (data->path_offsets == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    size_t path_size = 0;
+    for (Py_ssize_t row = 0; row < row_count; row++) {
+        data->path_offsets[row] = path_size;
+        size_t offset = (size_t)row * (size_t)bucket_count;
+        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+            size_t cell = offset + (size_t)bucket;
+            if (!data->present[cell]) continue;
+            size_t point_size = 2 + data->index_plan[(size_t)bucket * 21] +
+                                data->value_lengths[cell];
+            if (point_size > SIZE_MAX - path_size) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            path_size += point_size;
+        }
+    }
+    data->path_offsets[row_count] = path_size;
+    data->path_text = path_size != 0 ? PyMem_Malloc(path_size) : NULL;
+    if (path_size != 0 && data->path_text == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    for (Py_ssize_t row = 0; row < row_count; row++) {
+        size_t written = data->path_offsets[row];
+        size_t offset = (size_t)row * (size_t)bucket_count;
+        int open = 0;
+        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+            size_t cell = offset + (size_t)bucket;
+            if (!data->present[cell]) {
+                open = 0;
+                continue;
+            }
+            const unsigned char *planned =
+                data->index_plan + (size_t)bucket * 21;
+            data->path_text[written++] = open ? 'L' : 'M';
+            memcpy(data->path_text + written, planned + 1, planned[0]);
+            written += planned[0];
+            data->path_text[written++] = ',';
+            memcpy(data->path_text + written,
+                   data->value_text + data->value_offsets[cell],
+                   data->value_lengths[cell]);
+            written += data->value_lengths[cell];
+            open = 1;
+        }
+    }
+    PyMem_Free(measures);
+    Py_DECREF(buckets);
+    return PyCapsule_New(data, SERIES_DATA_CAPSULE_NAME, series_data_destroy);
+
+error:
+    PyMem_Free(measures);
+    Py_DECREF(buckets);
+    series_data_free(data);
+    return NULL;
+}
+
+static PyObject *
+series_data_chart(PyObject *args, int tick_text)
+{
+    PyObject *capsule, *downsample_source, *full_source;
+    Py_ssize_t threshold, tick_target;
+    if (!PyArg_ParseTuple(
+            args, "OOOnn:series_data_chart", &capsule, &downsample_source,
+            &full_source, &threshold, &tick_target)) return NULL;
+    if (threshold < 3 || tick_target < 2 || tick_target > 10000) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "series chart threshold must be >= 3 and tick target in 2..10000");
+        return NULL;
+    }
+    SeriesData *data = series_data_get(capsule);
+    if (data == NULL) return NULL;
+    PyObject *downsample = PySequence_Fast(
+        downsample_source,
+        "series chart downsample rows must be an iterable of indices");
+    PyObject *full = PySequence_Fast(
+        full_source, "series chart full rows must be an iterable of indices");
+    if (downsample == NULL || full == NULL) {
+        Py_XDECREF(downsample);
+        Py_XDECREF(full);
+        return NULL;
+    }
+    Py_ssize_t downsample_count = PySequence_Fast_GET_SIZE(downsample);
+    Py_ssize_t full_count = PySequence_Fast_GET_SIZE(full);
+    PyObject *paths = PyTuple_New(downsample_count + full_count);
+    PyObject *ticks = tick_text ? NULL : PyTuple_New(downsample_count);
+    WreathBytesWriter tick_writer = {0};
+    Py_ssize_t tick_count = 0;
+    if (tick_text && wreath_writer_init(&tick_writer, 256) < 0) {
+        Py_XDECREF(paths);
+        Py_XDECREF(tick_writer.bytes);
+        Py_DECREF(downsample);
+        Py_DECREF(full);
+        return NULL;
+    }
+    if (paths == NULL || (!tick_text && ticks == NULL)) {
+        Py_XDECREF(paths);
+        Py_XDECREF(ticks);
+        Py_XDECREF(tick_writer.bytes);
+        Py_DECREF(downsample);
+        Py_DECREF(full);
+        return NULL;
+    }
+    Py_ssize_t row_count = data->series_count * data->measure_count;
+    PyObject **downsample_items = PySequence_Fast_ITEMS(downsample);
+    PyObject **full_items = PySequence_Fast_ITEMS(full);
+    Py_ssize_t workspace_count = threshold < data->bucket_count
+        ? threshold : data->bucket_count;
+    Py_ssize_t *selected_workspace = workspace_count != 0
+        ? PyMem_Malloc((size_t)workspace_count * sizeof(*selected_workspace))
+        : NULL;
+    if (workspace_count != 0 && selected_workspace == NULL) goto chart_error;
+    for (Py_ssize_t output = 0; output < downsample_count; output++) {
+        Py_ssize_t row = PyLong_AsSsize_t(downsample_items[output]);
+        if (row == -1 && PyErr_Occurred()) goto chart_error;
+        if (row < 0 || row >= row_count) {
+            PyErr_Format(PyExc_IndexError,
+                         "series chart row %zd is outside 0..%zd",
+                         row, row_count - 1);
+            goto chart_error;
+        }
+        size_t offset = (size_t)row * (size_t)data->bucket_count;
+        const double *row_values = data->bucket_count != 0
+            ? data->values + offset : NULL;
+        const unsigned char *row_present = data->bucket_count != 0
+            ? data->present + offset : NULL;
+        double minimum, maximum;
+        Py_ssize_t selected_count = 0;
+        const double *row_prefix = data->prefix +
+            (size_t)row * ((size_t)data->bucket_count + 1);
+        const double *row_bounds = data->bounds + (size_t)row * 2;
+        Py_ssize_t *selected = series_chart_lttb(
+            row_values, row_prefix, row_bounds, data->bucket_count, threshold,
+            selected_workspace, &selected_count, &minimum, &maximum);
+        if (selected == NULL && data->bucket_count != 0) goto chart_error;
+        PyObject *path = series_chart_path(
+            row_values, row_present, data->bucket_count,
+            selected, selected_count, data->index_plan,
+            data->value_text,
+            data->bucket_count != 0 ? data->value_offsets + offset : NULL,
+            data->bucket_count != 0 ? data->value_lengths + offset : NULL);
+        PyObject *axis = tick_text ? NULL : series_chart_ticks(
+            minimum, maximum, tick_target);
+        int tick_error = tick_text ? series_chart_write_ticks(
+            &tick_writer, minimum, maximum, tick_target, output != 0,
+            &tick_count) : 0;
+        if (path == NULL || (!tick_text && axis == NULL) || tick_error < 0) {
+            Py_XDECREF(path);
+            Py_XDECREF(axis);
+            goto chart_error;
+        }
+        PyTuple_SET_ITEM(paths, output, path);
+        if (!tick_text) PyTuple_SET_ITEM(ticks, output, axis);
+    }
+    for (Py_ssize_t output = 0; output < full_count; output++) {
+        Py_ssize_t row = PyLong_AsSsize_t(full_items[output]);
+        if (row == -1 && PyErr_Occurred()) goto chart_error;
+        if (row < 0 || row >= row_count) {
+            PyErr_Format(PyExc_IndexError,
+                         "series chart row %zd is outside 0..%zd",
+                         row, row_count - 1);
+            goto chart_error;
+        }
+        size_t path_start = data->path_offsets[row];
+        size_t path_size = data->path_offsets[row + 1] - path_start;
+        if (path_size > (size_t)PY_SSIZE_T_MAX) {
+            PyErr_NoMemory();
+            goto chart_error;
+        }
+        PyObject *path = PyUnicode_DecodeASCII(
+            data->path_text == NULL ? "" : data->path_text + path_start,
+            (Py_ssize_t)path_size, NULL);
+        if (path == NULL) goto chart_error;
+        PyTuple_SET_ITEM(paths, downsample_count + output, path);
+    }
+    PyObject *tick_output = ticks;
+    if (tick_text) {
+        PyObject *bytes = wreath_writer_finish(&tick_writer);
+        tick_output = bytes == NULL ? NULL : PyUnicode_DecodeASCII(
+            PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes), NULL);
+        Py_XDECREF(bytes);
+        if (tick_output == NULL) goto chart_error;
+    }
+    PyObject *result = tick_text
+        ? Py_BuildValue("nOOOn", row_count, data->keys, paths,
+                        tick_output, tick_count)
+        : Py_BuildValue("nOOO", row_count, data->keys, paths, tick_output);
+    Py_DECREF(paths);
+    Py_DECREF(tick_output);
+    Py_DECREF(downsample);
+    Py_DECREF(full);
+    PyMem_Free(selected_workspace);
+    return result;
+
+chart_error:
+    Py_XDECREF(paths);
+    Py_XDECREF(ticks);
+    Py_XDECREF(tick_writer.bytes);
+    Py_DECREF(downsample);
+    Py_DECREF(full);
+    PyMem_Free(selected_workspace);
+    return NULL;
+}
+
+PyObject *
+wreath_series_data_chart(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    return series_data_chart(args, 0);
+}
+
+PyObject *
+wreath_series_data_chart_text(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    return series_data_chart(args, 1);
+}
 
 static PyObject *
 series_chart_project_spine(Py_ssize_t bucket_count, Py_ssize_t series_count,
@@ -1548,12 +2473,12 @@ series_chart_project_spine(Py_ssize_t bucket_count, Py_ssize_t series_count,
         double minimum, maximum;
         Py_ssize_t selected_count = 0;
         Py_ssize_t *selected = series_chart_lttb(
-            slot_values, bucket_count, threshold, &selected_count,
+            slot_values, NULL, NULL, bucket_count, threshold, NULL, &selected_count,
             &minimum, &maximum);
         if (selected == NULL && bucket_count != 0) goto output_error;
         PyObject *path = series_chart_path(
             slot_values, slot_present, bucket_count, selected, selected_count,
-            index_plan);
+            index_plan, NULL, NULL, NULL);
         PyMem_Free(selected);
         PyObject *axis = series_chart_ticks(minimum, maximum, tick_target);
         if (path == NULL || axis == NULL) {
@@ -1571,7 +2496,8 @@ series_chart_project_spine(Py_ssize_t bucket_count, Py_ssize_t series_count,
         unsigned char *slot_present = bucket_count != 0
             ? present + cell_offsets[slot] : NULL;
         PyObject *path = series_chart_path(
-            slot_values, slot_present, bucket_count, NULL, 0, index_plan);
+            slot_values, slot_present, bucket_count, NULL, 0, index_plan,
+            NULL, NULL, NULL);
         if (path == NULL) goto output_error;
         PyTuple_SET_ITEM(paths, downsample_count + output, path);
     }
@@ -1694,17 +2620,17 @@ error:
 PyObject *
 wreath_series_chart_spine(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *start, *end, *tz, *sparse, *fills;
+    PyObject *start, *end, *tz, *sparse, *fills, *capsule = NULL;
     PyObject *downsample_source, *full_source;
     int unit;
     Py_ssize_t threshold, tick_target;
     if (!PyArg_ParseTuple(
-            args, "OOiOOOOOnn:series_chart_spine",
+            args, "OOiOOOOOnn|O:series_chart_spine",
             &start, &end, &unit, &tz, &sparse, &fills,
-            &downsample_source, &full_source, &threshold, &tick_target))
+            &downsample_source, &full_source, &threshold, &tick_target,
+            &capsule))
         return NULL;
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyDateTime_CAPI *api = series_datetime_api(capsule);
     if (api == NULL) return NULL;
     if (!PyObject_TypeCheck(start, api->DateTimeType) ||
         !_PyDateTime_HAS_TZINFO(start)) {
@@ -2003,6 +2929,92 @@ error:
     PyMem_Free(measures);
     Py_DECREF(buckets);
     Py_DECREF(result);
+    return NULL;
+}
+
+/* Materialize the database-neutral dense-cell result at its Python boundary.
+ * The declaration has already become the two data arrays `names` and `fills`;
+ * no ORM, SQL, column or measure object crosses this entry point. */
+PyObject *
+wreath_series_cell_rows(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *row_source, *name_source, *fill_source;
+    PyObject *rows = NULL, *names = NULL, *fills = NULL, *result = NULL;
+    if (!PyArg_ParseTuple(args, "OOO:series_cell_rows",
+                          &row_source, &name_source, &fill_source)) return NULL;
+    rows = PySequence_Fast(row_source, "cell rows must be a sequence");
+    names = PySequence_Fast(name_source, "measure names must be a sequence");
+    fills = PySequence_Fast(fill_source, "measure fills must be a sequence");
+    if (rows == NULL || names == NULL || fills == NULL) goto error;
+    Py_ssize_t measure_count = PySequence_Fast_GET_SIZE(names);
+    if (PySequence_Fast_GET_SIZE(fills) != measure_count) {
+        PyErr_SetString(PyExc_ValueError,
+                        "measure names and fills must have the same length");
+        goto error;
+    }
+    Py_ssize_t row_count = PySequence_Fast_GET_SIZE(rows);
+    result = PyList_New(row_count);
+    if (result == NULL) goto error;
+    PyObject **row_items = PySequence_Fast_ITEMS(rows);
+    PyObject **name_items = PySequence_Fast_ITEMS(names);
+    PyObject **fill_items = PySequence_Fast_ITEMS(fills);
+    for (Py_ssize_t row_index = 0; row_index < row_count; row_index++) {
+        PyObject *row = PySequence_Fast(
+            row_items[row_index], "each cell row must be a sequence");
+        if (row == NULL) goto error;
+        if (PySequence_Fast_GET_SIZE(row) < measure_count + 2) {
+            PyErr_Format(PyExc_ValueError,
+                         "cell row %zd has fewer than %zd columns",
+                         row_index, measure_count + 2);
+            Py_DECREF(row);
+            goto error;
+        }
+        PyObject **items = PySequence_Fast_ITEMS(row);
+        PyObject *row_number = PyNumber_Long(items[0]);
+        PyObject *column_number = PyNumber_Long(items[1]);
+        PyObject *values = _PyDict_NewPresized(measure_count);
+        if (row_number == NULL || column_number == NULL || values == NULL) {
+            Py_XDECREF(row_number);
+            Py_XDECREF(column_number);
+            Py_XDECREF(values);
+            Py_DECREF(row);
+            goto error;
+        }
+        for (Py_ssize_t measure = 0; measure < measure_count; measure++) {
+            PyObject *found = items[measure + 2];
+            if (PyDict_SetItem(values, name_items[measure],
+                               found == Py_None ? fill_items[measure] : found) < 0) {
+                Py_DECREF(row_number);
+                Py_DECREF(column_number);
+                Py_DECREF(values);
+                Py_DECREF(row);
+                goto error;
+            }
+        }
+        PyObject *cell = PyTuple_New(3);
+        if (cell == NULL) {
+            Py_DECREF(row_number);
+            Py_DECREF(column_number);
+            Py_DECREF(values);
+            Py_DECREF(row);
+            goto error;
+        }
+        PyTuple_SET_ITEM(cell, 0, row_number);
+        PyTuple_SET_ITEM(cell, 1, column_number);
+        PyTuple_SET_ITEM(cell, 2, values);
+        PyList_SET_ITEM(result, row_index, cell);
+        Py_DECREF(row);
+    }
+    Py_DECREF(rows);
+    Py_DECREF(names);
+    Py_DECREF(fills);
+    return result;
+
+error:
+    Py_XDECREF(result);
+    Py_XDECREF(rows);
+    Py_XDECREF(names);
+    Py_XDECREF(fills);
     return NULL;
 }
 

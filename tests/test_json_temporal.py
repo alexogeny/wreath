@@ -145,6 +145,28 @@ def test_a_hook_raising_its_own_type_error_is_not_masked() -> None:
         dumps(BadHook())
 
 
+def test_a_jsonable_hook_is_materialized_once_at_the_encoder_boundary() -> None:
+    calls = 0
+
+    class Result:
+        def __jsonable__(self):
+            nonlocal calls
+            calls += 1
+            return {"at": datetime.datetime(2024, 1, 1, tzinfo=UTC)}
+
+    assert dumps(Result()) == b'{"at":"2024-01-01T00:00:00+00:00"}'
+    assert calls == 1
+
+
+def test_a_jsonable_hook_must_not_return_itself() -> None:
+    class Recursive:
+        def __jsonable__(self):
+            return self
+
+    with pytest.raises(TypeError, match="returned itself"):
+        dumps(Recursive())
+
+
 def test_an_instance_getattr_is_never_consulted() -> None:
     """`jsonable` looks the hook up on the *type*, so an instance __getattr__
     cannot be triggered by encoding -- the mechanism design 22 item 16

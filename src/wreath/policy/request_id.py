@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .._headers import find_header
 from .._native import _core
 from .._webpolicy import replace_response_header
 from ..request import Request
@@ -136,7 +135,7 @@ class RequestIdPolicy:
         )
 
     def _inbound(self, request: Request) -> str | None:
-        value = find_header(request.headers, self._header_bytes)
+        value = request._header_bytes(self._header_bytes)
         if value is None or not _request_id_valid(value, self._max_length):
             return None
         return value.decode("ascii")

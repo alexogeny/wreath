@@ -134,22 +134,9 @@ def _cacheable_response(response: Response) -> bool:
     # caller's Location to the next is the same leak a cached body would be.
     if not (200 <= response.status < 300):
         return False
-    for name, value in response.headers:
-        lname = name.lower()
-        if lname == b"set-cookie":
-            return False   # per-user cookie must never be shared
-        if lname == b"vary" and value.strip():
-            # `Vary` names request headers the answer depends on, and this
-            # cache's key is method+path+query -- it cannot represent them. One
-            # entry would be served to every variant: the msgpack body from
-            # `serialize()` handed to a JSON client, one locale's copy to every
-            # locale, one caller's `Authorization`-shaped answer to the next.
-            return False
-        if lname == b"cache-control":
-            directives = value.lower()
-            if b"no-store" in directives or b"private" in directives:
-                return False
-    return True
+    # The native scan refuses Set-Cookie, non-empty Vary, and private/no-store
+    # directives without allocating a lowercase header per field.
+    return _core.cacheable_headers(response.headers)
 
 
 def _snapshot(result: Any) -> tuple[str, Any] | None:

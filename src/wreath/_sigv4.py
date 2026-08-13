@@ -13,6 +13,8 @@ import hmac
 from collections.abc import Iterable
 from urllib.parse import quote
 
+from ._native import _core
+
 ALGORITHM = "AWS4-HMAC-SHA256"
 UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -52,12 +54,7 @@ def signing_key(secret: str, date_stamp: str, region: str, service: str) -> byte
 
 
 def _canonical_headers(headers: dict[str, str]) -> tuple[str, str]:
-    items = sorted(
-        (k.lower().strip(), " ".join(str(v).strip().split())) for k, v in headers.items()
-    )
-    canon = "".join(f"{k}:{v}\n" for k, v in items)
-    signed = ";".join(k for k, _ in items)
-    return canon, signed
+    return _core.sigv4_headers(headers)
 
 
 def _canonical_query(params: Iterable[tuple[str, str]]) -> str:
@@ -72,18 +69,7 @@ def canonical_request(
     headers: dict[str, str],
     payload_hash: str,
 ) -> tuple[str, str]:
-    canon_headers, signed_headers = _canonical_headers(headers)
-    cr = "\n".join(
-        [
-            method.upper(),
-            uri_encode(path, encode_slash=False) or "/",
-            _canonical_query(params),
-            canon_headers,
-            signed_headers,
-            payload_hash,
-        ]
-    )
-    return cr, signed_headers
+    return _core.sigv4_canonical(method, path, params, headers, payload_hash)
 
 
 def _scope(date_stamp: str, region: str, service: str) -> str:
