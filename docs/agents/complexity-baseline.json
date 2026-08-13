@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "Checked complexity assumptions for the metal request path. Timings are observations, not absolute performance gates; --check reruns each probe and enforces its declared global and tail exponent bound.",
+  "note": "Checked complexity assumptions for native and request-hot paths. Timings are observations, not absolute performance gates; --check reruns each probe and enforces its declared global and tail exponent bound.",
   "probes": {
     "wheel-fire-batch": {
       "contract": {
@@ -27,12 +27,12 @@
         "assumption": "advance() over k same-tick timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.265,
-        "tail_exponent": 1.383,
+        "fitted_exponent": 1.108,
+        "tail_exponent": 1.155,
         "local_exponents": [
-          1.105,
-          1.04,
-          1.726
+          1.017,
+          1.101,
+          1.21
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -45,10 +45,10 @@
           16000
         ],
         "seconds": [
-          0.00006306899012997746,
-          0.0001356150023639202,
-          0.0002788740093819797,
-          0.0009223550150636584
+          6.616394966840744e-05,
+          0.00013391103129833937,
+          0.0002871779724955559,
+          0.0006643449887633324
         ],
         "counters": [
           {
@@ -91,12 +91,12 @@
         "assumption": "cancel() of k same-deadline timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.98,
-        "tail_exponent": 1.026,
+        "fitted_exponent": 1.048,
+        "tail_exponent": 1.035,
         "local_exponents": [
-          0.88,
-          1.01,
-          1.042
+          1.09,
+          0.998,
+          1.071
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -109,10 +109,10 @@
           16000
         ],
         "seconds": [
-          0.00006797799142077565,
-          0.0001251150097232312,
-          0.0002519029949326068,
-          0.0005185650079511106
+          5.9861980844289064e-05,
+          0.000127418024931103,
+          0.0002545560128055513,
+          0.000534660997800529
         ],
         "counters": [
           {
@@ -155,12 +155,12 @@
         "assumption": "advance() across one idle rotation with n parked long timers: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.089,
-        "tail_exponent": 0.131,
+        "fitted_exponent": 0.004,
+        "tail_exponent": 0.018,
         "local_exponents": [
-          0.01,
-          0.072,
-          0.19
+          -0.009,
+          -0.034,
+          0.07
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -173,10 +173,10 @@
           400000
         ],
         "seconds": [
-          0.0000015519908629357815,
-          0.0000015629921108484268,
-          0.0000016429985407739878,
-          0.00000187402474693954
+          0.00014389900024980307,
+          0.00014296796871349216,
+          0.00013963098172098398,
+          0.00014654500409960747
         ],
         "counters": [
           {},
@@ -229,10 +229,10 @@
           2000
         ],
         "seconds": [
-          1.5894998796284197E-7,
-          2.478651003912091E-7,
-          3.4349504858255385E-7,
-          5.401700036600232E-7
+          1.6911508282646537e-07,
+          2.666001091711223e-07,
+          3.6543497117236257e-07,
+          6.47309934720397e-07
         ],
         "counters": [
           {
@@ -275,12 +275,12 @@
         "assumption": "k call_later+cancel cycles on the metal-config loop: linear, no rot.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.043,
-        "tail_exponent": 1.081,
+        "fitted_exponent": 1.044,
+        "tail_exponent": 1.039,
         "local_exponents": [
-          1.02,
-          0.889,
-          1.273
+          1.013,
+          1.165,
+          0.914
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -293,10 +293,10 @@
           40000
         ],
         "seconds": [
-          0.0010290649952366948,
-          0.0020862430101260543,
-          0.0038645690074190497,
-          0.009337882016552612
+          0.001071896986104548,
+          0.002162960998248309,
+          0.004849122022278607,
+          0.009135789005085826
         ],
         "counters": [
           {
@@ -339,12 +339,12 @@
         "assumption": "one pop plus one push is amortized O(1) in queue capacity",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.069,
-        "tail_exponent": 0.038,
+        "fitted_exponent": 0.023,
+        "tail_exponent": 0.003,
         "local_exponents": [
-          0.114,
-          0.128,
-          -0.053
+          0.021,
+          0.151,
+          -0.145
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -357,10 +357,10 @@
           131072
         ],
         "seconds": [
-          0.000022924068616703153,
-          0.000024801294784992933,
-          0.000027109170332551003,
-          0.000026125868316739798
+          2.712977584451437e-05,
+          2.753164153546095e-05,
+          3.055902197957039e-05,
+          2.763658994808793e-05
         ],
         "counters": [
           {},
@@ -395,12 +395,12 @@
         "assumption": "incremental delimiter scans visit each buffered byte O(1) times",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.505,
-        "tail_exponent": 0.639,
+        "fitted_exponent": 0.557,
+        "tail_exponent": 0.607,
         "local_exponents": [
-          0.207,
-          0.592,
-          0.685
+          0.466,
+          0.529,
+          0.686
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -413,10 +413,10 @@
           16000
         ],
         "seconds": [
-          0.0002575450052972883,
-          0.0002973389928229153,
-          0.00044831298873759806,
-          0.0007206950103864074
+          0.00023843697272241116,
+          0.0003294370253570378,
+          0.000475209963042289,
+          0.0007646119920536876
         ],
         "counters": [
           {},
@@ -451,12 +451,12 @@
         "assumption": "request parsing, activation, and response emission are O(requests)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.95,
-        "tail_exponent": 0.975,
+        "fitted_exponent": 0.979,
+        "tail_exponent": 1.0,
         "local_exponents": [
-          0.895,
-          0.964,
-          0.985
+          0.924,
+          1.011,
+          0.99
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -469,10 +469,10 @@
           4000
         ],
         "seconds": [
-          0.0013245719892438501,
-          0.0024629519903101027,
-          0.004805898992344737,
-          0.00950991699937731
+          0.0013530339929275215,
+          0.0025667970185168087,
+          0.005172286997549236,
+          0.010274100990500301
         ],
         "counters": [
           {},
@@ -507,12 +507,12 @@
         "assumption": "one-shot response validation and serialization are O(header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.469,
-        "tail_exponent": 0.541,
+        "fitted_exponent": 0.511,
+        "tail_exponent": 0.567,
         "local_exponents": [
-          0.327,
-          0.465,
-          0.617
+          0.372,
+          0.59,
+          0.544
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -525,10 +525,10 @@
           16000
         ],
         "seconds": [
-          0.00019807199714705348,
-          0.0002485379809513688,
-          0.0003431049990467727,
-          0.0005262299964670092
+          0.00020269898232072592,
+          0.000262271030806005,
+          0.00039464898873120546,
+          0.0005755379679612815
         ],
         "counters": [
           {},
@@ -563,12 +563,12 @@
         "assumption": "per-frame size-line scan and buffer consumption are O(frames)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.962,
-        "tail_exponent": 0.948,
+        "fitted_exponent": 0.919,
+        "tail_exponent": 0.968,
         "local_exponents": [
-          1.008,
-          0.91,
-          0.987
+          0.824,
+          0.905,
+          1.032
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -581,10 +581,10 @@
           16000
         ],
         "seconds": [
-          0.0014033990155439824,
-          0.0028227489965502173,
-          0.005303985992213711,
-          0.010510228021303192
+          0.0016745559987612069,
+          0.002964802028145641,
+          0.005551576963625848,
+          0.011352161003742367
         ],
         "counters": [
           {
@@ -627,12 +627,12 @@
         "assumption": "pairing heaps and the slot tournament drain k colliding timers in O(k)",
         "expect_exponent": 1.0,
         "tolerance": 0.6,
-        "fitted_exponent": 1.004,
-        "tail_exponent": 1.015,
+        "fitted_exponent": 1.09,
+        "tail_exponent": 1.151,
         "local_exponents": [
-          0.961,
-          1.063,
-          0.968
+          0.993,
+          1.011,
+          1.291
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -645,10 +645,10 @@
           4000
         ],
         "seconds": [
-          0.000058250006986781955,
-          0.00011338299373164773,
-          0.00023686501663178205,
-          0.00046338100219145417
+          5.745701491832733e-05,
+          0.00011438399087637663,
+          0.00023056200006976724,
+          0.0005643669865094125
         ],
         "counters": [
           {
@@ -691,12 +691,12 @@
         "assumption": "draining k timers that do not share a slot is O(k)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.027,
-        "tail_exponent": 1.041,
+        "fitted_exponent": 1.001,
+        "tail_exponent": 1.015,
         "local_exponents": [
-          1.007,
-          1.006,
-          1.075
+          0.977,
+          0.992,
+          1.037
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -709,10 +709,10 @@
           4000
         ],
         "seconds": [
-          0.000047779991291463375,
-          0.00009600102202966809,
-          0.00019286200404167175,
-          0.0004063039959874004
+          5.093502113595605e-05,
+          0.0001002479693852365,
+          0.0001994430203922093,
+          0.00040916696889325976
         ],
         "counters": [
           {
@@ -755,12 +755,12 @@
         "assumption": "gathered-write buffering is O(chunks), not O(chunks * buffered)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.88,
-        "tail_exponent": 0.849,
+        "fitted_exponent": 0.874,
+        "tail_exponent": 0.911,
         "local_exponents": [
-          1.011,
-          0.674,
-          1.023
+          0.798,
+          0.881,
+          0.94
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -773,10 +773,10 @@
           16000
         ],
         "seconds": [
-          0.00003913399996235967,
-          0.00007886899402365088,
-          0.00012583701754920185,
-          0.00025577101041562855
+          3.938400186598301e-05,
+          6.846798351034522e-05,
+          0.00012606603559106588,
+          0.00024192302953451872
         ],
         "counters": [
           {
@@ -819,12 +819,12 @@
         "assumption": "native egress enqueue is amortized O(writes) under backpressure",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.93,
-        "tail_exponent": 0.997,
+        "fitted_exponent": 0.88,
+        "tail_exponent": 0.88,
         "local_exponents": [
-          0.762,
-          1.03,
-          0.964
+          0.889,
+          0.853,
+          0.907
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -837,10 +837,10 @@
           8000
         ],
         "seconds": [
-          0.00004989400622434914,
-          0.00008460998651571572,
-          0.00017277500592172146,
-          0.00033705399255268276
+          5.3840980399399996e-05,
+          9.972701082006097e-05,
+          0.0001800769823603332,
+          0.00033756199991330504
         ],
         "counters": [
           {
@@ -883,12 +883,12 @@
         "assumption": "Rejecting a body with n extra keys against an n-field schema: O(n).",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.04,
-        "tail_exponent": 0.978,
+        "fitted_exponent": 1.006,
+        "tail_exponent": 1.001,
         "local_exponents": [
-          1.187,
-          0.975,
-          0.98
+          0.974,
+          1.129,
+          0.874
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -901,10 +901,10 @@
           3200
         ],
         "seconds": [
-          0.00017414155008736997,
-          0.0003964050498325378,
-          0.0007793687997036614,
-          0.0015377821997390128
+          0.0001945623487699777,
+          0.00038225290190894155,
+          0.000835903498227708,
+          0.001531952602090314
         ],
         "counters": [
           {},
@@ -939,12 +939,12 @@
         "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.022,
-        "tail_exponent": -0.052,
+        "fitted_exponent": 0.211,
+        "tail_exponent": -0.158,
         "local_exponents": [
-          -0.104,
-          0.873,
-          -1.078
+          0.761,
+          0.475,
+          -0.859
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -957,10 +957,10 @@
           28
         ],
         "seconds": [
-          0.6222472699882928,
-          0.616617588995723,
-          0.6612500069895759,
-          0.6104866620153189
+          0.6188592110411264,
+          0.6612392539973371,
+          0.6868640400352888,
+          0.644502435985487
         ],
         "counters": [
           {},
@@ -995,12 +995,12 @@
         "assumption": "Encoding an n-element structure is O(n): the writer buffer grows",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.07,
-        "tail_exponent": 1.078,
+        "fitted_exponent": 0.922,
+        "tail_exponent": 0.901,
         "local_exponents": [
-          1.034,
-          1.128,
-          1.028
+          0.94,
+          0.991,
+          0.811
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1013,10 +1013,10 @@
           160000
         ],
         "seconds": [
-          0.00021573601406998932,
-          0.0004418610187713057,
-          0.0009659670176915824,
-          0.0019699149997904897
+          0.00031171401496976614,
+          0.0005980900023132563,
+          0.001188736001495272,
+          0.0020852350280620158
         ],
         "counters": [
           {},
@@ -1051,12 +1051,12 @@
         "assumption": "Decoding an n-element document is O(n): single-pass scan, parser-local",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.049,
-        "tail_exponent": 1.071,
+        "fitted_exponent": 0.983,
+        "tail_exponent": 1.031,
         "local_exponents": [
-          0.881,
-          1.421,
-          0.722
+          0.864,
+          1.049,
+          1.012
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1069,10 +1069,10 @@
           160000
         ],
         "seconds": [
-          0.000640815997030586,
-          0.0011802000226452947,
-          0.0031593620078638196,
-          0.005212123011006042
+          0.0007244669832289219,
+          0.0013188389712013304,
+          0.0027284399839118123,
+          0.005504007975105196
         ],
         "counters": [
           {},
@@ -1107,12 +1107,12 @@
         "assumption": "Parsing an n-cookie header is O(n): one forward pass, O(1) dict ops.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.025,
-        "tail_exponent": 0.96,
+        "fitted_exponent": 1.024,
+        "tail_exponent": 0.993,
         "local_exponents": [
-          1.193,
-          0.906,
-          1.014
+          1.09,
+          1.011,
+          0.976
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1125,10 +1125,10 @@
           16000
         ],
         "seconds": [
-          0.00017146198661066592,
-          0.0003919769951608032,
-          0.0007345119956880808,
-          0.0014838599890936166
+          0.00020583596779033542,
+          0.0004381200415082276,
+          0.000882983033079654,
+          0.0017365320236422122
         ],
         "counters": [
           {},
@@ -1163,12 +1163,12 @@
         "assumption": "Parsing an n-field query string is O(n): one forward pass, list append.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.027,
-        "tail_exponent": 0.914,
+        "fitted_exponent": 1.028,
+        "tail_exponent": 0.942,
         "local_exponents": [
-          1.206,
-          1.17,
-          0.658
+          1.264,
+          0.836,
+          1.048
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1181,10 +1181,10 @@
           16000
         ],
         "seconds": [
-          0.0002218369918409735,
-          0.0005119429843034595,
-          0.001152117009041831,
-          0.0018177879974246025
+          0.00020528503227978945,
+          0.0004928929847665131,
+          0.0008796280017122626,
+          0.0018184760119765997
         ],
         "counters": [
           {},
@@ -1219,12 +1219,12 @@
         "assumption": "Building the header map from n headers is O(n): one pass into a dict.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.194,
-        "tail_exponent": 1.279,
+        "fitted_exponent": 0.949,
+        "tail_exponent": 0.883,
         "local_exponents": [
-          0.992,
-          1.29,
-          1.268
+          1.148,
+          0.751,
+          1.016
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1237,10 +1237,10 @@
           16000
         ],
         "seconds": [
-          0.00009876600233837962,
-          0.0001964289986062795,
-          0.00048020301619544625,
-          0.0011567760084290057
+          0.00010063900845125318,
+          0.00022296694805845618,
+          0.0003752229968085885,
+          0.0007585910498164594
         ],
         "counters": [
           {},
@@ -1275,12 +1275,12 @@
         "assumption": "Injecting a fixed set of default headers into an n-header response stays",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.031,
-        "tail_exponent": 0.966,
+        "fitted_exponent": 1.01,
+        "tail_exponent": 0.99,
         "local_exponents": [
-          1.126,
-          1.134,
-          0.797
+          1.048,
+          1.011,
+          0.969
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1293,10 +1293,10 @@
           8000
         ],
         "seconds": [
-          0.00036137999268248677,
-          0.0007886629900895059,
-          0.0017313369899056852,
-          0.0030090689833741635
+          0.00035034603206440806,
+          0.0007246169843710959,
+          0.0014602550072595477,
+          0.0028579520294442773
         ],
         "counters": [
           {},
@@ -1331,12 +1331,12 @@
         "assumption": "built-in egress header replacement is linear and leaves one current value",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.94,
-        "tail_exponent": 0.955,
+        "fitted_exponent": 0.938,
+        "tail_exponent": 0.943,
         "local_exponents": [
-          0.9,
-          0.969,
-          0.941
+          0.91,
+          0.994,
+          0.892
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1349,10 +1349,10 @@
           8000
         ],
         "seconds": [
-          0.00010700098937377334,
-          0.0001996249775402248,
-          0.0003906850179191679,
-          0.0007500810024794191
+          0.00010746100451797247,
+          0.00020194798707962036,
+          0.00040208303835242987,
+          0.0007463980000466108
         ],
         "counters": [
           {
@@ -1395,12 +1395,12 @@
         "assumption": "the standard middleware lifecycle is linear in sends and keeps headers bounded",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.993,
-        "tail_exponent": 0.92,
+        "fitted_exponent": 0.985,
+        "tail_exponent": 1.003,
         "local_exponents": [
-          1.141,
-          0.983,
-          0.858
+          0.954,
+          0.973,
+          1.033
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1413,10 +1413,10 @@
           2000
         ],
         "seconds": [
-          0.006312482000794262,
-          0.013921892998041585,
-          0.027519707015017048,
-          0.04986339001334272
+          0.0069861639640294015,
+          0.013533817022107542,
+          0.026561737002339214,
+          0.05435556097654626
         ],
         "counters": [
           {
@@ -1459,12 +1459,12 @@
         "assumption": "Parsing an n-part multipart body is O(body): the boundary search advances",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.945,
-        "tail_exponent": 0.891,
+        "fitted_exponent": 1.068,
+        "tail_exponent": 1.058,
         "local_exponents": [
-          1.082,
-          0.856,
-          0.926
+          1.065,
+          1.143,
+          0.973
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1477,10 +1477,10 @@
           8000
         ],
         "seconds": [
-          0.0003601869975682348,
-          0.0007622530101798475,
-          0.00138008501380682,
-          0.0026224419998470694
+          0.00033658096799626946,
+          0.0007040179916657507,
+          0.0015542710316367447,
+          0.0030507930205203593
         ],
         "counters": [
           {},
@@ -1515,12 +1515,12 @@
         "assumption": "static route activation is O(1) in total route count",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.008,
-        "tail_exponent": 0.011,
+        "fitted_exponent": 0.021,
+        "tail_exponent": -0.039,
         "local_exponents": [
-          -0.044,
-          -0.008,
-          0.029
+          0.203,
+          -0.167,
+          0.089
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -1533,10 +1533,10 @@
           64000
         ],
         "seconds": [
-          0.00023494201013818383,
-          0.0002210160018876195,
-          0.0002187209902331233,
-          0.00022761800209991634
+          0.00020736799342557788,
+          0.0002748440019786358,
+          0.0002181889722123742,
+          0.0002467720187269151
         ],
         "counters": [
           {},
@@ -1571,12 +1571,12 @@
         "assumption": "worst-case bitset activation is O(group size / 64)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.714,
-        "tail_exponent": 0.881,
+        "fitted_exponent": 0.808,
+        "tail_exponent": 0.914,
         "local_exponents": [
-          0.352,
-          0.796,
-          0.965
+          0.517,
+          1.049,
+          0.778
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1589,10 +1589,10 @@
           64000
         ],
         "seconds": [
-          0.0015585109940730035,
-          0.001988650008570403,
-          0.0034535150043666363,
-          0.006742480007233098
+          0.0014747109962627292,
+          0.002110522997099906,
+          0.004368101013824344,
+          0.007488476985599846
         ],
         "counters": [
           {},
@@ -1627,12 +1627,12 @@
         "assumption": "Trie match cost is independent of route count: O(1) in N.",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.046,
-        "tail_exponent": 0.1,
+        "fitted_exponent": 0.071,
+        "tail_exponent": 0.068,
         "local_exponents": [
-          -0.052,
-          0.019,
-          0.181
+          0.069,
+          0.095,
+          0.041
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -1645,10 +1645,10 @@
           4000
         ],
         "seconds": [
-          0.0007995640044100583,
-          0.000771220016758889,
-          0.0007813489937689155,
-          0.00088585598859936
+          0.0008235519635491073,
+          0.0008639979641884565,
+          0.0009226779802702367,
+          0.0009495389531366527
         ],
         "counters": [
           {},
@@ -1683,12 +1683,12 @@
         "assumption": "request-head parsing is O(headers plus header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.84,
-        "tail_exponent": 0.784,
+        "fitted_exponent": 0.956,
+        "tail_exponent": 0.948,
         "local_exponents": [
-          1.085,
-          0.442,
-          1.125
+          0.951,
+          1.017,
+          0.878
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1701,10 +1701,10 @@
           4000
         ],
         "seconds": [
-          0.00007119399379007518,
-          0.00015103400801308453,
-          0.00020522598060779274,
-          0.0004476119938772172
+          5.778798367828131e-05,
+          0.00011168897617608309,
+          0.0002261039917357266,
+          0.0004155280184932053
         ],
         "counters": [
           {},
@@ -1739,12 +1739,12 @@
         "assumption": "Decoding an object with n distinct keys is O(n): the parser-local key",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.126,
-        "tail_exponent": 1.196,
+        "fitted_exponent": 1.123,
+        "tail_exponent": 1.208,
         "local_exponents": [
-          1.055,
-          0.92,
-          1.472
+          0.969,
+          1.072,
+          1.344
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1757,10 +1757,10 @@
           80000
         ],
         "seconds": [
-          0.0011631580127868801,
-          0.0024173059791792184,
-          0.0045733010047115386,
-          0.0126900440081954
+          0.001191652030684054,
+          0.00233269901946187,
+          0.004904004978016019,
+          0.012446934008039534
         ],
         "counters": [
           {},
@@ -1795,12 +1795,12 @@
         "assumption": "Percent-decoding an n-byte target is O(n): one forward pass.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.987,
-        "tail_exponent": 1.044,
+        "fitted_exponent": 0.974,
+        "tail_exponent": 1.025,
         "local_exponents": [
-          0.848,
-          1.062,
-          1.027
+          0.862,
+          1.002,
+          1.049
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1813,10 +1813,10 @@
           160000
         ],
         "seconds": [
-          0.00005524398875422776,
-          0.00009940701420418918,
-          0.0002075600204989314,
-          0.00042284600203856826
+          6.29679998382926e-05,
+          0.00011447502765804529,
+          0.00022923998767510056,
+          0.0004742089658975601
         ],
         "counters": [
           {},
@@ -1851,12 +1851,12 @@
         "assumption": "XOR-unmasking an n-byte WebSocket payload is O(n): a single word-at-a-",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.896,
-        "tail_exponent": 1.032,
+        "fitted_exponent": 0.774,
+        "tail_exponent": 0.999,
         "local_exponents": [
-          0.667,
-          0.766,
-          1.299
+          0.241,
+          1.024,
+          0.974
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1869,10 +1869,10 @@
           400000
         ],
         "seconds": [
-          0.000005730980774387717,
-          0.000009096984285861254,
-          0.000015469006029888988,
-          0.00003806198947131634
+          7.883994840085506e-06,
+          9.31700924411416e-06,
+          1.8944963812828064e-05,
+          3.7210003938525915e-05
         ],
         "counters": [
           {},
@@ -1907,12 +1907,12 @@
         "assumption": "middleware dispatch is O(active hooks)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.654,
-        "tail_exponent": 0.769,
+        "fitted_exponent": 0.573,
+        "tail_exponent": 0.685,
         "local_exponents": [
-          0.459,
-          0.553,
-          0.985
+          0.325,
+          0.645,
+          0.725
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1925,10 +1925,10 @@
           64
         ],
         "seconds": [
-          0.013934043003246188,
-          0.019150011998135597,
-          0.028089553001336753,
-          0.055602190986974165
+          0.017441619012970477,
+          0.021853603015188128,
+          0.03416251897579059,
+          0.05648311699042097
         ],
         "counters": [
           {},
@@ -1963,12 +1963,12 @@
         "assumption": "tape dispatch is O(instructions), with a per-instruction cost that does not grow with the number of instruction kinds",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.97,
-        "tail_exponent": 0.949,
+        "fitted_exponent": 0.939,
+        "tail_exponent": 0.995,
         "local_exponents": [
-          1.056,
-          0.834,
-          1.064
+          0.822,
+          0.954,
+          1.036
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1981,10 +1981,10 @@
           64
         ],
         "seconds": [
-          0.005030088999774307,
-          0.010460531018907204,
-          0.01865214598365128,
-          0.038991464010905474
+          0.005385076976381242,
+          0.009522776992525905,
+          0.018442333966959268,
+          0.03781582199735567
         ],
         "counters": [
           {},
@@ -2019,12 +2019,12 @@
         "assumption": "response coercion is O(encoded body bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.718,
-        "tail_exponent": 0.824,
+        "fitted_exponent": 0.752,
+        "tail_exponent": 0.877,
         "local_exponents": [
-          0.527,
-          0.658,
-          0.991
+          0.475,
+          0.838,
+          0.915
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2037,10 +2037,10 @@
           160000
         ],
         "seconds": [
-          0.00019158099894411862,
-          0.0002760789939202368,
-          0.00043548899702727795,
-          0.0008655280107632279
+          0.00020917097572237253,
+          0.0002908249734900892,
+          0.0005198729922994971,
+          0.0009803259745240211
         ],
         "counters": [
           {},
@@ -2075,12 +2075,12 @@
         "assumption": "folding sort tokens into the query is O(tokens)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.92,
-        "tail_exponent": 0.98,
+        "fitted_exponent": 0.965,
+        "tail_exponent": 0.934,
         "local_exponents": [
-          0.795,
-          0.94,
-          1.02
+          1.044,
+          0.913,
+          0.955
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2093,10 +2093,10 @@
           8000
         ],
         "seconds": [
-          0.0005433219776023179,
-          0.0009425529860891402,
-          0.0018084309995174408,
-          0.0036675969895441085
+          0.0005559510318562388,
+          0.0011464180424809456,
+          0.0021588430390693247,
+          0.004184988036286086
         ],
         "counters": [
           {},
@@ -2149,10 +2149,10 @@
           2000
         ],
         "seconds": [
-          0.0002938329998869449,
-          0.0004801230097655207,
-          0.0010801710013765842,
-          0.001988729985896498
+          0.0003317809896543622,
+          0.0006967849913053215,
+          0.001280137978028506,
+          0.002522585040424019
         ],
         "counters": [
           {
@@ -2195,12 +2195,12 @@
         "assumption": "an unmatched request scans mounts in registration order, and costs nothing per request-path character",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.789,
-        "tail_exponent": 0.848,
+        "fitted_exponent": 0.785,
+        "tail_exponent": 0.849,
         "local_exponents": [
-          0.674,
-          0.784,
-          0.912
+          0.672,
+          0.747,
+          0.95
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2213,10 +2213,10 @@
           32
         ],
         "seconds": [
-          0.009443287999602035,
-          0.015065109997522086,
-          0.025932786986231804,
-          0.04880846501328051
+          0.011446660966612399,
+          0.018233531969599426,
+          0.03059672098606825,
+          0.059124936000443995
         ],
         "counters": [
           {},
@@ -2251,12 +2251,12 @@
         "assumption": "a missed static match does not scan the request path",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.035,
-        "tail_exponent": 0.057,
+        "fitted_exponent": 0.018,
+        "tail_exponent": -0.01,
         "local_exponents": [
-          -0.072,
-          0.227,
-          -0.113
+          0.096,
+          -0.049,
+          0.029
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2269,10 +2269,10 @@
           16000
         ],
         "seconds": [
-          0.007013519003521651,
-          0.006670314003713429,
-          0.0078062990214675665,
-          0.0072158490074798465
+          0.006959285994525999,
+          0.007438783999532461,
+          0.00718811503611505,
+          0.007336492009926587
         ],
         "counters": [
           {},
@@ -2307,12 +2307,12 @@
         "assumption": "parsing is O(document size), never superlinear in field count",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.037,
-        "tail_exponent": 1.043,
+        "fitted_exponent": 1.059,
+        "tail_exponent": 1.049,
         "local_exponents": [
-          1.0,
-          1.112,
-          0.975
+          1.114,
+          0.96,
+          1.138
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2325,10 +2325,10 @@
           4000
         ],
         "seconds": [
-          0.0004445108992513269,
-          0.0008891935998690314,
-          0.00192202835023636,
-          0.003777220549818594
+          0.00032548169838264585,
+          0.0007044961006613448,
+          0.0013700362003874033,
+          0.0030145104508847
         ],
         "counters": [
           {},
@@ -2363,12 +2363,12 @@
         "assumption": "rejecting an over-deep document is O(document size), and it is `max_document_bytes` -- not the depth check -- that bounds it",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.02,
-        "tail_exponent": 0.978,
+        "fitted_exponent": 0.927,
+        "tail_exponent": 0.968,
         "local_exponents": [
-          1.136,
-          0.92,
-          1.036
+          0.838,
+          0.947,
+          0.989
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2381,10 +2381,122 @@
           16000
         ],
         "seconds": [
-          0.00048032125050667673,
-          0.001055585998983588,
-          0.0019969222004874608,
-          0.004095666349167004
+          6.254615145735442e-05,
+          0.00011177385167684405,
+          0.00021542799950111658,
+          0.00042771564912982287
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-policy-plan-unique": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-authorization",
+        "axis": "distinct selected field policies",
+        "assumption": "native policy planning is linear in selected field count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-policy-plan-unique",
+        "group": "web",
+        "stage": "graphql-authorization",
+        "axis": "distinct selected field policies",
+        "assumption": "native policy planning is linear in selected field count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.894,
+        "tail_exponent": 0.991,
+        "local_exponents": [
+          0.672,
+          0.976,
+          1.007
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ],
+        "seconds": [
+          0.0008752290159463882,
+          0.0013948630075901747,
+          0.0027444500010460615,
+          0.005513728014193475
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-policy-plan-alias-control": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-authorization",
+        "axis": "selected aliases sharing one policy",
+        "assumption": "the same-size alias control remains linear while deduplicating",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-policy-plan-alias-control",
+        "group": "web",
+        "stage": "graphql-authorization",
+        "axis": "selected aliases sharing one policy",
+        "assumption": "the same-size alias control remains linear while deduplicating",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.842,
+        "tail_exponent": 0.855,
+        "local_exponents": [
+          0.802,
+          0.881,
+          0.828
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ],
+        "seconds": [
+          0.0007865229854360223,
+          0.001371498976368457,
+          0.002526442985981703,
+          0.00448606297140941
         ],
         "counters": [
           {},
@@ -2419,12 +2531,12 @@
         "assumption": "SigV4 header signing is O(headers log headers)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.955,
-        "tail_exponent": 0.954,
+        "fitted_exponent": 0.881,
+        "tail_exponent": 0.867,
         "local_exponents": [
-          0.965,
-          0.927,
-          0.982
+          0.955,
+          0.739,
+          0.996
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2437,10 +2549,10 @@
           4000
         ],
         "seconds": [
-          0.0003351210034452379,
-          0.0006541499751619995,
-          0.001243328006239608,
-          0.00245554800494574
+          0.000419877003878355,
+          0.0008141650469042361,
+          0.001358865003567189,
+          0.002710115979425609
         ],
         "counters": [
           {},
@@ -2475,12 +2587,12 @@
         "assumption": "backoff arithmetic is O(1) in the attempt number",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.024,
-        "tail_exponent": -0.006,
+        "fitted_exponent": 0.065,
+        "tail_exponent": 0.087,
         "local_exponents": [
-          0.085,
-          0.016,
-          -0.027
+          0.006,
+          0.11,
+          0.064
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2493,10 +2605,10 @@
           80000
         ],
         "seconds": [
-          0.005640346993459389,
-          0.005981627997243777,
-          0.006046439986675978,
-          0.00593413898604922
+          0.005936820001807064,
+          0.005962398950941861,
+          0.0064350239699706435,
+          0.006728133012074977
         ],
         "counters": [
           {},
@@ -2511,7 +2623,7 @@
         "group": "web",
         "stage": "handler",
         "axis": "input size",
-        "assumption": "Building a Cedar set of n scalars is linear in n.",
+        "assumption": "The same-size flat-value control is linear in n.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
@@ -2528,15 +2640,15 @@
         "group": "web",
         "stage": "handler",
         "axis": "input size",
-        "assumption": "Building a Cedar set of n scalars is linear in n.",
+        "assumption": "The same-size flat-value control is linear in n.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.905,
-        "tail_exponent": 0.924,
+        "fitted_exponent": 1.013,
+        "tail_exponent": 0.978,
         "local_exponents": [
-          0.882,
-          0.857,
-          0.991
+          1.088,
+          0.998,
+          0.958
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2549,10 +2661,66 @@
           1600
         ],
         "seconds": [
-          0.00006699980003759265,
-          0.00012347620213404298,
-          0.0002236243977677077,
-          0.000444604002404958
+          2.3814605083316564e-05,
+          5.0634797662496564e-05,
+          0.00010110139846801758,
+          0.00019644179847091436
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "cedar-nested-set-dedupe": {
+      "contract": {
+        "group": "web",
+        "stage": "handler",
+        "axis": "singleton nested sets in one Cedar value",
+        "assumption": "structural identities make nested-set deduplication linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "cedar-nested-set-dedupe",
+        "group": "web",
+        "stage": "handler",
+        "axis": "singleton nested sets in one Cedar value",
+        "assumption": "structural identities make nested-set deduplication linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.025,
+        "tail_exponent": 1.035,
+        "local_exponents": [
+          1.028,
+          0.953,
+          1.118
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "seconds": [
+          0.00011183560127392411,
+          0.00022802319144830108,
+          0.00044131259201094506,
+          0.0009578160010278225
         ],
         "counters": [
           {},
@@ -2587,12 +2755,12 @@
         "assumption": "Evaluating an n-member Cedar set literal is linear in n.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.652,
-        "tail_exponent": 0.79,
+        "fitted_exponent": 0.684,
+        "tail_exponent": 0.768,
         "local_exponents": [
-          0.346,
-          0.741,
-          0.84
+          0.46,
+          0.852,
+          0.683
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2605,10 +2773,10 @@
           800
         ],
         "seconds": [
-          0.00002288320101797581,
-          0.000029092602198943494,
-          0.00004862339701503515,
-          0.0000870155985467136
+          2.4628196842968465e-05,
+          3.387340111657977e-05,
+          6.115640280768275e-05,
+          9.818399557843804e-05
         ],
         "counters": [
           {},
@@ -2661,10 +2829,10 @@
           32
         ],
         "seconds": [
-          0.000007908802945166827,
-          0.00001370780519209802,
-          0.00002684239880181849,
-          0.000051144202006980774
+          9.664194658398629e-06,
+          1.7586792819201946e-05,
+          3.284539561718702e-05,
+          6.256119813770055e-05
         ],
         "counters": [
           {
@@ -2725,10 +2893,10 @@
           256
         ],
         "seconds": [
-          0.0006995850126259029,
-          0.001113373989937827,
-          0.0020808329863939434,
-          0.004343719017924741
+          0.0006162640056572855,
+          0.001020191004499793,
+          0.0021224850206635892,
+          0.003747529990505427
         ],
         "counters": [
           {
@@ -2772,11 +2940,11 @@
         "expect_exponent": 1.0,
         "tolerance": 0.6,
         "fitted_exponent": 1.005,
-        "tail_exponent": 0.991,
+        "tail_exponent": 0.932,
         "local_exponents": [
-          0.991,
-          1.129,
-          0.853
+          1.187,
+          0.894,
+          0.971
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2789,10 +2957,10 @@
           4000
         ],
         "seconds": [
-          0.00013454299187287688,
-          0.0002674429852049798,
-          0.0005848289874847978,
-          0.0010560359805822372
+          0.00014191598165780306,
+          0.0003230260335840285,
+          0.0006001840229146183,
+          0.0011764030205085874
         ],
         "counters": [
           {
@@ -2835,12 +3003,12 @@
         "assumption": "cancelling the head of the queue is O(1) per operation",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.967,
-        "tail_exponent": 0.991,
+        "fitted_exponent": 1.016,
+        "tail_exponent": 1.008,
         "local_exponents": [
-          0.93,
-          0.934,
-          1.047
+          1.053,
+          0.957,
+          1.059
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2853,10 +3021,10 @@
           4000
         ],
         "seconds": [
-          0.00014439100050367415,
-          0.00027514799148775637,
-          0.0005256279837340117,
-          0.0010862330091185868
+          0.0001527660060673952,
+          0.0003170040436089039,
+          0.0006153020076453686,
+          0.0012817810056731105
         ],
         "counters": [
           {
@@ -2871,118 +3039,6 @@
           {
             "cancelled": 4000
           }
-        ]
-      }
-    },
-    "graphql-policy-plan-unique": {
-      "contract": {
-        "group": "web",
-        "stage": "graphql-authorization",
-        "axis": "distinct selected field policies",
-        "assumption": "native policy planning is linear in selected field count",
-        "expect_exponent": 1.0,
-        "tolerance": 0.5,
-        "metric": null,
-        "sizes": [
-          8,
-          16,
-          32,
-          64
-        ],
-        "todo": null
-      },
-      "observation": {
-        "probe": "graphql-policy-plan-unique",
-        "group": "web",
-        "stage": "graphql-authorization",
-        "axis": "distinct selected field policies",
-        "assumption": "native policy planning is linear in selected field count",
-        "expect_exponent": 1.0,
-        "tolerance": 0.5,
-        "fitted_exponent": 0.837,
-        "tail_exponent": 0.815,
-        "local_exponents": [
-          0.931,
-          0.689,
-          0.94
-        ],
-        "class": "O(n)",
-        "degree_name": "linear",
-        "todo": null,
-        "status": "PASS",
-        "sizes": [
-          8,
-          16,
-          32,
-          64
-        ],
-        "seconds": [
-          0.0007397979497909546,
-          0.001410246011801064,
-          0.002273235993925482,
-          0.004362616047728807
-        ],
-        "counters": [
-          {},
-          {},
-          {},
-          {}
-        ]
-      }
-    },
-    "graphql-policy-plan-alias-control": {
-      "contract": {
-        "group": "web",
-        "stage": "graphql-authorization",
-        "axis": "selected aliases sharing one policy",
-        "assumption": "the same-size alias control remains linear while deduplicating",
-        "expect_exponent": 1.0,
-        "tolerance": 0.5,
-        "metric": null,
-        "sizes": [
-          8,
-          16,
-          32,
-          64
-        ],
-        "todo": null
-      },
-      "observation": {
-        "probe": "graphql-policy-plan-alias-control",
-        "group": "web",
-        "stage": "graphql-authorization",
-        "axis": "selected aliases sharing one policy",
-        "assumption": "the same-size alias control remains linear while deduplicating",
-        "expect_exponent": 1.0,
-        "tolerance": 0.5,
-        "fitted_exponent": 0.891,
-        "tail_exponent": 0.907,
-        "local_exponents": [
-          0.873,
-          0.851,
-          0.962
-        ],
-        "class": "O(n)",
-        "degree_name": "linear",
-        "todo": null,
-        "status": "PASS",
-        "sizes": [
-          8,
-          16,
-          32,
-          64
-        ],
-        "seconds": [
-          0.0005884440033696592,
-          0.0010779619915410876,
-          0.0019449190003797412,
-          0.003789048991166055
-        ],
-        "counters": [
-          {},
-          {},
-          {},
-          {}
         ]
       }
     },
@@ -3011,12 +3067,12 @@
         "assumption": "reconciling populated cells is linear in emitted cell count",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.989,
-        "tail_exponent": 1.009,
+        "fitted_exponent": 0.979,
+        "tail_exponent": 0.822,
         "local_exponents": [
-          0.985,
-          0.884,
-          1.134
+          1.395,
+          0.677,
+          0.967
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -3029,10 +3085,10 @@
           2000
         ],
         "seconds": [
-          0.00008230499224737287,
-          0.00016293599037453532,
-          0.00030066497856751084,
-          0.0006599790067411959
+          9.4907998573035e-05,
+          0.00024957797722890973,
+          0.0003989769611507654,
+          0.0007799809682182968
         ],
         "counters": [
           {},
@@ -3067,12 +3123,12 @@
         "assumption": "the same-size missing-cell control is linear in emitted cell count",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.874,
-        "tail_exponent": 0.882,
+        "fitted_exponent": 0.902,
+        "tail_exponent": 0.858,
         "local_exponents": [
-          0.867,
-          0.846,
-          0.918
+          0.91,
+          1.141,
+          0.575
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -3085,10 +3141,10 @@
           2000
         ],
         "seconds": [
-          0.00003628799458965659,
-          0.00006616394966840744,
-          0.00011889298912137747,
-          0.0002246120129711926
+          4.1436986066401005e-05,
+          7.787602953612804e-05,
+          0.00017174199456349015,
+          0.00025585904950276017
         ],
         "counters": [
           {},
@@ -3123,12 +3179,12 @@
         "assumption": "range reconciliation and path emission are linear in bucket count",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.799,
-        "tail_exponent": 0.879,
+        "fitted_exponent": 0.839,
+        "tail_exponent": 0.9,
         "local_exponents": [
-          0.649,
-          0.768,
-          0.99
+          0.766,
+          0.69,
+          1.109
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -3141,10 +3197,10 @@
           2000
         ],
         "seconds": [
-          0.00007919903146103024,
-          0.00012423295993357897,
-          0.0002115769893862307,
-          0.0004203190328553319
+          8.490000618621707e-05,
+          0.00014437001664191484,
+          0.00023291603429242969,
+          0.0005025209975428879
         ],
         "counters": [
           {},
@@ -3179,12 +3235,12 @@
         "assumption": "the same-size empty range projection remains linear",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.363,
-        "tail_exponent": 0.423,
+        "fitted_exponent": 0.335,
+        "tail_exponent": 0.41,
         "local_exponents": [
-          0.126,
-          0.71,
-          0.136
+          0.173,
+          0.372,
+          0.448
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -3197,10 +3253,10 @@
           2000
         ],
         "seconds": [
-          0.00004614604404196143,
-          0.00005037395749241114,
-          0.00008239404996857047,
-          0.00009051000233739614
+          5.56039740331471e-05,
+          6.26780092716217e-05,
+          8.109200280159712e-05,
+          0.00011059700045734644
         ],
         "counters": [
           {},
@@ -3235,12 +3291,12 @@
         "assumption": "distance and occupancy are accumulated in one linear pass",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.769,
-        "tail_exponent": 0.557,
+        "fitted_exponent": 0.623,
+        "tail_exponent": 0.682,
         "local_exponents": [
-          1.343,
-          0.327,
-          0.787
+          0.432,
+          0.835,
+          0.53
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -3253,10 +3309,10 @@
           4000
         ],
         "seconds": [
-          0.00002679001772776246,
-          0.00006794801447540522,
-          0.00008521898416802287,
-          0.000146995997056365
+          1.0700023267418146e-05,
+          1.4437013305723667e-05,
+          2.5747984182089567e-05,
+          3.717903746291995e-05
         ],
         "counters": [
           {},
@@ -3291,12 +3347,516 @@
         "assumption": "the same-size no-occupancy control is linear",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.867,
-        "tail_exponent": 0.932,
+        "fitted_exponent": 0.385,
+        "tail_exponent": 0.438,
         "local_exponents": [
-          0.735,
+          0.236,
+          0.513,
+          0.363
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          7.713970262557268e-06,
+          9.086972568184137e-06,
+          1.2964010238647461e-05,
+          1.6671023331582546e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "validation-json-int-list": {
+      "contract": {
+        "group": "web",
+        "stage": "validation",
+        "axis": "integers in one typed JSON request array",
+        "assumption": "fused decode and homogeneous scalar validation are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "validation-json-int-list",
+        "group": "web",
+        "stage": "validation",
+        "axis": "integers in one typed JSON request array",
+        "assumption": "fused decode and homogeneous scalar validation are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.933,
+        "tail_exponent": 0.95,
+        "local_exponents": [
+          0.925,
+          0.85,
+          1.051
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          8.11990990769118e-05,
+          0.00015417579852510243,
+          0.0002778875001240522,
+          0.0005756077007390559
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "validation-json-any-list-control": {
+      "contract": {
+        "group": "web",
+        "stage": "validation",
+        "axis": "values in one untyped JSON request array",
+        "assumption": "the same-size decode-only control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "validation-json-any-list-control",
+        "group": "web",
+        "stage": "validation",
+        "axis": "values in one untyped JSON request array",
+        "assumption": "the same-size decode-only control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.042,
+        "tail_exponent": 1.104,
+        "local_exponents": [
+          0.959,
+          0.921,
+          1.288
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          7.819445163477212e-05,
+          0.00015200120105873793,
+          0.00028784915048163384,
+          0.0007026857492746785
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "validation-response-int-list": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "integers in one typed JSON response array",
+        "assumption": "successful scalar validation and JSON emission are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "validation-response-int-list",
+        "group": "web",
+        "stage": "egress",
+        "axis": "integers in one typed JSON response array",
+        "assumption": "successful scalar validation and JSON emission are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.159,
+        "tail_exponent": 1.183,
+        "local_exponents": [
+          1.184,
+          0.937,
+          1.43
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          3.29467497067526e-05,
+          7.487374823540449e-05,
+          0.00014332699938677252,
+          0.0003860841999994591
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "validation-response-any-list-control": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "values in one untyped JSON response array",
+        "assumption": "the same-size encode control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "validation-response-any-list-control",
+        "group": "web",
+        "stage": "egress",
+        "axis": "values in one untyped JSON response array",
+        "assumption": "the same-size encode control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.923,
+        "tail_exponent": 0.942,
+        "local_exponents": [
           0.865,
-          1.0
+          0.987,
+          0.897
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          3.307999868411571e-05,
+          6.024135218467564e-05,
+          0.00011941920092795044,
+          0.000222386050154455
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sync-state-all-changed": {
+      "contract": {
+        "group": "web",
+        "stage": "sync",
+        "axis": "bounded rows whose values all changed",
+        "assumption": "native digest comparison and upsert selection are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sync-state-all-changed",
+        "group": "web",
+        "stage": "sync",
+        "axis": "bounded rows whose values all changed",
+        "assumption": "native digest comparison and upsert selection are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.032,
+        "tail_exponent": 1.008,
+        "local_exponents": [
+          1.102,
+          0.966,
+          1.049
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.00013662989949807524,
+          0.00029328440432436765,
+          0.0005729180993512273,
+          0.0011856730037834496
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sync-state-unchanged-control": {
+      "contract": {
+        "group": "web",
+        "stage": "sync",
+        "axis": "bounded rows whose values are unchanged",
+        "assumption": "the same-size no-delta control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sync-state-unchanged-control",
+        "group": "web",
+        "stage": "sync",
+        "axis": "bounded rows whose values are unchanged",
+        "assumption": "the same-size no-delta control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.009,
+        "tail_exponent": 0.999,
+        "local_exponents": [
+          1.046,
+          0.955,
+          1.044
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0001535456976853311,
+          0.0003169376985169947,
+          0.0006142435013316572,
+          0.0012664452020544558
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "trajectory-compile-ordered": {
+      "contract": {
+        "group": "web",
+        "stage": "geospatial",
+        "axis": "ordered fixes copied into packed trajectory storage",
+        "assumption": "boundary validation, sorting and distance accumulation are near-linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.6,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "trajectory-compile-ordered",
+        "group": "web",
+        "stage": "geospatial",
+        "axis": "ordered fixes copied into packed trajectory storage",
+        "assumption": "boundary validation, sorting and distance accumulation are near-linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.6,
+        "fitted_exponent": 1.029,
+        "tail_exponent": 1.071,
+        "local_exponents": [
+          0.951,
+          1.009,
+          1.133
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00022207266495873532,
+          0.00042943099591260153,
+          0.000864198994046698,
+          0.0018948193367881079
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "trajectory-compile-reversed-control": {
+      "contract": {
+        "group": "web",
+        "stage": "geospatial",
+        "axis": "reverse-ordered fixes copied into packed trajectory storage",
+        "assumption": "the same-size adversarial sort control remains near-linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.6,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "trajectory-compile-reversed-control",
+        "group": "web",
+        "stage": "geospatial",
+        "axis": "reverse-ordered fixes copied into packed trajectory storage",
+        "assumption": "the same-size adversarial sort control remains near-linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.6,
+        "fitted_exponent": 1.112,
+        "tail_exponent": 1.192,
+        "local_exponents": [
+          0.994,
+          0.986,
+          1.399
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00021668568175906935,
+          0.0004315816525680323,
+          0.000854971333562086,
+          0.0022541923293222985
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "series-cell-rows-populated": {
+      "contract": {
+        "group": "web",
+        "stage": "series",
+        "axis": "dense heatmap cells with four populated measures",
+        "assumption": "boundary materialization is linear in emitted cells",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "series-cell-rows-populated",
+        "group": "web",
+        "stage": "series",
+        "axis": "dense heatmap cells with four populated measures",
+        "assumption": "boundary materialization is linear in emitted cells",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.011,
+        "tail_exponent": 0.984,
+        "local_exponents": [
+          1.13,
+          0.815,
+          1.152
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -3309,10 +3869,2978 @@
           4000
         ],
         "seconds": [
-          0.000022922991774976254,
-          0.00003815197851508856,
-          0.00006950099486857653,
-          0.00013897096505388618
+          6.198509945534169e-05,
+          0.00013562000240199267,
+          0.00023867000127211213,
+          0.0005304395977873355
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "series-cell-rows-empty-control": {
+      "contract": {
+        "group": "web",
+        "stage": "series",
+        "axis": "dense heatmap cells with four null measures",
+        "assumption": "the same-size fill-value control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "series-cell-rows-empty-control",
+        "group": "web",
+        "stage": "series",
+        "axis": "dense heatmap cells with four null measures",
+        "assumption": "the same-size fill-value control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.04,
+        "tail_exponent": 1.015,
+        "local_exponents": [
+          1.14,
+          0.892,
+          1.139
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          6.215139874257147e-05,
+          0.00013697649701498448,
+          0.00025422220351174475,
+          0.0005596993956714869
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "scim-filter-all-match": {
+      "contract": {
+        "group": "web",
+        "stage": "scim",
+        "axis": "SCIM resources selected by one predicate",
+        "assumption": "predicate evaluation and result collection are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "scim-filter-all-match",
+        "group": "web",
+        "stage": "scim",
+        "axis": "SCIM resources selected by one predicate",
+        "assumption": "predicate evaluation and result collection are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.979,
+        "tail_exponent": 0.944,
+        "local_exponents": [
+          1.049,
+          0.976,
+          0.912
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0001578862516907975,
+          0.0003267274994868785,
+          0.0006425897008739412,
+          0.0012092371005564928
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "scim-filter-none-match-control": {
+      "contract": {
+        "group": "web",
+        "stage": "scim",
+        "axis": "SCIM resources rejected by one predicate",
+        "assumption": "the same-size no-result control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "scim-filter-none-match-control",
+        "group": "web",
+        "stage": "scim",
+        "axis": "SCIM resources rejected by one predicate",
+        "assumption": "the same-size no-result control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.019,
+        "tail_exponent": 0.979,
+        "local_exponents": [
+          1.133,
+          0.922,
+          1.036
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.00013752309896517546,
+          0.00030165604839567096,
+          0.0005715250998036935,
+          0.0011716236505890266
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "scim-values-wide-last-key": {
+      "contract": {
+        "group": "web",
+        "stage": "scim",
+        "axis": "mapping keys visited before a case-insensitive SCIM path match",
+        "assumption": "wide path lookup is one forward mapping pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "scim-values-wide-last-key",
+        "group": "web",
+        "stage": "scim",
+        "axis": "mapping keys visited before a case-insensitive SCIM path match",
+        "assumption": "wide path lookup is one forward mapping pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.987,
+        "tail_exponent": 1.054,
+        "local_exponents": [
+          0.768,
+          1.248,
+          0.86
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          2.241400070488453e-06,
+          3.816140815615654e-06,
+          9.060780284926295e-06,
+          1.644682022742927e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "scim-values-wide-first-key-control": {
+      "contract": {
+        "group": "web",
+        "stage": "scim",
+        "axis": "same wide mapping with the SCIM path match first",
+        "assumption": "the same-size mapping control stays bounded by one pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "scim-values-wide-first-key-control",
+        "group": "web",
+        "stage": "scim",
+        "axis": "same wide mapping with the SCIM path match first",
+        "assumption": "the same-size mapping control stays bounded by one pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.903,
+        "tail_exponent": 0.933,
+        "local_exponents": [
+          0.818,
+          0.979,
+          0.887
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          2.6120804250240324e-06,
+          4.605039721354842e-06,
+          9.076199494302274e-06,
+          1.6790039371699094e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "template-loop-escaped": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "escaped values emitted by one compiled template loop",
+        "assumption": "loop execution and escaping are linear in emitted values",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "template-loop-escaped",
+        "group": "web",
+        "stage": "egress",
+        "axis": "escaped values emitted by one compiled template loop",
+        "assumption": "loop execution and escaping are linear in emitted values",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.962,
+        "tail_exponent": 0.899,
+        "local_exponents": [
+          1.145,
+          0.792,
+          1.005
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          1.6525998944416642e-05,
+          3.6548497155308725e-05,
+          6.327859591692686e-05,
+          0.000127039902145043
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "template-loop-markup-control": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "trusted values emitted by one compiled template loop",
+        "assumption": "the same-size already-safe control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "template-loop-markup-control",
+        "group": "web",
+        "stage": "egress",
+        "axis": "trusted values emitted by one compiled template loop",
+        "assumption": "the same-size already-safe control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.924,
+        "tail_exponent": 0.959,
+        "local_exponents": [
+          0.82,
+          1.026,
+          0.892
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          1.1847203131765127e-05,
+          2.0908203441649676e-05,
+          4.256469546817243e-05,
+          7.899500196799636e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-results-distinct-fields": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "distinct fields accumulated in one native result plan",
+        "assumption": "field-plan insertion is O(1) amortized per distinct key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-results-distinct-fields",
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "distinct fields accumulated in one native result plan",
+        "assumption": "field-plan insertion is O(1) amortized per distinct key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.029,
+        "tail_exponent": 0.969,
+        "local_exponents": [
+          1.162,
+          0.985,
+          0.954
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          2.6225100737065076e-05,
+          5.870194872841239e-05,
+          0.00011615059920586646,
+          0.0002250810997793451
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-results-overwrite-control": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "writes to one repeated native result key",
+        "assumption": "the same-size overwrite control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-results-overwrite-control",
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "writes to one repeated native result key",
+        "assumption": "the same-size overwrite control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.027,
+        "tail_exponent": 1.094,
+        "local_exponents": [
+          0.851,
+          1.15,
+          1.038
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          1.0606402065604925e-05,
+          1.91328494111076e-05,
+          4.24710480729118e-05,
+          8.722289931029081e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-project-attributes": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "object attributes projected into GraphQL result rows",
+        "assumption": "attribute materialization is linear in response rows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-project-attributes",
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "object attributes projected into GraphQL result rows",
+        "assumption": "attribute materialization is linear in response rows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.057,
+        "tail_exponent": 0.993,
+        "local_exponents": [
+          1.13,
+          1.22,
+          0.766
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          4.664203346086045e-05,
+          0.00010206483420915902,
+          0.000237790400084729,
+          0.0004043273996406545
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-project-values-control": {
+      "contract": {
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "already-resolved values projected into GraphQL result rows",
+        "assumption": "the same-size direct-value control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "graphql-project-values-control",
+        "group": "web",
+        "stage": "graphql-projection",
+        "axis": "already-resolved values projected into GraphQL result rows",
+        "assumption": "the same-size direct-value control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.94,
+        "tail_exponent": 0.955,
+        "local_exponents": [
+          0.923,
+          0.896,
+          1.014
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          3.322089905850589e-05,
+          6.298330069209139e-05,
+          0.00011720556649379432,
+          0.00023674879921600222
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-encode-packed-repeated": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints in one packed repeated protobuf field",
+        "assumption": "packed size and emission passes are linear in item count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-encode-packed-repeated",
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints in one packed repeated protobuf field",
+        "assumption": "packed size and emission passes are linear in item count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.988,
+        "tail_exponent": 1.157,
+        "local_exponents": [
+          0.614,
+          1.1,
+          1.214
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.623059972189367e-05,
+          2.4844340514391662e-05,
+          5.32625603955239e-05,
+          0.00012353019905276597
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-encode-unpacked-control": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints in one unpacked repeated protobuf field",
+        "assumption": "the same-size per-item-tag control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-encode-unpacked-control",
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints in one unpacked repeated protobuf field",
+        "assumption": "the same-size per-item-tag control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.966,
+        "tail_exponent": 0.962,
+        "local_exponents": [
+          0.976,
+          0.957,
+          0.968
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.9946959801018237e-05,
+          3.923190059140325e-05,
+          7.613981957547366e-05,
+          0.0001489594392478466
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-decode-packed-repeated": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints decoded from one packed protobuf field",
+        "assumption": "packed decoding visits each payload byte a bounded number of times",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-decode-packed-repeated",
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints decoded from one packed protobuf field",
+        "assumption": "packed decoding visits each payload byte a bounded number of times",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.051,
+        "tail_exponent": 1.059,
+        "local_exponents": [
+          0.973,
+          1.237,
+          0.882
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          3.0704719247296456e-05,
+          6.0272300615906715e-05,
+          0.00014207754051312805,
+          0.000261751520447433
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-decode-unpacked-control": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints decoded from repeated unpacked protobuf fields",
+        "assumption": "the same-size tag-heavy control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-decode-unpacked-control",
+        "group": "web",
+        "stage": "protobuf",
+        "axis": "varints decoded from repeated unpacked protobuf fields",
+        "assumption": "the same-size tag-heavy control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.01,
+        "tail_exponent": 1.001,
+        "local_exponents": [
+          1.061,
+          0.908,
+          1.095
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          3.338974085636437e-05,
+          6.967831985093653e-05,
+          0.00013072266010567547,
+          0.000279190979199484
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-compile-wide-descriptor": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf-startup",
+        "axis": "fields compiled into one protobuf descriptor",
+        "assumption": "field lookup and JSON-name uniqueness are O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-compile-wide-descriptor",
+        "group": "web",
+        "stage": "protobuf-startup",
+        "axis": "fields compiled into one protobuf descriptor",
+        "assumption": "field lookup and JSON-name uniqueness are O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.019,
+        "tail_exponent": 1.067,
+        "local_exponents": [
+          0.905,
+          1.076,
+          1.058
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          4.811620456166565e-05,
+          9.009779896587133e-05,
+          0.00018992670229636132,
+          0.00039536859840154647
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-compile-single-field-control": {
+      "contract": {
+        "group": "web",
+        "stage": "protobuf-startup",
+        "axis": "fields compiled across one-field protobuf descriptors",
+        "assumption": "the same total-field control scales linearly",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-compile-single-field-control",
+        "group": "web",
+        "stage": "protobuf-startup",
+        "axis": "fields compiled across one-field protobuf descriptors",
+        "assumption": "the same total-field control scales linearly",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.086,
+        "tail_exponent": 1.055,
+        "local_exponents": [
+          1.206,
+          0.911,
+          1.199
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          7.018450414761901e-05,
+          0.00016187930013984443,
+          0.00030444429721683265,
+          0.0006988111010286957
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "msgpack-map": {
+      "contract": {
+        "group": "web",
+        "stage": "msgpack",
+        "axis": "entries in one MessagePack mapping",
+        "assumption": "mapping encoding is linear in keys plus values",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "msgpack-map",
+        "group": "web",
+        "stage": "msgpack",
+        "axis": "entries in one MessagePack mapping",
+        "assumption": "mapping encoding is linear in keys plus values",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.04,
+        "tail_exponent": 1.155,
+        "local_exponents": [
+          0.822,
+          1.007,
+          1.303
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          2.8149366456394395e-05,
+          4.977823312704762e-05,
+          0.00010001903477435311,
+          0.0002467185006632159
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "msgpack-array-control": {
+      "contract": {
+        "group": "web",
+        "stage": "msgpack",
+        "axis": "items in one MessagePack array",
+        "assumption": "the same-size scalar-array control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "msgpack-array-control",
+        "group": "web",
+        "stage": "msgpack",
+        "axis": "items in one MessagePack array",
+        "assumption": "the same-size scalar-array control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.06,
+        "tail_exponent": 0.98,
+        "local_exponents": [
+          1.265,
+          0.929,
+          1.03
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          6.93066588913401e-06,
+          1.6659199415395656e-05,
+          3.1719432445243e-05,
+          6.477833376266063e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "xml-parse-wide-attributes": {
+      "contract": {
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide sibling elements each carrying one attribute",
+        "assumption": "XML parsing is linear in elements and attributes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "xml-parse-wide-attributes",
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide sibling elements each carrying one attribute",
+        "assumption": "XML parsing is linear in elements and attributes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.042,
+        "tail_exponent": 1.049,
+        "local_exponents": [
+          1.077,
+          0.892,
+          1.206
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0002760000003036112,
+          0.0005821915983688086,
+          0.0010802365024574101,
+          0.0024917436006944627
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "xml-parse-wide-text-control": {
+      "contract": {
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide sibling elements carrying text only",
+        "assumption": "the same-size no-attribute control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "xml-parse-wide-text-control",
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide sibling elements carrying text only",
+        "assumption": "the same-size no-attribute control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.953,
+        "tail_exponent": 1.036,
+        "local_exponents": [
+          0.809,
+          0.886,
+          1.185
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0001966684008948505,
+          0.0003445014008320868,
+          0.0006367558031342924,
+          0.001447716896655038
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "xml-c14n-wide-attributes": {
+      "contract": {
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide attributed siblings in exclusive canonicalization",
+        "assumption": "namespace and attribute ordering stay linear for fixed width",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "xml-c14n-wide-attributes",
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide attributed siblings in exclusive canonicalization",
+        "assumption": "namespace and attribute ordering stay linear for fixed width",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.156,
+        "tail_exponent": 1.144,
+        "local_exponents": [
+          1.176,
+          1.172,
+          1.116
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0005877610004972666,
+          0.0013278022990562022,
+          0.002991771401138976,
+          0.00648625330068171
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "xml-c14n-wide-text-control": {
+      "contract": {
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide text-only siblings in exclusive canonicalization",
+        "assumption": "the same-size no-sort control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "xml-c14n-wide-text-control",
+        "group": "web",
+        "stage": "xml",
+        "axis": "wide text-only siblings in exclusive canonicalization",
+        "assumption": "the same-size no-sort control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.023,
+        "tail_exponent": 1.082,
+        "local_exponents": [
+          0.918,
+          0.979,
+          1.185
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0004806935030501336,
+          0.0009083486045710742,
+          0.0017907986999489366,
+          0.0040716832969337705
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sql-renumber-parameters": {
+      "contract": {
+        "group": "web",
+        "stage": "database",
+        "axis": "positional parameters in one SQL fragment",
+        "assumption": "parameter recognition and decimal rewriting are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sql-renumber-parameters",
+        "group": "web",
+        "stage": "database",
+        "axis": "positional parameters in one SQL fragment",
+        "assumption": "parameter recognition and decimal rewriting are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.079,
+        "tail_exponent": 1.049,
+        "local_exponents": [
+          1.135,
+          1.088,
+          1.011
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0001645215810276568,
+          0.0003613745397888124,
+          0.0007680457609239965,
+          0.001547370619373396
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sql-renumber-quoted-control": {
+      "contract": {
+        "group": "web",
+        "stage": "database",
+        "axis": "quoted numeric tokens in one SQL fragment",
+        "assumption": "the same-size quote-state control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sql-renumber-quoted-control",
+        "group": "web",
+        "stage": "database",
+        "axis": "quoted numeric tokens in one SQL fragment",
+        "assumption": "the same-size quote-state control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.047,
+        "tail_exponent": 0.914,
+        "local_exponents": [
+          1.305,
+          1.069,
+          0.758
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.7468520672991873e-05,
+          4.3169860728085044e-05,
+          9.058810072019696e-05,
+          0.00015322564053349197
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "dkim-relaxed-whitespace": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "body lines with repeated horizontal whitespace",
+        "assumption": "relaxed whitespace folding is one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "dkim-relaxed-whitespace",
+        "group": "web",
+        "stage": "egress",
+        "axis": "body lines with repeated horizontal whitespace",
+        "assumption": "relaxed whitespace folding is one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.88,
+        "tail_exponent": 0.922,
+        "local_exponents": [
+          0.8,
+          0.869,
+          0.975
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          3.442746625902752e-05,
+          5.995763349346817e-05,
+          0.00010948309985299905,
+          0.00021518846624530853
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "dkim-relaxed-plain-control": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "body lines already in relaxed form",
+        "assumption": "the same-size copy control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "dkim-relaxed-plain-control",
+        "group": "web",
+        "stage": "egress",
+        "axis": "body lines already in relaxed form",
+        "assumption": "the same-size copy control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.113,
+        "tail_exponent": 1.074,
+        "local_exponents": [
+          1.268,
+          0.884,
+          1.263
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          2.5289366021752357e-05,
+          6.0911765710140266e-05,
+          0.00011244796720954279,
+          0.00026984146679751573
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sse-multiline-data": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "newline-delimited values in one SSE data field",
+        "assumption": "prefix insertion and newline normalization are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sse-multiline-data",
+        "group": "web",
+        "stage": "egress",
+        "axis": "newline-delimited values in one SSE data field",
+        "assumption": "prefix insertion and newline normalization are linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.037,
+        "tail_exponent": 0.98,
+        "local_exponents": [
+          1.181,
+          0.952,
+          1.007
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          9.12568997591734e-06,
+          2.0689050434157252e-05,
+          4.003570007625967e-05,
+          8.04535101633519e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sse-single-line-control": {
+      "contract": {
+        "group": "web",
+        "stage": "egress",
+        "axis": "same bytes in one SSE data line",
+        "assumption": "the same-size no-split control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sse-single-line-control",
+        "group": "web",
+        "stage": "egress",
+        "axis": "same bytes in one SSE data line",
+        "assumption": "the same-size no-split control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.892,
+        "tail_exponent": 0.943,
+        "local_exponents": [
+          0.804,
+          0.846,
+          1.04
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.972189638763666e-06,
+          3.44394997227937e-06,
+          6.189790437929332e-06,
+          1.272893976420164e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "websocket-parse-masked": {
+      "contract": {
+        "group": "web",
+        "stage": "websocket",
+        "axis": "masked WebSocket payload bytes",
+        "assumption": "frame parsing and unmasking are linear in payload bytes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "websocket-parse-masked",
+        "group": "web",
+        "stage": "websocket",
+        "axis": "masked WebSocket payload bytes",
+        "assumption": "frame parsing and unmasking are linear in payload bytes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.403,
+        "tail_exponent": 0.526,
+        "local_exponents": [
+          0.116,
+          0.527,
+          0.526
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          4.313980462029576e-06,
+          4.674350493587553e-06,
+          6.7336199572309855e-06,
+          9.697970235720276e-06
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "websocket-parse-unmasked-control": {
+      "contract": {
+        "group": "web",
+        "stage": "websocket",
+        "axis": "unmasked WebSocket payload bytes",
+        "assumption": "the same-size copy-only control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "websocket-parse-unmasked-control",
+        "group": "web",
+        "stage": "websocket",
+        "axis": "unmasked WebSocket payload bytes",
+        "assumption": "the same-size copy-only control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.421,
+        "tail_exponent": 0.447,
+        "local_exponents": [
+          0.489,
+          0.061,
+          0.834
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          4.3470499804243445e-06,
+          6.100130267441273e-06,
+          6.361709674820304e-06,
+          1.1339740012772381e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "priority-queue-offer-drain": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "items offered to and drained from a native priority queue",
+        "assumption": "heap maintenance is O(n log n), not quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "priority-queue-offer-drain",
+        "group": "web",
+        "stage": "queue",
+        "axis": "items offered to and drained from a native priority queue",
+        "assumption": "heap maintenance is O(n log n), not quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.091,
+        "tail_exponent": 1.117,
+        "local_exponents": [
+          1.005,
+          1.198,
+          1.035
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00036003399873152375,
+          0.0007227940368466079,
+          0.0016578249633312225,
+          0.0033980750013142824
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "fifo-queue-offer-drain-control": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "items offered to and drained from a native FIFO queue",
+        "assumption": "the same-size ring-buffer control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "fifo-queue-offer-drain-control",
+        "group": "web",
+        "stage": "queue",
+        "axis": "items offered to and drained from a native FIFO queue",
+        "assumption": "the same-size ring-buffer control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.993,
+        "tail_exponent": 0.944,
+        "local_exponents": [
+          1.133,
+          0.866,
+          1.023
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0001284800237044692,
+          0.0002816980122588575,
+          0.000513402046635747,
+          0.0010433239513076842
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "priority-queue-snapshot": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "held priority-queue entries copied in get order",
+        "assumption": "snapshot ordering is O(n log n), not selection-sort quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "priority-queue-snapshot",
+        "group": "web",
+        "stage": "queue",
+        "axis": "held priority-queue entries copied in get order",
+        "assumption": "snapshot ordering is O(n log n), not selection-sort quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.304,
+        "tail_exponent": 1.432,
+        "local_exponents": [
+          0.984,
+          1.492,
+          1.372
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          8.245439967140556e-05,
+          0.00016311960062012076,
+          0.0004588978015817702,
+          0.0011881537968292833
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "fifo-queue-snapshot-control": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "held FIFO entries copied in get order",
+        "assumption": "the same-size ring snapshot control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "fifo-queue-snapshot-control",
+        "group": "web",
+        "stage": "queue",
+        "axis": "held FIFO entries copied in get order",
+        "assumption": "the same-size ring snapshot control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.172,
+        "tail_exponent": 1.133,
+        "local_exponents": [
+          1.164,
+          1.434,
+          0.833
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          7.291790097951889e-06,
+          1.6334594693034888e-05,
+          4.4124596752226355e-05,
+          7.859120378270746e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "rank-indices-disordered": {
+      "contract": {
+        "group": "web",
+        "stage": "query",
+        "axis": "disordered numeric scores ranked into indices",
+        "assumption": "native ranking is O(n log n), not quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "rank-indices-disordered",
+        "group": "web",
+        "stage": "query",
+        "axis": "disordered numeric scores ranked into indices",
+        "assumption": "native ranking is O(n log n), not quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.098,
+        "tail_exponent": 1.072,
+        "local_exponents": [
+          1.119,
+          1.189,
+          0.955
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00011759529976795117,
+          0.00025541379970187944,
+          0.000582415034295991,
+          0.0011291949990360687
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "rank-indices-sorted-control": {
+      "contract": {
+        "group": "web",
+        "stage": "query",
+        "axis": "already-sorted numeric scores ranked into indices",
+        "assumption": "the same-size ordered control remains O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "rank-indices-sorted-control",
+        "group": "web",
+        "stage": "query",
+        "axis": "already-sorted numeric scores ranked into indices",
+        "assumption": "the same-size ordered control remains O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.233,
+        "tail_exponent": 1.105,
+        "local_exponents": [
+          1.522,
+          1.127,
+          1.084
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          7.229309994727373e-05,
+          0.00020765533360342185,
+          0.00045351356578369936,
+          0.0009614146663807332
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "rank-fusion-overlap": {
+      "contract": {
+        "group": "web",
+        "stage": "query",
+        "axis": "ranking cells resolving to an overlapping key set",
+        "assumption": "hash accumulation plus final sort are O(n log n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "rank-fusion-overlap",
+        "group": "web",
+        "stage": "query",
+        "axis": "ranking cells resolving to an overlapping key set",
+        "assumption": "hash accumulation plus final sort are O(n log n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.359,
+        "tail_exponent": 1.515,
+        "local_exponents": [
+          0.989,
+          1.53,
+          1.5
+        ],
+        "class": "O(n^2)",
+        "degree_name": "quadratic",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          6.238589994609356e-05,
+          0.00012382589629851283,
+          0.0003575687995180488,
+          0.001011235301848501
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "rank-fusion-disjoint-control": {
+      "contract": {
+        "group": "web",
+        "stage": "query",
+        "axis": "same ranking cells resolving to disjoint key sets",
+        "assumption": "the same-size maximum-output control remains O(n log n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "rank-fusion-disjoint-control",
+        "group": "web",
+        "stage": "query",
+        "axis": "same ranking cells resolving to disjoint key sets",
+        "assumption": "the same-size maximum-output control remains O(n log n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.307,
+        "tail_exponent": 1.324,
+        "local_exponents": [
+          1.271,
+          1.311,
+          1.337
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.00022470190306194126,
+          0.0005422689020633698,
+          0.0013450576981995255,
+          0.003398771898355335
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "accept-ranges-reverse-quality": {
+      "contract": {
+        "group": "web",
+        "stage": "ingress",
+        "axis": "Accept ranges arriving opposite their negotiated quality order",
+        "assumption": "range ordering is O(n log n), never insertion-sort quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.45,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "accept-ranges-reverse-quality",
+        "group": "web",
+        "stage": "ingress",
+        "axis": "Accept ranges arriving opposite their negotiated quality order",
+        "assumption": "range ordering is O(n log n), never insertion-sort quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.45,
+        "fitted_exponent": 1.049,
+        "tail_exponent": 0.983,
+        "local_exponents": [
+          1.209,
+          0.968,
+          0.998
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0001532896509161219,
+          0.00035439390048850326,
+          0.0006930112489499151,
+          0.0013837797479936853
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "accept-ranges-ranked-control": {
+      "contract": {
+        "group": "web",
+        "stage": "ingress",
+        "axis": "Accept ranges arriving in negotiated quality order",
+        "assumption": "the same-size already-ranked control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "accept-ranges-ranked-control",
+        "group": "web",
+        "stage": "ingress",
+        "axis": "Accept ranges arriving in negotiated quality order",
+        "assumption": "the same-size already-ranked control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.03,
+        "tail_exponent": 0.937,
+        "local_exponents": [
+          1.173,
+          1.152,
+          0.723
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          9.981000039260834e-05,
+          0.00022511175193358214,
+          0.000500081799691543,
+          0.000825530500151217
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "media-negotiation-excluded-wildcards": {
+      "contract": {
+        "group": "web",
+        "stage": "ingress",
+        "axis": "accepted wildcards, denied exact ranges, and offered media types",
+        "assumption": "exclusions and candidates are indexed per call, not cross-scanned",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "media-negotiation-excluded-wildcards",
+        "group": "web",
+        "stage": "ingress",
+        "axis": "accepted wildcards, denied exact ranges, and offered media types",
+        "assumption": "exclusions and candidates are indexed per call, not cross-scanned",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.0,
+        "tail_exponent": 1.029,
+        "local_exponents": [
+          0.929,
+          1.037,
+          1.02
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          5.035439971834421e-05,
+          9.589759865775704e-05,
+          0.000196840800344944,
+          0.00039930000202730297
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "media-negotiation-denied-control": {
+      "contract": {
+        "group": "web",
+        "stage": "ingress",
+        "axis": "same count of denied ranges beside the same offered media set",
+        "assumption": "the same-size parse and normalization control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "media-negotiation-denied-control",
+        "group": "web",
+        "stage": "ingress",
+        "axis": "same count of denied ranges beside the same offered media set",
+        "assumption": "the same-size parse and normalization control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.342,
+        "tail_exponent": 1.369,
+        "local_exponents": [
+          1.468,
+          0.801,
+          1.936
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          4.342920146882534e-05,
+          0.00012011700309813022,
+          0.00020926400320604445,
+          0.0008010025951080025
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "argument-normalize-deep": {
+      "contract": {
+        "group": "web",
+        "stage": "authorization",
+        "axis": "nested container edges in one bounded policy argument",
+        "assumption": "cycle detection uses an operation-owned active set, not ancestor rescans",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "argument-normalize-deep",
+        "group": "web",
+        "stage": "authorization",
+        "axis": "nested container edges in one bounded policy argument",
+        "assumption": "cycle detection uses an operation-owned active set, not ancestor rescans",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.999,
+        "tail_exponent": 1.325,
+        "local_exponents": [
+          0.279,
+          1.209,
+          1.44
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          1.0190601460635663e-05,
+          1.2362649431452156e-05,
+          2.8589050634764136e-05,
+          7.754979887977242e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "argument-normalize-flat-control": {
+      "contract": {
+        "group": "web",
+        "stage": "authorization",
+        "axis": "flat scalar items in one bounded policy argument",
+        "assumption": "the same-size JSON-emission control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "argument-normalize-flat-control",
+        "group": "web",
+        "stage": "authorization",
+        "axis": "flat scalar items in one bounded policy argument",
+        "assumption": "the same-size JSON-emission control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.771,
+        "tail_exponent": 0.845,
+        "local_exponents": [
+          0.608,
+          0.816,
+          0.874
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          3.566150553524494e-06,
+          5.433699698187411e-06,
+          9.564400534145534e-06,
+          1.752579992171377e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sparsevector-compile-disordered": {
+      "contract": {
+        "group": "web",
+        "stage": "database",
+        "axis": "disordered sparse-vector declaration entries",
+        "assumption": "native storage compilation is O(n log n), never quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sparsevector-compile-disordered",
+        "group": "web",
+        "stage": "database",
+        "axis": "disordered sparse-vector declaration entries",
+        "assumption": "native storage compilation is O(n log n), never quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.092,
+        "tail_exponent": 0.982,
+        "local_exponents": [
+          1.296,
+          1.137,
+          0.827
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          5.129810015205294e-05,
+          0.00012594194849953056,
+          0.0002770515013253316,
+          0.0004915262979920954
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "sparsevector-compile-ordered-control": {
+      "contract": {
+        "group": "web",
+        "stage": "database",
+        "axis": "already-ordered sparse-vector declaration entries",
+        "assumption": "the same-size native-storage control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "sparsevector-compile-ordered-control",
+        "group": "web",
+        "stage": "database",
+        "axis": "already-ordered sparse-vector declaration entries",
+        "assumption": "the same-size native-storage control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.039,
+        "tail_exponent": 0.981,
+        "local_exponents": [
+          1.228,
+          0.816,
+          1.146
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          1.7844451940618454e-05,
+          4.180129908490926e-05,
+          7.361590105574578e-05,
+          0.00016289415070787073
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "prometheus-routes-full-histograms": {
+      "contract": {
+        "group": "web",
+        "stage": "observability",
+        "axis": "route metric rows with every fixed histogram bucket populated",
+        "assumption": "route planning and bounded histogram emission are linear in routes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "prometheus-routes-full-histograms",
+        "group": "web",
+        "stage": "observability",
+        "axis": "route metric rows with every fixed histogram bucket populated",
+        "assumption": "route planning and bounded histogram emission are linear in routes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.906,
+        "tail_exponent": 0.933,
+        "local_exponents": [
+          0.876,
+          0.833,
+          1.033
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          0.0032038039003964513,
+          0.0058781519997864965,
+          0.010472358600236476,
+          0.021436570701189338
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "prometheus-routes-empty-control": {
+      "contract": {
+        "group": "web",
+        "stage": "observability",
+        "axis": "same route metric rows with empty fixed histograms",
+        "assumption": "the same-size route-planning control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "prometheus-routes-empty-control",
+        "group": "web",
+        "stage": "observability",
+        "axis": "same route metric rows with empty fixed histograms",
+        "assumption": "the same-size route-planning control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.903,
+        "tail_exponent": 0.884,
+        "local_exponents": [
+          0.972,
+          0.805,
+          0.963
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          0.00017324250075034797,
+          0.00033982759923674167,
+          0.0005939105991274119,
+          0.0011576076038181781
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "flight-metadata-reverse-rows": {
+      "contract": {
+        "group": "web",
+        "stage": "observability",
+        "axis": "reverse-ID native-flight metadata rows",
+        "assumption": "canonical row ordering is O(n log n), never quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "flight-metadata-reverse-rows",
+        "group": "web",
+        "stage": "observability",
+        "axis": "reverse-ID native-flight metadata rows",
+        "assumption": "canonical row ordering is O(n log n), never quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 1.18,
+        "tail_exponent": 1.311,
+        "local_exponents": [
+          0.892,
+          1.257,
+          1.365
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.00014686865033581854,
+          0.0002726131991948932,
+          0.0006515581480925903,
+          0.0016778883495135234
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "flight-metadata-ordered-control": {
+      "contract": {
+        "group": "web",
+        "stage": "observability",
+        "axis": "already-ID-ordered native-flight metadata rows",
+        "assumption": "the same-size canonical-emission control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "flight-metadata-ordered-control",
+        "group": "web",
+        "stage": "observability",
+        "axis": "already-ID-ordered native-flight metadata rows",
+        "assumption": "the same-size canonical-emission control is O(n log n) or better",
+        "expect_exponent": 1.0,
+        "tolerance": 0.65,
+        "fitted_exponent": 0.837,
+        "tail_exponent": 0.877,
+        "local_exponents": [
+          0.835,
+          0.604,
+          1.15
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.00015296704950742423,
+          0.0002729057508986443,
+          0.0004147690488025546,
+          0.0009202725515933708
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "privacy-topology-chain": {
+      "contract": {
+        "group": "extended",
+        "stage": "privacy",
+        "axis": "models in one foreign-key chain",
+        "assumption": "children-first ordering visits each model and edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "privacy-topology-chain",
+        "group": "extended",
+        "stage": "privacy",
+        "axis": "models in one foreign-key chain",
+        "assumption": "children-first ordering visits each model and edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.024,
+        "tail_exponent": 1.131,
+        "local_exponents": [
+          0.815,
+          1.006,
+          1.256
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "seconds": [
+          0.00039185709902085365,
+          0.0006894597026985139,
+          0.0013850197021383793,
+          0.003307213803054765
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "privacy-topology-disconnected-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "privacy",
+        "axis": "disconnected models in one privacy graph",
+        "assumption": "the same-size deterministic-ordering control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "privacy-topology-disconnected-control",
+        "group": "extended",
+        "stage": "privacy",
+        "axis": "disconnected models in one privacy graph",
+        "assumption": "the same-size deterministic-ordering control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.982,
+        "tail_exponent": 1.022,
+        "local_exponents": [
+          0.893,
+          1.014,
+          1.03
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          200,
+          400,
+          800,
+          1600
+        ],
+        "seconds": [
+          0.00021878189872950315,
+          0.0004061779007315636,
+          0.0008200442011002451,
+          0.00167481160024181
         ],
         "counters": [
           {},
