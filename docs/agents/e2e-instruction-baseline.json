@@ -1,7 +1,7 @@
 {
   "schema": "wreath/e2e-instruction-baseline/1",
-  "recorded": "2026-08-12",
-  "note": "Retired instructions are the comparison axis. Cycles are retained as diagnostics but are not a gate: laptop frequency and competing work moved them substantially while instruction slopes stayed stable. Socket rows count the complete server process tree and subtract N/2-request totals from N-request totals, removing fixed perf attachment, process startup, peer startup, and idle-loop work. The ordinary targets use 50,000 versus 25,000 requests and 64 connections. The expensive holistic dashboard uses 1,500 versus 750 requests, 8 connections and 50 warmups; the other holistic arms use 20,000 versus 10,000, 16 connections and 1,000 warmups, except MCP calls use 8 connections to respect the declared per-session concurrency bound. Every row is the median of five trials. gRPC is measured through the native TLS/HTTP2 server; the other arms use native plaintext HTTP/1.1. The metal server is pinned to one physical core and the load generator elsewhere.",
+  "recorded": "2026-08-13",
+  "note": "Retired instructions are the comparison axis. Cycles are retained as diagnostics but are not a gate: laptop frequency and competing work moved them substantially while instruction slopes stayed stable. Socket rows count the complete server process tree and subtract N/2-request totals from N-request totals, removing fixed perf attachment, process startup, peer startup, and idle-loop work. The ordinary targets use 50,000 versus 25,000 requests and 64 connections. The expensive holistic dashboard uses 1,500 versus 750 requests, 8 connections and 50 warmups. The 2026-08-13 declarative extension arms use workload-sized N/N2 slopes, 8 connections, 50 warmups and five trials. Signed webhooks generate a fresh, correctly signed event id and timestamp per operation, so the row measures successful verification, replay claiming, typed decoding and dispatch rather than 409 replay refusals. The persistent WebSocket room is far below the HTTP floor; it divides a directly counted 100,000-message run by messages instead of subtracting an independently timed low run whose periodic loop work was larger than the signal. Its wide range is retained and the row is marked unresolved rather than presenting the median as precise. gRPC is measured through the native TLS/HTTP2 server; HTTP arms use native plaintext HTTP/1.1. The metal server is pinned to one physical core and the load generator elsewhere.",
   "workloads": {
     "typical_e2e": {
       "application": "benchmarks.apps:app",
@@ -24,19 +24,19 @@
     "holistic_e2e": {
       "application": "benchmarks.holistic_e2e:app",
       "request": "POST /v1/holistic/42?limit=3&page=1&size=12&sort=-score with bearer, JSON, origin, trace, session-cookie and zstd headers",
-      "surface": "The deep operations-intelligence dashboard through VersionedRouter: proxy, trusted-host, global and principal rate limits, quota, request ID, server timing, CORS, CSRF, security, signed session, cache-control and zstd policy; typed path/query/header/cookie/body binding, nested Field validation, dependencies and feature flags; bearer authentication, roles, permissions and Cedar; concurrent named ORM/PostgreSQL and outbound HTTP reads; native ORM model storage, background work, compiled escaped templates and HTML emission; four DST-correct temporal ranges, native-owned 730 x 48 x 6 series projection, eight LTTB reductions, eleven nine-significant-digit gap-preserving paths, eight tick axes, zoned recurrence, a packed 730-fix geospatial trajectory and occupancy grid, pgvector/halfvec/sparsevec incident projections, pagination, metrics flattening, and protobuf and MessagePack exports. It has no memoized response or cache-hit path.",
+      "surface": "The deep operations-intelligence dashboard through VersionedRouter: proxy, trusted-host, global and principal rate limits, quota, request ID, server timing, CORS, CSRF, security, signed session, cache-control and zstd policy; typed path/query/header/cookie/body binding, nested Field validation, dependencies and feature flags; bearer authentication, roles, permissions and Cedar; concurrent named ORM/PostgreSQL and outbound HTTP reads; native ORM model storage, background work, compiled escaped templates and HTML emission; four DST-correct temporal ranges, native-owned 730 x 48 x 6 series projection with immutable x/value/full-path plans, prefix sums and bounds, eight LTTB reductions, eleven nine-significant-digit gap-preserving paths, eight tick axes serialized at one final text boundary, zoned recurrence, a packed 730-fix geospatial trajectory and AVX2 occupancy grid, pgvector/halfvec/sparsevec incident projections, pagination, metrics flattening, and protobuf and MessagePack exports. It has no memoized response or cache-hit path.",
       "instructions_per_request": {
-        "median": 7923252.917333334,
-        "range": [7920920.06, 7925126.513333334]
+        "median": 4136765.328,
+        "range": [4134436.6133333333, 4138752.541333333]
       },
       "cycles_per_request": {
-        "median": 4171377.350666667,
-        "range": [4095815.6253333334, 4432998.424]
+        "median": 2735566.249333333,
+        "range": [2640517.5346666668, 2868884.114666667]
       },
       "optimization_from_prior_baseline": {
-        "prior_median_instructions": 10552488.222666666,
-        "reduction_instructions": 2629235.305333332,
-        "reduction_percent": 24.92
+        "prior_median_instructions": 7923252.917333334,
+        "reduction_instructions": 3786487.5893333335,
+        "reduction_percent": 47.79
       },
       "prior_dashboard": {
         "median_instructions": 8089526.0,
@@ -53,6 +53,8 @@
     },
     "holistic_versioned_suite": {
       "application": "benchmarks.holistic_e2e:app",
+      "recorded": "2026-08-12",
+      "historical": true,
       "definition": "One successful request through every independently measurable /v1 arm. MCP initialization is a correctness/setup arm and is deliberately excluded; one authenticated session is opened before pricing each MCP call. No arm uses response memoization or a cache-hit path.",
       "aggregate_instructions": 11927240.73933333,
       "aggregate_cycles": 7978888.234666667,
@@ -143,6 +145,133 @@
           "instruction_range": [256463.6096, 257790.575],
           "cycles": 247000.4081,
           "cycle_range": [241581.3022, 251565.9118]
+        }
+      }
+    },
+    "holistic_declarative_extensions": {
+      "application": "benchmarks.holistic_e2e:app",
+      "recorded": "2026-08-13",
+      "definition": "The request-time declarative surfaces added after the historical versioned-suite snapshot. Every HTTP route is mounted below /v1. The aggregate is the sum of one successful operation through each extension arm; it excludes the existing dashboard and historical protocol arms.",
+      "aggregate_instructions": 5851237.936203333,
+      "optimization_from_prior_baseline": {
+        "prior_aggregate_instructions": 6238889.224753333,
+        "reduction_instructions": 387651.28855000064,
+        "reduction_percent": 6.21,
+        "scope": "Metrics, Sync snapshot and Enterprise Cedar route arms re-recorded; unchanged arms retain their preceding same-day medians."
+      },
+      "arms": {
+        "series-live": {
+          "request": "GET /v1/accounts/42/activity-series",
+          "surface": "Declared Series over an ORM model with a bound parameter, zoned daily spine, count/sum/average measures, top-three grouping, PostgreSQL wire round trip and dense JSON envelope",
+          "instructions": 1836621.4175,
+          "instruction_range": [1833312.331, 1836904.474],
+          "cycles": 1112152.0295,
+          "cycle_range": [1089876.4355, 1143194.665],
+          "median_requests_per_second": 1655.09
+        },
+        "enterprise": {
+          "request": "GET /v1/enterprise/accounts/42 with X-Tenant: acme",
+          "surface": "Global TenancyMiddleware, TenantHeader directory lookup and ambient binding, organization memberships and roles, and Cedar organization authorization",
+          "instructions": 544953.5573,
+          "instruction_range": [544641.1903, 545601.1429],
+          "cycles": 502750.1544,
+          "cycle_range": [496222.259, 515567.262],
+          "optimization_from_prior_baseline": {
+            "prior_median_instructions": 557634.07925,
+            "reduction_instructions": 12680.521949999966,
+            "reduction_percent": 2.27
+          }
+        },
+        "admin-detail": {
+          "request": "GET /v1/admin/operations-view/42",
+          "surface": "Generated Admin detail route with permission access, ORM-shaped read, field projection, escaping and compiled HTML response",
+          "instructions": 523628.655,
+          "instruction_range": [522207.76633333333, 523938.78466666664],
+          "cycles": 562213.206,
+          "cycle_range": [540464.6263333333, 578630.147],
+          "median_requests_per_second": 3108.98
+        },
+        "scim-search": {
+          "request": "GET /v1/scim/v2/Users?filter=userName eq holistic-user@example.com",
+          "surface": "Generated SCIM user filter/list over the user and organization stores, authenticated as the directory principal and authorized through Cedar",
+          "instructions": 574695.2916666666,
+          "instruction_range": [573040.595, 574886.006],
+          "cycles": 603371.4286666666,
+          "cycle_range": [599224.4253333333, 763320.1763333334],
+          "median_requests_per_second": 3043.21
+        },
+        "sync-snapshot": {
+          "request": "GET /v1/sync/accounts/mine",
+          "surface": "Bounded Sync.shape evaluation, PostgreSQL wire round trip, twelve native ORM rows, native loaded/null/primary-key scan and authoritative snapshot/key boundary",
+          "instructions": 462884.0062,
+          "instruction_range": [462623.9695, 462888.287],
+          "cycles": 397766.2463,
+          "cycle_range": [394476.2681, 402570.7402],
+          "optimization_from_prior_baseline": {
+            "prior_median_instructions": 511326.13,
+            "reduction_instructions": 48442.1238,
+            "reduction_percent": 9.47
+          }
+        },
+        "signed-webhook": {
+          "request": "POST /v1/webhooks/field-observations with one fresh HMAC-signed event per operation",
+          "surface": "WebhookHub source, explicit CSRF exemption, HMAC verification, bounded replay claim, typed FieldObservation validation and dispatch",
+          "instructions": 449811.62566666666,
+          "instruction_range": [448852.407, 450527.15633333335],
+          "cycles": 453055.6506666667,
+          "cycle_range": [397343.063, 597989.245],
+          "median_requests_per_second": 3444.5
+        },
+        "workflow": {
+          "request": "POST /v1/workflows/reports",
+          "surface": "Three declared Workflow steps over a fresh operation-owned InMemoryWorkflowStore, with recorded results and completion envelope",
+          "instructions": 357244.20675,
+          "instruction_range": [357198.3035, 357680.5295],
+          "cycles": 418327.942,
+          "cycle_range": [356810.994, 475096.8545],
+          "median_requests_per_second": 4411.59
+        },
+        "readiness": {
+          "request": "GET /v1/ready",
+          "surface": "Generated health router running concurrent critical PostgreSQL and non-critical outbound service probes",
+          "instructions": 535500.9495,
+          "instruction_range": [534304.494, 536010.3205],
+          "cycles": 703220.827,
+          "cycle_range": [606904.6405, 714161.0575],
+          "median_requests_per_second": 2451.2
+        },
+        "metrics": {
+          "request": "GET /v1/metrics",
+          "surface": "Generated Prometheus endpoint over a stable ProjectorSnapshot with call-owned native route labels, counters, histogram exposition and document framing",
+          "instructions": 322611.0562,
+          "instruction_range": [322193.7163, 323269.8708],
+          "cycles": 311891.7053,
+          "cycle_range": [309018.8376, 314512.7547],
+          "optimization_from_prior_baseline": {
+            "prior_median_instructions": 649139.699,
+            "reduction_instructions": 326528.6428,
+            "reduction_percent": 50.3
+          }
+        },
+        "openapi": {
+          "request": "GET /v1/openapi.json",
+          "surface": "Authenticated serving of the generated OpenAPI contract after startup compilation",
+          "instructions": 230793.8745,
+          "instruction_range": [230586.6485, 231345.5585],
+          "cycles": 257975.341,
+          "cycle_range": [252422.376, 261620.745],
+          "median_requests_per_second": 5053.56
+        },
+        "websocket-room": {
+          "request": "persistent WEBSOCKET /v1/live/accounts/42 text message round trip",
+          "surface": "Authenticated versioned WebSocket route, RoomRegistry membership, local broadcast and frame egress",
+          "instructions": 12493.29592,
+          "instruction_range": [11692.2534, 35687.80329],
+          "cycles": 4991.79761,
+          "cycle_range": [4812.7592, 15142.40153],
+          "median_requests_per_second": 55434.16,
+          "resolution": "unresolved-above-median",
+          "note": "Four trials clustered at 11.7k-13.0k instructions and one retired 35.7k. The median is useful as an order of magnitude, not a regression threshold; periodic server work is large relative to this native message path."
         }
       }
     },
