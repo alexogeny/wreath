@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from ._codecs import parse_qs
+from ._native import _core
 from .orm.query import Select
 
 if TYPE_CHECKING:
@@ -45,6 +45,13 @@ MAX_SIZE = 100
 #: a full scan an anonymous caller can ask for repeatedly. Past this, use a
 #: keyset filter -- which is what a page this deep should have been doing.
 MAX_PAGE = 10_000
+
+
+def _rank_indices(
+    scores: Sequence[float], *, page: int, size: int, descending: bool
+) -> tuple[int, ...]:
+    """Select a numeric page while the sort workspace remains native-owned."""
+    return _core.rank_indices(scores, (page - 1) * size, size, descending)
 
 __all__ = [
     "DEFAULT_SIZE",
@@ -104,14 +111,15 @@ class Page[T]:
         controls without recomputing any of them. `items` are passed through
         as they are -- serialising them is the response encoder's job.
         """
+        pages = 0 if self.size <= 0 else (self.total + self.size - 1) // self.size
         return {
             "items": list(self.items),
             "total": self.total,
             "page": self.page,
             "size": self.size,
-            "pages": self.pages,
-            "has_next": self.has_next,
-            "has_prev": self.has_prev,
+            "pages": pages,
+            "has_next": self.page < pages,
+            "has_prev": self.page > 1,
         }
 
 
@@ -127,24 +135,6 @@ class PageParams:
 def parse_sort(raw: str) -> tuple[str, ...]:
     """`"name,-created_at"` -> `("name", "-created_at")`; blank -> `()`."""
     return tuple(token.strip() for token in raw.split(",") if token.strip())
-
-
-def _bounded(raw: str | None, default: int, ceiling: int) -> int:
-    """One query value as an int in `[1, ceiling]`, falling back to `default`.
-
-    Clamps rather than refusing. A caller asking for page 20,000 is not making a
-    protocol error worth a 422 -- it is asking for a page past the end, and the
-    honest answer is the last page wreath is willing to walk to. `MAX_PAGE`
-    exists because `LIMIT/OFFSET` makes the database discard every row before
-    the offset, which an anonymous caller could otherwise ask for repeatedly.
-    """
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(1, min(value, ceiling))
 
 
 def page_params(request: Any) -> PageParams:
@@ -182,14 +172,10 @@ def page_params(request: Any) -> PageParams:
     # `request.query_string`, not the scope: on the native server the scope is a
     # lazily materialized dict, so reading it here would build the whole thing
     # to reach one member. First value wins, matching the binding layer.
-    values: dict[str, str] = {}
-    for key, value in parse_qs(request.query_string):
-        values.setdefault(key, value)
-    return PageParams(
-        page=_bounded(values.get("page"), 1, MAX_PAGE),
-        size=_bounded(values.get("size"), DEFAULT_SIZE, MAX_SIZE),
-        sort=parse_sort(values.get("sort") or ""),
+    page, size, sort = _core.page_params(
+        request.query_string, DEFAULT_SIZE, MAX_PAGE, MAX_SIZE
     )
+    return PageParams(page=page, size=size, sort=sort)
 
 
 def sortable_fields(model: type) -> tuple[str, ...]:
