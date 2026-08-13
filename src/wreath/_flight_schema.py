@@ -541,8 +541,8 @@ class SchemaError(ValueError):
 #
 #     Recorder.log()          PyObject...  -> 64 bytes -> ring
 #
-# The Python path below is the same work, in three steps, and it is still
-# reached whenever there is no ring to pack for:
+# The Python path below is the same work, in three steps, and remains the
+# boundary for sinks without a ring and for off-loop staging:
 #
 #     _logsite.pack_value()   PyObject*  -> LogArg      (per argument)
 #     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
@@ -558,10 +558,10 @@ class SchemaError(ValueError):
 #
 #   * **No recorder.** A test capture, `testing_runtime`, a plain callable
 #     sink: there is no ring, so there is nothing for C to pack into.
-#   * **A buffered record.** TRACE/DEBUG held for a possible promotion has to
-#     survive as an object until the request decides, so it is packed here.
-#     Measured 3.0us per held record against 0.42us published, which makes it
-#     the most expensive thing left in this module -- see the plan.
+#   * **A request-buffered record.** TRACE/DEBUG held for possible promotion is
+#     packed directly into a request-owned cell array. Discarding the
+#     buffer materializes nothing; promotion creates Python cells only at the
+#     configured sink boundary.
 #   * **Off the loop.** The ring has exactly one writer. A record from a job
 #     worker is packed here and staged (`_logscratch.OffLoopStage`) for the
 #     loop to publish, flagged LOG_FLAG_OFF_LOOP and one interval late.
@@ -924,83 +924,21 @@ class LogCell:
     dropped_siblings: int = 0
 
     def encode(self) -> bytes:
-        packed = bytearray()
-        flags = self.flags
-        count = 0
-        for index, arg in enumerate(self.args):
-            if index >= LOG_MAX_ARGS:
-                flags |= LOG_FLAG_TRUNCATED
-                break
-            result = _encode_log_arg(arg, LOG_INLINE_ARG_BYTES - len(packed))
-            if result is None:
-                flags |= LOG_FLAG_TRUNCATED
-                break
-            chunk, clipped = result
-            packed += chunk
-            count += 1
-            if clipped:
-                flags |= LOG_FLAG_TRUNCATED
-            if arg.redacted:
-                flags |= LOG_FLAG_REDACTED
-        return _LOG.pack(
-            SCHEMA_VERSION,
-            EventKind.LOG,
-            flags & 0xFFFF,
-            self.site_id & 0xFFFFFFFF,
-            self.request_id & 0xFFFFFFFFFFFFFFFF,
-            self.offset_ms & 0xFFFFFFFF,
-            self.dropped_siblings & 0xFFFFFFFF,
-            int(self.severity) & 0xFF,
-            self.worker_id & 0xFF,
-            count & 0xFF,
-            len(packed) & 0xFF,
-            0,
-            bytes(packed).ljust(LOG_INLINE_ARG_BYTES, b"\0"),
+        return _core.log_cell_encode(
+            self.request_id,
+            self.site_id,
+            self.severity,
+            self.offset_ms,
+            self.worker_id,
+            self.args,
+            self.flags,
+            self.dropped_siblings,
         )
 
     @classmethod
     def decode(cls, data: bytes) -> LogCell:
-        if len(data) < CELL_SIZE:
-            raise SchemaError(f"log cell needs {CELL_SIZE} bytes, got {len(data)}")
-        (
-            version,
-            kind,
-            flags,
-            site_id,
-            request_id,
-            offset_ms,
-            dropped_siblings,
-            severity,
-            worker_id,
-            arg_count,
-            arg_bytes,
-            _reserved,
-            blob,
-        ) = _LOG.unpack(data[:CELL_SIZE])
-        if version != SCHEMA_VERSION:
-            raise SchemaError(f"unsupported schema version {version}")
-        if kind != EventKind.LOG:
-            raise SchemaError(f"expected log kind, got {kind}")
-        if arg_bytes > LOG_INLINE_ARG_BYTES:
-            raise SchemaError(
-                f"log cell declares {arg_bytes} argument bytes, but a cell holds "
-                f"at most {LOG_INLINE_ARG_BYTES}"
-            )
-        args = _decode_log_args(memoryview(blob)[:arg_bytes])
-        if len(args) != arg_count:
-            raise SchemaError(
-                f"log cell declares {arg_count} arguments but its payload holds "
-                f"{len(args)}"
-            )
-        return cls(
-            request_id=request_id,
-            site_id=site_id,
-            severity=Severity(severity) if severity in _SEVERITIES else severity,
-            offset_ms=offset_ms,
-            worker_id=worker_id,
-            args=args,
-            flags=flags,
-            dropped_siblings=dropped_siblings,
+        return _core.log_cell_decode(
+            data, SchemaError, LogArg, LogArgType, Severity, cls
         )
 
 
@@ -1325,63 +1263,13 @@ class CaptureSlab:
 
     @classmethod
     def decode(cls, data: bytes) -> CaptureSlab:
-        if len(data) < CAPTURE_SLAB_HEADER_SIZE:
-            raise SchemaError(
-                f"capture slab needs {CAPTURE_SLAB_HEADER_SIZE} bytes, got {len(data)}"
-            )
-        (
-            request_id,
-            used_bytes,
-            field_count,
-            version,
-            kind,
-            worker_id,
-            flags,
-            _r0,
-            _r1,
-        ) = _CAPTURE_SLAB_HEADER.unpack_from(data, 0)
-        if version != SCHEMA_VERSION:
-            raise SchemaError(f"unsupported schema version {version}")
-        if kind != EventKind.CAPTURE:
-            raise SchemaError(f"expected capture kind, got {kind}")
-        if used_bytes > len(data):
-            raise SchemaError("capture slab used_bytes exceeds the buffer")
-        fields: list[CaptureField] = []
-        offset = CAPTURE_SLAB_HEADER_SIZE
-        for _ in range(field_count):
-            if offset + CAPTURE_FIELD_HEADER_SIZE > used_bytes:
-                raise SchemaError("capture slab truncated reading a field header")
-            fc, descriptor_id, disposition, _res, stored_length, original_length = (
-                _CAPTURE_FIELD_HEADER.unpack_from(data, offset)
-            )
-            offset += CAPTURE_FIELD_HEADER_SIZE
-            end = offset + stored_length
-            if end > used_bytes:
-                raise SchemaError("capture slab truncated reading a field payload")
-            payload = bytes(data[offset:end])
-            offset += _pad4(stored_length)
-            fields.append(
-                CaptureField(
-                    field_class=(
-                        CaptureFieldClass(fc)
-                        if fc in _CAPTURE_CLASSES
-                        else CaptureFieldClass.UNKNOWN
-                    ),
-                    descriptor_id=descriptor_id,
-                    disposition=(
-                        CaptureDisposition(disposition)
-                        if disposition in _CAPTURE_DISPOSITIONS
-                        else CaptureDisposition.LENGTH
-                    ),
-                    original_length=original_length,
-                    payload=payload,
-                )
-            )
-        return cls(
-            request_id=request_id,
-            fields=tuple(fields),
-            worker_id=worker_id,
-            flags=flags,
+        return _core.capture_slab_decode(
+            data,
+            SchemaError,
+            CaptureField,
+            CaptureFieldClass,
+            CaptureDisposition,
+            cls,
         )
 
 
@@ -1485,17 +1373,12 @@ class MetadataImage:
 # and consume the same wire format:
 #
 # * `decode_metadata_image` is the exact inverse of `canonical_bytes` above.
-# * `siphash24` *does* have a C counterpart (`_native/flight.c:74`, reachable
-#   across translation units as `wreath_nfr_fingerprint`), and it is not
-#   exported to Python on purpose: the native packer hashes in C and never
-#   calls this, so exporting it would accelerate only the path taken when the
-#   extension is *not* publishing, and would put a hard `_flight` dependency on
-#   `_logsite`, which has none and must not gain one -- Windows builds no
-#   `_flight` at all (`setup.py:398`).
+# * `siphash24` is implemented by the always-present core extension, so schema
+#   callers and the recorder use the same dependency-free native primitive
+#   without coupling the portable schema surface to the Linux flight module.
 #
-# The two implementations must still agree byte for byte or a fingerprint would
-# differ between the C and Python packers in one process and break correlation
-# within a recording. `tests/test_flight_capture.py:52` pins the shared vector.
+# `tests/test_flight_capture.py` pins the published SipHash vector so recorder
+# and schema fingerprints cannot drift from the algorithm's external oracle.
 
 #: Refuse to allocate for absurd declared sizes before the bytes are present.
 MAX_CHUNK_BYTES = 64 * 1024 * 1024
@@ -1520,52 +1403,9 @@ def decode_metadata_image(data: bytes) -> MetadataImage:
     )
 
 
-_U64 = 0xFFFFFFFFFFFFFFFF
-def _rotl64(x: int, b: int) -> int:
-    return ((x << b) | (x >> (64 - b))) & _U64
-
-
 def siphash24(data: bytes, k0: int, k1: int) -> int:
     """SipHash-2-4, matching siphash24() in flight.c byte for byte.
 
     The recorder's keyed redaction hash; the differential tests share a key so
     HASHED capture slabs compare exactly. Word loads are little-endian."""
-    v0 = 0x736F6D6570736575 ^ k0
-    v1 = 0x646F72616E646F6D ^ k1
-    v2 = 0x6C7967656E657261 ^ k0
-    v3 = 0x7465646279746573 ^ k1
-
-    def _round() -> None:
-        nonlocal v0, v1, v2, v3
-        v0 = (v0 + v1) & _U64
-        v1 = _rotl64(v1, 13) ^ v0
-        v0 = _rotl64(v0, 32)
-        v2 = (v2 + v3) & _U64
-        v3 = _rotl64(v3, 16) ^ v2
-        v0 = (v0 + v3) & _U64
-        v3 = _rotl64(v3, 21) ^ v0
-        v2 = (v2 + v1) & _U64
-        v1 = _rotl64(v1, 17) ^ v2
-        v2 = _rotl64(v2, 32)
-
-    length = len(data)
-    end = length - (length % 8)
-    for off in range(0, end, 8):
-        m = int.from_bytes(data[off : off + 8], "little")
-        v3 ^= m
-        _round()
-        _round()
-        v0 ^= m
-    b = (length & 0xFF) << 56
-    for i in range(length - end):
-        b |= data[end + i] << (8 * i)
-    v3 ^= b
-    _round()
-    _round()
-    v0 ^= b
-    v2 ^= 0xFF
-    _round()
-    _round()
-    _round()
-    _round()
-    return v0 ^ v1 ^ v2 ^ v3
+    return _core.siphash24(data, k0, k1)
