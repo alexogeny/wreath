@@ -17,6 +17,7 @@ import threading
 # reached by a response that carries background tasks.
 from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace as _dc_replace
 from inspect import isawaitable
 from inspect import iscoroutinefunction as _iscoroutinefunction
 from inspect import signature as _signature
@@ -97,12 +98,8 @@ from .router import RouteDefinition, Router
 from .state import State
 from .websocket import WebSocket, WebSocketDisconnect
 
-_build_capability_mask = (
-    _core.build_capability_mask
-)
-_build_compiled_capability_mask = (
-    _core.build_compiled_capability_mask
-)
+_build_capability_mask = _core.build_capability_mask
+_build_compiled_capability_mask = _core.build_compiled_capability_mask
 
 # Baseline Response.__call__ used to detect subclasses that override sending;
 # only unmodified responses ride the one-shot "wreath.response" server extension.
@@ -577,6 +574,7 @@ class Wreath:
         "_bearer_verifier_is_async",
         "_app_scope",
         "_authorizer",
+        "_route_authorize",
         "_authorization_vocabulary",
         "_cancel_on_disconnect",
         "_capabilities",
@@ -711,6 +709,7 @@ class Wreath:
         self._bearer_verifier: Any = None
         self._bearer_verifier_is_async = False
         self._authorizer: AuthorizationProvider | None = None
+        self._route_authorize: Any = None
         self._authorization_vocabulary: AuthorizationVocabulary | None = None
         self._require_access_declarations = require_access_declarations
         # Values from `Depends(..., scope="app")`. Owned by this application
@@ -1904,6 +1903,8 @@ class Wreath:
             if not isinstance(vocabulary, AuthorizationVocabulary):
                 raise TypeError("vocabulary must be an AuthorizationVocabulary")
         self._authorizer = authorizer
+        route_authorize = getattr(authorizer, "_authorize_route", None)
+        self._route_authorize = route_authorize if callable(route_authorize) else None
         self._authorization_vocabulary = vocabulary
         self._dirty = True
 
@@ -4214,6 +4215,17 @@ class Wreath:
             merge_requirements(route.requirement, requirement_for(route.endpoint))
             for route in self._routes
         ]
+        compile_policy = getattr(self._authorizer, "_compile_route_requirement", None)
+        if callable(compile_policy):
+            requirements = [
+                _dc_replace(
+                    requirement,
+                    policies=tuple(compile_policy(policy) for policy in requirement.policies),
+                )
+                if requirement.policies
+                else requirement
+                for requirement in requirements
+            ]
         if self._require_access_declarations:
             missing = [
                 f"{'/'.join(sorted(route.methods)) or 'ANY'} {route.path}"
@@ -4722,10 +4734,17 @@ class Wreath:
             authorizer = self._authorizer
             if authorizer is None:
                 raise RuntimeError("authorization provider is not configured")
-            for policy in requirement.policies:
-                decision = await authorizer.authorize(request, policy)
-                if not decision.allowed:
-                    raise Forbidden(decision.reason or "Forbidden")
+            route_authorize = self._route_authorize
+            if route_authorize is None:
+                for policy in requirement.policies:
+                    decision = await authorizer.authorize(request, policy)
+                    if not decision.allowed:
+                        raise Forbidden(decision.reason or "Forbidden")
+            else:
+                for policy in requirement.policies:
+                    denial = await route_authorize(request, policy)
+                    if denial is not None:
+                        raise Forbidden(denial)
         return None
 
     def enable_api_docs(
@@ -5185,6 +5204,11 @@ def _coerce_response(
     if isinstance(value, str):
         return TextResponse(value, status=status)
     if isinstance(value, (dict, list, tuple, int, float, bool)) or value is None:
+        return JSONResponse(value, status=status)
+    if callable(getattr(kind, "__jsonable__", None)):
+        # Explicitly opted-in result objects materialize at response egress.
+        # The native encoder calls the hook once and consumes the returned wire
+        # shape immediately; arbitrary dataclasses remain refused.
         return JSONResponse(value, status=status)
     raise TypeError(f"handlers must return a response-compatible value, got {type(value).__name__}")
 
