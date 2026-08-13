@@ -238,55 +238,18 @@ class Response:
         Raises:
             ValueError: Any of the attribute rules or injection checks above failed.
         """
-        if samesite is not None:
-            samesite = samesite.lower()
-            if samesite not in ("strict", "lax", "none"):
-                raise ValueError(f"samesite must be 'strict', 'lax', or 'none', got {samesite!r}")
-            if samesite == "none" and not secure:
-                raise ValueError(
-                    "SameSite=None cookies must be Secure (RFC 6265bis 5.4.7); pass secure=True"
-                )
-        # Fail at the call, not later at the native serializer: a control
-        # character (CR/LF especially) in a cookie name or value is a
-        # header-injection vector and never valid (RFC 6265 §4.1.1). `path` and
-        # `domain` are interpolated into the same header line and are just as
-        # injectable, so they are checked here too rather than trusted for
-        # being "configuration" -- a router that builds a cookie path from a
-        # request is ordinary code.
-        for field_name, field_value in (
-            ("name", name),
-            ("value", value),
-            ("path", path),
-            ("domain", domain),
-        ):
-            if field_value is None:
-                continue
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in field_value):
-                raise ValueError(f"cookie {field_name} contains a control character")
-            if field_name in ("path", "domain") and ";" in field_value:
-                raise ValueError(f"cookie {field_name} contains an attribute separator")
-        if name.startswith("__Secure-") and not secure:
-            raise ValueError("__Secure- cookies must be Secure; pass secure=True")
-        if name.startswith("__Host-") and not (secure and path == "/" and domain is None):
-            raise ValueError(
-                "__Host- cookies must be Secure, have Path=/, and set no Domain (RFC 6265bis 4.1.3)"
-            )
-        parts = [f"{name}={value}"]
-        if max_age is not None:
-            parts.append(f"Max-Age={max_age}")
-        if expires is not None:
-            parts.append(f"Expires={expires}")
-        if path:
-            parts.append(f"Path={path}")
-        if domain is not None:
-            parts.append(f"Domain={domain}")
-        if secure:
-            parts.append("Secure")
-        if httponly:
-            parts.append("HttpOnly")
-        if samesite is not None:
-            parts.append(f"SameSite={samesite.capitalize()}")
-        self.headers.append((b"set-cookie", "; ".join(parts).encode("latin-1")))
+        header = _core.cookie_header(
+            name,
+            value,
+            max_age,
+            expires,
+            path,
+            domain,
+            secure,
+            httponly,
+            samesite,
+        )
+        self.headers.append((b"set-cookie", header))
 
     def delete_cookie(self, name: str, *, path: str = "/", domain: str | None = None) -> None:
         """Expire a cookie by resending it empty with `Max-Age=0` and a 1970 `Expires`.
