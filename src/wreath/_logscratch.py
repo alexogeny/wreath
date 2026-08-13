@@ -40,10 +40,11 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
-from ._flight_schema import LOG_FLAG_PROMOTED, LogCell, Severity
+from ._flight_schema import LogCell, Severity
+from ._native import _core
 
 #: Records buffered per request before overflow. Provisional, like every other
 #: NFR budget: enough to hold a request's narrative, small enough that a
@@ -235,39 +236,55 @@ class RequestLogBuffer:
     discard the part being asked for.
     """
 
-    __slots__ = ("_budget", "_dropped", "_promoted", "_records", "request_id")
+    __slots__ = ("_buffer",)
 
     def __init__(self, request_id: int, budget: int = DEFAULT_SCRATCH_BUDGET) -> None:
-        if budget < 0:
-            raise ValueError("budget must not be negative")
-        self.request_id = request_id
-        self._budget = budget
-        self._records: list[LogCell] = []
-        self._dropped = 0
-        self._promoted = False
+        self._buffer = _core.LogBuffer(request_id=request_id, budget=budget)
 
     def add(self, cell: LogCell) -> None:
-        if len(self._records) >= self._budget:
-            self._dropped += 1
-            return
-        self._records.append(cell)
+        """Retain an already materialized record.
+
+        This compatibility boundary serves direct buffer users and tests. Hot
+        log sites use ``add_values`` below and never construct the record.
+        """
+        self._buffer.add_cell(cell.encode())
+
+    def add_values(
+        self,
+        site_id: int,
+        severity: int,
+        specs: bytes,
+        values: tuple[object, ...],
+        k0: int,
+        k1: int,
+        flags: int = 0,
+        dropped_siblings: int = 0,
+    ) -> int:
+        """Pack dynamic values directly into the operation-owned cell array."""
+        return self._buffer.add_values(
+            site_id, severity, specs, values, k0, k1, flags, dropped_siblings
+        )
 
     def promote(self) -> None:
         """Mark this request's buffer for publication regardless of outcome."""
-        self._promoted = True
+        self._buffer.promote()
+
+    @property
+    def request_id(self) -> int:
+        return self._buffer.request_id
 
     @property
     def promoted(self) -> bool:
-        return self._promoted
+        return self._buffer.promoted
 
     @property
     def dropped(self) -> int:
         """Records the budget refused. Reported as LOG_SCRATCH_FULL."""
-        return self._dropped
+        return self._buffer.dropped
 
     @property
     def held(self) -> int:
-        return len(self._records)
+        return self._buffer.held
 
     def finish(self, *, promoted: bool, emit: Callable[[LogCell], None]) -> int:
         """Publish or discard the buffer, and empty it either way.
@@ -275,15 +292,7 @@ class RequestLogBuffer:
         Returns the number published. Emptying unconditionally is what makes an
         escaped scope inert rather than a leak.
         """
-        records, self._records = self._records, []
-        if not (promoted or self._promoted):
-            return 0
-        for cell in records:
-            emit(
-                replace(
-                    cell,
-                    request_id=self.request_id,
-                    flags=cell.flags | LOG_FLAG_PROMOTED,
-                )
-            )
+        records = self._buffer.finish(promoted)
+        for encoded in records:
+            emit(LogCell.decode(encoded))
         return len(records)
