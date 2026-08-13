@@ -13,6 +13,8 @@ static PyMethodDef client_methods[] = {
      "response_framing(method, status, headers) -> (mode, length)"},
     {"response_keeps_alive", wreath_http_response_keeps_alive, METH_VARARGS,
      "response_keeps_alive(minor, headers, framed) -> bool"},
+    {"parse_chunk_size", wreath_http_parse_chunk_size, METH_O,
+     "parse_chunk_size(line) -> int"},
     {"serialize_request", wreath_http_serialize_request, METH_VARARGS,
      "serialize_request(method, target, host, headers, body) -> bytes"},
     {NULL, NULL, 0, NULL},

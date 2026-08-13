@@ -28,9 +28,15 @@ response_framing: Callable[[str, int, list[tuple[bytes, bytes]]], tuple[str, int
 #: connection may be reused once this response is complete.
 response_keeps_alive: Callable[[int, list[tuple[bytes, bytes]], bool], bool]
 
+#: `parse_chunk_size(line)` -- validate one complete CRLF-terminated chunk-size
+#: line and return its hexadecimal size. Chunk extensions are deliberately
+#: ignored, as required by the response reader.
+parse_chunk_size: Callable[[bytes], int]
+
 parse_response_head = _client.parse_response_head
 response_framing = _client.response_framing
 response_keeps_alive = _client.response_keeps_alive
+parse_chunk_size = _client.parse_chunk_size
 
 
 def serialize_request(
@@ -46,6 +52,7 @@ def serialize_request(
 
 __all__ = [
     "parse_response_head",
+    "parse_chunk_size",
     "response_framing",
     "response_keeps_alive",
     "serialize_request",
