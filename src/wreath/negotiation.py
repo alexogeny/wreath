@@ -140,35 +140,7 @@ def parse_accept(header: str | None) -> list[tuple[str, float]]:
     Returns:
         `(media_range, q)` best first; empty when the header is absent or empty.
     """
-    if not header:
-        return []
-    ranges: list[tuple[str, float, int]] = []
-    for index, part in enumerate(header.split(",")):
-        token = part.strip()
-        media, _, params = token.partition(";")
-        media = media.strip().lower()
-        if not media:
-            continue
-        q = 1.0
-        for param in params.split(";"):
-            name, _, value = param.partition("=")
-            if name.strip().lower() == "q":
-                try:
-                    q = float(value.strip())
-                except ValueError:
-                    q = 0.0
-        specificity = 2 if "*" not in media else (1 if media != "*/*" else 0)
-        ranges.append((media, q, specificity * 1000 - index))
-    ranges.sort(key=lambda r: (r[1], r[2]), reverse=True)
-    return [(media, q) for media, q, _ in ranges]
-
-
-def _matches(media_type: str, media_range: str) -> bool:
-    if media_range in ("*/*", "*"):
-        return True
-    if media_range.endswith("/*"):
-        return media_type.split("/", 1)[0] == media_range[:-2]
-    return media_type == media_range
+    return _core.parse_accept(header)
 
 
 def negotiate(
@@ -192,24 +164,10 @@ def negotiate(
     Returns:
         The chosen serializer, or None when nothing offered is acceptable.
     """
-    parsed = parse_accept(accept)
-    if not parsed:
-        return serializers[0] if serializers else None
-    # `q=0` means *not acceptable* (RFC 9110 §12.5.1), and it has to be applied
-    # as an exclusion across the whole header rather than skipped in place:
-    # `application/json;q=0, */*` ranks the wildcard first, so matching in order
-    # served exactly the type the client had just refused.
-    excluded = tuple(media_range for media_range, q in parsed if q <= 0.0)
-    for media_range, q in parsed:
-        if q <= 0.0:
-            continue
-        for serializer in serializers:
-            if not _matches(serializer.media_type, media_range):
-                continue
-            if any(_matches(serializer.media_type, denied) for denied in excluded):
-                continue
-            return serializer
-    return None
+    index = _core.negotiate_media(
+        accept, tuple(serializer.media_type for serializer in serializers)
+    )
+    return None if index is None else serializers[index]
 
 
 def serialize(
