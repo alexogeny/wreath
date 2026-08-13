@@ -770,6 +770,219 @@ storage_orm_get(PyObject *self, PyObject *arg)
     return cell_load((const char *)self + field->offset, field);
 }
 
+static PyObject *
+storage_orm_loaded_values(PyObject *self, PyObject *Py_UNUSED(unused))
+{
+    WreathPgModelLayout *layout = require_layout(self);
+    PyObject *columns;
+    PyObject *values;
+    if (layout == NULL) return NULL;
+    columns = PyObject_GetAttrString(
+        (PyObject *)Py_TYPE(self), "__wreath_column_names__");
+    if (columns == NULL) return NULL;
+    if (!PyTuple_Check(columns) || PyTuple_GET_SIZE(columns) != layout->field_count) {
+        Py_DECREF(columns);
+        PyErr_SetString(PyExc_TypeError,
+                        "model column names do not match native storage");
+        return NULL;
+    }
+    values = PyDict_New();
+    if (values == NULL) {
+        Py_DECREF(columns);
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < layout->field_count; index++) {
+        const WreathPgModelField *field = &layout->fields[index];
+        PyObject *name;
+        PyObject *value;
+        if (!bit_get(self, layout, BITMAP_LOADED, field->bit)) continue;
+        name = Py_NewRef(PyTuple_GET_ITEM(columns, index));
+        if (bit_get(self, layout, BITMAP_NULL, field->bit)) {
+            value = Py_NewRef(Py_None);
+        } else {
+            value = cell_load((const char *)self + field->offset, field);
+            if (value == NULL) {
+                Py_DECREF(name);
+                goto error;
+            }
+        }
+        if (PyDict_SetItem(values, name, value) < 0) {
+            Py_DECREF(name);
+            Py_DECREF(value);
+            goto error;
+        }
+        Py_DECREF(name);
+        Py_DECREF(value);
+    }
+    Py_DECREF(columns);
+    return values;
+
+error:
+    Py_DECREF(values);
+    Py_DECREF(columns);
+    return NULL;
+}
+
+/* Materialize a bounded Sync snapshot from native model cells at its public
+ * boundary.  The row walk, loaded/null bitmaps and primary-key selection stay
+ * in native storage; Python mappings are allocated only because Snapshot.rows
+ * and Snapshot.keys are the documented result. */
+static PyObject *
+sync_snapshot_rows(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *source;
+    PyObject *sync_error;
+    PyObject *rows = NULL;
+    PyObject *payloads = NULL;
+    PyObject *keys = NULL;
+    PyObject *key_name = NULL;
+    PyObject *values_name = NULL;
+    PyObject *columns = NULL;
+    PyTypeObject *cached_type = NULL;
+    WreathPgModelLayout *layout = NULL;
+    if (!PyArg_ParseTuple(args, "OO:sync_snapshot_rows", &source, &sync_error))
+        return NULL;
+    rows = PySequence_Fast(source, "sync snapshot rows must be a positional iterable");
+    if (rows == NULL) goto error;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(rows);
+    payloads = PyTuple_New(count);
+    keys = PyTuple_New(count);
+    key_name = PyUnicode_FromString("key");
+    values_name = PyUnicode_FromString("values");
+    if (payloads == NULL || keys == NULL || key_name == NULL || values_name == NULL)
+        goto error;
+
+    PyObject **items = PySequence_Fast_ITEMS(rows);
+    for (Py_ssize_t row_index = 0; row_index < count; row_index++) {
+        PyObject *row = items[row_index];
+        if (Py_TYPE(row) != cached_type) {
+            Py_XDECREF(columns);
+            cached_type = Py_TYPE(row);
+            layout = wreath_pg_model_layout_for_type(cached_type);
+            if (layout == NULL) {
+                PyErr_Format(PyExc_TypeError,
+                             "sync row %zd is %.200s, not a compiled ORM model",
+                             row_index, cached_type->tp_name);
+                columns = NULL;
+                goto error;
+            }
+            columns = PyObject_GetAttrString(
+                (PyObject *)cached_type, "__wreath_column_names__");
+            if (columns == NULL) goto error;
+            if (!PyTuple_Check(columns) ||
+                PyTuple_GET_SIZE(columns) != layout->field_count) {
+                PyErr_SetString(PyExc_TypeError,
+                                "model column names do not match native storage");
+                goto error;
+            }
+        }
+
+        PyObject *values = PyDict_New();
+        PyObject *parts = NULL;
+        PyObject *key = NULL;
+        PyObject *payload = NULL;
+        if (values == NULL) goto error;
+        Py_ssize_t primary_count = 0;
+        for (Py_ssize_t index = 0; index < layout->field_count; index++)
+            if (layout->fields[index].flags & WREATH_FIELD_PRIMARY_KEY)
+                primary_count++;
+        parts = PyTuple_New(primary_count);
+        if (parts == NULL) {
+            Py_DECREF(values);
+            goto error;
+        }
+
+        Py_ssize_t primary = 0;
+        int missing_primary = primary_count == 0;
+        for (Py_ssize_t index = 0; index < layout->field_count; index++) {
+            const WreathPgModelField *field = &layout->fields[index];
+            int loaded = bit_get(row, layout, BITMAP_LOADED, field->bit);
+            int is_null = loaded && bit_get(row, layout, BITMAP_NULL, field->bit);
+            if (field->flags & WREATH_FIELD_PRIMARY_KEY) {
+                if (!loaded || is_null) {
+                    missing_primary = 1;
+                } else {
+                    PyObject *component = cell_load(
+                        (const char *)row + field->offset, field);
+                    PyObject *text = component == NULL ? NULL : PyObject_Str(component);
+                    Py_XDECREF(component);
+                    if (text == NULL) {
+                        Py_DECREF(values);
+                        Py_DECREF(parts);
+                        goto error;
+                    }
+                    PyTuple_SET_ITEM(parts, primary++, text);
+                }
+            }
+            if (!loaded) continue;
+            PyObject *value = is_null
+                ? Py_NewRef(Py_None)
+                : cell_load((const char *)row + field->offset, field);
+            if (value == NULL || PyDict_SetItem(
+                    values, PyTuple_GET_ITEM(columns, index), value) < 0) {
+                Py_XDECREF(value);
+                Py_DECREF(values);
+                Py_DECREF(parts);
+                goto error;
+            }
+            Py_DECREF(value);
+        }
+        if (missing_primary) {
+            Py_DECREF(values);
+            Py_DECREF(parts);
+            PyErr_Format(sync_error,
+                         "%.200s has no loaded primary key, so it cannot be synced; "
+                         "select the key column, or pass key= to Sync()",
+                         cached_type->tp_name);
+            goto error;
+        }
+        if (primary_count == 1) {
+            key = Py_NewRef(PyTuple_GET_ITEM(parts, 0));
+        } else {
+            PyObject *separator = PyUnicode_FromString(":");
+            if (separator != NULL) key = PyUnicode_Join(separator, parts);
+            Py_XDECREF(separator);
+        }
+        Py_DECREF(parts);
+        if (key == NULL) {
+            Py_DECREF(values);
+            goto error;
+        }
+        payload = PyDict_New();
+        if (payload == NULL ||
+            PyDict_SetItem(payload, key_name, key) < 0 ||
+            PyDict_SetItem(payload, values_name, values) < 0) {
+            Py_XDECREF(payload);
+            Py_DECREF(key);
+            Py_DECREF(values);
+            goto error;
+        }
+        Py_DECREF(values);
+        PyTuple_SET_ITEM(keys, row_index, Py_NewRef(key));
+        PyTuple_SET_ITEM(payloads, row_index, payload);
+        Py_DECREF(key);
+        if ((row_index & 1023) == 1023 && PyErr_CheckSignals() < 0) goto error;
+    }
+
+    PyObject *result = PyTuple_Pack(2, payloads, keys);
+    Py_DECREF(rows);
+    Py_DECREF(payloads);
+    Py_DECREF(keys);
+    Py_DECREF(key_name);
+    Py_DECREF(values_name);
+    Py_XDECREF(columns);
+    return result;
+
+error:
+    Py_XDECREF(rows);
+    Py_XDECREF(payloads);
+    Py_XDECREF(keys);
+    Py_XDECREF(key_name);
+    Py_XDECREF(values_name);
+    Py_XDECREF(columns);
+    return NULL;
+}
+
 static int model_set_loaded(PyObject *self, Py_ssize_t index, PyObject *value);
 
 /* Record a value read from the database: no coercion, no dirty bit.
@@ -1244,6 +1457,7 @@ static PyMethodDef storage_methods[] = {
     {"_orm_new", storage_orm_new, METH_NOARGS | METH_CLASS, NULL},
     {"_orm_initialize", storage_orm_initialize, METH_O, NULL},
     {"_orm_get", storage_orm_get, METH_O, NULL},
+    {"_orm_loaded_values", storage_orm_loaded_values, METH_NOARGS, NULL},
     {"_orm_set", (PyCFunction)(void(*)(void))storage_orm_set, METH_FASTCALL, NULL},
     {"_orm_set_loaded", (PyCFunction)(void(*)(void))storage_orm_set_loaded, METH_FASTCALL, NULL},
     {"_orm_is_loaded", storage_orm_is_loaded, METH_O, NULL},
@@ -1620,6 +1834,7 @@ static PyMethodDef model_methods[] = {
     {"_make_relation_descriptor", make_relation_descriptor, METH_VARARGS, NULL},
     {"_configure_model_errors", configure_model_errors, METH_VARARGS, NULL},
     {"_rebind_field_oid", rebind_field_oid, METH_VARARGS, NULL},
+    {"sync_snapshot_rows", sync_snapshot_rows, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 
