@@ -16,6 +16,17 @@ import pytest
 from wreath.sync import Delta, Snapshot, Sync, SyncError, UnboundedShape, sync_events
 
 
+def _native_sync_row_type():
+    from wreath.orm import Mapped, Model, column
+    from wreath.orm.types import Int64, Text
+
+    class NativeSyncRow(Model, table="native_sync_rows"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        caption: Mapped[str] = column(Text)
+
+    return NativeSyncRow
+
+
 class FakeColumn:
     def __init__(self, index: int, name: str) -> None:
         self.index = index
@@ -440,6 +451,47 @@ async def test_the_default_key_is_the_primary_key():
     assert result.keys == ("a", "b")
 
 
+def test_native_model_snapshot_materializes_the_public_boundary_once():
+    NativeSyncRow = _native_sync_row_type()
+    sync = Sync(NativeSyncRow)
+
+    result = sync._snapshot(
+        [NativeSyncRow(id=7, caption="seven"), NativeSyncRow(id=9, caption="nine")]
+    )
+
+    assert result == Snapshot(
+        rows=(
+            {"key": "7", "values": {"id": 7, "caption": "seven"}},
+            {"key": "9", "values": {"id": 9, "caption": "nine"}},
+        ),
+        keys=("7", "9"),
+    )
+
+
+def test_native_model_snapshot_keeps_the_missing_primary_key_refusal():
+    NativeSyncRow = _native_sync_row_type()
+    sync = Sync(NativeSyncRow)
+
+    with pytest.raises(SyncError, match="select the key column, or pass key="):
+        sync._snapshot([NativeSyncRow._orm_new()])
+
+
+def test_compiled_model_primary_key_override_keeps_the_public_path():
+    from wreath.orm import Mapped, Model, column
+    from wreath.orm.types import Int64, Text
+
+    class Overridden(Model, table="overridden_sync_rows"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        caption: Mapped[str] = column(Text)
+
+        def _orm_primary_key(self):
+            return ("custom", self.id)
+
+    result = Sync(Overridden)._snapshot([Overridden(id=7, caption="seven")])
+
+    assert result.keys == ("custom:7",)
+
+
 async def test_a_supplied_key_is_used_instead_of_the_primary_key():
     """Distinguishable from the default on purpose: same-shaped keys prove nothing."""
     sync = Sync(Row, key=lambda row: f"photo-{row.id}")
@@ -522,8 +574,35 @@ def test_a_row_version_is_stable_and_order_independent():
     """`hash()` is randomised per process; two workers must agree."""
     from wreath.sync import _version_of
 
+    assert _version_of({}) == "cae66941d9efbd404e4d88758ea67670"
+    assert _version_of({"a": 1, "b": "x"}) == "3e154a17e5f4cbc40b83a8f4ff5168de"
     assert _version_of({"a": 1, "b": "x"}) == _version_of({"b": "x", "a": 1})
     assert _version_of({"a": 1}) != _version_of({"a": 2})
+
+
+def test_native_sync_digest_lanes_match_the_scalar_tail_across_blocks():
+    """Four-lane state construction must agree with the one-to-three-row tail.
+
+    Values exceed one BLAKE2b block, and truncating the new state to three rows
+    deliberately compares AVX2-built old digests with scalar-built new ones.
+    """
+    from wreath._native import _core
+
+    rows = tuple(
+        {
+            "key": f"row-{index}",
+            "values": {
+                "caption": (f"value-{index}-" * 40),
+                "ordinal": index,
+            },
+        }
+        for index in range(4)
+    )
+    held = _core.sync_state(rows)
+    _state, upserted, removed = _core.sync_state_diff(held, rows[:3])
+
+    assert upserted == ()
+    assert removed == ("row-3",)
 
 
 def test_a_row_without_a_primary_key_is_refused_by_the_default_key():
