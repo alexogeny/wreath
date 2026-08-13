@@ -18,11 +18,15 @@
 
 #include "wreathcore.h"
 
+#include "simd.h"
+
 #define _PY_DATETIME_IMPL
 #include <datetime.h>
 #undef _PY_DATETIME_IMPL
 
 #include <math.h>
+
+#include <limits.h>
 
 /* Mean Earth radius in metres (IUGG). Must equal EARTH_RADIUS_M in
  * src/wreath/_geodesy.py, which is where both arms define the sphere; a
@@ -41,6 +45,7 @@ typedef struct {
     int64_t when_us;
     double lat;
     double lon;
+    double cumulative_metres;
     PyObject *when;
     Py_ssize_t order;
 } WreathTrajectoryFix;
@@ -75,6 +80,15 @@ wreath_trajectory_get(PyObject *capsule)
     return PyCapsule_GetPointer(capsule, WREATH_TRAJECTORY_CAPSULE);
 }
 
+static PyDateTime_CAPI *
+wreath_geo_datetime_api(PyObject *capsule)
+{
+    if (capsule != NULL && capsule != Py_None)
+        return (PyDateTime_CAPI *)PyCapsule_GetPointer(
+            capsule, PyDateTime_CAPSULE_NAME);
+    return (PyDateTime_CAPI *)PyCapsule_Import(PyDateTime_CAPSULE_NAME, 0);
+}
+
 static int64_t
 wreath_geo_days_before(int year, int month, int day)
 {
@@ -97,18 +111,23 @@ wreath_geo_instant_us(PyObject *value, PyDateTime_CAPI *api, int64_t *out)
         PyErr_SetString(PyExc_TypeError, "trajectory timestamps must be offset-aware datetimes");
         return -1;
     }
-    PyObject *offset = PyObject_CallMethod(value, "utcoffset", NULL);
-    if (offset == NULL) return -1;
-    if (!PyObject_TypeCheck(offset, api->DeltaType)) {
+    int64_t offset_us = 0;
+    if (PyDateTime_DATE_GET_TZINFO(value) != api->TimeZone_UTC) {
+        PyObject *offset = PyObject_CallMethod(value, "utcoffset", NULL);
+        if (offset == NULL) return -1;
+        if (!PyObject_TypeCheck(offset, api->DeltaType)) {
+            Py_DECREF(offset);
+            PyErr_SetString(
+                PyExc_TypeError,
+                "trajectory timestamp utcoffset() must return timedelta");
+            return -1;
+        }
+        offset_us =
+            ((int64_t)PyDateTime_DELTA_GET_DAYS(offset) * INT64_C(86400) +
+             PyDateTime_DELTA_GET_SECONDS(offset)) * INT64_C(1000000) +
+            PyDateTime_DELTA_GET_MICROSECONDS(offset);
         Py_DECREF(offset);
-        PyErr_SetString(PyExc_TypeError, "trajectory timestamp utcoffset() must return timedelta");
-        return -1;
     }
-    int64_t offset_us =
-        ((int64_t)PyDateTime_DELTA_GET_DAYS(offset) * INT64_C(86400) +
-         PyDateTime_DELTA_GET_SECONDS(offset)) * INT64_C(1000000) +
-        PyDateTime_DELTA_GET_MICROSECONDS(offset);
-    Py_DECREF(offset);
     int64_t local_us =
         (wreath_geo_days_before(
              PyDateTime_GET_YEAR(value), PyDateTime_GET_MONTH(value),
@@ -185,10 +204,17 @@ wreath_geo_haversine(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 }
 
 PyObject *
-wreath_geo_trajectory_compile(PyObject *Py_UNUSED(self), PyObject *source)
+wreath_geo_trajectory_compile(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyObject *source, *error_type, *coordinate_type, *datetime_capi;
+    if (!PyArg_ParseTuple(args, "OOOO:geo_trajectory_compile", &source,
+                          &error_type, &coordinate_type, &datetime_capi)) return NULL;
+    if (!PyExceptionClass_Check(error_type) || !PyType_Check(coordinate_type)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "trajectory compiler needs exception and Coordinate types");
+        return NULL;
+    }
+    PyDateTime_CAPI *api = wreath_geo_datetime_api(datetime_capi);
     if (api == NULL) return NULL;
     PyObject *sequence = PySequence_Fast(
         source, "trajectory fixes must be an ordered iterable of (timestamp, coordinate) pairs");
@@ -213,12 +239,27 @@ wreath_geo_trajectory_compile(PyObject *Py_UNUSED(self), PyObject *source)
     for (Py_ssize_t index = 0; index < count; index++) {
         PyObject *fix = items[index];
         if (!PyTuple_Check(fix) || PyTuple_GET_SIZE(fix) != 2) {
-            PyErr_Format(PyExc_TypeError,
-                         "trajectory fix %zd must be a two-item tuple", index);
+            PyErr_Format(error_type,
+                         "fix %zd must be a (timestamp, Coordinate) pair", index);
             goto error;
         }
         PyObject *when = PyTuple_GET_ITEM(fix, 0);
         PyObject *coordinate = PyTuple_GET_ITEM(fix, 1);
+        if (!PyObject_TypeCheck(coordinate, (PyTypeObject *)coordinate_type)) {
+            PyErr_Format(error_type,
+                         "fix %zd must carry a Coordinate, got %.200s",
+                         index, Py_TYPE(coordinate)->tp_name);
+            goto error;
+        }
+        if (!PyObject_TypeCheck(when, api->DateTimeType) ||
+            !_PyDateTime_HAS_TZINFO(when)) {
+            PyErr_Format(error_type,
+                         "fix %zd has a timestamp with no timezone; a trajectory "
+                         "derives durations and speeds from these, and a naive "
+                         "timestamp makes both wrong across a DST boundary. Use "
+                         "wreath.temporal.Instant.", index);
+            goto error;
+        }
         PyObject *lat_object = PyObject_GetAttrString(coordinate, "lat");
         PyObject *lon_object = PyObject_GetAttrString(coordinate, "lon");
         if (lat_object == NULL || lon_object == NULL) {
@@ -237,8 +278,16 @@ wreath_geo_trajectory_compile(PyObject *Py_UNUSED(self), PyObject *source)
         fixes[index].order = index;
     }
     Py_DECREF(sequence);
-    if (count > 1) qsort(fixes, (size_t)count, sizeof(*fixes),
-                         wreath_trajectory_fix_compare);
+    if (count > 1) {
+        qsort(fixes, (size_t)count, sizeof(*fixes),
+              wreath_trajectory_fix_compare);
+        for (Py_ssize_t index = 1; index < count; index++) {
+            fixes[index].cumulative_metres =
+                fixes[index - 1].cumulative_metres + wreath_haversine_metres(
+                    fixes[index - 1].lat, fixes[index - 1].lon,
+                    fixes[index].lat, fixes[index].lon);
+        }
+    }
     return wreath_trajectory_capsule(trajectory);
 
 error:
@@ -271,13 +320,9 @@ wreath_geo_trajectory_info(PyObject *Py_UNUSED(self), PyObject *capsule)
 {
     WreathTrajectory *trajectory = wreath_trajectory_get(capsule);
     if (trajectory == NULL) return NULL;
-    double total = 0.0;
-    for (Py_ssize_t index = 1; index < trajectory->count; index++) {
-        WreathTrajectoryFix *left = &trajectory->fixes[index - 1];
-        WreathTrajectoryFix *right = &trajectory->fixes[index];
-        total += wreath_haversine_metres(
-            left->lat, left->lon, right->lat, right->lon);
-    }
+    double total = trajectory->count < 2 ? 0.0 :
+        trajectory->fixes[trajectory->count - 1].cumulative_metres -
+        trajectory->fixes[0].cumulative_metres;
     double duration = trajectory->count < 2 ? 0.0 :
         (double)(trajectory->fixes[trajectory->count - 1].when_us -
                  trajectory->fixes[0].when_us) / 1000000.0;
@@ -291,13 +336,13 @@ wreath_geo_trajectory_info(PyObject *Py_UNUSED(self), PyObject *capsule)
 PyObject *
 wreath_geo_trajectory_between(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *capsule, *start, *end;
-    if (!PyArg_ParseTuple(args, "OOO:geo_trajectory_between", &capsule, &start, &end))
+    PyObject *capsule, *start, *end, *datetime_capi = NULL;
+    if (!PyArg_ParseTuple(args, "OOO|O:geo_trajectory_between", &capsule,
+                          &start, &end, &datetime_capi))
         return NULL;
     WreathTrajectory *source = wreath_trajectory_get(capsule);
     if (source == NULL) return NULL;
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyDateTime_CAPI *api = wreath_geo_datetime_api(datetime_capi);
     if (api == NULL) return NULL;
     int64_t start_us, end_us;
     if (wreath_geo_instant_us(start, api, &start_us) < 0 ||
@@ -335,17 +380,94 @@ wreath_geo_trajectory_between(PyObject *Py_UNUSED(self), PyObject *args)
     return wreath_trajectory_capsule(result);
 }
 
+#if defined(WREATH_HAVE_AVX2)
+WREATH_TARGET_AVX2 static int
+wreath_trajectory_grid_avx2(
+    const WreathTrajectoryFix *fixes, Py_ssize_t first, Py_ssize_t last,
+    double lat_min, double lat_max, double lon_min, double lon_max,
+    double lat_step, double lon_step, Py_ssize_t rows, Py_ssize_t columns,
+    unsigned char *occupied, Py_ssize_t *occupied_count)
+{
+    const __m256d v_lat_min = _mm256_set1_pd(lat_min);
+    const __m256d v_lat_max = _mm256_set1_pd(lat_max);
+    const __m256d v_lon_min = _mm256_set1_pd(lon_min);
+    const __m256d v_lon_max = _mm256_set1_pd(lon_max);
+    const __m256d v_lat_step = _mm256_set1_pd(lat_step);
+    const __m256d v_lon_step = _mm256_set1_pd(lon_step);
+    const __m256i offsets = _mm256_setr_epi64x(0, 6, 12, 18);
+    Py_ssize_t index = first;
+    for (; index + 3 <= last; index += 4) {
+        const double *lat_base = &fixes[index].lat;
+        const double *lon_base = &fixes[index].lon;
+        __m256d lat = _mm256_i64gather_pd(lat_base, offsets, 8);
+        __m256d lon = _mm256_i64gather_pd(lon_base, offsets, 8);
+        __m256d inside = _mm256_and_pd(
+            _mm256_and_pd(_mm256_cmp_pd(lat, v_lat_min, _CMP_GE_OQ),
+                          _mm256_cmp_pd(lat, v_lat_max, _CMP_LE_OQ)),
+            _mm256_and_pd(_mm256_cmp_pd(lon, v_lon_min, _CMP_GE_OQ),
+                          _mm256_cmp_pd(lon, v_lon_max, _CMP_LE_OQ)));
+        int mask = _mm256_movemask_pd(inside);
+        if (mask != 0) {
+            __m256d row_values = _mm256_div_pd(
+                _mm256_sub_pd(lat, v_lat_min), v_lat_step);
+            __m256d column_values = _mm256_div_pd(
+                _mm256_sub_pd(lon, v_lon_min), v_lon_step);
+            int row4[4];
+            int column4[4];
+            _mm_storeu_si128((__m128i *)row4, _mm256_cvttpd_epi32(row_values));
+            _mm_storeu_si128(
+                (__m128i *)column4, _mm256_cvttpd_epi32(column_values));
+            for (int lane = 0; lane < 4; lane++) {
+                if ((mask & (1 << lane)) == 0) continue;
+                Py_ssize_t row = row4[lane];
+                Py_ssize_t column = column4[lane];
+                if (row >= rows) row = rows - 1;
+                if (column >= columns) column = columns - 1;
+                Py_ssize_t cell = row * columns + column;
+                unsigned char bit =
+                    (unsigned char)(1u << ((unsigned int)cell & 7u));
+                unsigned char *slot = &occupied[(size_t)cell >> 3];
+                if ((*slot & bit) == 0) {
+                    *slot |= bit;
+                    (*occupied_count)++;
+                }
+            }
+        }
+        if ((index & 1023) == 1023 && PyErr_CheckSignals() < 0) return -1;
+    }
+    for (; index <= last; index++) {
+        double lat = fixes[index].lat;
+        double lon = fixes[index].lon;
+        if (lat >= lat_min && lat <= lat_max && lon >= lon_min && lon <= lon_max) {
+            Py_ssize_t row = (Py_ssize_t)floor((lat - lat_min) / lat_step);
+            Py_ssize_t column = (Py_ssize_t)floor((lon - lon_min) / lon_step);
+            if (row >= rows) row = rows - 1;
+            if (column >= columns) column = columns - 1;
+            Py_ssize_t cell = row * columns + column;
+            unsigned char bit =
+                (unsigned char)(1u << ((unsigned int)cell & 7u));
+            unsigned char *slot = &occupied[(size_t)cell >> 3];
+            if ((*slot & bit) == 0) {
+                *slot |= bit;
+                (*occupied_count)++;
+            }
+        }
+    }
+    return 0;
+}
+#endif
+
 PyObject *
 wreath_geo_trajectory_grid_summary(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *capsule, *start, *end;
+    PyObject *capsule, *start, *end, *datetime_capi = NULL;
     double lat_min, lat_max, lon_min, lon_max, lat_step, lon_step;
     Py_ssize_t rows, columns;
     if (!PyArg_ParseTuple(
-            args, "OOOddddddnn:geo_trajectory_grid_summary",
+            args, "OOOddddddnn|O:geo_trajectory_grid_summary",
             &capsule, &start, &end,
             &lat_min, &lat_max, &lon_min, &lon_max, &lat_step, &lon_step,
-            &rows, &columns)) return NULL;
+            &rows, &columns, &datetime_capi)) return NULL;
     if (rows <= 0 || columns <= 0 || lat_step <= 0.0 || lon_step <= 0.0) {
         PyErr_SetString(PyExc_ValueError, "trajectory grid dimensions and steps must be positive");
         return NULL;
@@ -362,8 +484,7 @@ wreath_geo_trajectory_grid_summary(PyObject *Py_UNUSED(self), PyObject *args)
         PyMem_Free(occupied);
         return NULL;
     }
-    PyDateTime_CAPI *api = (PyDateTime_CAPI *)PyCapsule_Import(
-        PyDateTime_CAPSULE_NAME, 0);
+    PyDateTime_CAPI *api = wreath_geo_datetime_api(datetime_capi);
     int64_t start_us, end_us;
     if (api == NULL || wreath_geo_instant_us(start, api, &start_us) < 0 ||
         wreath_geo_instant_us(end, api, &end_us) < 0) {
@@ -384,19 +505,25 @@ wreath_geo_trajectory_grid_summary(PyObject *Py_UNUSED(self), PyObject *args)
     }
     Py_ssize_t first = first_inside >= 0 ? (anchor >= 0 ? anchor : first_inside) : anchor;
     Py_ssize_t last = last_inside >= 0 ? last_inside : anchor;
-    double total_distance = 0.0;
-    double previous_lat = 0.0, previous_lon = 0.0;
-    int have_previous = 0;
+    double total_distance = first >= 0 && last > first
+        ? trajectory->fixes[last].cumulative_metres -
+          trajectory->fixes[first].cumulative_metres
+        : 0.0;
     Py_ssize_t occupied_count = 0;
     if (first >= 0) {
+#if defined(WREATH_HAVE_AVX2)
+        if (last - first >= 15 && rows <= INT_MAX && columns <= INT_MAX &&
+            wreath_simd_has_avx2()) {
+            if (wreath_trajectory_grid_avx2(
+                    trajectory->fixes, first, last, lat_min, lat_max,
+                    lon_min, lon_max, lat_step, lon_step, rows, columns,
+                    occupied, &occupied_count) < 0) goto error;
+        }
+        else
+#endif
         for (Py_ssize_t index = first; index <= last; index++) {
             double lat = trajectory->fixes[index].lat;
             double lon = trajectory->fixes[index].lon;
-            if (have_previous)
-                total_distance += wreath_haversine_metres(previous_lat, previous_lon, lat, lon);
-            previous_lat = lat;
-            previous_lon = lon;
-            have_previous = 1;
             if (lat >= lat_min && lat <= lat_max && lon >= lon_min && lon <= lon_max) {
                 Py_ssize_t row = (Py_ssize_t)floor((lat - lat_min) / lat_step);
                 Py_ssize_t column = (Py_ssize_t)floor((lon - lon_min) / lon_step);
