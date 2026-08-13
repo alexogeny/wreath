@@ -3502,22 +3502,26 @@ def _flight_metadata_ordered_control(n: int):
 def _privacy_topology_harness(n: int, *, chain: bool) -> float:
     """Price the privacy planner's children-first graph calculation."""
     from wreath._privacy.graph import Graph, Node, order_children_first
+    from wreath._privacy.model import Edge
 
-    models = tuple(type(f"PrivacyProbe{index}", (), {}) for index in range(n))
-    nodes = {
+    models: tuple[type, ...] = tuple(
+        type(f"PrivacyProbe{index}", (), {}) for index in range(n)
+    )
+    nodes: dict[type, Node] = {
         model: Node(model, model.__name__, "public", f"t{index:06d}", (), {})
         for index, model in enumerate(models)
     }
-    outbound = (
+    edge = Edge("child", "parent_id", "parent", "id", "r")
+    outbound: dict[type, tuple[tuple[Edge, type], ...]] = (
         {
-            models[index]: ((None, models[index - 1]),)
+            models[index]: ((edge, models[index - 1]),)
             for index in range(1, n)
         }
         if chain
         else {}
     )
     graph = Graph(nodes, outbound, {})
-    members = set(models)
+    members: set[type] = set(models)
     loops = 10
     before = time.perf_counter()
     for _ in range(loops):

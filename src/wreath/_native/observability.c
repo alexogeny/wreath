@@ -1542,7 +1542,7 @@ statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tag
 {
     WreathBytesWriter writer = {0};
     PyObject *number = NULL, *merged = NULL, *items = NULL;
-    PyObject *line = NULL, *bytes = NULL;
+    PyObject *line = NULL, *encoded = NULL;
     if (wreath_writer_init(&writer, 96) < 0 ||
         statsd_write_sanitized(&writer, prefix, 0) < 0 ||
         wreath_writer_byte(&writer, '.') < 0 ||
@@ -1589,13 +1589,13 @@ statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tag
             }
         }
     }
-    bytes = wreath_writer_finish(&writer);
-    if (bytes == NULL) goto error;
+    encoded = wreath_writer_finish(&writer);
+    if (encoded == NULL) goto error;
     line = PyUnicode_DecodeUTF8(
-        PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes), "strict");
+        PyBytes_AS_STRING(encoded), PyBytes_GET_SIZE(encoded), "strict");
     if (line == NULL || PyList_Append(out, line) < 0) goto error;
     Py_DECREF(line);
-    Py_DECREF(bytes);
+    Py_DECREF(encoded);
     Py_XDECREF(items);
     Py_XDECREF(merged);
     Py_DECREF(number);
@@ -1603,7 +1603,7 @@ statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tag
 
 error:
     Py_XDECREF(line);
-    Py_XDECREF(bytes);
+    Py_XDECREF(encoded);
     Py_XDECREF(items);
     Py_XDECREF(merged);
     Py_XDECREF(number);
