@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._native import _core
+
 
 def _value(row: Any, index: int) -> Any:
     """One column out of a driver row, by position.
@@ -58,14 +60,9 @@ def cell_rows(declaration: Any, rows: list[Any]) -> list[tuple[int, int, dict[st
         name: fill(declaration, name, declaration.fills.get(name))
         for name, _measure in declaration.measures
     }
-    out: list[tuple[int, int, dict[str, Any]]] = []
-    for row in rows:
-        values = {}
-        for index, (name, _measure) in enumerate(declaration.measures):
-            found = _value(row, 2 + index)
-            values[name] = empty[name] if found is None else found
-        out.append((int(_value(row, 0)), int(_value(row, 1)), values))
-    return out
+    names = tuple(name for name, _measure in declaration.measures)
+    fills = tuple(empty[name] for name in names)
+    return _core.series_cell_rows(rows, names, fills)
 
 
 def fill(declaration: Any, name: str, value: Any) -> Any:

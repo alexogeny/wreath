@@ -7,6 +7,7 @@ import datetime
 import pytest
 
 from wreath.series import (
+    ChartData,
     lttb,
     nice_ticks,
     project_chart,
@@ -66,13 +67,75 @@ class TestSeriesPath:
         assert series_path(
             range(5),
             (1.234567891234, 0.0000123456789, 12345678912.0, -0.000000123456789, 9.999999999),
-        ) == (
-            "M0,1.23456789L1,1.23456789e-5L2,1.23456789e+10"
-            "L3,-1.23456789e-7L4,10"
-        )
+        ) == ("M0,1.23456789L1,1.23456789e-5L2,1.23456789e+10L3,-1.23456789e-7L4,10")
 
 
 class TestChartProjection:
+    def test_prepared_empty_bucket_run_materializes_empty_paths(self):
+        prepared = ChartData((), {("alpha", False): {}}, {"count": 0.0})
+        assert prepared.project_chart(
+            downsample_rows=(0,), full_rows=(0,), threshold=3, tick_target=5
+        ) == (1, (("alpha", False),), ("", ""), ((0.0,),))
+
+    def test_prepared_data_matches_the_one_shot_projection(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {
+                    "count": float(bucket + 1),
+                    "latency": None if bucket % 4 == 0 else bucket / 3,
+                }
+                for bucket in buckets
+                if bucket % 3 != 0
+            },
+            ("beta", True): {
+                bucket: {"count": float(20 - bucket), "latency": bucket / 2}
+                for bucket in buckets
+                if bucket % 2 == 0
+            },
+        }
+        fills = {"count": 0.0, "latency": None}
+        expected = project_chart(
+            buckets,
+            sparse,
+            fills,
+            downsample_rows=(0, 2),
+            full_rows=(1, 3),
+            threshold=6,
+            tick_target=5,
+        )
+
+        assert (
+            ChartData(buckets, sparse, fills).project_chart(
+                downsample_rows=(0, 2),
+                full_rows=(1, 3),
+                threshold=6,
+                tick_target=5,
+            )
+            == expected
+        )
+
+    def test_text_projection_materializes_only_the_final_tick_document(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {"count": bucket / 7} for bucket in buckets if bucket not in (3, 8)
+            }
+        }
+        prepared = ChartData(buckets, sparse, {"count": None})
+        regular = prepared.project_chart(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+
+        row_count, keys, paths, tick_text, tick_count = prepared.project_chart_text(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+
+        assert (row_count, keys) == regular[:2]
+        assert paths == regular[2]
+        assert tick_text == ";".join(",".join(f"{tick:g}" for tick in axis) for axis in regular[3])
+        assert tick_count == sum(len(axis) for axis in regular[3])
+
     def test_it_matches_the_individual_data_kernels(self):
         buckets = tuple(range(9))
         sparse = {
@@ -151,18 +214,21 @@ class TestChartProjection:
             threshold=16,
             tick_target=6,
         )
-        assert project_chart_spine(
-            start,
-            end,
-            bucket=width,
-            in_zone=timezone,
-            sparse=sparse,
-            fills=fills,
-            downsample_rows=(0,),
-            full_rows=(1,),
-            threshold=16,
-            tick_target=6,
-        ) == expected
+        assert (
+            project_chart_spine(
+                start,
+                end,
+                bucket=width,
+                in_zone=timezone,
+                sparse=sparse,
+                fills=fills,
+                downsample_rows=(0,),
+                full_rows=(1,),
+                threshold=16,
+                tick_target=6,
+            )
+            == expected
+        )
 
     def test_range_projection_shares_duplicate_rows_across_multiple_measures(self):
         timezone = zone("Pacific/Auckland")

@@ -113,6 +113,7 @@ from .orm.types import (
 # modules now share that contract.
 from .queries import Placeholder
 from .temporal import (
+    _DATETIME_CAPI,
     Bucket,
     Instant,
     TemporalError,
@@ -131,6 +132,7 @@ __all__ = [
     "Cell",
     "Cells",
     "CellsResult",
+    "ChartData",
     "Measure",
     "Range",
     "Series",
@@ -249,6 +251,71 @@ def series_path(x: Any, y: Any) -> str:
     return _core.series_path(x, y)
 
 
+class ChartData:
+    """An immutable numerical chart dataset prepared from plain iterables.
+
+    Construction is the Python boundary: buckets, sparse readings and fills are
+    validated and copied into owned numeric storage once. Repeated projections
+    then retain dense cells, presence bits, LTTB selections and path buffers in
+    that storage until the final paths and axes materialise.
+
+    The ordinary `project_chart` and `project_chart_spine` calls
+    remain useful for one-shot data. Use this value when the same in-memory or
+    database-derived snapshot serves more than one projection.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(
+        self,
+        buckets: Any,
+        sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
+        fills: dict[str, Any],
+    ) -> None:
+        self._data = _core.series_data(buckets, sparse, fills)
+
+    def project_chart(
+        self,
+        *,
+        downsample_rows: Any,
+        full_rows: Any = (),
+        threshold: int = 128,
+        tick_target: int = 9,
+    ) -> tuple[
+        int,
+        tuple[tuple[Any, bool], ...],
+        tuple[str, ...],
+        tuple[tuple[float, ...], ...],
+    ]:
+        """Project this snapshot to final SVG paths and tick axes."""
+
+        return _core.series_data_chart(
+            self._data,
+            downsample_rows,
+            full_rows,
+            threshold,
+            tick_target,
+        )
+
+    def project_chart_text(
+        self,
+        *,
+        downsample_rows: Any,
+        full_rows: Any = (),
+        threshold: int = 128,
+        tick_target: int = 9,
+    ) -> tuple[int, tuple[tuple[Any, bool], ...], tuple[str, ...], str, int]:
+        """Serialize tick axes at their final text egress boundary."""
+
+        return _core.series_data_chart_text(
+            self._data,
+            downsample_rows,
+            full_rows,
+            threshold,
+            tick_target,
+        )
+
+
 def project_chart(
     buckets: Any,
     sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
@@ -310,15 +377,12 @@ def project_chart_spine(
     """
     if not isinstance(bucket, Bucket):
         raise SeriesError(
-            "project_chart_spine(bucket=) takes a bucket such as Day, "
-            f"got {bucket!r}"
+            f"project_chart_spine(bucket=) takes a bucket such as Day, got {bucket!r}"
         )
     start_instant = Instant.of(start)
     end_instant = Instant.of(end)
     tz = _temporal_tzinfo(in_zone)
-    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(
-        bucket.name
-    )
+    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(bucket.name)
     return _core.series_chart_spine(
         start_instant,
         end_instant,
@@ -330,6 +394,7 @@ def project_chart_spine(
         full_rows,
         threshold,
         tick_target,
+        _DATETIME_CAPI,
     )
 
 
@@ -2089,8 +2154,7 @@ class Series(_Builder):
 
     def _fill_values(self) -> dict[str, Any]:
         return {
-            name: fill(self, name, self._d.fills.get(name))
-            for name, _measure in self._d.measures
+            name: fill(self, name, self._d.fills.get(name)) for name, _measure in self._d.measures
         }
 
     def _series_from_sparse(self, buckets: Any, sparse: dict[Any, Any]) -> tuple[SeriesData, ...]:

@@ -27,6 +27,7 @@ from wreath.temporal import (
     bucket,
     spine,
     spine_length,
+    spine_lengths,
     zone,
 )
 
@@ -158,6 +159,17 @@ class TestSpine:
         end = at(2027, 4, 20, 18, 41)
         assert spine_length(start, end, bucket=unit, in_zone=timezone) == len(
             spine(start, end, bucket=unit, in_zone=timezone)
+        )
+
+    def test_several_lengths_share_the_range_without_changing_answers(self):
+        start = at(2025, 9, 20, 7, 17)
+        end = at(2027, 4, 20, 18, 41)
+        units = (Hour, Day, Week, Month, Quarter, Year)
+        assert spine_lengths(
+            start, end, buckets=units, in_zone=AUCKLAND
+        ) == tuple(
+            spine_length(start, end, bucket=unit, in_zone=AUCKLAND)
+            for unit in units
         )
 
     def test_the_end_of_one_bucket_is_the_start_of_the_next(self):
