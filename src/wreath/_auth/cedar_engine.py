@@ -93,8 +93,9 @@ def _context_attribute(name: str) -> tuple[Any, ...]:
 
 
 #: Set methods whose argument names members. `isEmpty` takes none and names none.
-_NAMING_METHODS = frozenset({_METHOD_IDS["contains"], _METHOD_IDS["containsAll"],
-                             _METHOD_IDS["containsAny"]})
+_NAMING_METHODS = frozenset(
+    {_METHOD_IDS["contains"], _METHOD_IDS["containsAll"], _METHOD_IDS["containsAny"]}
+)
 
 
 def _literal_names(node: object) -> Iterator[str]:
@@ -157,9 +158,37 @@ def _context_attributes(policies: Iterable[Any]) -> frozenset[str]:
     return frozenset(found)
 
 
-def _referenced_members(
-    policies: Iterable[Any], attribute: str
-) -> frozenset[str] | None:
+def _contains_principal(node: object) -> bool:
+    if node == (_OP_VAR, _VARS["principal"]):
+        return True
+    if not isinstance(node, tuple | list):
+        return False
+    return any(_contains_principal(part) for part in node)
+
+
+def _needs_principal_entity(policies: Iterable[Any]) -> bool:
+    """Whether evaluating these policies can read principal entity storage."""
+    for policy in policies:
+        if policy[2][0] not in (_SCOPE_ANY, _SCOPE_EQ):
+            return True
+        stack = list(policy[5])
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, tuple | list):
+                continue
+            if (
+                isinstance(node, tuple)
+                and node
+                and node[0] in (_OP_IN, _OP_HAS, _OP_IS, _OP_GETATTR)
+                and len(node) > 1
+                and _contains_principal(node[1])
+            ):
+                return True
+            stack.extend(node)
+    return False
+
+
+def _referenced_members(policies: Iterable[Any], attribute: str) -> frozenset[str] | None:
     """Every literal name tested against `context.<attribute>`, or None.
 
     One walk for every set-valued context key the authorizer resolves lazily —
@@ -274,13 +303,50 @@ def _to_cedar_value(value: object, *, where: str) -> Any:
 
 _KEYWORDS = frozenset(
     {
-        "permit", "forbid", "when", "unless", "principal", "action", "resource",
-        "context", "true", "false", "if", "then", "else", "in", "like", "has", "is",
+        "permit",
+        "forbid",
+        "when",
+        "unless",
+        "principal",
+        "action",
+        "resource",
+        "context",
+        "true",
+        "false",
+        "if",
+        "then",
+        "else",
+        "in",
+        "like",
+        "has",
+        "is",
     }
 )
 _PUNCTUATION = (
-    "::", "||", "&&", "==", "!=", "<=", ">=",
-    "(", ")", "[", "]", "{", "}", ",", ";", ":", ".", "@", "!", "<", ">", "+", "-", "*",
+    "::",
+    "||",
+    "&&",
+    "==",
+    "!=",
+    "<=",
+    ">=",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    ",",
+    ";",
+    ":",
+    ".",
+    "@",
+    "!",
+    "<",
+    ">",
+    "+",
+    "-",
+    "*",
 )
 
 
@@ -611,11 +677,7 @@ class _Parser:
             return (_OP_NOT, self._unary())
         if self._match("-"):
             operand = self._unary()
-            if (
-                isinstance(operand, tuple)
-                and operand[0] == _OP_CONST
-                and type(operand[1]) is int
-            ):
+            if isinstance(operand, tuple) and operand[0] == _OP_CONST and type(operand[1]) is int:
                 folded = -operand[1]
                 if folded < _I64_MIN:
                     raise self._fail("integer literal does not fit in i64")
@@ -875,6 +937,8 @@ class CedarPolicies:
         "_dangling",
         "_entities",
         "_policies",
+        "_principal_by_action",
+        "_principal_default",
         "_source",
         "_store",
     )
@@ -895,6 +959,11 @@ class CedarPolicies:
         self._context_default = _context_attributes(general)
         self._context_by_action = {
             action: self._context_default | _context_attributes(policies)
+            for action, policies in exact.items()
+        }
+        self._principal_default = _needs_principal_entity(general)
+        self._principal_by_action = {
+            action: self._principal_default or _needs_principal_entity(policies)
             for action, policies in exact.items()
         }
         self._entities = tuple(entities)
@@ -1016,6 +1085,11 @@ class CedarPolicies:
         action_uid = _as_uid_tuple(action, "action")
         return self._context_by_action.get(action_uid, self._context_default)
 
+    def principal_entity_for_action(self, action: object) -> bool:
+        """Whether this action can read request principal attributes or ancestry."""
+        action_uid = _as_uid_tuple(action, "action")
+        return self._principal_by_action.get(action_uid, self._principal_default)
+
     def is_authorized(
         self,
         *,
@@ -1046,11 +1120,9 @@ class CedarPolicies:
         Evaluation runs in C. This does no parsing — that happened once, in
         `__init__`.
         """
-        request_entities = _as_entities(entities)
+        request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(
-                self._store, self._dangling, self._entities, request_entities
-            )
+            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
         else:
             store = self._store
         allowed, reason, diagnostics = _core.cedar_is_authorized(
@@ -1063,6 +1135,30 @@ class CedarPolicies:
         )
         return AuthorizationDecision(allowed, reason, diagnostics)
 
+    def _route_denial(
+        self,
+        *,
+        principal: object,
+        action: object,
+        resource: object,
+        context: Mapping[str, object] | None = None,
+        entities: object = None,
+    ) -> object:
+        """Evaluate one route without materializing its successful decision."""
+        request_entities = None if entities is None else _as_entities(entities)
+        if request_entities:
+            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+        else:
+            store = self._store
+        return _core.cedar_route_denial(
+            self._policies,
+            _as_uid_tuple(principal, "principal"),
+            _as_uid_tuple(action, "action"),
+            _as_uid_tuple(resource, "resource"),
+            _to_cedar_value(dict(context or {}), where="context"),
+            store,
+        )
+
     def _is_authorized_many(
         self,
         *,
@@ -1074,11 +1170,9 @@ class CedarPolicies:
         stop_on_denied: bool,
     ) -> tuple[AuthorizationDecision, ...]:
         """Evaluate several resources against one compiled request context."""
-        request_entities = _as_entities(entities)
+        request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(
-                self._store, self._dangling, self._entities, request_entities
-            )
+            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
         else:
             store = self._store
         principal_uid = _as_uid_tuple(principal, "principal")
@@ -1094,6 +1188,32 @@ class CedarPolicies:
             stop_on_denied,
         )
         return tuple(AuthorizationDecision(*result) for result in results)
+
+    def _is_authorized_many_native(
+        self,
+        *,
+        principal: object,
+        action: object,
+        resources: tuple[object, ...],
+        context: Mapping[str, object] | None,
+        entities: object,
+        stop_on_denied: bool,
+    ) -> object:
+        """Evaluate a batch without materializing internal decisions in Python."""
+        request_entities = None if entities is None else _as_entities(entities)
+        if request_entities:
+            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+        else:
+            store = self._store
+        return _core.cedar_is_authorized_many_native(
+            self._policies,
+            _as_uid_tuple(principal, "principal"),
+            _as_uid_tuple(action, "action"),
+            tuple(_as_uid_tuple(resource, "resource") for resource in resources),
+            _to_cedar_value(dict(context or {}), where="context"),
+            store,
+            stop_on_denied,
+        )
 
 
 def _as_uid_tuple(value: object, name: str) -> tuple[str, str]:

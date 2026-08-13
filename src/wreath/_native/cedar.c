@@ -26,7 +26,44 @@ typedef struct {
     PyObject *error;    /* owned evaluation-error message, or NULL */
 } cedar_ctx;
 
+#define CEDAR_DECISION_BATCH_CAPSULE "wreath.cedar.decision_batch"
+
+typedef struct {
+    Py_ssize_t count;
+    unsigned char *allowed;
+    unsigned char *reason;
+} CedarDecisionBatch;
+
 static PyObject *cedar_eval(cedar_ctx *ctx, PyObject *node, int depth);
+
+static void
+cedar_decision_batch_destroy(PyObject *capsule)
+{
+    CedarDecisionBatch *batch = PyCapsule_GetPointer(
+        capsule, CEDAR_DECISION_BATCH_CAPSULE);
+    if (batch == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    PyMem_Free(batch->reason);
+    PyMem_Free(batch->allowed);
+    PyMem_Free(batch);
+}
+
+int
+wreath_cedar_decision_batch_read(PyObject *object, Py_ssize_t *count,
+                                 const unsigned char **allowed,
+                                 const unsigned char **reason)
+{
+    if (!PyCapsule_IsValid(object, CEDAR_DECISION_BATCH_CAPSULE)) return 0;
+    CedarDecisionBatch *batch = PyCapsule_GetPointer(
+        object, CEDAR_DECISION_BATCH_CAPSULE);
+    if (batch == NULL) return -1;
+    *count = batch->count;
+    *allowed = batch->allowed;
+    *reason = batch->reason;
+    return 1;
+}
 
 static int
 cedar_add_i64(int64_t left, int64_t right, int64_t *result)
@@ -129,6 +166,8 @@ cedar_is_uid(PyObject *value)
            PyUnicode_Check(PyTuple_GET_ITEM(value, 1));
 }
 
+static int cedar_dedupe_key(PyObject *value, PyObject **key);
+
 /* Structural equality: 1 equal, 0 unequal, -1 error (ctx->error or Python). */
 static int
 cedar_eq(cedar_ctx *ctx, PyObject *a, PyObject *b, int depth)
@@ -154,31 +193,19 @@ cedar_eq(cedar_ctx *ctx, PyObject *a, PyObject *b, int depth)
         return PyObject_RichCompareBool(a, b, Py_EQ);
     }
     if (PyList_Check(a) && PyList_Check(b)) {
-        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(a); i++) {
-            int found = 0;
-            for (Py_ssize_t j = 0; j < PyList_GET_SIZE(b) && !found; j++) {
-                found = cedar_eq(ctx, PyList_GET_ITEM(a, i), PyList_GET_ITEM(b, j), depth + 1);
-                if (found < 0) {
-                    return -1;
-                }
-            }
-            if (!found) {
-                return 0;
-            }
+        PyObject *left = NULL, *right = NULL;
+        int equal;
+        if (PyList_GET_SIZE(a) != PyList_GET_SIZE(b)) return 0;
+        if (cedar_dedupe_key(a, &left) < 0 ||
+            cedar_dedupe_key(b, &right) < 0) {
+            Py_XDECREF(left);
+            Py_XDECREF(right);
+            return -1;
         }
-        for (Py_ssize_t j = 0; j < PyList_GET_SIZE(b); j++) {
-            int found = 0;
-            for (Py_ssize_t i = 0; i < PyList_GET_SIZE(a) && !found; i++) {
-                found = cedar_eq(ctx, PyList_GET_ITEM(b, j), PyList_GET_ITEM(a, i), depth + 1);
-                if (found < 0) {
-                    return -1;
-                }
-            }
-            if (!found) {
-                return 0;
-            }
-        }
-        return 1;
+        equal = PyObject_RichCompareBool(left, right, Py_EQ);
+        Py_DECREF(left);
+        Py_DECREF(right);
+        return equal;
     }
     if (PyDict_Check(a) && PyDict_Check(b)) {
         if (PyDict_Size(a) != PyDict_Size(b)) {
@@ -216,9 +243,8 @@ cedar_set_contains(cedar_ctx *ctx, PyObject *set_list, PyObject *value, int dept
 
 /* Build a hashable identity for a Cedar value.
  *
- * Returns 0 on success with *key set to an owned reference, or to NULL when the
- * value needs structural comparison instead. Returns -1 with a Python exception
- * set on a real failure; unlike the evaluation helpers in this file, this one
+ * Returns 0 on success with *key set to an owned reference. Returns -1 with a
+ * Python exception set; unlike the evaluation helpers in this file, this one
  * never uses the NULL-without-exception convention.
  *
  * The tag keeps kinds apart because `cedar_eq` does: `True` and `1` are not
@@ -245,8 +271,72 @@ cedar_dedupe_key(PyObject *value, PyObject **key)
          * exception to signal "not applicable". */
         tag = "t";
     }
+    else if (PyList_Check(value)) {
+        PyObject *members = PySet_New(NULL);
+        PyObject *frozen = NULL;
+        if (members == NULL) return -1;
+        if (Py_EnterRecursiveCall(" while hashing a Cedar set")) {
+            Py_DECREF(members);
+            return -1;
+        }
+        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(value); index++) {
+            PyObject *member = NULL;
+            if (cedar_dedupe_key(PyList_GET_ITEM(value, index), &member) < 0 ||
+                member == NULL || PySet_Add(members, member) < 0) {
+                Py_XDECREF(member);
+                Py_LeaveRecursiveCall();
+                Py_DECREF(members);
+                return -1;
+            }
+            Py_DECREF(member);
+        }
+        Py_LeaveRecursiveCall();
+        frozen = PyFrozenSet_New(members);
+        Py_DECREF(members);
+        if (frozen == NULL) return -1;
+        *key = Py_BuildValue("(sN)", "l", frozen);
+        return *key == NULL ? -1 : 0;
+    }
+    else if (PyDict_Check(value)) {
+        PyObject *members = PySet_New(NULL);
+        PyObject *frozen = NULL;
+        Py_ssize_t position = 0;
+        PyObject *name, *item;
+        if (members == NULL) return -1;
+        if (Py_EnterRecursiveCall(" while hashing a Cedar record")) {
+            Py_DECREF(members);
+            return -1;
+        }
+        while (PyDict_Next(value, &position, &name, &item)) {
+            PyObject *item_key = NULL;
+            PyObject *member = NULL;
+            if (cedar_dedupe_key(item, &item_key) < 0 || item_key == NULL) {
+                Py_XDECREF(item_key);
+                Py_LeaveRecursiveCall();
+                Py_DECREF(members);
+                return -1;
+            }
+            member = PyTuple_Pack(2, name, item_key);
+            Py_DECREF(item_key);
+            if (member == NULL || PySet_Add(members, member) < 0) {
+                Py_XDECREF(member);
+                Py_LeaveRecursiveCall();
+                Py_DECREF(members);
+                return -1;
+            }
+            Py_DECREF(member);
+        }
+        Py_LeaveRecursiveCall();
+        frozen = PyFrozenSet_New(members);
+        Py_DECREF(members);
+        if (frozen == NULL) return -1;
+        *key = Py_BuildValue("(sN)", "r", frozen);
+        return *key == NULL ? -1 : 0;
+    }
     else {
-        return 0;                /* records and nested sets: structural */
+        PyErr_Format(PyExc_TypeError, "unsupported Cedar value %.200s",
+                     Py_TYPE(value)->tp_name);
+        return -1;
     }
     *key = Py_BuildValue("(sO)", tag, value);
     return *key == NULL ? -1 : 0;
@@ -396,10 +486,8 @@ cedar_convert_value(PyObject *value, PyObject *entity_uid_type,
         PySet_Check(value) || PyFrozenSet_Check(value)) {
         PyObject *iterator = PyObject_GetIter(value);
         PyObject *seen = iterator != NULL ? PySet_New(NULL) : NULL;
-        PyObject *structural = seen != NULL ? PyList_New(0) : NULL;
-        result = structural != NULL ? PyList_New(0) : NULL;
+        result = seen != NULL ? PyList_New(0) : NULL;
         if (result == NULL) {
-            Py_XDECREF(structural);
             Py_XDECREF(seen);
             Py_XDECREF(iterator);
             goto done;
@@ -419,29 +507,9 @@ cedar_convert_value(PyObject *value, PyObject *entity_uid_type,
                 Py_CLEAR(result);
                 break;
             }
-            int duplicate = 0;
-            if (key != NULL) {
-                duplicate = PySet_Contains(seen, key);
-                if (duplicate == 0 && PySet_Add(seen, key) < 0) duplicate = -1;
-                Py_DECREF(key);
-            }
-            else {
-                cedar_ctx context = {{NULL, NULL, NULL, NULL}, NULL, NULL};
-                for (Py_ssize_t index = 0;
-                     index < PyList_GET_SIZE(structural) && duplicate == 0;
-                     index++) {
-                    duplicate = cedar_eq(
-                        &context, candidate,
-                        PyList_GET_ITEM(structural, index), 0);
-                }
-                if (duplicate < 0 && context.error != NULL) {
-                    PyErr_SetObject(PyExc_TypeError, context.error);
-                }
-                Py_XDECREF(context.error);
-                if (duplicate == 0 && PyList_Append(structural, candidate) < 0) {
-                    duplicate = -1;
-                }
-            }
+            int duplicate = PySet_Contains(seen, key);
+            if (duplicate == 0 && PySet_Add(seen, key) < 0) duplicate = -1;
+            Py_DECREF(key);
             if (duplicate < 0 ||
                 (duplicate == 0 && PyList_Append(result, candidate) < 0)) {
                 Py_DECREF(candidate);
@@ -451,7 +519,6 @@ cedar_convert_value(PyObject *value, PyObject *entity_uid_type,
             Py_DECREF(candidate);
         }
         if (result != NULL && PyErr_Occurred()) Py_CLEAR(result);
-        Py_DECREF(structural);
         Py_DECREF(seen);
         Py_DECREF(iterator);
         goto done;
@@ -954,20 +1021,15 @@ cedar_eval(cedar_ctx *ctx, PyObject *node, int depth)
         return cedar_eval(ctx, PyTuple_GET_ITEM(node, condition ? 2 : 3), depth + 1);
     }
     case 14: { /* SET */
-        /* Deduplicated by hash where the member allows it. Scanning the kept
-         * list per candidate is O(n**2), and a set literal is re-evaluated on
-         * every authorization, so a policy holding a few hundred entries (an
-         * allowlist, a tenant list) paid that per request. Only records and
-         * nested sets, which cannot be hashed, still compare structurally --
-         * and only against each other. */
+        /* Every converted Cedar value has a tagged structural key.  Nested
+         * sets and records therefore take the same linear expected-time path
+         * as scalars instead of falling back to pairwise comparison. */
         PyObject *items = PyTuple_GET_ITEM(node, 1);
         PyObject *result = PyList_New(0);
         PyObject *seen = PySet_New(NULL);
-        PyObject *structural = PyList_New(0);
-        if (result == NULL || seen == NULL || structural == NULL) {
+        if (result == NULL || seen == NULL) {
             Py_XDECREF(result);
             Py_XDECREF(seen);
-            Py_XDECREF(structural);
             return NULL;
         }
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(items); i++) {
@@ -980,30 +1042,16 @@ cedar_eval(cedar_ctx *ctx, PyObject *node, int depth)
                 Py_DECREF(item);
                 goto set_error;
             }
-            if (key != NULL) {
-                int present = PySet_Contains(seen, key);
-                if (present < 0 || (present == 0 && PySet_Add(seen, key) < 0)) {
-                    Py_DECREF(key);
-                    Py_DECREF(item);
-                    goto set_error;
-                }
+            int present = PySet_Contains(seen, key);
+            if (present < 0 || (present == 0 && PySet_Add(seen, key) < 0)) {
                 Py_DECREF(key);
-                if (present) {
-                    Py_DECREF(item);
-                    continue;
-                }
+                Py_DECREF(item);
+                goto set_error;
             }
-            else {
-                int present = cedar_set_contains(ctx, structural, item, 0);
-                if (present < 0 ||
-                    (present == 0 && PyList_Append(structural, item) < 0)) {
-                    Py_DECREF(item);
-                    goto set_error;
-                }
-                if (present) {
-                    Py_DECREF(item);
-                    continue;
-                }
+            Py_DECREF(key);
+            if (present) {
+                Py_DECREF(item);
+                continue;
             }
             if (PyList_Append(result, item) < 0) {
                 Py_DECREF(item);
@@ -1012,13 +1060,11 @@ cedar_eval(cedar_ctx *ctx, PyObject *node, int depth)
             Py_DECREF(item);
         }
         Py_DECREF(seen);
-        Py_DECREF(structural);
         return result;
 
     set_error:
         Py_DECREF(result);
         Py_DECREF(seen);
-        Py_DECREF(structural);
         return NULL;
     }
     case 15: { /* RECORD */
@@ -1303,6 +1349,44 @@ error:
     return NULL;
 }
 
+static int
+cedar_authorize_compact_one(
+    PyObject *policies, PyObject *principal, PyObject *action,
+    PyObject *resource, PyObject *context, PyObject *store,
+    const unsigned char *shared_matches, const signed char *shared_outcomes,
+    unsigned char *allowed, unsigned char *reason)
+{
+    cedar_ctx ctx = {{principal, action, resource, context}, store, NULL};
+    int permitted = 0;
+    int forbidden = 0;
+    Py_ssize_t policy_count = PyTuple_GET_SIZE(policies);
+    for (Py_ssize_t index = 0; index < policy_count; index++) {
+        PyObject *policy = PyTuple_GET_ITEM(policies, index);
+        int outcome;
+        if (shared_matches == NULL)
+            outcome = cedar_policy_satisfied(&ctx, policy);
+        else if (!shared_matches[index]) outcome = 0;
+        else if (shared_outcomes[index] >= 0)
+            outcome = shared_outcomes[index];
+        else outcome = cedar_policy_satisfied_resource(&ctx, policy);
+        if (outcome == -2) {
+            Py_XDECREF(ctx.error);
+            return -1;
+        }
+        if (outcome == -1) {
+            Py_CLEAR(ctx.error);
+            continue;
+        }
+        if (outcome == 1) {
+            if (cedar_program_int(PyTuple_GET_ITEM(policy, 0))) forbidden = 1;
+            else permitted = 1;
+        }
+    }
+    *allowed = (unsigned char)(!forbidden && permitted);
+    *reason = (unsigned char)(forbidden ? 2 : permitted ? 1 : 0);
+    return 0;
+}
+
 PyObject *
 wreath_cedar_is_authorized(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -1315,6 +1399,30 @@ wreath_cedar_is_authorized(PyObject *Py_UNUSED(self), PyObject *args)
     return cedar_authorize_one(
         policies, principal, action, resource, context, store,
         NULL, NULL, NULL, NULL);
+}
+
+PyObject *
+wreath_cedar_route_denial(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *policies, *principal, *action, *resource, *context, *store;
+    if (!PyArg_ParseTuple(args, "O!OOOO!O!:cedar_route_denial",
+                          &PyTuple_Type, &policies, &principal, &action, &resource,
+                          &PyDict_Type, &context, &PyDict_Type, &store)) {
+        return NULL;
+    }
+    unsigned char allowed, reason;
+    if (cedar_authorize_compact_one(
+            policies, principal, action, resource, context, store,
+            NULL, NULL, &allowed, &reason) < 0) return NULL;
+    if (allowed) Py_RETURN_NONE;
+    static const char *reasons[] = {
+        "no permit policy matched", "cedar permit", "explicit forbid",
+    };
+    if (reason > 2) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid native Cedar reason");
+        return NULL;
+    }
+    return PyUnicode_FromString(reasons[reason]);
 }
 
 PyObject *
@@ -1416,4 +1524,87 @@ wreath_cedar_is_authorized_many(PyObject *Py_UNUSED(self), PyObject *args)
     if (result_count != resource_count &&
         _PyTuple_Resize(&results, result_count) < 0) return NULL;
     return results;
+}
+
+PyObject *
+wreath_cedar_is_authorized_many_native(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *policies, *principal, *action, *resources, *context, *store;
+    int stop_on_denied;
+    if (!PyArg_ParseTuple(
+            args, "O!OOO!O!O!p:cedar_is_authorized_many_native",
+            &PyTuple_Type, &policies, &principal, &action,
+            &PyTuple_Type, &resources, &PyDict_Type, &context,
+            &PyDict_Type, &store, &stop_on_denied)) return NULL;
+
+    Py_ssize_t policy_count = PyTuple_GET_SIZE(policies);
+    unsigned char *shared_matches = policy_count != 0
+        ? PyMem_Malloc((size_t)policy_count) : NULL;
+    signed char *shared_outcomes = policy_count != 0
+        ? PyMem_Malloc((size_t)policy_count) : NULL;
+    if (policy_count != 0 &&
+        (shared_matches == NULL || shared_outcomes == NULL)) {
+        PyMem_Free(shared_matches);
+        PyMem_Free(shared_outcomes);
+        return PyErr_NoMemory();
+    }
+    cedar_ctx shared = {{principal, action, Py_None, context}, store, NULL};
+    for (Py_ssize_t index = 0; index < policy_count; index++) {
+        PyObject *policy = PyTuple_GET_ITEM(policies, index);
+        int principal_match = cedar_scope_matches(
+            &shared, PyTuple_GET_ITEM(policy, 2), principal);
+        int action_match = principal_match > 0 ? cedar_scope_matches(
+            &shared, PyTuple_GET_ITEM(policy, 3), action) : principal_match;
+        if (action_match < 0) goto error;
+        shared_matches[index] = (unsigned char)(action_match > 0);
+        shared_outcomes[index] = -1;
+        if (action_match > 0 && cedar_policy_is_resource_independent(policy)) {
+            int outcome = cedar_policy_conditions(&shared, policy);
+            if (outcome == -2) goto error;
+            if (outcome >= 0) shared_outcomes[index] = (signed char)outcome;
+            else Py_CLEAR(shared.error);
+        }
+    }
+
+    Py_ssize_t resource_count = PyTuple_GET_SIZE(resources);
+    CedarDecisionBatch *batch = PyMem_Calloc(1, sizeof(*batch));
+    if (batch == NULL) goto memory;
+    if (resource_count != 0) {
+        batch->allowed = PyMem_Malloc((size_t)resource_count);
+        batch->reason = PyMem_Malloc((size_t)resource_count);
+        if (batch->allowed == NULL || batch->reason == NULL) {
+            PyMem_Free(batch->reason);
+            PyMem_Free(batch->allowed);
+            PyMem_Free(batch);
+            goto memory;
+        }
+    }
+    for (; batch->count < resource_count; batch->count++) {
+        if (cedar_authorize_compact_one(
+                policies, principal, action,
+                PyTuple_GET_ITEM(resources, batch->count), context, store,
+                shared_matches, shared_outcomes,
+                &batch->allowed[batch->count], &batch->reason[batch->count]) < 0) {
+            PyMem_Free(batch->reason);
+            PyMem_Free(batch->allowed);
+            PyMem_Free(batch);
+            goto error;
+        }
+        if (stop_on_denied && !batch->allowed[batch->count]) {
+            batch->count++;
+            break;
+        }
+    }
+    PyMem_Free(shared_outcomes);
+    PyMem_Free(shared_matches);
+    return PyCapsule_New(
+        batch, CEDAR_DECISION_BATCH_CAPSULE, cedar_decision_batch_destroy);
+
+memory:
+    PyErr_NoMemory();
+error:
+    Py_XDECREF(shared.error);
+    PyMem_Free(shared_outcomes);
+    PyMem_Free(shared_matches);
+    return NULL;
 }
