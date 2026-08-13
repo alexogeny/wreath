@@ -20,7 +20,6 @@ from hmac import compare_digest
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any, cast
 
-from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
 from ._native import _core
@@ -594,7 +593,11 @@ class Request:
             self._context = scope
         self._receive = receive
         self._app = app
-        self._header_map: dict[bytes, bytes] | None = None
+        # A conforming ASGI server gets the ordinary dict below. Wreath's own
+        # server supplies its request-owned native header index instead, so
+        # policy lookups do not first materialize the ASGI list and a second
+        # Python container containing the same objects.
+        self._header_map: Any | None = None
         self._header_scanned = False
         self._path_params = path_params
         # Completed first-class policy stages. The reference executor updates
@@ -667,18 +670,7 @@ class Request:
         context = self._context
         if context is not None:
             return cast("str | None", context._bearer_token())
-        value_bytes: bytes | None = None
-        for name, candidate in self.headers:
-            if name != b"authorization":
-                continue
-            if value_bytes is not None:
-                return None
-            value_bytes = candidate
-        if value_bytes is None:
-            return None
-        value = value_bytes.decode("latin-1")
-        scheme, _separator, token = value.partition(" ")
-        return token if token and scheme.lower() == "bearer" else None
+        return _core.bearer_token(self.headers)
 
     def _bearer_verify(self, verifier: Any) -> Any:
         """Activate a built-in bearer verifier at the native header boundary.
@@ -966,20 +958,21 @@ class Request:
         # line with the RFC cookie separator while enforcing the limit before
         # allocating the joined value; first-line-only creates proxy/app auth
         # ambiguity and silently drops CSRF/session cookies.
-        values: list[bytes] = []
-        total = 0
-        for name, candidate in self.headers:
-            if name != b"cookie":
-                continue
-            total += len(candidate) + (2 if values else 0)
-            if total > self._limits.max_cookie_bytes:
-                raise RequestHeaderFieldsTooLarge(
-                    f"Cookie headers are {total} bytes; the limit is "
-                    f"{self._limits.max_cookie_bytes}"
-                )
-            values.append(candidate)
-        value = b"; ".join(values) if values else None
-        parsed: dict[str, str] = {} if value is None else parse_cookies(value)
+        context = self._context
+        native_parse = (
+            None if context is None else getattr(context, "_parse_cookies", None)
+        )
+        if native_parse is None:
+            parsed: dict[str, str] = _core.parse_cookie_headers(
+                self.headers,
+                self._limits.max_cookie_bytes,
+                RequestHeaderFieldsTooLarge,
+            )
+        else:
+            parsed = native_parse(
+                self._limits.max_cookie_bytes,
+                RequestHeaderFieldsTooLarge,
+            )
         self._cookies = parsed
         return parsed
 
@@ -987,6 +980,11 @@ class Request:
         # Only ProxyPolicy needs this: it rewrites Host from a
         # trusted X-Forwarded-Host before anything downstream reads it. The
         # cache maintenance lives here because the caches do.
+        context = self._context
+        native_set = None if context is None else getattr(context, "_set_header", None)
+        if native_set is not None:
+            native_set(name, value)
+            return
         headers = self.headers
         for index, (existing, _value) in enumerate(headers):
             if existing == name:
@@ -1003,11 +1001,20 @@ class Request:
         if header_map is not None:
             header_map[name] = value
 
-    def _index_headers(self) -> dict[bytes, bytes]:
-        """Materialize the first-value header index for multi-header consumers."""
+    def _index_headers(self) -> Any:
+        """Return the first-value header index for multi-header consumers."""
         header_map = self._header_map
         if header_map is None:
-            header_map = self._header_map = build_header_map(self.headers)
+            context = self._context
+            native_index = (
+                None if context is None else getattr(context, "_header_index", None)
+            )
+            header_map = (
+                build_header_map(self.headers)
+                if native_index is None
+                else native_index()
+            )
+            self._header_map = header_map
             self._header_scanned = True
         return header_map
 
@@ -1027,6 +1034,14 @@ class Request:
             name: header name, in any case
             default: returned when the header is absent
         """
+        context = self._context
+        if context is not None:
+            try:
+                native_header_text = context._header_text
+            except AttributeError:
+                pass
+            else:
+                return native_header_text(name, default)
         # ASGI servers must deliver header names already lowercased, so the
         # raw keys are usable directly; first value wins for duplicates.
         target = name.encode("latin-1") if isinstance(name, str) else name
@@ -1039,11 +1054,23 @@ class Request:
                 self._header_scanned = True
                 value = find_header(self.headers, target)
                 return value.decode("latin-1") if value is not None else default
-            header_map = self._header_map = build_header_map(self.headers)
+            header_map = self._index_headers()
         value = header_map.get(target)
         if value is None:
             return default
         return value.decode("latin-1")
+
+    def _header_bytes(self, name: bytes) -> bytes | None:
+        """One raw header value without materializing the header collection."""
+        context = self._context
+        if context is not None:
+            try:
+                native_header = context._header
+            except AttributeError:
+                pass
+            else:
+                return native_header(name)
+        return find_header(self.headers, name)
 
     @property
     def locale(self) -> str:
@@ -1066,31 +1093,7 @@ class Request:
         header = self.header("accept-language")
         if not header:
             return "en"
-        best: tuple[float, int, str] | None = None
-        for index, part in enumerate(header.split(",")):
-            tag, _, parameters = part.strip().partition(";")
-            tag = tag.strip()
-            if not tag or tag == "*":
-                continue
-            quality = 1.0
-            # Every parameter, not just the first: `;charset=utf-8;q=0.1` is
-            # legal, and reading only the first one scored it 1.0 -- so the tag
-            # the client least wanted could win.
-            for parameter in parameters.split(";"):
-                key, _, raw = parameter.partition("=")
-                if key.strip().lower() != "q":
-                    continue
-                try:
-                    quality = float(raw)
-                except ValueError:
-                    quality = 0.0
-                break
-            # Negated index so that, at equal quality, the earlier tag wins --
-            # which is the order the client listed its preference in.
-            candidate = (quality, -index, tag)
-            if best is None or candidate > best:
-                best = candidate
-        return best[2] if best is not None else "en"
+        return _core.locale_preference(header)
 
     async def body(self) -> bytes:
         """The whole request body as bytes, read once and cached.
@@ -1333,22 +1336,8 @@ class Request:
             self._form = result
             return result
         body = await self.body()
-        fields = {}
-        every: dict[str, list[str]] = {}
         limit = self._limits.max_form_fields
-        try:
-            pairs = parse_qs(body, limit)
-        except ValueError:
-            # The one thing `parse_qs` refuses. It is not "malformed input" --
-            # the codec decodes anything else it is handed, so this call raises
-            # `ValueError` for the field-count bound and nothing else. A limit
-            # that exists to refuse hostile input has to refuse it as a client
-            # error: a bare `ValueError` reaches the boundary as an unhandled
-            # 500, which reports the caller's fault as the server's.
-            raise PayloadTooLarge(f"urlencoded form exceeds {limit} fields") from None
-        for key, value in pairs:
-            fields.setdefault(key, value)
-            every.setdefault(key, []).append(value)
+        fields, every = _core.parse_form_urlencoded(body, limit, PayloadTooLarge)
         result = FormData(fields, {}, every)
         self._form = result
         return result
