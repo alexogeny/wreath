@@ -515,4 +515,37 @@ activation, and direct-receive ownership are regression gates in the test. This
 is structural evidence, not a throughput or latency claim; published performance
 claims still require repeated runs that clear the measured A/A noise floor.
 
-**Reference:** [`wreath.server`](../reference/server.md).
+## Serverless without one platform owning the app shape
+
+`LambdaAdapter` translates API Gateway payload v1/v2 and Function URL events
+directly into ASGI. Construct one module-scoped instance so one event loop,
+connection pools, and ASGI lifespan survive warm invocations:
+
+```python
+from wreath.aws_lambda import LambdaAdapter
+from myservice import app
+
+handler = LambdaAdapter(app)
+```
+
+It preserves repeated v1 headers/query values, v2 cookies, binary bodies and
+responses, and exposes the original event/context under the
+`wreath.lambda` ASGI extension. Wreath remains an ordinary ASGI app; this is a
+deployment adapter, not a server dependency.
+
+Google Cloud Functions uses the same warm-lifespan model through
+`GoogleFunctionAdapter`:
+
+```python
+from wreath.serverless import GoogleFunctionAdapter
+
+handler = GoogleFunctionAdapter(app)
+```
+
+Azure Functions already ships an ASGI host, so `azure_function_app(app)` hands
+Wreath to `azure.functions.AsgiFunctionApp` rather than translating the request
+again. Vercel's Python runtime also accepts an `app` variable that is an ASGI
+application directly—export the Wreath instance, with no adapter at all.
+
+**Reference:** [`wreath.server`](../reference/server.md),
+[`wreath.aws_lambda`](../reference/aws_lambda.md).
