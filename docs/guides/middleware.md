@@ -116,6 +116,64 @@ Security headers, CSRF cookies, CORS, timing and request IDs are applied nativel
 before response serialization. A conforming external ASGI server runs the same
 policy through Wreath's readable reference executor.
 
+`AIScrapingPolicy` is also native ingress policy, and Wreath enables its refusal
+by default. It scans the bundled WUA database once and rejects autonomous AI
+crawlers before routing or Python activation. `Wreath(ai_scraping="allow")`
+opts into all such traffic; an explicit
+`HttpPolicy(ai_scraping=AIScrapingPolicy(allow=(...)))` admits named crawlers
+while refusing the remainder. User-triggered AI fetchers are not in the scraper
+set.
+The explicit declaration may be passed to the constructor or installed later
+with `app.configure_http_policy(...)`; in the latter form it replaces the
+injected default. Native and portable refusals share one native-owned aggregate
+counter, and native Flight completions preserve the bounded `ai_scraping`
+disposition for OTLP without promoting an expected 403 into an application
+error.
+
+This is an enforced known-product default, not bot attestation. A caller can
+spoof a browser User-Agent; use Web Bot Auth for positive agent identity,
+authentication for non-public content, rate limiting to bound anonymous work,
+and an edge bot service when distributed/browser-emulating scraping is in
+scope. `robots_txt(app)` publishes the same AI refusal to cooperative crawlers
+and keeps `/robots.txt` readable to them.
+
+Client-fact traffic classification is the explicit exception: its database
+lookup is native, while `TrafficPolicy` materializes one `ClientFacts` value and
+selects among the small tuple of application declarations in Python. Configuring
+it therefore makes the policy descriptor use the readable executor on Wreath's
+server too; there is no silent native/Python split whose ordering could differ.
+
+## User story: give verified agents their own traffic lane
+
+```python
+from wreath.policy import (
+    AIScrapingPolicy, HttpPolicy, TieredRateLimitPolicy,
+    TrafficClass, TrafficPolicy, traffic_class,
+)
+
+app = Wreath(http_policy=HttpPolicy(
+    ai_scraping=AIScrapingPolicy(allow=("oai-searchbot",)),
+))
+facts = app.client_facts("public")
+app.configure_http_policy(HttpPolicy(
+    traffic=TrafficPolicy(facts, (
+        TrafficClass("verified-agent", verified_agent=True),
+        TrafficClass("claimed-bot", claimed_agent=True),
+    )),
+    principal_rate_limit=TieredRateLimitPolicy(
+        tiers={"verified-agent": (600, 60.0), "claimed-bot": (30, 60.0)},
+        default=(120, 60.0),
+        tier=traffic_class,
+    ),
+))
+```
+
+The selected name is also `context.client_class` in the default Cedar context.
+That lets rate limiting and authorization consume one classification without
+either re-running GeoIP, UA, or signature verification. The explicit scraping
+opt-in is required here because this example assigns admitted AI traffic a
+bounded allowance instead of accepting Wreath's default refusal.
+
 ## User story: put a ceiling on abusive clients
 
 > *As an API author, a few clients hammer my API and occasionally knock it over.
