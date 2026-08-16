@@ -123,8 +123,8 @@ Two different reasons, both worth stating.
 
 **On the way out it is bandwidth.** A `tsvector` is derived from columns that are
 already in the same payload — it is noise by construction, and it serializes as a
-hex blob. A default page of twenty `Vector(1536)` rows is about thirty thousand
-floats nobody asked for, on every list request.
+base64 string when explicitly exposed. A default page of twenty `Vector(1536)`
+rows is about thirty thousand floats nobody asked for, on every list request.
 
 **On the way in it is control.** Ranking is the one thing a row's own editor can
 change *invisibly*: for an application whose search is semantic, anyone permitted
