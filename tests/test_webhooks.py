@@ -235,24 +235,25 @@ async def test_inbound_source_verifies_decodes_dispatches_and_rejects_replay() -
 
 
 @pytest.mark.asyncio
-async def test_inbound_source_uses_normalized_headers_and_compiled_validator(
+async def test_inbound_source_uses_public_verifier_protocol_and_compiled_validator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from wreath.binding import _body_validator as compile_validator
 
     app = Wreath()
-    normalized_calls = 0
+    verifier_calls = 0
     compile_calls = 0
     validation_calls = 0
 
-    class TrackingVerifier(HMACWebhookVerifier):
-        def verify(self, **options: object) -> WebhookEnvelope:
-            raise AssertionError("source must not renormalize headers in public verify")
+    class TrackingVerifier:
+        def __init__(self) -> None:
+            self._delegate = HMACWebhookVerifier(KEYS)
+            self.max_age = self._delegate.max_age
 
-        def _verify_normalized(self, **options: object) -> WebhookEnvelope:
-            nonlocal normalized_calls
-            normalized_calls += 1
-            return super()._verify_normalized(**options)
+        def verify(self, **options: object) -> WebhookEnvelope:
+            nonlocal verifier_calls
+            verifier_calls += 1
+            return self._delegate.verify(**options)
 
     def tracked_compile(annotation: object):
         nonlocal compile_calls
@@ -270,7 +271,7 @@ async def test_inbound_source_uses_normalized_headers_and_compiled_validator(
     source = app.webhooks("optimized").source(
         "sender",
         path="/hooks/optimized",
-        verifier=TrackingVerifier(KEYS),
+        verifier=TrackingVerifier(),
     )
 
     @source.event("widget.changed", payload=WidgetChanged)
@@ -300,7 +301,7 @@ async def test_inbound_source_uses_normalized_headers_and_compiled_validator(
 
     assert compile_calls == 1
     assert validation_calls == 2
-    assert normalized_calls == 2
+    assert verifier_calls == 2
 
 
 @pytest.mark.asyncio
@@ -891,6 +892,10 @@ def test_outbox_schema_is_explicit_and_identifier_is_validated() -> None:
     assert "WHERE state IN ('pending','retry_wait')" in sql
     with pytest.raises(ValueError, match="identifier"):
         PostgresWebhookOutbox("bad; DROP TABLE users")
+    with pytest.raises(ValueError, match="identifier"):
+        PostgresWebhookOutbox("WebhookEvents")
+    with pytest.raises(ValueError, match="63-byte"):
+        PostgresWebhookOutbox("w" * 64)
 
 
 def test_inbox_schema_is_explicit_and_identifier_is_validated() -> None:
@@ -900,6 +905,10 @@ def test_inbox_schema_is_explicit_and_identifier_is_validated() -> None:
     assert "fencing_token bigint NOT NULL DEFAULT 1" in sql
     with pytest.raises(ValueError, match="identifier"):
         PostgresWebhookInbox("bad-name")
+    with pytest.raises(ValueError, match="identifier"):
+        PostgresWebhookInbox("WebhookEvents")
+    with pytest.raises(ValueError, match="63-byte"):
+        PostgresWebhookInbox("w" * 64)
 
 
 @pytest.mark.asyncio
