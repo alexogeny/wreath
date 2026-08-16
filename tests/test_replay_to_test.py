@@ -200,6 +200,12 @@ async def test_a_module_only_target_imports_the_module() -> None:
     assert "import herd.app" in source
 
 
+@pytest.mark.asyncio
+async def test_a_malformed_generated_test_target_is_refused() -> None:
+    with pytest.raises(ValueError, match="module:attribute"):
+        await generate_test(_app(), _recording(GET), target="herd.app:bad:name")
+
+
 # --- a connection that carried more than one request (design 22 item 18) -----
 
 

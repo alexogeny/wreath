@@ -288,6 +288,10 @@ can be *proved* rather than trusted.
 
 ::: wreath.replay.FaultyHttpClient
 
+::: wreath.replay.RecordedHttpExchange
+
+::: wreath.replay.HttpReplayError
+
 ::: wreath.replay.ObjectStoreDouble
 
 ::: wreath.replay.AdapterFault
