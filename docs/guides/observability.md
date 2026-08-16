@@ -20,7 +20,11 @@ Prometheus (scrape) mounts a `/metrics` endpoint straight from the app:
 
 ```python
 projector = ...   # the app's metrics snapshot source
-app.metrics(projector, path="/metrics")
+app.metrics(
+    projector,
+    path="/metrics",
+    counter_sources=(client_facts_provider,),
+)
 ```
 
 Or drive the exporters directly from `wreath.telemetry`, all reading the same source:
@@ -28,11 +32,34 @@ Or drive the exporters directly from `wreath.telemetry`, all reading the same so
 ```python
 from wreath import telemetry
 
-telemetry.activate_prometheus(projector)            # scrape (text 0.0.4)
-telemetry.activate_openmetrics(projector)           # OpenMetrics 1.0.0 + exemplars
-telemetry.activate_statsd(projector, dogstatsd=True)  # UDP push, DogStatsD tags
-telemetry.activate_cloudwatch_emf(projector, namespace="Trailhead")  # EMF JSON to stdout
+telemetry.activate_prometheus(projector, app=app)            # scrape (text 0.0.4)
+telemetry.activate_openmetrics(projector, app=app)           # OpenMetrics 1.0.0
+telemetry.activate_statsd(projector, app=app, dogstatsd=True)  # UDP push
+telemetry.activate_cloudwatch_emf(projector, app=app, namespace="Trailhead")  # EMF
 ```
+
+An explicit `counter_sources=(provider,)` adds any operation-owned subsystem
+whose `counters()` returns `wreath.metrics.Counters`. Every bridge delegates
+discovery, deduplication, shape checks, and failure isolation to
+`wreath.metrics.collect`; Prometheus, OpenMetrics, StatsD/DogStatsD and
+CloudWatch EMF only encode those canonical rows. A
+`ClientFactsProvider` uses this seam for fixed totals and ISO alpha-2
+`country_xx` totals only, so Prometheus and DogStatsD never receive an
+attacker-controlled browser, platform, User-Agent, country, or IP as a metric
+label.
+Values are monotonic counters by default. A source whose reading also contains
+live gauges marks their names explicitly, for example
+`Counters("health", "public", {"ready": 1}, gauges=frozenset({"ready"}))`, so
+delta-oriented bridges keep the gauge absolute.
+Providers declared with `app.client_facts()` are already application-owned and
+are discovered automatically by `app.metrics(...)`; they need no duplicate
+`counter_sources` wiring.
+The default `AIScrapingPolicy` is discovered in the same walk and contributes
+the bounded `ai_scraping_policy.refused` total. Native refusals also remain in
+Flight and OTLP as the structured `ai_scraping` policy disposition even though
+they occur before route activation. They remain successful policy decisions,
+not unhandled errors, so error reporters such as Sentry, Rollbar, and Bugsnag
+are not invoked for them.
 
 - **Prometheus / OpenMetrics** — counters, gauges, and per-route histograms in the exposition format; OpenMetrics adds the terminating `# EOF` and the richer content type.
 - **StatsD / DogStatsD** — `flush()` sends UDP lines (counters as deltas, gauges absolute); DogStatsD mode emits `|#k:v` tags, plain StatsD folds labels into the metric name. `run_periodic(interval)` drives it from a supervised task.
@@ -52,6 +79,60 @@ reach the live queue. See
 ## Traces
 
 `telemetry.activate_otel(...)` bridges wreath's spans to OpenTelemetry (OTLP), which in turn reaches Jaeger, Tempo, Honeycomb, and most vendors.
+
+When a handler already resolved `ClientFacts`,
+`telemetry.annotate_otel(recording_span, facts)` adds the standard
+`geo.country.iso_code`, `user_agent.*`, `browser.mobile`, and
+`user_agent.synthetic.type=bot` attributes. Wreath's projection omits the raw
+IP and original User-Agent. It is explicit because `activate_otel` returns
+parent context, not a recording span owned by Wreath.
+
+With Wreath's native server and Flight Recorder, that same resolution also
+emits one compact client-facts carrier behind the completion cell. The
+projector enriches Wreath's exported server span automatically in both JSON and
+protobuf OTLP. It exports only country, IP family/source, a stable bundled-UA
+rule id, mobile/bot flags, and whether Web Bot Auth verified the agent; raw
+network and header identifiers stay out of the ring.
+An ingress refusal needs no client-facts carrier: its completion flags carry
+the bounded `ai_scraping` disposition directly, and the OTLP server span emits
+`wreath.policy.refused=true` without retaining the User-Agent.
+
+Wreath also ships its own dependency-free `OtlpHttpExporter` for OTLP traces,
+metrics, and logs. The OpenTelemetry bridge is for context/interoperability; it
+is not the only way telemetry leaves the process.
+
+## Unhandled errors and Sentry
+
+Unhandled HTTP, WebSocket, exception-renderer, and background failures are
+recorded as `wreath.error.unhandled` events on the same logging/OTLP spine. The
+record contains the exception type and framework phase, never a request body,
+headers, or exception message.
+
+Add a Sentry sink without giving Wreath ownership of Sentry's global setup:
+
+```python
+import sentry_sdk
+from wreath.errors import BugsnagErrorReporter, RollbarErrorReporter, SentryErrorReporter
+
+sentry_sdk.init(dsn=settings.sentry_dsn)
+app.add_error_reporter(SentryErrorReporter(client_facts=client_facts_provider))
+```
+
+Passing a client-facts provider is optional. When present, the adapter puts
+browser and platform facts in non-indexed event context and only bounded
+country/IP-family/source/mobile/bot values in Sentry tags. It never sets a
+Sentry user, raw address, raw User-Agent, city, coordinates, or ASN
+organization.
+
+The same protocol has first-party `RollbarErrorReporter` and
+`BugsnagErrorReporter` adapters. The application initializes whichever vendor
+SDK it chose; Wreath only forwards the exception. Native OTLP logs remain the
+vendor-neutral route and need none of those packages.
+
+Reporter failures are counted and logged; they do not replace the application's
+response. An explicit `OtlpErrorReporter` is available for jobs or other owners
+outside app dispatch, while app-boundary errors are already recorded and should
+not register it a second time.
 
 Because every bridge reads the recorder's own metric definitions rather than a parallel set, switching or doubling up exporters never changes what the numbers *mean* — only where they land.
 
