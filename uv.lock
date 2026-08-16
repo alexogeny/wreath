@@ -1568,7 +1568,7 @@ wheels = [
 
 [[package]]
 name = "wreath"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1666,10 +1666,10 @@ dev = [
 
 [[package]]
 name = "wreath-http3"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/wreath-http3" }
 
 [[package]]
 name = "wreath-linux"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/wreath-linux" }
