@@ -28,3 +28,5 @@ and cannot be installed with `add_middleware()`.
 ::: wreath.policy.sessions
 
 ::: wreath.policy.timing
+
+::: wreath.policy.traffic
