@@ -1,17 +1,17 @@
 # Prescriptive plan: second factors — TOTP and WebAuthn passkeys
 
-Status: **stages 1-3 implemented** (July 2026). TOTP enrolment and verification,
+Status: **stages 1-4 implemented** (August 2026). TOTP enrolment and verification,
 step-up (`second_factor_at`, `wreath.auth.second_factor(max_age=...)`,
 `context.second_factor_age`), and WebAuthn as a *second* factor all ship — see
 [Second factors](../guides/second-factors.md).
 
-Stage 4, **passkeys as a first factor**, is not built: discoverable credentials
-and usernameless login, where a failed ceremony has no password to fall back to.
-Two known gaps in what does ship are recorded in `docs/reference/roadmap.md`
-rather than only here: the permission manifest does not model freshness, so a
-route behind `@second_factor` can read as permitted and then answer 403; and a
-WebAuthn challenge is only genuinely single-use when `second_factor_router` is
-given an `enrolments=` store, which is why building one without it warns.
+Stage 4 adds opt-in discoverable enrolment and usernameless first-factor login
+through `second_factor_router(passkey_login=True)`. It requires resident
+credentials and user verification, resolves the returned public credential id
+with one indexed store lookup, and uses the same single-use `ChallengeStore` as
+second-factor assertions. The permission manifest still does not model
+freshness, so a route behind `@second_factor` can read as permitted and then
+answer 403.
 
 Related material:
 
@@ -226,7 +226,7 @@ factor.
 ES256 and Ed25519 only; RS256 authenticators are rare enough to reject with a
 clear message rather than to implement a second signature scheme for.
 
-**Stage 4 — passkeys as a first factor.** Discoverable credentials, usernameless
+**Stage 4 — passkeys as a first factor.** Implemented: discoverable credentials, usernameless
 login. Only after stage 3 has been used, because the failure modes are the same
 ones with no password to fall back to.
 
