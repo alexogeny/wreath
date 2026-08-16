@@ -18,6 +18,7 @@ scrape trustworthy rather than merely present:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ import pytest
 from wreath import Wreath, metrics
 from wreath._prometheus import PrometheusBridge, render_exposition
 from wreath._statsd import StatsDBridge
+from wreath.mcp import MCP
 from wreath.metrics import Counters
 
 
@@ -62,8 +64,9 @@ def test_two_instances_of_one_subsystem_stay_apart() -> None:
     assert queues == {"work", "mail"}
 
 
-def test_an_app_with_nothing_registered_reports_nothing() -> None:
-    assert metrics.collect(Wreath()) == ()
+def test_an_app_with_nothing_registered_reports_its_own_health_counters() -> None:
+    app = Wreath(ai_scraping="allow")
+    assert metrics.collect(app) == (app.counters(),)
 
 
 def test_collection_is_by_asking_not_by_a_list() -> None:
@@ -80,6 +83,15 @@ def test_collection_is_by_asking_not_by_a_list() -> None:
     assert readings[("invented", "x")].values == {"n": 3}
 
 
+def test_an_mcp_server_mounted_on_the_app_is_discovered() -> None:
+    app = Wreath(ai_scraping="allow")
+    mcp = MCP(app, name="operations", version="1.0.0")
+
+    readings = {(row.subsystem, row.instance): row for row in metrics.collect(app)}
+
+    assert readings[("mcp", "operations")] == mcp.counters()
+
+
 def test_a_subsystem_that_raises_does_not_blank_the_others() -> None:
     # A metrics read must not be able to take down the thing it measures, and
     # one bug must not cost every other subsystem its numbers.
@@ -91,6 +103,7 @@ def test_a_subsystem_that_raises_does_not_blank_the_others() -> None:
     app._job_runners["broken"] = Exploding()  # type: ignore[assignment]
     found = {reading.subsystem for reading in metrics.collect(app)}
     assert {"jobs", "messaging", "entity", "pool"} <= found
+    assert app.metrics_collection_errors == 1
 
 
 def test_something_returning_the_wrong_shape_is_skipped() -> None:
@@ -98,15 +111,16 @@ def test_something_returning_the_wrong_shape_is_skipped() -> None:
         def counters(self) -> Any:
             return {"not": "a Counters"}
 
-    app = Wreath()
+    app = Wreath(ai_scraping="allow")
     app._job_runners["odd"] = Wrong()  # type: ignore[assignment]
-    assert metrics.collect(app) == ()
+    assert metrics.collect(app) == (app.counters(),)
+    assert app.metrics_invalid_sources == 1
 
 
 def test_a_holder_with_no_counters_is_simply_absent() -> None:
-    app = Wreath()
+    app = Wreath(ai_scraping="allow")
     app._job_runners["plain"] = object()  # type: ignore[assignment]
-    assert metrics.collect(app) == ()
+    assert metrics.collect(app) == (app.counters(),)
 
 
 # --- the flat form --------------------------------------------------------------------
@@ -116,6 +130,16 @@ def test_prefixed_names_carry_the_namespace_and_subsystem() -> None:
     reading = Counters(subsystem="jobs", instance="work", values={"run_errors": 2})
     assert reading.prefixed() == {"wreath_jobs_run_errors": 2}
     assert reading.prefixed("acme") == {"acme_jobs_run_errors": 2}
+
+
+def test_gauges_must_name_a_value_in_the_same_reading() -> None:
+    with pytest.raises(ValueError, match="unknown: ready"):
+        Counters(
+            subsystem="health",
+            instance="public",
+            values={"live": 1},
+            gauges=frozenset({"ready"}),
+        )
 
 
 def test_flatten_sums_instances_because_a_flat_sink_cannot_hold_them_apart() -> None:
@@ -135,6 +159,44 @@ def test_counters_reach_the_exposition() -> None:
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
     assert "wreath_jobs_run_errors{instance=\"work\"} 0" in text
     assert "wreath_entity_lost{instance=\"wreath_entity\"} 0" in text
+
+
+def test_explicit_counter_sources_reach_prometheus_and_dogstatsd() -> None:
+    source = SimpleNamespace(
+        counters=lambda: Counters(
+            "client_facts", "public", {"geo_known": 7, "bot": 3}
+        )
+    )
+    text = PrometheusBridge(FakeProjector(), counter_sources=(source,)).render()
+    assert 'wreath_client_facts_geo_known{instance="public"} 7' in text
+
+    bridge = StatsDBridge(
+        FakeProjector(), dogstatsd=True, counter_sources=(source,)
+    )
+    lines: list[str] = []
+    bridge._counter_lines(lines)
+    assert "wreath.client_facts.bot:3|g|#instance:public" in lines
+
+
+def test_explicit_source_failure_is_isolated_identically_by_every_bridge() -> None:
+    good = SimpleNamespace(
+        counters=lambda: Counters("health", "public", {"ready": 1})
+    )
+
+    class Broken:
+        def counters(self) -> Counters:
+            raise RuntimeError("metrics source failed")
+
+    sources = (Broken(), good)
+    text = PrometheusBridge(FakeProjector(), counter_sources=sources).render()
+    assert 'wreath_health_ready{instance="public"} 1' in text
+
+    bridge = StatsDBridge(
+        FakeProjector(), dogstatsd=True, counter_sources=sources
+    )
+    lines: list[str] = []
+    bridge._counter_lines(lines)
+    assert "wreath.health.ready:1|g|#instance:public" in lines
 
 
 def test_a_bridge_without_an_app_renders_the_projector_half_alone() -> None:

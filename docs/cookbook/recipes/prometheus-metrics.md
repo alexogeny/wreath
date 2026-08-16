@@ -22,8 +22,15 @@ family names:
 
 ```python
 app.metrics(projector, path="/metrics", namespace="trailhead",
-            route_labels={1: {"method": "GET", "path": "/llamas"}})
+            route_labels={1: {"method": "GET", "path": "/llamas"}},
+            counter_sources=(client_facts_provider,))
 ```
+
+`counter_sources=` accepts operation-owned objects such as
+`ClientFactsProvider` that expose `counters()`. Client facts contribute fixed
+resolution, classification, Geo coverage, IP-family, forwarding, bot, and
+mobile totals, plus bounded `country_xx` totals. Raw addresses, User-Agents,
+browsers, platforms, and countries never become metric labels.
 
 The same snapshot feeds every other bridge, so nothing can disagree. If you'd
 rather drive the exporter yourself — to gate the endpoint behind auth, or to run
