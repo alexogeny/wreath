@@ -1,14 +1,16 @@
-# Phased delivery
+# Historical delivery sequence
 
-The tool is built in tiers of increasing ambition and risk. Each tier is gated
-on the previous one holding its precision bar on the corpus golden tests.
+The tool was built in tiers of increasing ambition and risk. The analyzer,
+whole-tree emitter, inventory, and behavioral verifier now ship; this document
+records the sequence rather than the current public surface. See the
+[porting guide](../../guides/porting.md) for that contract.
 
-## Phase 0 — report-only ✅ implemented
+## Phase 0 — report-only foundation
 
 `wreath port SRC --report-only` (also `--json`). The `wreath._port` package: the
 `ast` analysis pass + cross-module symbol table (`_Imports`/`_index_tree`) + Port
-IR (`Finding`/`Report`) + rule catalog/classifier (`rules.py`), emitting **only**
-the report (counts + `file:line` + tags + per-category coverage) over the whole
+IR (`Finding`/`Report`) + rule catalog/classifier (`rules.py`). At this phase it
+emitted **only** the report (counts + `file:line` + tags + per-category coverage) over the whole
 tree. Public API: `wreath.port.analyze(root)` / `analyze_all(roots)` → `Report`
 (`.to_json()`, `.to_markdown()`, `.coverage(category)`, `.coverage_overall()`).
 Immediate value — a scoped migration plan — with **zero emit risk**; it also

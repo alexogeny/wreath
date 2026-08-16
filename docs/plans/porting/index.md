@@ -1,12 +1,11 @@
 # Porting FastAPI apps to Wreath (`wreath port`)
 
-!!! note "Phase 0 implemented (report-only); emission still staged"
-    The **report-only analyzer is built**: `wreath port <src> --report-only`
-    (and `--json`) statically analyzes an app and prints a coverage report, and
-    the public `wreath.port` API (`analyze` / `analyze_all` → `Report`) is live.
-    **Code emission (Phase 1+) is deferred** — see the [phased plan](phased-plan.md).
-    These pages are excluded from the built docs and move into the nav when
-    emission ships. See the [README](README.md).
+!!! note "Analysis, whole-tree emission, inventory, and verification ship"
+    `wreath port <src> --report-only` remains the static planning mode, while
+    `--output` emits a guarded sister tree and `--verify ... --cases ...`
+    compares source and candidate ASGI responses. The pages in this directory
+    preserve the design sequence and corpus rationale; the
+    [user guide](../../guides/porting.md) is the current contract.
 
 `wreath port` is a source-to-source translator: point it at an existing
 FastAPI / Pydantic / SQLAlchemy-or-ormar / Alembic application and it emits
@@ -38,4 +37,4 @@ is emitted with false confidence.
 - [Rule catalog](rule-catalog.md) — every construct, tagged 1:1 / lossy / unsupported.
 - [Output & safety](output-and-safety.md) — in-place vs sister-folder, the report, idempotency, the fail-safe posture.
 - [Coverage & corpus](coverage-and-corpus.md) — how coverage is measured, and the honest number.
-- [Phased plan](phased-plan.md) — from a report-only first cut to assisted query suggestions.
+- [Phased plan](phased-plan.md) — the historical sequence from the first analyzer to assisted query work.

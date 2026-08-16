@@ -325,6 +325,58 @@ to overwrite was correct. A **failure** never reached the output at all. Fold
 them together and "your tree is already ported" becomes indistinguishable from
 "a third of your tree never made it".
 
+## Prove the emitted application answers the same requests
+
+Static translation can prove that a declaration has one mechanical spelling;
+it cannot prove that the surrounding application behaves the same. After the
+emitted tree imports and its review notes are resolved, run both applications
+against one explicit corpus:
+
+```console
+wreath port --verify old_app.main:app new_app.main:app --cases port-cases.json
+```
+
+```json
+{
+  "cases": [
+    {
+      "name": "read one llama",
+      "method": "GET",
+      "path": "/llamas/42?expand=ranch",
+      "headers": {"accept": "application/json"}
+    },
+    {
+      "name": "create one llama",
+      "method": "POST",
+      "path": "/llamas",
+      "headers": {"content-type": "application/json"},
+      "body": "{\"name\":\"Ada\"}"
+    }
+  ]
+}
+```
+
+Both lifespan contexts run. Status, repeated response headers, and body bytes
+are compared. Header-name order and casing are normalized; repeated values stay
+in wire order because that order can be meaningful. `Date` and `Server` are
+ignored by default, and another volatile header is excluded only when you name
+it with `--ignore-header`. Binary request bodies use `body_base64` rather than
+`body`.
+
+The command exits 0 only when every response is equivalent and 1 when any field
+differs. It does not claim that two hidden database writes or outbound calls are
+equal: include the observable result in the corpus, or verify those effects
+through their own independent contract. A narrow claim you can trust is better
+than a broad green report that observed neither side.
+
+Give the two targets isolated stores prepared to equivalent starting state.
+The verifier sends each case to the source and then the candidate; pointing both
+at one mutable database would let the first request change the second request's
+preconditions. CLI targets must also have distinct importable module names. The
+Python API, `verify_apps(source_app, candidate_app, cases)`, accepts application
+objects directly when a migration harness needs more control over imports or
+state setup.
+
 ## Coverage is a diagnostic, not a target
 
 The report includes a coverage number — currently around **0.78** of constructs auto-translated across the representative apps.
