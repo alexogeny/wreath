@@ -116,6 +116,118 @@ async def test_h2_route_attribution_stamps_metadata_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_h2_native_ai_refusal_is_a_structured_completion() -> None:
+    from wreath import Wreath
+    from wreath.metrics import collect
+
+    app = Wreath()
+    reached = False
+
+    @app.get("/")
+    async def handler(request):
+        nonlocal reached
+        reached = True
+        return "not reached"
+
+    loop = asyncio.get_event_loop()
+    transport = FakeTransport()
+    rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=16)
+    protocol = Http2Protocol(
+        app, ServerConfig(protocols=("h2",)), loop, set(), recorder=rec
+    )
+    protocol.connection_made(transport)
+    await _settle()
+    protocol.data_received(support.PREFACE)
+    protocol.data_received(support.encode_settings({}))
+    await _settle()
+    protocol.data_received(
+        support.build_headers_frame(
+            1,
+            support.request_headers(
+                path=b"/", extra=[(b"user-agent", b"GPTBot/1.0")]
+            ),
+        )
+    )
+    await _settle()
+
+    assert reached is False
+    assert rec.requests == 1
+    assert rec.completions == 1
+    cell = fs.CompletionCell.decode(rec.drain())
+    assert cell.protocol is fs.Protocol.HTTP2
+    assert cell.status == 403
+    assert cell.terminal is fs.TerminalStatus.OK
+    assert cell.flags & fs.FLAG_POLICY_REFUSED
+    assert cell.flags & fs.FLAG_AI_SCRAPING_REFUSED
+    readings = {(row.subsystem, row.instance): row.values for row in collect(app)}
+    assert readings[("ai_scraping_policy", "default")] == {"refused": 1}
+
+
+@pytest.mark.asyncio
+async def test_h2_native_refusal_resets_open_request_without_closing_connection() -> None:
+    from wreath import Response, Wreath
+
+    app = Wreath()
+    reached: list[str] = []
+
+    @app.post("/")
+    async def refused_handler(request):
+        reached.append("refused")
+        return Response(b"not reached")
+
+    @app.get("/healthy")
+    async def healthy_handler(request):
+        reached.append("healthy")
+        return Response(b"ok")
+
+    loop = asyncio.get_event_loop()
+    transport = FakeTransport()
+    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set())
+    protocol.connection_made(transport)
+    await _settle()
+    protocol.data_received(support.PREFACE)
+    protocol.data_received(support.encode_settings({}))
+    await _settle()
+
+    protocol.data_received(
+        support.build_headers_frame(
+            1,
+            support.request_headers(
+                method=b"POST",
+                path=b"/",
+                extra=[(b"user-agent", b"GPTBot/1.0")],
+            ),
+            end_stream=False,
+        )
+    )
+    await _settle()
+    protocol.data_received(
+        support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b"in flight")
+    )
+    await _settle()
+    protocol.data_received(
+        support.build_headers_frame(
+            3,
+            support.request_headers(method=b"GET", path=b"/healthy"),
+        )
+    )
+    await _settle()
+
+    frames = support.FrameParser()
+    frames.feed(bytes(transport.buffer))
+    emitted = frames.frames()
+    assert not [frame for frame in emitted if frame.type == support.GOAWAY]
+    resets = [
+        frame for frame in emitted
+        if frame.type == support.RST_STREAM and frame.stream_id == 1
+    ]
+    assert resets
+    assert int.from_bytes(resets[0].payload, "big") == support.NO_ERROR
+    assert transport.closed is False
+    assert reached == ["healthy"]
+
+
+@pytest.mark.asyncio
 async def test_h2_error_terminal_is_recorded() -> None:
     async def boom(scope, receive, send):
         raise RuntimeError("boom")

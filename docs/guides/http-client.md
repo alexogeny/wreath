@@ -118,8 +118,57 @@ correlation and causation, and Postgres-backed inbox and outbox stores for
 at-least-once delivery you can reason about:
 
 ```python
-from wreath.webhooks import HMACWebhookSigner, HMACWebhookVerifier
+from wreath.webhooks import (
+    GitHubWebhookVerifier,
+    HMACWebhookSigner,
+    HMACWebhookVerifier,
+    StandardWebhookVerifier,
+    StripeWebhookVerifier,
+)
+```
+
+`WebhookSource` accepts the public `WebhookVerifier` protocol, so the hub and
+its limits/deduplication stay the same for every sender. The first-party
+verifiers cover Wreath's envelope, Standard Webhooks/Svix-compatible signatures,
+Stripe's `Stripe-Signature`, and GitHub's `X-Hub-Signature-256`; each verifies
+the exact body bytes before JSON is decoded.
+
+## Record and replay an upstream
+
+An armed forensic request records each completed outbound exchange as one
+self-contained Flight Recorder field. Build replay adapters straight from that
+recording and inject the named HTTP double into the code under test:
+
+```python
+from wreath.replay import ReplayAdapters, open_recording
+
+recording = open_recording("incident.wfr1")
+adapters = ReplayAdapters.from_recording(recording, request_id=42)
+payments = adapters.http["payments"]
+```
+
+Replay validates method, target, headers, body, and idempotency key before it
+returns the recorded response. A redacted, truncated, or ambiguous exchange is
+refused rather than approximated.
+
+## Verify a Turnstile challenge
+
+`wreath.bot.Turnstile` uses a normal named HTTP client pinned to Cloudflare, so
+destination policy, lifecycle, timeout, capture, and replay do not form a second
+integration path:
+
+```python
+from wreath.bot import Turnstile, challenge_dependency
+
+turnstile_http = app.http_client(
+    "turnstile", base_url="https://challenges.cloudflare.com"
+)
+turnstile = Turnstile(
+    turnstile_http, secret=settings.turnstile_secret, hostname="app.example"
+)
+verify_human = challenge_dependency(turnstile)
 ```
 
 **Reference:** [`wreath.http_client`](../reference/http_client.md),
-[`wreath.webhooks`](../reference/webhooks.md).
+[`wreath.webhooks`](../reference/webhooks.md),
+[`wreath.bot`](../reference/bot.md).
