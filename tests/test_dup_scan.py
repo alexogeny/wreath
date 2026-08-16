@@ -518,6 +518,110 @@ def test_ranking_is_by_the_lines_a_collapse_would_remove(tree: Path) -> None:
     assert group.redundant_lines == 20  # the copies after the first, not all three
 
 
+def test_an_intentional_group_is_filtered_only_by_its_exact_site_set(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reasoned exception must not become permission for the next copy."""
+    _write(tree, "settle.py", RENAMED_TWINS)
+    raw, scanned = dup_scan.scan(
+        tree,
+        ("src/wreath",),
+        dup_scan.DEFAULT_MIN_LINES,
+        include_excluded=True,
+    )
+    sites = tuple(
+        sorted((site.path, site.qualname or site.name) for site in raw[0].sites)
+    )
+    monkeypatch.setattr(
+        dup_scan,
+        "INTENTIONAL_GROUPS",
+        (dup_scan.Exclusion(sites, "the two operations are intentionally parallel"),),
+    )
+
+    assert dup_scan.scan(
+        tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES
+    ) == ([], scanned)
+    assert dup_scan.intentional_reason(raw[0]) is not None
+
+    expanded = dup_scan.Group(
+        raw[0].digest,
+        (*raw[0].sites, dup_scan.Site("src/wreath/new.py", "third", 1, 10)),
+    )
+    assert dup_scan.intentional_reason(expanded) is None
+
+
+def test_exclusions_distinguish_same_named_methods(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tree, "methods.py", '''
+class First:
+    def render(self, value):
+        one = _step(value)
+        two = _step(one)
+        three = _step(two)
+        four = _step(three)
+        five = _step(four)
+        _record(five)
+        _audit(five)
+        return five
+
+
+class Second:
+    def render(self, item):
+        alpha = _step(item)
+        beta = _step(alpha)
+        gamma = _step(beta)
+        delta = _step(gamma)
+        epsilon = _step(delta)
+        _record(epsilon)
+        _audit(epsilon)
+        return epsilon
+''')
+
+    groups, _ = dup_scan.scan(
+        tree,
+        ("src/wreath",),
+        dup_scan.DEFAULT_MIN_LINES,
+        include_excluded=True,
+    )
+
+    assert len(groups) == 1
+    assert {site.qualname for site in groups[0].sites} == {
+        "First.render",
+        "Second.render",
+    }
+    identities = tuple(
+        sorted((site.path, site.qualname) for site in groups[0].sites)
+    )
+    monkeypatch.setattr(
+        dup_scan,
+        "INTENTIONAL_GROUPS",
+        (dup_scan.Exclusion(identities, "these two methods intentionally mirror"),),
+    )
+    assert dup_scan.intentional_reason(groups[0]) is not None
+    wrong_methods = dup_scan.Group(
+        groups[0].digest,
+        tuple(
+            dup_scan.Site(
+                site.path,
+                site.name,
+                site.line,
+                site.lines,
+                site.qualname.replace("render", "other"),
+            )
+            for site in groups[0].sites
+        ),
+    )
+    assert dup_scan.intentional_reason(wrong_methods) is None
+
+
+def test_every_repository_exclusion_is_reasoned_and_canonical() -> None:
+    for exclusion in dup_scan.INTENTIONAL_GROUPS:
+        assert exclusion.reason.strip()
+        assert len(exclusion.sites) >= 2
+        assert exclusion.sites == tuple(sorted(exclusion.sites))
+
+
 def test_a_renamed_c_copy_is_found(tree: Path) -> None:
     """The native half of the same finding, and half of this tree is C."""
     _write(tree, "writer.c", RENAMED_C_TWINS)

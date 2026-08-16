@@ -10,6 +10,8 @@ from __future__ import annotations
 import pytest
 
 from wreath._flight_schema import (
+    FLAG_AI_SCRAPING_REFUSED,
+    FLAG_POLICY_REFUSED,
     MetadataImage,
     NamedMeta,
     PhaseCoverage,
@@ -88,7 +90,9 @@ def _attrs(span: dict) -> dict[str, object]:
     out: dict[str, object] = {}
     for kv in span["attributes"]:
         value = kv["value"]
-        out[kv["key"]] = value.get("stringValue", value.get("intValue"))
+        out[kv["key"]] = value.get(
+            "stringValue", value.get("intValue", value.get("boolValue"))
+        )
     return out
 
 
@@ -118,6 +122,35 @@ def test_server_span_shape_and_route_attributes() -> None:
     assert attrs["wreath.terminal"] == "ok"
 
 
+def test_compact_client_facts_enrich_server_span() -> None:
+    from wreath._flight_schema import ClientFactFlag, ClientFactsCell
+
+    trace = _trace(
+        client_facts=ClientFactsCell(
+            request_id=1,
+            flags=(
+                ClientFactFlag.UA_KNOWN
+                | ClientFactFlag.BOT_CLAIMED
+                | ClientFactFlag.AGENT_VERIFIED
+                | ClientFactFlag.IP_KNOWN
+                | ClientFactFlag.IP_FORWARDED
+                | ClientFactFlag.GEO_KNOWN
+            ),
+            user_agent_rule_id=23,
+            country="AU",
+        )
+    )
+    attrs = _attrs(_only_span(build_trace_request([trace])))
+    assert attrs["wreath.client.agent.claimed"] is True
+    assert attrs["wreath.client.agent.verified"] is True
+    assert attrs["wreath.user_agent.classified"] is True
+    assert attrs["wreath.user_agent.rule_id"] == "23"
+    assert attrs["user_agent.synthetic.type"] == "bot"
+    assert attrs["network.type"] == "ipv4"
+    assert attrs["wreath.client.address_source"] == "forwarded"
+    assert attrs["geo.country.iso_code"] == "AU"
+
+
 def test_failure_sets_error_status() -> None:
     req = build_trace_request(
         [_trace(status=500, terminal=TerminalStatus.ERROR, error_class=7)]
@@ -126,6 +159,18 @@ def test_failure_sets_error_status() -> None:
     assert span["status"]["code"] == 2  # ERROR
     assert span["status"]["message"] == "error"
     assert _attrs(span)["error.type"] == "class:7"
+
+
+def test_policy_refusal_is_structured_without_becoming_an_error() -> None:
+    trace = _trace(
+        status=403,
+        flags=FLAG_POLICY_REFUSED | FLAG_AI_SCRAPING_REFUSED,
+    )
+    span = _only_span(build_trace_request([trace]))
+    attrs = _attrs(span)
+    assert span["status"] == {"code": 0}
+    assert attrs["wreath.policy.refused"] is True
+    assert attrs["wreath.policy.disposition"] == "ai_scraping"
 
 
 def test_parent_span_id_present_only_when_propagated() -> None:
@@ -342,6 +387,10 @@ _ALLOWED_ATTRIBUTE_KEYS = frozenset(
         "http.response.status_code", "http.request.method", "http.route",
         "error.type", "wreath.phase", "wreath.coverage",
         "wreath.dependency_id", "wreath.dependency",
+        "wreath.client.agent.claimed", "wreath.client.agent.verified",
+        "wreath.user_agent.classified", "wreath.user_agent.rule_id",
+        "user_agent.synthetic.type", "browser.mobile", "network.type",
+        "wreath.client.address_source", "geo.country.iso_code",
     }
 )
 

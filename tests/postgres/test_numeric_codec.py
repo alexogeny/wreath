@@ -22,7 +22,7 @@ from decimal import Decimal
 
 import pytest
 
-from wreath._pgdriver import _decode_numeric, _encode_numeric
+from wreath._pgdriver import _decode_numeric, _encode_numeric, _encode_numeric_reference
 from wreath.postgres import Database, PoolConfig
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
@@ -148,7 +148,11 @@ def test_both_codecs_agree_byte_for_byte() -> None:
     read took, so a divergence is a value that changes with the call path.
     """
     domain = [*_domain(), *NON_FINITE]
-    encode_diff = [v for v in domain if _encode_numeric(v) != _native._encode_binary(v, 1700)]
+    encode_diff = [
+        v
+        for v in domain
+        if _encode_numeric_reference(v) != _native._encode_binary(v, 1700)
+    ]
     assert not encode_diff, f"{len(encode_diff)} encode divergences: {encode_diff[:5]}"
     decode_diff = []
     for value in domain:
@@ -157,6 +161,17 @@ def test_both_codecs_agree_byte_for_byte() -> None:
         if not ((pure.is_nan() and native.is_nan()) or str(pure) == str(native)):
             decode_diff.append((value, pure, native))
     assert not decode_diff, f"{len(decode_diff)} decode divergences: {decode_diff[:5]}"
+
+
+@pytest.mark.skipif(_native is None, reason="native extension not built")
+def test_wide_coefficients_cross_the_native_boundary_once() -> None:
+    """Thousands of digits agree with the independent definition byte-for-byte."""
+    digits = (1, 2, 3, 4, 0, 0, 9, 8) * 512
+    value = Decimal((1, digits, -2051))
+    expected = _encode_numeric_reference(value)
+
+    assert _encode_numeric(value) == expected
+    assert _native._encode_binary(value, 1700) == expected
 
 
 @_live

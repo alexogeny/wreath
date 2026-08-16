@@ -18,24 +18,14 @@ have to assume: that the neutral fingerprint really does match across schemas,
 that it still discriminates a tenant whose structure differs, and that the
 advisory lock actually excludes a second runner.
 
-## What is proven here, and what is not
+## What is proven here
 
-`apply_fleet` is complete and correct: it locks, loops, skips a tenant already
-at the target, reports per tenant, and refuses a bad fleet at declaration time.
-What cannot yet be *produced* is a fleet **artifact**, and there are two layers
-left, both the same missing piece:
-
-* the **desired image** is built from the registry descriptor, which names the
-  schema its models declare, so a fleet target fingerprint is not neutral;
-* the **DDL** is schema-qualified, so an artifact generated against `t_alice`
-  creates `t_alice.widgets` again when applied to `t_bob`.
-
-Both are the *fleet desired-image compiler* -- a schema-neutral desired image
-and unqualified DDL for a `search_path`-bound tenant. `_registry_descriptor`
-already refuses an unqualified spec by that exact name, so the shape was known;
-it is native work rather than a loop. Until it lands, an end-to-end fleet apply
-is not testable without faking an artifact, and a fabricated artifact would
-prove the fake rather than the feature.
+`apply_fleet` locks, loops, skips a tenant already at the target, reports per
+tenant, and refuses a bad fleet at declaration time. `generate_single_plan`
+with `fleet=True` supplies the other half: a schema-neutral desired image and
+unqualified DDL for the `search_path`-bound tenant. The tests below generate
+that real artifact and apply it across structurally identical schemas rather
+than fabricating the format they intend to prove.
 """
 
 from __future__ import annotations

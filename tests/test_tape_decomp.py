@@ -37,6 +37,26 @@ def test_the_stack_is_built_from_factories_not_shared_instances() -> None:
         assert one is not other
 
 
+def test_native_instruction_probe_policy_arms_name_the_component_they_build() -> None:
+    from benchmarks.bench_clock_scaling import ARMS
+
+    expected = {
+        "policy-proxy": "ProxyPolicy",
+        "policy-ai": "AIScrapingPolicy",
+        "policy-rate": "RateLimitPolicy",
+        "policy-cors": "CorsPolicy",
+        "policy-csrf": "CsrfPolicy",
+        "policy-security": "SecurityHeadersPolicy",
+        "policy-request-id": "RequestIdPolicy",
+        "policy-timing": "ServerTimingPolicy",
+    }
+    for arm, component_name in expected.items():
+        app, _request = ARMS[arm](lambda: None)
+        assert tuple(type(item).__name__ for item in app._http_policy.components) == (
+            component_name,
+        )
+
+
 def test_no_two_arms_share_a_policy_component() -> None:
     seen: set[int] = set()
     for arm in _arms():

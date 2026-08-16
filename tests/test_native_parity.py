@@ -63,6 +63,13 @@ def _twins(name: str) -> Iterator[tuple[str, Callable[..., object]]]:
 HEADER_LIST = [(b"host", b"x"), (b"accept", b"a"), (b"accept", b"b")]
 
 
+def test_first_duplicate_preserves_encounter_order() -> None:
+    assert _core.first_duplicate(("a", "b", "b", "a")) == "b"
+    assert _core.first_duplicate(("a", "b")) is None
+    with pytest.raises(TypeError, match="unhashable"):
+        _core.first_duplicate(("a", []))
+
+
 def test_find_header_returns_the_first_of_a_repeated_field() -> None:
     """RFC 9110 section 5.3: repeated field lines are ordered, so the first wins.
 
@@ -317,6 +324,18 @@ def test_ws_parse_frame_recovers_the_payload_that_was_framed() -> None:
             # One byte is short of the two-octet minimum header, so the frame is
             # not yet decidable and must be reported as incomplete, not refused.
             assert ws_parse_frame(frame[:1]) is None, label
+
+
+def test_ws_parse_frame_starts_at_an_owned_buffer_offset() -> None:
+    """A cursor avoids copying or front-deleting the unread stream tail."""
+    first = bytes.fromhex("810548656c6c6f")
+    second = bytes.fromhex("8203616263")
+    buffer = bytearray(first + second)
+
+    assert _core.ws_parse_frame(buffer, len(first)) == (True, 2, b"abc", len(second))
+    assert _core.ws_parse_frame(buffer, len(buffer)) is None
+    with pytest.raises(ValueError, match="offset must be between 0 and 12, got 13"):
+        _core.ws_parse_frame(buffer, len(buffer) + 1)
 
 
 # --- multipart ------------------------------------------------------------

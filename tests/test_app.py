@@ -8,7 +8,7 @@ import wreath.app as app_module
 from wreath import JSONResponse, Response, Wreath
 from wreath.app import _StaticMatcher
 from wreath.binding import Depends
-from wreath.policy import HttpPolicy
+from wreath.policy import HttpPolicy, RequestIdPolicy
 from wreath.response import PreparedResponse
 
 
@@ -376,7 +376,7 @@ def test_frozen_dispatch_is_not_selected_for_request_lifecycle_features() -> Non
 
     shapes = []
 
-    policy = Wreath(http_policy=HttpPolicy())
+    policy = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
     policy.frozen("/ready", PreparedResponse())
     shapes.append(policy)
 
@@ -722,6 +722,30 @@ def test_rejects_duplicate_static_routes() -> None:
         @app.get("/")
         async def second(request):
             return "second"
+
+
+def test_named_route_registration_does_not_rescan_prior_definitions() -> None:
+    class NoIterationList(list):
+        def __iter__(self):
+            raise AssertionError("route registration rescanned prior definitions")
+
+    app = Wreath()
+
+    @app.get("/first", name="first")
+    async def first(request):
+        return "first"
+
+    app._routes = NoIterationList(app._routes)
+
+    @app.get("/second", name="second")
+    async def second(request):
+        return "second"
+
+    with pytest.raises(ValueError, match="route name 'first' is already registered"):
+
+        @app.get("/third", name="first")
+        async def duplicate(request):
+            return "duplicate"
 
 
 @pytest.mark.asyncio

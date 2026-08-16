@@ -9,6 +9,7 @@ import pytest
 
 import wreath
 from wreath import _flight_schema as flight_schema
+from wreath._websocket import build_frame
 from wreath.replay import (
     FaultDescriptor,
     FaultKind,
@@ -156,6 +157,20 @@ async def test_websocket_peer_drives_real_frames_in_both_server_modes(
     assert [(frame.opcode, frame.payload) for frame in binary] == [(2, b"cba")]
     assert peer.frames[-1].opcode == 8
     assert result.segments_fed == 4
+
+
+def test_websocket_peer_decodes_many_packed_frames_without_retaining_wire() -> None:
+    peer = WebSocketSimulator.__new__(WebSocketSimulator)
+    peer._frame_buffer = bytearray()
+    peer._frames = []
+    wire = b"".join(build_frame(2, bytes((index & 255,))) for index in range(512))
+
+    decoded = peer._decode(wire)
+
+    assert [frame.payload for frame in decoded] == [
+        bytes((index & 255,)) for index in range(512)
+    ]
+    assert peer._frame_buffer == b""
 
 
 @pytest.mark.asyncio

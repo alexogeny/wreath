@@ -1177,6 +1177,55 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
         assert "pending_webauthn" not in session
 
 
+async def test_a_discoverable_passkey_is_a_first_factor() -> None:
+    """No email or password is needed once a resident passkey names its owner."""
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    device = _Authenticator()
+    async with TestClient(
+        _app(users, factors, clock, passkey_login=True)
+    ) as client:
+        user = await _seed(users)
+        cookie = _cookie(await _http_login(client))
+
+        begun, _, minted = await _http_register(client, device, cookie)
+        assert begun.json()["authenticatorSelection"] == {
+            "userVerification": "required",
+            "residentKey": "required",
+            "requireResidentKey": True,
+        }
+        cookie = _cookie(begun) or cookie
+        enrolled = await client.post(
+            "/auth/2fa/webauthn/confirm",
+            json=_wire(minted),
+            headers={"cookie": cookie},
+        )
+        assert enrolled.status == 200, enrolled.json()
+        factor_id = enrolled.json()["id"]
+        assert factor_id != b64url_encode(device.credential_id)
+        assert len(factor_id) == 64
+        await client.post("/users/logout", headers={"cookie": _cookie(enrolled)})
+
+        login = await client.post("/auth/2fa/webauthn/login/begin")
+        assert login.status == 200, login.json()
+        assert login.json()["allowCredentials"] == []
+        assert login.json()["userVerification"] == "required"
+        assertion = device.assertion(
+            b64url_decode(login.json()["challenge"]), sign_count=1
+        )
+        completed = await client.post(
+            "/auth/2fa/webauthn/login",
+            json={"id": b64url_encode(device.credential_id), **_wire(assertion)},
+            headers={"cookie": _cookie(login)},
+        )
+        assert completed.status == 200, completed.json()
+        assert completed.json()["id"] == user.id
+        session = (
+            await client.get("/session", headers={"cookie": _cookie(completed)})
+        ).json()
+        assert session["principal"]["sub"] == user.id
+        assert session["principal"]["second_factor_uv"] is True
+
+
 async def test_the_user_verification_outcome_reaches_the_session() -> None:
     """A policy may care whether a PIN was entered, so it is written down."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()

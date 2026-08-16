@@ -11,6 +11,7 @@ from wreath.migrations import (
     HISTORY_VERIFIED,
     FleetResolution,
     TenantState,
+    apply_fleet,
     pack_tenant_directory,
     resolve_fleet,
 )
@@ -18,6 +19,13 @@ from wreath.migrations import (
 TARGET_MIGRATION = 12
 TARGET_CHECKSUM = 0xABCDEF
 GENERATION = 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", ["TenantOne", "t" * 64])
+async def test_fleet_schema_names_cannot_fold_or_truncate(schema: str) -> None:
+    with pytest.raises(ValueError, match="identifier|63-byte"):
+        await apply_fleet(None, b"", [schema])
 
 
 def _resolve(states: list[TenantState]) -> FleetResolution:

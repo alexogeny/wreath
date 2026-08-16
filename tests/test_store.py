@@ -66,7 +66,7 @@ def test_identifiers_are_checked_rather_than_quoted() -> None:
     for bad in ("a; DROP TABLE users", "", "1abc", "sch.ema", "a b"):
         with pytest.raises(ValueError, match="plain SQL identifier"):
             sql_identifier(bad)
-    with pytest.raises(ValueError, match="key must be a plain SQL identifier"):
+    with pytest.raises(ValueError, match="key .* is not a plain SQL identifier"):
         sql_identifier("a-b", what="key")
 
 
@@ -475,11 +475,18 @@ class TestIdentifierGuard:
         with pytest.raises(ValueError, match="plain SQL identifier"):
             sql_identifier(given)
 
-    @pytest.mark.parametrize("given", ["sessions", "wreath_entity", "_x", "a1", "A_1"])
+    @pytest.mark.parametrize("given", ["sessions", "wreath_entity", "_x", "a1"])
     def test_a_bare_identifier_is_returned_unchanged(self, given: str) -> None:
         from wreath.store import sql_identifier
 
         assert sql_identifier(given) == given
+
+    @pytest.mark.parametrize("given", ["A_1", "a" * 64])
+    def test_an_unquoted_name_cannot_fold_or_truncate(self, given: str) -> None:
+        from wreath.store import sql_identifier
+
+        with pytest.raises(ValueError, match="identifier|63-byte"):
+            sql_identifier(given)
 
     @pytest.mark.parametrize("word", ["select", "table", "user", "order", "default"])
     def test_a_reserved_word_is_refused(self, word: str) -> None:
@@ -500,7 +507,7 @@ class TestIdentifierGuard:
     def test_the_refusal_names_what_was_being_declared(self) -> None:
         from wreath.store import sql_identifier
 
-        with pytest.raises(ValueError, match="^column must be"):
+        with pytest.raises(ValueError, match="^column .* is not"):
             sql_identifier("a b", what="column")
 
 
