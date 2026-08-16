@@ -53,6 +53,21 @@ while a sibling is running tests produces failures nobody can attribute.
   not silently tolerated -- a marked probe still runs, records its observed and
   target degree with a written reason, and fails if the subject gets better as
   well as worse, so the mark cannot rot into permission.
+
+  **A probe proves a contract somebody already suspected.**
+  `wreath-complexity-probe --discover` is the other direction: a static sweep of
+  `src/wreath` for the shapes that are provably superlinear -- a linear
+  operation inside a loop over something the loop does not shrink -- so a
+  candidate can be turned into a probe, restructured, or acknowledged before
+  anyone measures it. It is a ratchet, not a gate: most candidates are bounded
+  by something the scanner cannot read, so the whole current set is recorded in
+  `docs/agents/complexity-discovery.json` and `--discover-check` fails only on a
+  **new** one. Acknowledge with `--update-discovery` and say why in the change.
+  The two rules that make it readable were both learned by getting them wrong:
+  membership against a `set`/`dict` is O(1) and is not a finding at all, and
+  iterating `d.values()` *is* the loop rather than an extra linear op inside
+  one -- reporting either buried every real finding under several hundred lines
+  of scenery.
 - **`python -O` is supported, and no invariant may depend on `assert`.** `-O`
   strips every `assert` statement, so an `assert` guarding a wire format, a
   layout, or any other invariant silently disappears in the one interpreter mode
@@ -354,6 +369,8 @@ uv run wreath-port-golden --update    # ... rewrite what drifted, on purpose
 uv run wreath-dup-scan           # function bodies sharing a structure (a report, not a gate)
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
 uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
+uv run wreath-complexity-probe --discover        # superlinear shapes no probe covers yet
+uv run wreath-complexity-probe --discover-check  # ... vs docs/agents/complexity-discovery.json
 uv run wreath-policy-decomp      # what first-class HTTP policy costs a request
 uv run wreath-decomp             # request stages, ORM internals, ns/frame calibration
 ```
