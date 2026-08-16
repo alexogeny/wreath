@@ -393,7 +393,7 @@ def test_a_column_name_that_is_not_an_identifier_is_refused_before_it_is_spliced
         reach=Reach(()),
         match_column="id; DROP TABLE accounts",
     )
-    with pytest.raises(ValueError, match="is not a plain SQL identifier"):
+    with pytest.raises(ValueError, match="quoted column"):
         predicate_for(action, build_graph(orm), PrivacyRegistry(), "4711")
 
 

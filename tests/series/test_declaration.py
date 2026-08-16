@@ -72,6 +72,14 @@ class TestMeasures:
         with pytest.raises(SeriesError, match="declared twice"):
             view().measure(started=count()).measure(started=count())
 
+    def test_many_fresh_measure_names_extend_in_declaration_order(self):
+        first = {f"old_{index}": count() for index in range(256)}
+        second = {f"new_{index}": count() for index in range(256)}
+
+        declared = view().measure(**first).measure(**second)
+
+        assert [name for name, _measure in declared.measures] == [*first, *second]
+
     def test_at_least_one_measure_is_needed(self):
         with pytest.raises(SeriesError, match="at least one"):
             view().measure()
@@ -172,11 +180,20 @@ class TestSources:
 
     def test_a_predicate_through_a_relation_adds_that_model(self):
         declared = view().measure(n=count()).where(Trek.herd.name == "alpha")
-        assert set(declared.sources) == {Trek, Herd}
+        assert declared.sources == (Trek, Herd)
 
     def test_grouping_through_a_relation_adds_that_model(self):
         declared = view().measure(n=count()).by(Trek.herd.name)
-        assert set(declared.sources) == {Trek, Herd}
+        assert declared.sources == (Trek, Herd)
+
+    def test_a_model_reached_twice_keeps_its_first_position(self):
+        declared = (
+            view()
+            .measure(n=count())
+            .where(Trek.herd.name == "alpha")
+            .by(Trek.herd.id)
+        )
+        assert declared.sources == (Trek, Herd)
 
 
 class TestRange:
