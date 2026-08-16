@@ -211,6 +211,12 @@ def test_a_key_column_must_be_a_plain_identifier():
         Key("id; DROP TABLE treks", "int8")
 
 
+@pytest.mark.parametrize("name", ["TrekId", "t" * 64])
+def test_a_key_column_cannot_fold_or_truncate(name: str):
+    with pytest.raises(PassDeclarationError, match="identifier|63-byte"):
+        Key(name, "int8")
+
+
 def test_a_key_type_must_be_a_plain_sql_type_name():
     with pytest.raises(PassDeclarationError) as error:
         Key("id", "int8); DROP TABLE treks --")

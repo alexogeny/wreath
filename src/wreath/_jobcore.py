@@ -15,6 +15,7 @@ import hashlib
 from collections.abc import Callable
 from typing import Final
 
+from ._pgname import validate_identifier as validate_identifier
 from .temporal import Recurrence
 
 # --- job/message lifecycle state machine -----------------------------------
@@ -50,28 +51,6 @@ _TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     DONE: frozenset(),
     DEAD: frozenset(),
 }
-
-
-def validate_identifier(value: str, kind: str) -> str:
-    """Validate a bounded SQL-safe identifier (queue/schema/channel/task name).
-
-    The shared rule for every config-time name the jobs and messaging
-    coordinators derive Postgres object names and LISTEN/NOTIFY channels from:
-    1..63 bytes, each character an ASCII alphanumeric or `_`/`$`. `kind`
-    names the identifier in the error so callers get an actionable message.
-    """
-    if not value or len(value.encode("utf-8")) > 63:
-        raise ValueError(f"{kind} must be 1..63 bytes: {value!r}")
-    for character in value:
-        # ASCII alphanumerics only. `str.isalnum()` is true for `café`, `½`, and
-        # Arabic-Indic digits, none of which are what "SQL-safe identifier"
-        # means here -- these names are interpolated into DDL and derived into
-        # LISTEN/NOTIFY channels, where the encoding assumptions are the
-        # server's, not Python's.
-        if not (character.isascii() and (character.isalnum() or character in "_$")):
-            raise ValueError(f"invalid {kind} character {character!r} in {value!r}")
-    return value
-
 
 class TransitionError(ValueError):
     """An illegal job/message state transition was attempted."""

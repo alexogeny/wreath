@@ -324,7 +324,7 @@ PIN or a fingerprint where the device can, and let a security key without one
 still work. The outcome lands on the session principal as `second_factor_uv`
 beside `second_factor_at`, so a policy that cares about the difference can read
 it rather than assume it. `user_verification="required"` tightens it for the
-whole router; passwordless — where verification is not optional — is stage four.
+whole router. Discoverable first-factor login always requires it.
 
 ### Recovery codes come with the first key too
 
@@ -543,13 +543,30 @@ easy cause; `wreath doctor` is the place to look first.
 one response body, and everything else in this module is built on the assumption
 that this is the only place they appear.
 
-## What is not here yet
+## Passkeys as a first factor
 
-**Passkeys as a *first* factor** — discoverable credentials and usernameless
-login, where there is no password to fall back to when the ceremony fails. The
-failure modes are the ones above with the safety net removed, which is why it
-waits until the second-factor flow has been used in anger. See
-`docs/reference/roadmap.md`.
+Set `passkey_login=True` on the router to require discoverable resident
+credentials at enrolment and mount a usernameless login pair:
+
+```python
+app.include_router(
+    second_factor_router(
+        users,
+        factors,
+        rp_id="example.com",
+        passkey_login=True,
+    )
+)
+```
+
+`POST /auth/2fa/webauthn/login/begin` returns an empty `allowCredentials` list,
+so the authenticator chooses an account. `POST /auth/2fa/webauthn/login` verifies
+that assertion with user verification required, resolves its owner through one
+indexed `DiscoverableSecondFactorStore.credential` lookup, rotates the session, and writes
+the same principal as password login. Existing non-resident security keys keep
+working as second factors but cannot identify an account.
+
+## What is not here yet
 
 Also deliberately absent: attestation verified against a metadata service, SMS
 and email one-time codes, and push approval. The reasoning for each is in

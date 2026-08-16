@@ -15,13 +15,19 @@ import pytest
 
 from wreath import Wreath
 from wreath._cli import main as cli_main
-from wreath._flight_schema import Protocol, TerminalStatus
-from wreath._projector import Projector
+from wreath._flight_schema import (
+    FLAG_AI_SCRAPING_REFUSED,
+    FLAG_POLICY_REFUSED,
+    Protocol,
+    TerminalStatus,
+)
+from wreath._projector import ProjectedTrace, Projector
 from wreath.inspector import (
     Command,
     InspectorClient,
     InspectorConfig,
     InspectorError,
+    _trace_payload,
     serve_inspector,
 )
 
@@ -104,6 +110,25 @@ async def test_timeline_lists_recent_traces_newest_first(tmp_path) -> None:
     assert body["traces"][0]["status"] == 500
     assert body["traces"][0]["is_failure"] is True
     assert "loss" in body
+
+
+def test_trace_payload_names_ai_scraping_refusals() -> None:
+    trace = ProjectedTrace(
+        request_id=1,
+        connection_id=2,
+        route_id=0,
+        plan_id=0,
+        worker_id=0,
+        duration_us=3,
+        status=403,
+        terminal=TerminalStatus.OK,
+        protocol=Protocol.HTTP1,
+        error_class=0,
+        flags=FLAG_POLICY_REFUSED | FLAG_AI_SCRAPING_REFUSED,
+        bytes_in=0,
+        bytes_out=0,
+    )
+    assert _trace_payload(trace)["policy_disposition"] == "ai_scraping"
 
 
 @pytest.mark.asyncio

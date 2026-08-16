@@ -5,6 +5,7 @@
  * the protocol/stream. Python sees a Request only after ingress has completed.
  */
 #include "server_policy.h"
+#include "wreathcore.h"
 
 #include <math.h>
 #include <string.h>
@@ -60,24 +61,6 @@ trim_ows(const char **data, Py_ssize_t *size)
                          (*data)[*size - 1] == '\t')) (*size)--;
 }
 
-static int
-parse_quality(const char *data, Py_ssize_t size)
-{
-    trim_ows(&data, &size);
-    if (size == 1 && data[0] == '0') return 0;
-    if (size == 1 && data[0] == '1') return 1000;
-    if (size < 3 || size > 5 || data[1] != '.' ||
-        (data[0] != '0' && data[0] != '1')) return 0;
-    int value = data[0] == '1' ? 1000 : 0;
-    int scale = 100;
-    for (Py_ssize_t i = 2; i < size; i++, scale /= 10) {
-        if (data[i] < '0' || data[i] > '9' ||
-            (data[0] == '1' && data[i] != '0')) return 0;
-        if (data[0] == '0') value += (data[i] - '0') * scale;
-    }
-    return value;
-}
-
 /* 0 none, 1 gzip, 2 zstd. Mirrors the public selector exactly. */
 static int
 select_compression(PyObject *value)
@@ -114,7 +97,8 @@ select_compression(PyObject *value)
             trim_ows(&name, &name_size);
             if (ascii_equal_ci(name, name_size, "q", 1)) {
                 quality = equals < part_size
-                    ? parse_quality(part + equals + 1, part_size - equals - 1) : 0;
+                    ? wreath_parse_quality(part + equals + 1,
+                                           part_size - equals - 1) : 0;
             }
             parameter = end;
         }
@@ -396,6 +380,7 @@ reply_body(WreathPolicyReply *reply, int status, const char *content_type,
            const char *body, Py_ssize_t body_size)
 {
     reply->status = status;
+    reply->flight_flags = status >= 400 ? WREATH_NFR_FLAG_POLICY_REFUSED : 0;
     reply->headers = PyList_New(0);
     reply->body = PyBytes_FromStringAndSize(body, body_size);
     if (reply->headers == NULL || reply->body == NULL) return -1;
@@ -436,9 +421,69 @@ reply_problem(WreathPolicyReply *reply, int status)
 }
 
 
+static int
+ai_scraping_config_valid(const WreathCoreCAPI *core, PyObject *config)
+{
+    if (!PyTuple_CheckExact(config) || PyTuple_GET_SIZE(config) != 2 ||
+        !core->user_agent_database_check(PyTuple_GET_ITEM(config, 0)) ||
+        !PyBytes_CheckExact(PyTuple_GET_ITEM(config, 1))) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "invalid native AI scraping policy descriptor");
+        return 0;
+    }
+    PyObject *table = PyTuple_GET_ITEM(config, 1);
+    Py_ssize_t size = PyBytes_GET_SIZE(table);
+    const unsigned char *data = (const unsigned char *)PyBytes_AS_STRING(table);
+    if (size == 0 || (size & 1) != 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "native AI scraping rule table must contain uint16 ids");
+        return 0;
+    }
+    uint16_t previous = 0;
+    for (Py_ssize_t at = 0; at < size; at += 2) {
+        uint16_t current = (uint16_t)(data[at] | ((uint16_t)data[at + 1] << 8));
+        if (current == 0 || current <= previous) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "native AI scraping rule ids must be nonzero and sorted");
+            return 0;
+        }
+        previous = current;
+    }
+    return 1;
+}
+
+
+static int
+run_ai_scraping(const WreathCoreCAPI *core, PyObject *config,
+                 PyObject *method, PyObject *path, PyObject *headers,
+                 WreathPolicyReply *reply)
+{
+    if (PyUnicode_CompareWithASCIIString(path, "/robots.txt") == 0 &&
+        (PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
+         PyUnicode_CompareWithASCIIString(method, "HEAD") == 0)) return 0;
+    PyObject *user_agent = find_header(headers, "user-agent", 10, NULL);
+    if (user_agent == NULL) return 0;
+    int blocked = 0;
+    if (core->user_agent_blocked(
+            PyTuple_GET_ITEM(config, 0), user_agent,
+            PyTuple_GET_ITEM(config, 1), &blocked) < 0) return -1;
+    if (!blocked) return 0;
+    static const char body[] =
+        "{\"type\":\"about:blank\",\"title\":\"Forbidden\",\"status\":403,"
+        "\"detail\":\"AI scraper traffic is disabled by default\"}";
+    int result = reply_body(reply, 403, "application/problem+json", body,
+                            (Py_ssize_t)sizeof(body) - 1);
+    if (result > 0) {
+        reply->flight_flags |= WREATH_NFR_FLAG_AI_SCRAPING_REFUSED;
+    }
+    return result;
+}
+
+
 int
 wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
 {
+    program->core = NULL;
     program->descriptor = PyObject_GetAttrString(app, "_wreath_policy");
     if (program->descriptor == NULL) {
         if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
@@ -458,9 +503,16 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
     }
     PyObject *tag = PyTuple_GET_ITEM(program->descriptor, WREATH_POLICY_TAG);
     if (!PyUnicode_Check(tag) ||
-        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v2") != 0) {
+        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v3") != 0) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported native HTTP policy descriptor");
         return -1;
+    }
+    PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
+    if (ai_scraping != NULL) {
+        program->core = (const WreathCoreCAPI *)PyCapsule_Import(
+            WREATH_CORE_CAPI_NAME, 0);
+        if (program->core == NULL) return -1;
+        if (!ai_scraping_config_valid(program->core, ai_scraping)) return -1;
     }
     program->response_transform = (unsigned char)(
         program_item(program, WREATH_POLICY_CACHE) != NULL ||
@@ -473,6 +525,7 @@ void
 wreath_policy_program_clear(WreathPolicyProgram *program)
 {
     Py_CLEAR(program->descriptor);
+    program->core = NULL;
     program->response_transform = 0;
 }
 
@@ -502,6 +555,32 @@ wreath_policy_reply_clear(WreathPolicyReply *reply)
     Py_CLEAR(reply->headers);
     Py_CLEAR(reply->body);
     reply->status = 0;
+    reply->flight_flags = 0;
+}
+
+
+void
+wreath_policy_record_completion(const WreathFlightCAPI *flight,
+                                wreath_nfr_worker *worker,
+                                uint64_t connection_id, uint8_t protocol,
+                                uint64_t start_ns, uint64_t end_ns,
+                                PyObject *headers,
+                                const WreathPolicyReply *reply,
+                                uint64_t bytes_in, uint64_t bytes_out)
+{
+    if (flight == NULL || worker == NULL) return;
+    wreath_nfr_context context;
+    flight->context_start(worker, &context, connection_id, protocol, start_ns);
+    if (context.mode == WREATH_NFR_MODE_OFF) return;
+    context.flags |= reply->flight_flags;
+    PyObject *traceparent = find_header(headers, "traceparent", 11, NULL);
+    if (traceparent != NULL && PyBytes_CheckExact(traceparent)) {
+        flight->context_propagate(
+            worker, &context, (const uint8_t *)PyBytes_AS_STRING(traceparent),
+            PyBytes_GET_SIZE(traceparent));
+    }
+    flight->context_end(worker, &context, end_ns, (uint32_t)reply->status,
+                        WREATH_NFR_TERM_OK, 0, bytes_in, bytes_out);
 }
 
 
@@ -1016,8 +1095,9 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
 
 int
 wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
-                      PyObject *method, PyObject *scheme, PyObject *client,
-                      PyObject *headers, WreathPolicyReply *reply)
+                      PyObject *method, PyObject *path, PyObject *scheme,
+                      PyObject *client, PyObject *headers,
+                      WreathPolicyReply *reply)
 {
     wreath_policy_state_clear(state);
     memset(reply, 0, sizeof(*reply));
@@ -1049,6 +1129,13 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         if (count != 1 || !trusted_host_allowed(trusted, host)) {
             return reply_problem(reply, 400);
         }
+    }
+
+    PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
+    if (ai_scraping != NULL) {
+        int result = run_ai_scraping(
+            program->core, ai_scraping, method, path, headers, reply);
+        if (result != 0) return result;
     }
 
     PyObject *rate = program_item(program, WREATH_POLICY_RATE);
@@ -1327,6 +1414,10 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
                      PyObject *headers)
 {
     if (program->descriptor == NULL || !state->native) return 0;
+    const uint32_t egress = WREATH_POLICY_DONE_REQUEST_ID |
+        WREATH_POLICY_DONE_TIMING | WREATH_POLICY_DONE_CORS |
+        WREATH_POLICY_DONE_CSRF | WREATH_POLICY_DONE_SECURITY;
+    if ((state->completed & egress) == 0) return 0;
     if (!PyList_Check(headers)) {
         PyErr_SetString(PyExc_RuntimeError,
                         "native HTTP policy requires a mutable response header list");

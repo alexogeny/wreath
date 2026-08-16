@@ -21,8 +21,9 @@ it is being issued.
 from __future__ import annotations
 
 import argparse
-import importlib
 from typing import Any
+
+from .._target import load_target
 
 __all__ = ["add_privacy_parser", "execute"]
 
@@ -68,25 +69,7 @@ def _load(spec: str) -> Any:
     the fix ("point at the Privacy object, not the module holding it") is worth
     saying once here.
     """
-    module_name, _separator, attribute = spec.partition(":")
-    # No "was there a separator?" clause: `partition` puts everything in the
-    # first half when there is none, so the attribute is empty and the test
-    # below already refuses it. A mutation run found the clause changed no
-    # outcome, which is the definition of a second spelling of one condition.
-    if not module_name or not attribute:
-        raise ValueError(f"privacy target {spec!r} must be spelled module:attribute")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as error:
-        raise ValueError(
-            f"could not import {module_name!r}: {error}"
-        ) from error
-    try:
-        target = getattr(module, attribute)
-    except AttributeError as error:
-        raise ValueError(
-            f"module {module_name!r} has no attribute {attribute!r}"
-        ) from error
+    target = load_target(spec, label="privacy")
     from ..privacy import Privacy
 
     if not isinstance(target, Privacy):

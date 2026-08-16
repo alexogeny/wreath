@@ -24,6 +24,7 @@ from operator import itemgetter
 from typing import Any, Literal, NamedTuple, cast, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ._pgname import validate_identifier
 from ._sparsevec import MAX_SPARSEVEC_NNZ, SparseVector
 from .kv import KV
 
@@ -39,9 +40,6 @@ _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 # the oldest notification is dropped and a counter is bumped instead of letting
 # an idle-but-noisy channel grow memory without bound.
 _NOTIFY_RING_CAPACITY = 1024
-# NAMEDATALEN - 1; PostgreSQL truncates longer identifiers, so reject them up
-# front rather than silently listen on a different channel than requested.
-_MAX_CHANNEL_NAME = 63
 
 
 class Notification(NamedTuple):
@@ -53,20 +51,8 @@ class Notification(NamedTuple):
 
 
 def _validate_channel(channel: str) -> str:
-    """Validate a LISTEN/UNLISTEN channel name.
-
-    The name is emitted as a double-quoted identifier, so restricting it to
-    identifier characters (and bounding its length) keeps the emitted SQL
-    injection-free and preserves the exact case the caller asked for.
-    """
-    if not isinstance(channel, str) or not channel:
-        raise ValueError("channel name must be a non-empty string")
-    if len(channel.encode("utf-8")) > _MAX_CHANNEL_NAME:
-        raise ValueError(f"channel name exceeds {_MAX_CHANNEL_NAME} bytes")
-    for character in channel:
-        if not (character.isalnum() or character in "_$"):
-            raise ValueError(f"invalid channel name character: {character!r}")
-    return channel
+    """Validate a LISTEN/UNLISTEN channel through the shared PG vocabulary."""
+    return validate_identifier(channel, "channel")
 
 
 def _parse_notification(payload: bytes) -> Notification | None:
@@ -182,15 +168,21 @@ def _encode_vector(value: object) -> bytes:
     return struct.pack(f"!HH{count}f", count, 0, *value)
 
 
-def _decode_vector(data: bytes) -> list[float]:
+def _decode_dense_vector(
+    data: bytes, *, kind: str, width: int, format_code: str
+) -> list[float]:
     if len(data) < 4:
-        raise ProtocolError("binary vector header is truncated")
+        raise ProtocolError(f"binary {kind} header is truncated")
     count, unused = struct.unpack_from("!HH", data, 0)
     if unused != 0:
-        raise ProtocolError(f"unsupported binary vector flags {unused}")
-    if len(data) != 4 + count * 4:
-        raise ProtocolError("binary vector length does not match its dimension")
-    return list(struct.unpack_from(f"!{count}f", data, 4))
+        raise ProtocolError(f"unsupported binary {kind} flags {unused}")
+    if len(data) != 4 + count * width:
+        raise ProtocolError(f"binary {kind} length does not match its dimension")
+    return list(struct.unpack_from(f"!{count}{format_code}", data, 4))
+
+
+def _decode_vector(data: bytes) -> list[float]:
+    return _decode_dense_vector(data, kind="vector", width=4, format_code="f")
 
 
 def _encode_halfvec(value: object) -> bytes:
@@ -224,14 +216,7 @@ def _encode_halfvec(value: object) -> bytes:
 
 
 def _decode_halfvec(data: bytes) -> list[float]:
-    if len(data) < 4:
-        raise ProtocolError("binary halfvec header is truncated")
-    count, unused = struct.unpack_from("!HH", data, 0)
-    if unused != 0:
-        raise ProtocolError(f"unsupported binary halfvec flags {unused}")
-    if len(data) != 4 + count * 2:
-        raise ProtocolError("binary halfvec length does not match its dimension")
-    return list(struct.unpack_from(f"!{count}e", data, 4))
+    return _decode_dense_vector(data, kind="halfvec", width=2, format_code="e")
 
 
 def _decode_vector_text(data: bytes) -> list[float]:
@@ -663,8 +648,8 @@ def _as_decimal(value: object) -> Decimal:
     )
 
 
-def _encode_numeric(value: object) -> bytes:
-    """Pack a ``Decimal`` into PostgreSQL's base-10000 numeric wire form.
+def _encode_numeric_reference(value: object) -> bytes:
+    """Independent Python definition of PostgreSQL's numeric wire form.
 
     Layout: ``ndigits``, ``weight``, ``sign``, ``dscale``, then ``ndigits``
     base-10000 groups, most significant first. The value is
@@ -681,45 +666,74 @@ def _encode_numeric(value: object) -> bytes:
             marker = _NUMERIC_NAN
         return struct.pack("!hhHH", 0, 0, marker, 0)
 
-    unscaled = int("".join(map(str, digit_tuple))) if digit_tuple else 0
+    digits = "".join(map(str, digit_tuple))
     if exponent > 0:
-        # A positive exponent is a whole-number magnitude; multiply it out so
-        # the group split below always works against a plain integer.
-        unscaled *= 10**exponent
+        # A positive exponent contributes coefficient zeros. Keep them as
+        # digits: folding every digit into one bigint and then repeatedly
+        # dividing it by 10000 made encoding quadratic in numeric precision.
+        digits += "0" * exponent
         exponent = 0
     dscale = -exponent
+    if dscale > 0xFFFF:
+        raise ValueError(
+            f"numeric display scale {dscale} exceeds PostgreSQL's 65535 limit"
+        )
 
     # Pad the fractional part out to a whole number of base-10000 groups so the
     # split lands on a group boundary.
     padding = (-dscale) % 4
-    unscaled *= 10**padding
+    digits = "0" * ((-len(digits) - padding) % 4) + digits + "0" * padding
     fraction_groups = (dscale + padding) // 4
-
-    groups: list[int] = []
-    while unscaled:
-        unscaled, remainder = divmod(unscaled, 10000)
-        groups.append(remainder)
-    groups.reverse()
+    groups = [
+        int(chunk)
+        for (chunk,) in struct.iter_unpack("!4s", digits.encode("ascii"))
+    ]
+    if len(groups) > 32767:
+        raise ValueError(
+            f"numeric needs {len(groups)} base-10000 groups; PostgreSQL permits 32767"
+        )
 
     weight = len(groups) - 1 - fraction_groups
     # PostgreSQL sends no leading or trailing zero groups; dscale still records
     # the display scale, so stripping them cannot lose the value's precision.
-    while groups and groups[0] == 0:
-        groups.pop(0)
-        weight -= 1
-    while groups and groups[-1] == 0:
-        groups.pop()
+    lead = next(
+        (index for index, group in enumerate(groups) if group != 0), len(groups)
+    )
+    weight -= lead
+    tail = next(
+        (index + 1 for index in range(len(groups) - 1, lead - 1, -1)
+         if groups[index] != 0),
+        lead,
+    )
+    groups = groups[lead:tail]
     if not groups:
         # PostgreSQL has no signed zero -- `SELECT '-0'::numeric` is `0` -- so a
         # negative zero is sent positive rather than as a sign the server would
         # never itself produce.
         weight = 0
         sign = 0
+    if not -32768 <= weight <= 32767:
+        raise ValueError(
+            f"numeric weight {weight} exceeds PostgreSQL's signed 16-bit limit"
+        )
 
     header = struct.pack(
         "!hhHH", len(groups), weight, _NUMERIC_NEG if sign else _NUMERIC_POS, dscale
     )
     return header + struct.pack(f"!{len(groups)}h", *groups)
+
+
+def _encode_numeric(value: object) -> bytes:
+    """Pack one numeric entirely inside the native PostgreSQL codec.
+
+    The Decimal is materialized before this boundary and the wire bytes after
+    it. Coefficient digits, base-10000 groups and trimming remain C-owned; the
+    Python definition above is retained as the independent differential oracle.
+    """
+    number = _as_decimal(value)
+    from ._native import _postgres
+
+    return _postgres._encode_binary(number, _NUMERIC)
 
 
 def _decode_numeric(data: bytes) -> Decimal:

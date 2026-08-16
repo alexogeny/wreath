@@ -20,6 +20,7 @@ from wreath.policy import (
 )
 from wreath.response import HTMLResponse
 from wreath.server import ServerConfig
+from wreath.signatures import robots_txt
 
 _server = importlib.import_module("wreath._native._server")
 
@@ -108,6 +109,81 @@ async def test_ingress_refusal_is_native_and_never_calls_the_handler() -> None:
     response = await serve(app, b"GET /x HTTP/1.1\r\nhost: evil.test\r\n\r\n")
     assert response.startswith(b"HTTP/1.1 400 Bad Request\r\n")
     assert materialized == []
+
+
+@pytest.mark.asyncio
+async def test_default_ai_scraping_refusal_stays_before_python_activation() -> None:
+    reached = False
+    app = Wreath()
+
+    @app.get("/")
+    async def home() -> str:
+        nonlocal reached
+        reached = True
+        return "ok"
+
+    app._compile_routes()
+    response = await serve(
+        app,
+        b"GET / HTTP/1.1\r\nhost: allowed.test\r\nuser-agent: GPTBot/1.0\r\n\r\n",
+    )
+    assert response.startswith(b"HTTP/1.1 403 Forbidden\r\n")
+    assert b"AI scraper traffic is disabled by default" in response
+    assert reached is False
+
+
+@pytest.mark.asyncio
+async def test_native_ai_scraping_checks_every_recognized_product() -> None:
+    app = Wreath()
+
+    @app.get("/")
+    async def home() -> str:
+        return "ok"
+
+    app._compile_routes()
+    response = await serve(
+        app,
+        b"GET / HTTP/1.1\r\nhost: allowed.test\r\n"
+        b"user-agent: Googlebot/1.0 GPTBot/1.0\r\n\r\n",
+    )
+    assert response.startswith(b"HTTP/1.1 403 Forbidden\r\n")
+
+
+@pytest.mark.asyncio
+async def test_native_ai_scraping_policy_allows_its_robots_declaration() -> None:
+    app = Wreath()
+
+    @app.get("/robots.txt")
+    async def robots() -> str:
+        return robots_txt(app)
+
+    app._compile_routes()
+    response = await serve(
+        app,
+        b"GET /robots.txt HTTP/1.1\r\nhost: allowed.test\r\n"
+        b"user-agent: GPTBot/1.0\r\n\r\n",
+    )
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"User-agent: gptbot" in response
+    assert b"Disallow: /" in response
+
+
+@pytest.mark.asyncio
+async def test_explicit_ai_scraping_opt_in_keeps_the_policy_free_fast_path() -> None:
+    app = Wreath(ai_scraping="allow")
+
+    @app.get("/")
+    async def home() -> str:
+        return "ok"
+
+    app._compile_routes()
+    assert app._http_policy is None
+    assert app._wreath_policy is None
+    response = await serve(
+        app,
+        b"GET / HTTP/1.1\r\nhost: allowed.test\r\nuser-agent: GPTBot/1.0\r\n\r\n",
+    )
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
 
 
 @pytest.mark.asyncio

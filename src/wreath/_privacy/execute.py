@@ -36,10 +36,10 @@ ledger, finds the same completed passes and writes the record it is missing.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._pgname import validate_identifier
 from .graph import Graph, build_graph
 from .model import Disposal, Erase, ErasurePlan, TableAction
 from .record import ErasureRecord
@@ -63,9 +63,6 @@ REDACTED = "[erased]"
 
 #: The same rule `wreath.passes.Table` applies to a table name, for the same
 #: reason: the name is interpolated into statement text rather than bound.
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 class ErasureBlocked(RuntimeError):
     """The plan would leave personal data behind, so it will not run."""
 
@@ -500,6 +497,5 @@ def _identifier(name: str) -> str:
     braces -- but the statement text is assembled here, so the check belongs
     here too.
     """
-    if not _IDENTIFIER.fullmatch(name):
-        raise ValueError(f"{name!r} is not a plain SQL identifier")
+    validate_identifier(name, "quoted column")
     return f'"{name}"'

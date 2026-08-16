@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from wreath import Wreath
+from wreath.aws_lambda import LambdaAdapter
+from wreath.response import JSONResponse, Response
+
+
+def test_lambda_payload_v2_runs_one_lifespan_across_warm_invocations() -> None:
+    app = Wreath()
+    lifecycle: list[str] = []
+
+    @app.on_startup
+    async def startup(_app):
+        lifecycle.append("start")
+
+    @app.on_shutdown
+    async def shutdown(_app):
+        lifecycle.append("stop")
+
+    @app.post("/hello")
+    async def hello(request):
+        return JSONResponse({
+            "query": request.query_string.decode(),
+            "body": (await request.body()).decode(),
+            "cookie": request.header("cookie"),
+        })
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/hello",
+        "rawQueryString": "x=1",
+        "headers": {"host": "api.example", "content-type": "text/plain"},
+        "cookies": ["a=1", "b=2"],
+        "requestContext": {
+            "http": {"method": "POST", "path": "/hello", "sourceIp": "203.0.113.4"}
+        },
+        "body": "payload",
+        "isBase64Encoded": False,
+    }
+    adapter = LambdaAdapter(app)
+    first = adapter(event, object())
+    second = adapter(event, object())
+    adapter.close()
+    assert first["statusCode"] == second["statusCode"] == 200
+    assert first["isBase64Encoded"] is False
+    assert '"cookie":"a=1; b=2"' in first["body"]
+    assert lifecycle == ["start", "stop"]
+
+
+def test_lambda_payload_v2_separates_decoded_and_raw_paths() -> None:
+    app = Wreath()
+
+    @app.get("/café")
+    async def cafe(request):
+        assert request.scope["path"] == "/café"
+        assert request.scope["raw_path"] == b"/caf%C3%A9"
+        return Response(b"ok", media_type=b"text/plain")
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/caf%C3%A9",
+        "requestContext": {
+            "http": {
+                "method": "GET",
+                "path": "/café",
+                "sourceIp": "203.0.113.4",
+            }
+        },
+    }
+    with LambdaAdapter(app) as adapter:
+        response = adapter(event, None)
+    assert response["statusCode"] == 200
+    assert response["body"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("raw_path", "http_path", "message"),
+    [
+        (7, "/", "rawPath must be a string"),
+        ("/café", "/café", "non-ASCII bytes percent-encoded"),
+        ("/caf%C3%A9", 7, "http path must be a string"),
+        ("/%FF", None, "not valid percent-encoded UTF-8"),
+    ],
+)
+def test_lambda_payload_v2_refuses_malformed_path_forms(
+    raw_path, http_path, message
+) -> None:
+    http = {"method": "GET"}
+    if http_path is not None:
+        http["path"] = http_path
+    event = {
+        "version": "2.0",
+        "rawPath": raw_path,
+        "requestContext": {"http": http},
+    }
+    adapter = LambdaAdapter(Wreath())
+    try:
+        with pytest.raises(ValueError, match=message):
+            adapter(event, None)
+    finally:
+        adapter.close()
+
+
+def test_lambda_payload_v1_preserves_multivalue_inputs_and_binary_outputs() -> None:
+    app = Wreath()
+
+    @app.get("/binary")
+    async def binary(request):
+        assert request.query_string == b"tag=a&tag=b"
+        assert request.headers.count((b"x-item", b"one")) == 1
+        return Response(
+            b"\x00\xff",
+            headers=[
+                (b"content-type", b"application/octet-stream"),
+                (b"set-cookie", b"a=1"),
+                (b"set-cookie", b"b=2"),
+            ],
+        )
+
+    event = {
+        "httpMethod": "GET",
+        "path": "/binary",
+        "multiValueQueryStringParameters": {"tag": ["a", "b"]},
+        "multiValueHeaders": {"host": ["api.example"], "x-item": ["one"]},
+        "requestContext": {"identity": {"sourceIp": "203.0.113.4"}},
+    }
+    with LambdaAdapter(app) as adapter:
+        response = adapter(event, None)
+    assert response["statusCode"] == 200
+    assert response["body"] == "AP8="
+    assert response["isBase64Encoded"] is True
+    assert response["multiValueHeaders"]["set-cookie"] == ["a=1", "b=2"]
+
+
+def test_lambda_refuses_unknown_payload_versions_and_malformed_events() -> None:
+    app = Wreath()
+    adapter = LambdaAdapter(app)
+    with pytest.raises(ValueError, match="expected '1.0' or '2.0'"):
+        adapter({"version": "3.0", "requestContext": {}}, None)
+    with pytest.raises(ValueError, match="requestContext"):
+        adapter({"version": "2.0"}, None)
+    adapter.close()
+
+
+def test_lambda_startup_failure_closes_the_warm_driver() -> None:
+    app = Wreath()
+
+    @app.on_startup
+    async def fail(_app):
+        raise RuntimeError("configuration failed")
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/",
+        "requestContext": {"http": {"method": "GET"}},
+    }
+    adapter = LambdaAdapter(app)
+    with pytest.raises(RuntimeError, match="lifespan startup failed"):
+        adapter(event, None)
+    with pytest.raises(RuntimeError, match="closed"):
+        adapter(event, None)
+
+
+def test_lambda_runs_an_asgi_app_that_does_not_support_lifespan() -> None:
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            raise RuntimeError("lifespan unsupported")
+        request = await receive()
+        assert request["type"] == "http.request"
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/",
+        "requestContext": {"http": {"method": "GET"}},
+    }
+    with LambdaAdapter(app) as adapter:
+        response = adapter(event, None)
+    assert response["statusCode"] == 200
+    assert response["body"] == "b2s="
+
+
+def test_lambda_reports_disconnect_only_after_the_response_finishes() -> None:
+    observations: list[object] = []
+
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                phase = message["type"].rsplit(".", 1)[1]
+                await send({"type": f"lifespan.{phase}.complete"})
+                if phase == "shutdown":
+                    return
+        first = await receive()
+        pending_disconnect = asyncio.create_task(receive())
+        await asyncio.sleep(0)
+        observations.extend((first["type"], pending_disconnect.done()))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+        observations.append((await pending_disconnect)["type"])
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/",
+        "requestContext": {"http": {"method": "GET"}},
+    }
+    with LambdaAdapter(app) as adapter:
+        adapter(event, None)
+    assert observations == ["http.request", False, "http.disconnect"]
+
+
+def test_lambda_payload_v2_folds_header_names_case_insensitively() -> None:
+    app = Wreath()
+
+    @app.get("/")
+    async def mixed_case_headers(_request):
+        return Response(
+            b"ok",
+            headers=[
+                (b"content-type", b"text/plain"),
+                (b"X-Test", b"one"),
+                (b"x-test", b"two"),
+            ],
+        )
+
+    event = {
+        "version": "2.0",
+        "rawPath": "/",
+        "requestContext": {"http": {"method": "GET"}},
+    }
+    with LambdaAdapter(app) as adapter:
+        response = adapter(event, None)
+    assert response["headers"]["X-Test"] == "one,two"
+    assert "x-test" not in response["headers"]

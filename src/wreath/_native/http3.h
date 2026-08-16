@@ -30,6 +30,7 @@
 #include <openssl/ssl.h>
 
 #include "flight.h"
+#include "wreathcore.h"
 #include "server_request_capi.h"
 #include "server_policy.h"
 

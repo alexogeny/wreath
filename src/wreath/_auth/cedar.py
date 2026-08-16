@@ -150,13 +150,11 @@ def request_flags(
     """
     if provider is None:
         return _NO_FLAGS
-    state = request.state
-    cached = state.get(_FLAGS_SLOT)
-    if cached is not None:
-        return cast(frozenset[str], cached)
-    resolved = _resolve_flags(request, provider, vocabulary)
-    state.__setattr__(_FLAGS_SLOT, resolved)
-    return resolved
+    return resolve_once(
+        request,
+        _FLAGS_SLOT,
+        lambda: _resolve_flags(request, provider, vocabulary),
+    )
 
 
 def _resolve_flags(
@@ -168,6 +166,9 @@ def _resolve_flags(
     for every fact and this one is not a second copy of it. `request_flags`
     stays as the function it was, sharing the same cache slot.
     """
+    from ..flags import Flag, _flag_resolver
+
+    provider = _flag_resolver(provider)
     identity = request.identity
     context: dict[str, Any] = {}
     if identity is not None:
@@ -179,7 +180,10 @@ def _resolve_flags(
             if callable(resolve_all)
             else _NO_FLAGS
         )
-    return frozenset(name for name in vocabulary if provider.enabled(name, context))
+    return frozenset(
+        name for name in vocabulary
+        if provider.resolve(Flag(name, False), context)
+    )
 
 
 def _default_location(request: Request) -> object:
@@ -223,13 +227,11 @@ def request_regions(
     """
     if regions is None:
         return _NO_FLAGS
-    state = request.state
-    cached = state.get(_REGIONS_SLOT)
-    if cached is not None:
-        return cast(frozenset[str], cached)
-    resolved = _resolve_regions(request, regions, location, vocabulary)
-    state.__setattr__(_REGIONS_SLOT, resolved)
-    return resolved
+    return resolve_once(
+        request,
+        _REGIONS_SLOT,
+        lambda: _resolve_regions(request, regions, location, vocabulary),
+    )
 
 
 def _resolve_regions(
@@ -373,6 +375,9 @@ def _resolve_quota(
 
 def _default_context(request: Request) -> Mapping[str, object]:
     context: dict[str, object] = {"method": request.method, "path": request.path}
+    from ..policy.traffic import traffic_class
+
+    context["client_class"] = traffic_class(request)
     # Step-up, expressed where a policy can read it:
     #
     #     permit(principal, action == Action::"delete", resource)
@@ -535,6 +540,10 @@ class CedarAuthorizer:
         self._entities = entities
         self._context = context
         self._clock = clock
+        if flags is not None:
+            from ..flags import _flag_resolver
+
+            flags = _flag_resolver(flags)
         self._flags = flags
         self._regions = regions
         self._location = location
@@ -759,6 +768,10 @@ class CedarAuthorizer:
                 context["method"] = request.method
             if "path" in needed:
                 context["path"] = request.path
+            if "client_class" in needed:
+                from ..policy.traffic import traffic_class
+
+                context["client_class"] = traffic_class(request)
             if "second_factor_age" in needed:
                 age = second_factor_age(identity, time.time())
                 if age is not None:

@@ -4,16 +4,16 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 114,
+        "c": 121,
         "python": 2
       },
       "pre_activation": {
-        "c": 37,
+        "c": 44,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 32,
+          "c": 39,
           "python": 1
         },
         "routing": {
@@ -30,14 +30,14 @@
         }
       },
       "c_calls": {
-        "dict.get": 38,
-        "builtins.isinstance": 10,
+        "dict.get": 39,
+        "builtins.isinstance": 11,
+        "str.encode": 6,
         "builtins.getattr": 6,
         "builtins.len": 4,
-        "str.encode": 4,
-        "bytes.decode": 2,
+        "bytes.decode": 3,
+        "bytes.lower": 3,
         "time.perf_counter": 2,
-        "bytes.lower": 2,
         "lock.__enter__": 2,
         "KV.get": 2,
         "lock.__exit__": 2,
@@ -51,6 +51,7 @@
         "bytes.split": 1,
         "bytes.strip": 1,
         "str.lower": 1,
+        "UserAgentDB.blocked": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
         "wreath._native._core.find_header": 1,
@@ -90,16 +91,16 @@
     "minimal": {
       "status": 200,
       "totals": {
-        "c": 8,
+        "c": 10,
         "python": 1
       },
       "pre_activation": {
-        "c": 4,
+        "c": 6,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 2,
+          "c": 4,
           "python": 1
         },
         "routing": {
@@ -112,8 +113,9 @@
         }
       },
       "c_calls": {
+        "builtins.isinstance": 3,
         "dict.get": 2,
-        "builtins.isinstance": 2,
+        "UserAgentDB.blocked_headers": 1,
         "BitsetRouteTable.match": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,

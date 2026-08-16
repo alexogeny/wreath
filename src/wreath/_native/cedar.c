@@ -22,7 +22,7 @@
 
 typedef struct {
     PyObject *vars[4];  /* principal, action, resource, context (borrowed) */
-    PyObject *store;    /* uid -> (attrs dict, ancestors frozenset) (borrowed) */
+    PyObject *store;    /* uid -> (attrs dict, direct-parent tuple) (borrowed) */
     PyObject *error;    /* owned evaluation-error message, or NULL */
 } cedar_ctx;
 
@@ -597,16 +597,54 @@ cedar_eval_i64(cedar_ctx *ctx, PyObject *node, int depth, const char *what, int6
     return 0;
 }
 
-static PyObject *
-cedar_ancestors(cedar_ctx *ctx, PyObject *uid)
+/* Reachability over the compact direct-parent graph. `target` is one uid when
+ * `targets` is NULL; otherwise `targets` is a set/frozenset. The frontier and
+ * visited set live for this evaluation only, so the native path owns no global
+ * mutable cache and cycles cost one visit per entity. */
+static int
+cedar_ancestor_matches(cedar_ctx *ctx, PyObject *uid,
+                       PyObject *target, PyObject *targets)
 {
-    /* Borrowed frozenset of ancestors, or NULL when the uid has no entry
-     * (which is not an error: an undeclared entity has no ancestors). */
     PyObject *entry = PyDict_GetItemWithError(ctx->store, uid);
-    if (entry == NULL) {
-        return NULL;
+    PyObject *frontier = NULL, *seen = NULL;
+    Py_ssize_t cursor = 0;
+    int matched = 0;
+    if (entry == NULL) return PyErr_Occurred() ? -1 : 0;
+    frontier = PySequence_List(PyTuple_GET_ITEM(entry, 1));
+    seen = PySet_New(NULL);
+    if (frontier == NULL || seen == NULL) goto error;
+    while (cursor < PyList_GET_SIZE(frontier)) {
+        PyObject *parent = PyList_GET_ITEM(frontier, cursor++);
+        int contains = targets != NULL
+            ? PySet_Contains(targets, parent)
+            : PyObject_RichCompareBool(target, parent, Py_EQ);
+        if (contains < 0) goto error;
+        if (contains) {
+            matched = 1;
+            break;
+        }
+        contains = PySet_Contains(seen, parent);
+        if (contains < 0) goto error;
+        if (contains) continue;
+        if (PySet_Add(seen, parent) < 0) goto error;
+        entry = PyDict_GetItemWithError(ctx->store, parent);
+        if (entry == NULL) {
+            if (PyErr_Occurred()) goto error;
+            continue;
+        }
+        PyObject *parents = PyTuple_GET_ITEM(entry, 1);
+        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(parents); index++) {
+            if (PyList_Append(frontier, PyTuple_GET_ITEM(parents, index)) < 0)
+                goto error;
+        }
     }
-    return PyTuple_GET_ITEM(entry, 1);
+    Py_DECREF(seen);
+    Py_DECREF(frontier);
+    return matched;
+error:
+    Py_XDECREF(seen);
+    Py_XDECREF(frontier);
+    return -1;
 }
 
 /* Shared by OP_IN, OP_IS-with-ancestor: 1 in, 0 not, -1 error. */
@@ -625,35 +663,33 @@ cedar_in(cedar_ctx *ctx, PyObject *left, PyObject *right)
         return -1;
     }
     Py_ssize_t count = right_is_list ? PyList_GET_SIZE(right) : 1;
-    PyObject *ancestors = cedar_ancestors(ctx, left);
-    if (ancestors == NULL && PyErr_Occurred()) {
-        return -1;
-    }
+    PyObject *targets = NULL;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *candidate = right_is_list ? PyList_GET_ITEM(right, i) : right;
         if (!cedar_is_uid(candidate)) {
             cedar_fail(ctx, PyUnicode_FromFormat(
                 "'in' requires entities on the right, got %s", cedar_type_name(candidate)));
+            Py_XDECREF(targets);
             return -1;
         }
         int equal = PyObject_RichCompareBool(candidate, left, Py_EQ);
         if (equal < 0) {
+            Py_XDECREF(targets);
             return -1;
         }
         if (equal) {
+            Py_XDECREF(targets);
             return 1;
         }
-        if (ancestors != NULL) {
-            int member = PySet_Contains(ancestors, candidate);
-            if (member < 0) {
-                return -1;
-            }
-            if (member) {
-                return 1;
-            }
-        }
     }
-    return 0;
+    if (right_is_list) {
+        targets = PySet_New(right);
+        if (targets == NULL) return -1;
+    }
+    int matched = cedar_ancestor_matches(
+        ctx, left, right_is_list ? NULL : right, targets);
+    Py_XDECREF(targets);
+    return matched;
 }
 
 /* like-pattern match against precompiled segments: 1/0/-1. */
@@ -1113,18 +1149,13 @@ cedar_scope_matches(cedar_ctx *ctx, PyObject *scope, PyObject *uid)
     if (kind == 1) { /* == */
         return PyObject_RichCompareBool(uid, PyTuple_GET_ITEM(scope, 1), Py_EQ);
     }
-    PyObject *ancestors;
     if (kind == 2) { /* in */
         PyObject *target = PyTuple_GET_ITEM(scope, 1);
         int equal = PyObject_RichCompareBool(uid, target, Py_EQ);
         if (equal != 0) {
             return equal;
         }
-        ancestors = cedar_ancestors(ctx, uid);
-        if (ancestors == NULL) {
-            return PyErr_Occurred() ? -1 : 0;
-        }
-        return PySet_Contains(ancestors, target);
+        return cedar_ancestor_matches(ctx, uid, target, NULL);
     }
     if (kind == 3) { /* in [..] */
         PyObject *targets = PyTuple_GET_ITEM(scope, 1);
@@ -1132,17 +1163,7 @@ cedar_scope_matches(cedar_ctx *ctx, PyObject *scope, PyObject *uid)
         if (member != 0) {
             return member;
         }
-        ancestors = cedar_ancestors(ctx, uid);
-        if (ancestors == NULL) {
-            return PyErr_Occurred() ? -1 : 0;
-        }
-        PyObject *overlap = PyNumber_And(targets, ancestors);
-        if (overlap == NULL) {
-            return -1;
-        }
-        int matched = PySet_GET_SIZE(overlap) > 0;
-        Py_DECREF(overlap);
-        return matched;
+        return cedar_ancestor_matches(ctx, uid, NULL, targets);
     }
     /* is */
     int same = PyUnicode_Compare(PyTuple_GET_ITEM(uid, 0), PyTuple_GET_ITEM(scope, 1));
@@ -1160,11 +1181,7 @@ cedar_scope_matches(cedar_ctx *ctx, PyObject *scope, PyObject *uid)
     if (equal != 0) {
         return equal;
     }
-    ancestors = cedar_ancestors(ctx, uid);
-    if (ancestors == NULL) {
-        return PyErr_Occurred() ? -1 : 0;
-    }
-    return PySet_Contains(ancestors, ancestor);
+    return cedar_ancestor_matches(ctx, uid, ancestor, NULL);
 }
 
 /* Conditions for a policy whose scopes already matched. */

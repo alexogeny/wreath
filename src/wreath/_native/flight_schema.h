@@ -46,7 +46,8 @@ enum {
     WREATH_NFR_KIND_PHASE = 3,
     WREATH_NFR_KIND_CONTROL = 4,
     WREATH_NFR_KIND_CAPTURE = 5,
-    WREATH_NFR_KIND_LOG = 6
+    WREATH_NFR_KIND_LOG = 6,
+    WREATH_NFR_KIND_CLIENT_FACTS = 7
 };
 
 /* CaptureFieldClass: the boundary a captured field came from. */
@@ -60,7 +61,8 @@ enum {
     WREATH_NFR_CAP_CLASS_DB_PARAM = 6,
     WREATH_NFR_CAP_CLASS_DB_ROW = 7,
     WREATH_NFR_CAP_CLASS_OUTBOUND_REQUEST = 8,
-    WREATH_NFR_CAP_CLASS_OUTBOUND_RESPONSE = 9
+    WREATH_NFR_CAP_CLASS_OUTBOUND_RESPONSE = 9,
+    WREATH_NFR_CAP_CLASS_OUTBOUND_HTTP_EXCHANGE = 10
 };
 
 /* CaptureDisposition: how a field is reduced before it enters a slab. */
@@ -126,6 +128,20 @@ enum {
 #define WREATH_NFR_FLAG_BODY_TRUNCATED (1u << 6)
 #define WREATH_NFR_FLAG_TELEMETRY_LOSS (1u << 7)
 #define WREATH_NFR_FLAG_HAS_CORRELATION (1u << 8)
+#define WREATH_NFR_FLAG_HAS_CLIENT_FACTS (1u << 9)
+#define WREATH_NFR_FLAG_POLICY_REFUSED (1u << 10)
+#define WREATH_NFR_FLAG_AI_SCRAPING_REFUSED (1u << 11)
+
+/* Client-facts-cell flags. */
+#define WREATH_NFR_CLIENT_UA_KNOWN (1u << 0)
+#define WREATH_NFR_CLIENT_BOT_CLAIMED (1u << 1)
+#define WREATH_NFR_CLIENT_AGENT_VERIFIED (1u << 2)
+#define WREATH_NFR_CLIENT_MOBILE_KNOWN (1u << 3)
+#define WREATH_NFR_CLIENT_MOBILE (1u << 4)
+#define WREATH_NFR_CLIENT_IP_KNOWN (1u << 5)
+#define WREATH_NFR_CLIENT_IP_FORWARDED (1u << 6)
+#define WREATH_NFR_CLIENT_GEO_KNOWN (1u << 7)
+#define WREATH_NFR_CLIENT_IPV6 (1u << 8)
 
 /* A completion/event cell. Mirrors CompletionCell in _flight_schema.py. */
 typedef struct {
@@ -160,6 +176,18 @@ typedef struct {
     uint64_t span_id;        /* offset 40 */
     uint8_t reserved1[16];   /* offset 48 */
 } wreath_nfr_correlation_cell;
+
+/* A compact client classification. Raw address, User-Agent, and verified-agent
+ * identity deliberately do not cross this boundary. */
+typedef struct {
+    uint8_t schema_version;       /* offset 0  */
+    uint8_t kind;                 /* offset 1  */
+    uint16_t flags;               /* offset 2  (WREATH_NFR_CLIENT_*) */
+    uint16_t user_agent_rule_id;  /* offset 4  (0 = none) */
+    uint8_t country[2];           /* offset 6  (uppercase ISO, or NULs) */
+    uint64_t request_id;          /* offset 8  */
+    uint8_t reserved[48];         /* offset 16 */
+} wreath_nfr_client_facts_cell;
 
 /* A phase (detail) record. 16 bytes; only armed requests write it. Mirrors
  * PhaseRecord in _flight_schema.py. */
@@ -357,6 +385,8 @@ _Static_assert(sizeof(wreath_nfr_completion_cell) == WREATH_NFR_CELL_SIZE,
                "completion cell must be 64 bytes");
 _Static_assert(sizeof(wreath_nfr_correlation_cell) == WREATH_NFR_CELL_SIZE,
                "correlation cell must be 64 bytes");
+_Static_assert(sizeof(wreath_nfr_client_facts_cell) == WREATH_NFR_CELL_SIZE,
+               "client-facts cell must be 64 bytes");
 _Static_assert(sizeof(wreath_nfr_phase_cell) == WREATH_NFR_PHASE_CELL_SIZE,
                "phase cell must be 16 bytes");
 _Static_assert(sizeof(wreath_nfr_phase_batch_cell) == WREATH_NFR_CELL_SIZE,

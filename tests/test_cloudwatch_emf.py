@@ -8,6 +8,8 @@ import pathlib
 import sys
 import types
 
+from wreath.metrics import Counters
+
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "wreath"
 
 
@@ -24,6 +26,8 @@ def _mod(name: str):
             key = f"wreath.{dep}"
             if key not in sys.modules:
                 spec = importlib.util.spec_from_file_location(key, _SRC / f"{dep}.py")
+                if spec is None or spec.loader is None:
+                    raise RuntimeError(f"cannot load test module {key}") from None
                 m = importlib.util.module_from_spec(spec)
                 sys.modules[key] = m
                 spec.loader.exec_module(m)
@@ -164,6 +168,131 @@ def test_render_emits_valid_json_lines():
     for ln in lines:
         obj = json.loads(ln)  # each line is a standalone EMF document
         assert "_aws" in obj and obj["_aws"]["Timestamp"] == 99
+    assert not text.endswith("\n")
+
+
+def test_subsystem_counters_use_the_same_collection_and_failure_isolation():
+    class Broken:
+        def counters(self):
+            raise RuntimeError("unavailable")
+
+    source = types.SimpleNamespace(
+        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    bridge = emf.EmfBridge(
+        _Src(snap), counter_sources=(Broken(), source), namespace="Trailhead"
+    )
+    blob = bridge.blobs(snap, timestamp_ms=99)[-1]
+    assert blob["Instance"] == "mail"
+    assert blob["jobs_run_errors"] == 3
+    assert _metric_names(blob) == {"jobs_run_errors": "None"}
+
+
+def test_subsystem_counters_obey_delta_mode_and_leave_gauges_absolute():
+    values = {"run_errors": 3, "ready": 1}
+    source = types.SimpleNamespace(
+        counters=lambda: Counters(
+            "jobs", "mail", values, gauges=frozenset({"ready"})
+        )
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    bridge = emf.EmfBridge(_Src(snap), counter_sources=(source,))
+
+    first = bridge.blobs(snap, timestamp_ms=1)[-1]
+    second = bridge.blobs(snap, timestamp_ms=2)[-1]
+    values["run_errors"] = 5
+    third = bridge.blobs(snap, timestamp_ms=3)[-1]
+
+    assert first["jobs_run_errors"] == 3
+    assert second["jobs_run_errors"] == 0
+    assert third["jobs_run_errors"] == 2
+    assert first["jobs_ready"] == second["jobs_ready"] == third["jobs_ready"] == 1
+
+    values["run_errors"] = 1
+    reset = bridge.blobs(snap, timestamp_ms=4)[-1]
+    assert reset["jobs_run_errors"] == 1
+
+
+def test_subsystem_counters_obey_cumulative_mode():
+    source = types.SimpleNamespace(
+        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    bridge = emf.EmfBridge(
+        _Src(snap), counter_sources=(source,), cumulative=True
+    )
+    bridge.blobs(snap, timestamp_ms=1)
+    second = bridge.blobs(snap, timestamp_ms=2)[-1]
+    assert second["jobs_run_errors"] == 3
+
+
+def test_subsystem_counter_kernel_preserves_signed_gauges_and_large_integers():
+    values = {"temperature": -7, "huge": 1 << 100}
+    source = types.SimpleNamespace(
+        counters=lambda: Counters(
+            "workers", "alpha", values, gauges=frozenset({"temperature"})
+        )
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    bridge = emf.EmfBridge(_Src(snap), counter_sources=(source,))
+
+    first = bridge.blobs(snap, timestamp_ms=1)[-1]
+    values["temperature"] = -9
+    values["huge"] += 5
+    second = bridge.blobs(snap, timestamp_ms=2)[-1]
+
+    assert first["workers_temperature"] == -7
+    assert first["workers_huge"] == 1 << 100
+    assert second["workers_temperature"] == -9
+    assert second["workers_huge"] == 5
+
+
+def test_render_appends_subsystem_counter_blobs() -> None:
+    source = types.SimpleNamespace(
+        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    text = emf.EmfBridge(_Src(snap), counter_sources=(source,)).render(timestamp_ms=1)
+    blobs = [json.loads(line) for line in text.splitlines()]
+    assert blobs[-1]["jobs_run_errors"] == 3
+
+
+def test_native_counter_documents_match_the_independent_python_definition() -> None:
+    readings = (
+        Counters(
+            "jobs",
+            "mail",
+            {f"metric_{index}": index for index in range(101)},
+            gauges=frozenset({"metric_0"}),
+        ),
+    )
+    dimensions = {"Service": "api", "Instance": "configured"}
+    expected = emf._counter_blobs(
+        readings,
+        timestamp_ms=99,
+        namespace="Trailhead",
+        dimensions=dimensions,
+        cumulative=False,
+        deltas={},
+        lock=emf.threading.Lock(),
+    )
+    snap = _Snap(0, 0, [], _Loss())
+    state = emf._core.metric_delta_state()
+    rendered = emf._core.emf_render(
+        snap,
+        99,
+        None,
+        "Trailhead",
+        dimensions,
+        None,
+        False,
+        state,
+        100,
+        readings,
+    )
+    actual = [json.loads(line) for line in rendered.splitlines()][1:]
+    assert actual == expected
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """The core of second factors: TOTP, recovery codes, WebAuthn, and their store.
 
-Stages one to three of `docs/plans/second-factors-totp-webauthn.md`: TOTP,
-hashed single-use recovery codes, WebAuthn registration and assertion, and the
-credential store seam all three share. The wreath-coupled router glue lives in
+TOTP, hashed single-use recovery codes, WebAuthn registration and assertion,
+including discoverable passkey login, and the credential store seam all three
+share. The wreath-coupled router glue lives in
 `wreath.users`; this module is the part that can be reasoned about, and
 unit-tested, without an ASGI app. The WebAuthn *wire formats* -- CBOR, COSE,
 authenticator data, DER signatures -- live one module along in
@@ -83,6 +83,7 @@ __all__ = [
     "DEFAULT_SKEW",
     "MAX_SKEW",
     "InMemorySecondFactorStore",
+    "DiscoverableSecondFactorStore",
     "SecondFactor",
     "SecondFactorStore",
     "TotpEnrolment",
@@ -582,6 +583,25 @@ class SecondFactorStore(Protocol):
         ...
 
 
+@runtime_checkable
+class DiscoverableSecondFactorStore(SecondFactorStore, Protocol):
+    """The additional indexed lookup required by first-factor passkeys.
+
+    Kept separate from `SecondFactorStore` so existing TOTP and second-factor
+    WebAuthn stores remain valid. `second_factor_router(passkey_login=True)`
+    refuses at construction unless this extension is implemented.
+    """
+
+    async def credential(self, credential_id: str) -> SecondFactor | None:
+        """Look up one credential by its framework id, or return `None`.
+
+        Discoverable login derives this opaque id from the public WebAuthn
+        credential id with the same one-way function enrolment uses. The lookup
+        must be indexed; enumerating every user's credentials makes login
+        proportional to the deployment's account count.
+        """
+        ...
+
 @dataclass(slots=True)
 class InMemorySecondFactorStore:
     """A dict-backed `SecondFactorStore` for development and tests.
@@ -609,6 +629,10 @@ class InMemorySecondFactorStore:
             raise ValueError(f"duplicate second-factor id: {credential.id!r}")
         self._rows[credential.id] = credential
         return credential
+
+    async def credential(self, credential_id: str) -> SecondFactor | None:
+        """Return one credential by id, or `None`."""
+        return self._rows.get(credential_id)
 
     async def remove(self, user_id: str, credential_id: str) -> None:
         """Delete one credential, but only if it belongs to `user_id`.
@@ -688,6 +712,20 @@ class TotpEnrolment:
 def new_credential_id() -> str:
     """A random opaque credential id (128 bits, hex)."""
     return secrets.token_hex(16)
+
+
+def discoverable_credential_id(credential_id: bytes) -> str:
+    """The opaque, indexed row id for a public WebAuthn credential handle.
+
+    A factor's framework id appears in the factor-management API. Keeping the
+    raw handle there needlessly exposes a stable authenticator identifier, while
+    a random id cannot be derived during username-less login. A domain-separated
+    SHA-256 digest provides both properties and remains an ordinary primary-key
+    lookup for every discoverable store.
+    """
+    if not credential_id:
+        raise ValueError("a discoverable credential needs a non-empty id")
+    return hashlib.sha256(b"wreath-webauthn-row\x00" + credential_id).hexdigest()
 
 
 def begin_totp_enrolment(
@@ -956,8 +994,8 @@ MAX_USER_HANDLE_BYTES = 64
 
 #: What `authenticatorSelection.userVerification` may say. Second-factor use
 #: asks for `preferred`: the authenticator verifies the user when it can, and a
-#: security key with no PIN still works. `required` is the passwordless setting,
-#: and belongs to stage four rather than here.
+#: security key with no PIN still works. `required` is the discoverable-login
+#: setting used by stage four.
 UserVerification = Literal["required", "preferred", "discouraged"]
 _USER_VERIFICATION = frozenset(("required", "preferred", "discouraged"))
 
@@ -1054,6 +1092,7 @@ def begin_webauthn_registration(
     existing: Sequence[SecondFactor] = (),
     timeout_ms: int = DEFAULT_WEBAUTHN_TIMEOUT_MS,
     user_verification: str = "preferred",
+    discoverable: bool = False,
     challenge: bytes | None = None,
 ) -> WebAuthnCeremony:
     """Phase one of registration: mint a challenge and describe what to create.
@@ -1079,6 +1118,8 @@ def begin_webauthn_registration(
             is bound to it forever, so it is a decision, not a setting -- use
             the site's registrable domain (`example.com`), not a subdomain you
             might move off.
+        discoverable: require a resident credential that can identify its
+            account during a usernameless first-factor assertion.
         challenge: supply one only in tests; the default is fresh randomness.
 
     Raises:
@@ -1114,9 +1155,8 @@ def begin_webauthn_registration(
         "attestation": "none",
         "authenticatorSelection": {
             "userVerification": user_verification,
-            # A second factor is looked up by id, so it does not need to be
-            # discoverable. Discoverable credentials are stage four.
-            "residentKey": "discouraged",
+            "residentKey": "required" if discoverable else "discouraged",
+            "requireResidentKey": discoverable,
         },
         "excludeCredentials": _descriptors(existing),
     }
@@ -1133,10 +1173,9 @@ def begin_webauthn_assertion(
 ) -> WebAuthnCeremony:
     """Phase one of an assertion: mint a challenge and list what may answer it.
 
-    `allowCredentials` names the caller's own registered credentials, which is
-    what makes this a *second* factor: the user has already been identified by
-    the first one, so there is nothing to discover. Usernameless login, where
-    the list is empty and the authenticator chooses, is stage four.
+    `allowCredentials` names the caller's own registered credentials for a
+    second-factor assertion. Pass an empty sequence for discoverable login: the
+    authenticator then chooses a resident credential and returns its public id.
 
     Raises:
         ValueError: an empty RP ID or an unknown `user_verification`.
@@ -1224,7 +1263,11 @@ async def confirm_webauthn_registration(
     now = datetime.now(UTC) if at is None else datetime.fromtimestamp(at, UTC)
     credential = await store.add(
         SecondFactor(
-            id=new_credential_id(),
+            # The stable public authenticator handle is never rendered by the
+            # factor-management API. Its domain-separated digest is still
+            # derivable at username-less login and uses the store's primary-key
+            # index instead of scanning accounts or unpacking Python objects.
+            id=discoverable_credential_id(auth_data.credential_id),
             user_id=user_id,
             kind="webauthn",
             label=label,

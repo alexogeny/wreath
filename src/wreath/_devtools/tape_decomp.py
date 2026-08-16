@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import json
 import platform
 import statistics
@@ -183,16 +182,12 @@ async def _calibrate(
 
 
 def _load_app(target: str) -> tuple[Any, list[Any]]:
-    module_name, separator, attribute = target.partition(":")
-    if not separator:
-        raise SystemExit(f"wreath-policy-decomp: --app must be 'module:attribute', got {target!r}")
-    module = importlib.import_module(module_name)
+    from wreath._target import load_target
+
     try:
-        app = getattr(module, attribute)
-    except AttributeError:
-        raise SystemExit(
-            f"wreath-policy-decomp: {module_name} has no attribute {attribute!r}"
-        ) from None
+        app = load_target(target, label="policy decomposition application")
+    except ValueError as error:
+        raise SystemExit(f"wreath-policy-decomp: {error}") from error
     policy = getattr(app, "_http_policy", None)
     installed = list(policy.components if policy is not None else ())
     if not installed:

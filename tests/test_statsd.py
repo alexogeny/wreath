@@ -183,6 +183,49 @@ def test_flush_sends_udp_packets():
     assert b"wreath.http.requests.0:1|c" in joined
 
 
+def test_native_packets_match_the_independent_line_packetizer():
+    snap = _Snap(3, 1, [_Route(i, i + 1, 0, 1250.0, 25.0) for i in range(5)], _Loss())
+    line_bridge = statsd.StatsDBridge(
+        _Src(snap), prefix="my service", dogstatsd=True, tags={"env": "prod"}
+    )
+    lines = line_bridge._lines(snap, {})
+    lines.append("my_service.jobs.run_errors:7|g|#env:prod,instance:work")
+
+    expected = []
+    packet = []
+    size = 0
+    maximum = 90
+    for line in lines:
+        added = len(line.encode("utf-8")) + 1
+        if packet and size + added > maximum:
+            expected.append("\n".join(packet).encode("utf-8"))
+            packet, size = [], 0
+        packet.append(line)
+        size += added
+    if packet:
+        expected.append("\n".join(packet).encode("utf-8"))
+
+    packet_bridge = statsd.StatsDBridge(
+        _Src(snap), prefix="my service", dogstatsd=True, tags={"env": "prod"}
+    )
+    reading = types.SimpleNamespace(
+        subsystem="jobs", instance="work", values={"run_errors": 7}
+    )
+    packets, count = statsd._core.statsd_packets(
+        snap,
+        {},
+        packet_bridge._prefix,
+        packet_bridge._dogstatsd,
+        packet_bridge._tags,
+        packet_bridge._route_labels,
+        packet_bridge._deltas,
+        (reading,),
+        maximum,
+    )
+    assert packets == tuple(expected)
+    assert count == len(lines)
+
+
 class _Src:
     def __init__(self, snap, rec=None):
         self._snap = snap

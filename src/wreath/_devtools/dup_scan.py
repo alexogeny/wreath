@@ -35,10 +35,13 @@ It is off by default because it costs a second pass and reads noisier.
 **This is a report, and deliberately not a gate.** Plenty of its findings are
 legitimate near-twins -- `query`/`mutation`, `insert_settled`/
 `upsert_correction`, an SSE2 arm beside its AVX2 twin -- where the shared shape
-is the point and collapsing them would cost more clarity than it saves. Wiring
-it into `wreath-check` would train everyone to ignore it. Read it when a
-subsystem feels repetitive, and when it names something you did not know was
-duplicated, that is the finding.
+is the point and collapsing them would cost more clarity than it saves. Those
+are filtered only by an exact, named set of sites in `INTENTIONAL_GROUPS`, with
+a reason. Exact membership is load-bearing: if another copy joins one of those
+shapes, the larger group no longer matches the exception and is reported.
+Wiring the report into `wreath-check` would train everyone to ignore it. Read it
+when a subsystem feels repetitive, and when it names something you did not know
+was duplicated, that is the finding.
 
 Ranked by *redundant* lines (the copies after the first), because that is what
 collapsing the group would actually remove.
@@ -318,6 +321,12 @@ class Site:
     name: str
     line: int
     lines: int
+    qualname: str = ""
+
+    @property
+    def identity_name(self) -> str:
+        """Qualified Python name, or the native/top-level spelling."""
+        return self.qualname or self.name
 
 
 @dataclass(frozen=True)
@@ -338,10 +347,270 @@ class Group:
             "redundant_lines": self.redundant_lines,
             "copies": len(self.sites),
             "sites": [
-                {"path": s.path, "name": s.name, "line": s.line, "lines": s.lines}
+                {
+                    "path": s.path,
+                    "name": s.identity_name,
+                    "line": s.line,
+                    "lines": s.lines,
+                }
                 for s in self.sites
             ],
         }
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """One exact group whose parallel structure is an asserted design choice."""
+
+    sites: tuple[tuple[str, str], ...]
+    reason: str
+
+
+def _exclusion(reason: str, *sites: tuple[str, str]) -> Exclusion:
+    return Exclusion(tuple(sorted(sites)), reason)
+
+
+# These are deliberately site-specific rather than path or name patterns. A
+# directory exemption would hide the next real copy in the noisiest parts of
+# the tree; an exact set stops matching as soon as a new site joins the group.
+INTENTIONAL_GROUPS: tuple[Exclusion, ...] = (
+    _exclusion(
+        "scaffold functions emit unrelated literal artifacts; normalisation erases "
+        "the literal content that is their entire behaviour",
+        *(('src/wreath/_scaffold.py', name) for name in (
+            '_tenants', '_tenancy_tests', '_web_package_json', '_web_index_html')),
+    ),
+    _exclusion(
+        "scaffold functions emit unrelated literal artifacts; normalisation erases "
+        "the literal content that is their entire behaviour",
+        *(('src/wreath/_scaffold.py', name) for name in (
+            '_contracts', '_memory_adapter', '_web_tsconfig', '_web_main')),
+    ),
+    _exclusion(
+        "scaffold functions emit unrelated literal artifacts; normalisation erases "
+        "the literal content that is their entire behaviour",
+        ('src/wreath/_scaffold.py', '_model_tests'),
+        ('src/wreath/_scaffold.py', '_web_app'),
+    ),
+    _exclusion(
+        "scaffold functions emit unrelated literal artifacts; normalisation erases "
+        "the literal content that is their entire behaviour",
+        ('src/wreath/_scaffold.py', '_agents'),
+        ('src/wreath/_scaffold.py', '_models'),
+    ),
+    _exclusion(
+        "the compiled JSON converter closes over annotation-specific child converters; "
+        "the Any converter is its independent recursive base case and hot-path oracle",
+        ('src/wreath/binding.py', '_jsonable_any'),
+        ('src/wreath/binding.py', '_compile_jsonable.<locals>.jsonable_value'),
+    ),
+    _exclusion(
+        "fixed Flight cell kinds have distinct ABI layouts and straight-line ingest "
+        "loops; a callback or tagged generic loop would add work per cell",
+        *(('src/wreath/_native/flight_project.c', name) for name in (
+            'flight_ingest_completion', 'flight_ingest_correlation',
+            'flight_ingest_client_facts')),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_find_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_find_avx2'),
+    ),
+    _exclusion(
+        "reader and writer registration are symmetric reactor operations over distinct "
+        "kernel filters; combining them would hide the selected filter in a branch",
+        ('src/wreath/_native/reactor_poller.c', 'rp_add_reader'),
+        ('src/wreath/_native/reactor_poller.c', 'rp_add_writer'),
+    ),
+    _exclusion(
+        "normalisation erases mapping keys and attribute names, making unrelated status "
+        "snapshots look identical",
+        ('src/wreath/doctor.py', 'TracedRequest.as_dict'),
+        ('src/wreath/inspector.py', '_projector_loss'),
+        ('src/wreath/jobs.py', 'JobRunner.stats'),
+        ('src/wreath/messaging.py', 'MessageBus.stats'),
+    ),
+    _exclusion(
+        "conjunction and disjunction are separate precedence levels in the SCIM grammar; "
+        "their mirrored recursive-descent shape makes that precedence visible",
+        ('src/wreath/_native/scim.c', 'scim_conjunction'),
+        ('src/wreath/_native/scim.c', 'scim_disjunction'),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_json_run_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_json_run_avx2'),
+    ),
+    _exclusion(
+        "policy describe methods populate the shared MiddlewareContract with independent "
+        "header semantics; normalisation erases those declarations",
+        ('src/wreath/policy/compression.py', 'CompressionPolicy.describe'),
+        ('src/wreath/policy/cors.py', 'CorsPolicy.describe'),
+    ),
+    _exclusion(
+        "the optional HTTP/3 and server extensions resolve different recorder owner "
+        "types and cannot share a linked implementation",
+        ('src/wreath/_native/http3_connection.c', 'wreath_h3_worker_from'),
+        ('src/wreath/_native/server_common.c', 'wreath_flight_worker_from'),
+    ),
+    _exclusion(
+        "these are iterator protocols for unrelated native object layouts; their common "
+        "shape is CPython's StopIteration/error contract",
+        ('src/wreath/_native/queue.c', 'queue_value_next'),
+        ('src/wreath/_native/server_common.c', 'value_awaitable_next'),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_html_run_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_html_run_avx2'),
+    ),
+    _exclusion(
+        "FIFO queue and deadline heap drains are layout-specialized hot loops; a common "
+        "callback loop would add an indirect call per item",
+        ('src/wreath/_native/queue.c', 'queue_drain'),
+        ('src/wreath/_native/queue.c', 'heap_drain'),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_dkim_run_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_dkim_run_avx2'),
+    ),
+    _exclusion(
+        "the strict step and attempt wrappers already layer type-specific diagnostics over "
+        "the canonical _read_one_recording implementation",
+        ('src/wreath/_recording_format.py', 'read_step_recording'),
+        ('src/wreath/_recording_format.py', 'read_attempt_recording'),
+    ),
+    _exclusion(
+        "the attempt and data-kernel readers own different binary formats and error "
+        "vocabularies; their common bounds-check shape is the wire-decoder contract",
+        ('src/wreath/_native/codecs.c', 'read_attempt_text'),
+        ('src/wreath/_native/data_kernels.c', 'data_read_text'),
+    ),
+    _exclusion(
+        "reader and writer removal are symmetric reactor operations over distinct kernel "
+        "filters; combining them would hide the selected filter in a branch",
+        ('src/wreath/_native/reactor_poller.c', 'rp_remove_reader'),
+        ('src/wreath/_native/reactor_poller.c', 'rp_remove_writer'),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_value_run_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_value_run_avx2'),
+    ),
+    _exclusion(
+        "the two migration refusals own different hazards and recovery instructions; "
+        "normalisation erases the diagnostic text that distinguishes them",
+        ('src/wreath/migrations.py', 'DowngradeWouldStrandCode.__init__'),
+        ('src/wreath/migrations.py', 'DowngradeWouldStrandRecodedData.__init__'),
+    ),
+    _exclusion(
+        "sparse-vector indices and values require different CPython constructors in a "
+        "per-element hot loop; a converter callback would add an indirect call per item",
+        ('src/wreath/_native/codecs.c', 'wreath_sparsevector_indices'),
+        ('src/wreath/_native/codecs.c', 'wreath_sparsevector_values'),
+    ),
+    _exclusion(
+        "FIFO queue and deadline heap waiting slots are layout-specialized; sharing would "
+        "replace direct field access with layout branches",
+        ('src/wreath/_native/queue.c', 'queue_set_waiting'),
+        ('src/wreath/_native/queue.c', 'heap_set_waiting'),
+    ),
+    _exclusion(
+        "io_uring start and stop deliberately mirror the registration lifecycle while "
+        "calling opposite kernel operations",
+        ('src/wreath/_native/reactor_poller.c', 'rp_start_uring_receive'),
+        ('src/wreath/_native/reactor_poller.c', 'rp_stop_uring_receive'),
+    ),
+    _exclusion(
+        "IPv4 and IPv6 indexes use different integer widths and record layouts; a common "
+        "inner loop would add width/layout branches per bucket",
+        ('src/wreath/_native/client_facts.c', 'geo_index_v4'),
+        ('src/wreath/_native/client_facts.c', 'geo_index_v6'),
+    ),
+    _exclusion(
+        "Prometheus escaping targets the sizing buffer in one pass and the final bytes "
+        "writer in another; an adapter callback would add work per escaped run",
+        ('src/wreath/_native/observability.c', 'prom_label_buffer_value'),
+        ('src/wreath/_native/observability.c', 'prom_write_label_value'),
+    ),
+    _exclusion(
+        "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
+        ('src/wreath/_native/simd.h', 'wreath_xor_mask_sse2'),
+        ('src/wreath/_native/simd.h', 'wreath_xor_mask_avx2'),
+    ),
+    _exclusion(
+        "JSON and MessagePack are separately built extension modules; the matching wrapper "
+        "shape is their shared Python codec protocol, not shared encoding logic",
+        ('src/wreath/_native/json.c', 'wreath_json_dumps'),
+        ('src/wreath/_native/msgpack.c', 'wreath_msgpack_dumps'),
+    ),
+    _exclusion(
+        "FIFO queue and deadline heap close paths are layout-specialized and wake different "
+        "waiter structures",
+        ('src/wreath/_native/queue.c', 'queue_close'),
+        ('src/wreath/_native/queue.c', 'heap_close'),
+    ),
+    _exclusion(
+        "normalisation erases mapping keys and attribute names, making unrelated report "
+        "serializers look identical",
+        ('src/wreath/_port/ir.py', 'Finding.as_dict'),
+        ('src/wreath/doctor.py', 'TracedWork.as_dict'),
+    ),
+    _exclusion(
+        "a Flight slab decoder and an HTTP signature builder are unrelated; normalisation "
+        "erases the callees and constants that define both operations",
+        ('src/wreath/_flight_schema.py', 'CaptureSlab.decode'),
+        ('src/wreath/signatures.py', 'signature_base'),
+    ),
+    _exclusion(
+        "these capsule destructors own unrelated layouts; the common shape is CPython's "
+        "capsule validation and cleanup protocol",
+        ('src/wreath/_native/graphql.c', 'graphql_policy_state_destroy'),
+        ('src/wreath/_native/sparse_vector.h', 'wreath_sparse_vector_destroy'),
+    ),
+    _exclusion(
+        "GC traverse and clear must enumerate the same plan fields in the same order; their "
+        "parallel shape is an ownership invariant",
+        ('src/wreath/_native/postgres/plan.c', 'plan_traverse'),
+        ('src/wreath/_native/postgres/plan.c', 'plan_clear'),
+    ),
+    _exclusion(
+        "FIFO queue and deadline heap clear paths are layout-specialized and release "
+        "different storage representations",
+        ('src/wreath/_native/queue.c', 'queue_clear'),
+        ('src/wreath/_native/queue.c', 'heap_clear'),
+    ),
+    _exclusion(
+        "reader and writer callback removal bind different event-loop methods; the mirrored "
+        "shape is the transport's explicit duplex protocol",
+        ('src/wreath/_native/reactor_transport.c', 'st_remove_reader_cb'),
+        ('src/wreath/_native/reactor_transport.c', 'st_remove_writer_cb'),
+    ),
+    _exclusion(
+        "these porting helpers copy unrelated framework metadata; normalisation erases the "
+        "field names and target API calls that distinguish them",
+        ('src/wreath/_port/analyzer/models.py', '_config_extra'),
+        ('src/wreath/_port/emit/ormar.py', '_copy_tablename'),
+    ),
+    _exclusion(
+        "trace and log wrappers declare signal-specific types and fields over the shared "
+        "_export_projected transport; normalisation erases those declarations",
+        ('src/wreath/_export.py', 'OtlpHttpExporter.export_projected_logs'),
+        ('src/wreath/_export.py', 'OtlpHttpExporter.export_projected_traces'),
+    ),
+)
+
+
+def intentional_reason(group: Group) -> str | None:
+    """The reason `group` is filtered, only when its full site set matches."""
+    sites = tuple(
+        sorted((site.path, site.identity_name) for site in group.sites)
+    )
+    for exclusion in INTENTIONAL_GROUPS:
+        if sites == exclusion.sites:
+            return exclusion.reason
+    return None
 
 
 def _digest(shape: bytes | bytearray) -> str:
@@ -424,9 +693,9 @@ class Pair:
     def as_dict(self) -> dict:
         return {
             "similarity": round(self.similarity, 3),
-            "left": {"path": self.left.path, "name": self.left.name,
+            "left": {"path": self.left.path, "name": self.left.identity_name,
                      "line": self.left.line, "lines": self.left.lines},
-            "right": {"path": self.right.path, "name": self.right.name,
+            "right": {"path": self.right.path, "name": self.right.identity_name,
                       "line": self.right.line, "lines": self.right.lines},
         }
 
@@ -466,7 +735,9 @@ def _sources(root: Path, relatives: tuple[str, ...],
 _BLOCKS = ("body", "handlers", "orelse", "finalbody", "cases")
 
 
-def _definitions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+def _definitions(
+    tree: ast.Module,
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]]:
     """Every function defined anywhere in *tree*, in source order.
 
     `ast.walk` answers this too, and did, at ten times the cost: a definition is
@@ -479,16 +750,21 @@ def _definitions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDe
     is what keeps `_BLOCKS` complete; a block missing from it makes the scan
     quietly stop reading part of every file that uses it.
     """
-    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-    todo = deque([tree])
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
+    todo = deque([(tree, "")])
     while todo:
-        node = todo.popleft()
+        node, parent = todo.popleft()
+        child_parent = parent
+        if isinstance(node, ast.ClassDef):
+            child_parent = f"{parent}.{node.name}" if parent else node.name
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            qualified = f"{parent}.{node.name}" if parent else node.name
+            found.append((node, qualified))
+            child_parent = f"{qualified}.<locals>"
         for name in _BLOCKS:
             block = getattr(node, name, None)
             if block:
-                todo.extend(block)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            found.append(node)
+                todo.extend((item, child_parent) for item in block)
     return found
 
 
@@ -501,7 +777,7 @@ def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
         # tool unusable on a tree mid-edit.
         return []
     bodies = []
-    for node in _definitions(tree):
+    for node, qualname in _definitions(tree):
         body = _significant_body(node)
         if not body or _is_stub(body):
             continue
@@ -510,7 +786,7 @@ def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
             continue
         shape = bytearray()
         _structure(body, shape)
-        bodies.append(Body(Site(relative, node.name, node.lineno, span),
+        bodies.append(Body(Site(relative, node.name, node.lineno, span, qualname),
                            _digest(shape), bytes(shape)))
     return bodies
 
@@ -521,7 +797,11 @@ def _native_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
     except OSError:
         return []
     bodies = []
+    line = 1
+    line_cursor = 0
     for match in _C_HEAD.finditer(source):
+        line += source.count("\n", line_cursor, match.start())
+        line_cursor = match.start()
         name = match.group("name")
         if name in _C_NOT_A_DEFINITION:
             continue
@@ -530,8 +810,7 @@ def _native_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
         shape, lines = _c_shape(body)
         if lines < min_lines:
             continue
-        line = source.count("\n", 0, match.start()) + 1
-        bodies.append(Body(Site(relative, name, line, lines),
+        bodies.append(Body(Site(relative, name, line, lines, name),
                            _digest(shape), bytes(shape)))
     return bodies
 
@@ -547,9 +826,15 @@ def collect(root: Path, relatives: tuple[str, ...], min_lines: int,
     ]
 
 
-def scan(root: Path, relatives: tuple[str, ...], min_lines: int,
-         langs: tuple[str, ...] = LANGS) -> tuple[list[Group], int]:
-    """Group every function body by shape. Returns (groups, functions scanned)."""
+def scan(
+    root: Path,
+    relatives: tuple[str, ...],
+    min_lines: int,
+    langs: tuple[str, ...] = LANGS,
+    *,
+    include_excluded: bool = False,
+) -> tuple[list[Group], int]:
+    """Group bodies by shape, omitting exact intentional groups by default."""
     bodies = collect(root, relatives, min_lines, langs)
     groups: dict[str, list[Site]] = defaultdict(list)
     for body in bodies:
@@ -561,6 +846,8 @@ def scan(root: Path, relatives: tuple[str, ...], min_lines: int,
         if len(sites) > 1
     ]
     found.sort(key=lambda g: (-g.redundant_lines, g.sites[0].path, g.sites[0].line))
+    if not include_excluded:
+        found = [group for group in found if intentional_reason(group) is None]
     return found, len(bodies)
 
 
@@ -675,6 +962,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--near", action="store_true",
                         help="also report pairs that are almost the same shape, "
                              "which exact grouping cannot see")
+    parser.add_argument(
+        "--show-excluded",
+        action="store_true",
+        help="also show exact intentional groups and the reason each is filtered",
+    )
     parser.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
                         help=f"how alike a --near pair must be "
                              f"(default {DEFAULT_SIMILARITY})")
@@ -684,7 +976,19 @@ def main(argv: list[str] | None = None) -> int:
     root = repo_root()
     relatives = tuple(args.path) if args.path else DEFAULT_ROOTS
     langs = LANGS if args.lang == "all" else (args.lang,)
-    groups, scanned = scan(root, relatives, args.min_lines, langs)
+    if args.show_excluded:
+        all_groups, scanned = scan(
+            root, relatives, args.min_lines, langs, include_excluded=True
+        )
+        excluded = [
+            (group, reason)
+            for group in all_groups
+            if (reason := intentional_reason(group)) is not None
+        ]
+        groups = [group for group in all_groups if intentional_reason(group) is None]
+    else:
+        groups, scanned = scan(root, relatives, args.min_lines, langs)
+        excluded = []
     pairs = (near_clones(root, relatives, args.min_lines, langs, args.similarity)
              if args.near else [])
     shown = groups if args.top <= 0 else groups[: args.top]
@@ -695,6 +999,10 @@ def main(argv: list[str] | None = None) -> int:
             "min_lines": args.min_lines,
             "langs": list(langs),
             "groups": [g.as_dict() for g in groups],
+            "excluded_groups": [
+                {**group.as_dict(), "reason": reason}
+                for group, reason in excluded
+            ],
             "near": [p.as_dict() for p in pairs],
         }, indent=2))
         return 0
@@ -710,19 +1018,39 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{group.redundant_lines:>9}  {len(group.sites):>6}  "
                   f"{first.lines} lines each")
             for site in group.sites:
-                print(f"{'':>19}{site.path}:{site.line} {site.name}")
+                print(f"{'':>19}{site.path}:{site.line} {site.identity_name}")
         if len(groups) > len(shown):
             print(f"\n... and {len(groups) - len(shown)} more group(s); --top 0 for all.")
         total = sum(g.redundant_lines for g in groups)
         print(f"\nwreath-dup-scan: {len(groups)} group(s), {total} redundant line(s).")
+
+    if excluded:
+        print("\nintentional groups (exact site set)")
+        excluded_shown = excluded if args.top <= 0 else excluded[: args.top]
+        for group, reason in excluded_shown:
+            first = group.sites[0]
+            print(
+                f"{group.redundant_lines:>9}  {len(group.sites):>6}  "
+                f"{first.lines} lines at first site"
+            )
+            for site in group.sites:
+                print(f"{'':>19}{site.path}:{site.line} {site.identity_name}")
+            print(f"{'':>19}reason: {reason}")
+        if len(excluded) > len(excluded_shown):
+            print(
+                f"\n... and {len(excluded) - len(excluded_shown)} more intentional "
+                "group(s); --top 0 for all."
+            )
+        print(f"\nwreath-dup-scan: {len(excluded)} intentional group(s) filtered.")
 
     if args.near:
         near_shown = pairs if args.top <= 0 else pairs[: args.top]
         print(f"\nnear copies (>= {args.similarity:.2f} alike, not exact)")
         for pair in near_shown:
             print(f"{pair.similarity:>9.2f}  {pair.left.path}:{pair.left.line} "
-                  f"{pair.left.name}  <->  {pair.right.path}:{pair.right.line} "
-                  f"{pair.right.name}")
+                  f"{pair.left.identity_name}  <->  "
+                  f"{pair.right.path}:{pair.right.line} "
+                  f"{pair.right.identity_name}")
         if len(pairs) > len(near_shown):
             print(f"\n... and {len(pairs) - len(near_shown)} more pair(s); "
                   f"--top 0 for all.")

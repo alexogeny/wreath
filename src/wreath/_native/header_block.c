@@ -335,13 +335,15 @@ wreath_headers_view(
     return 0;
 }
 
-PyObject *
-wreath_headers_name_object(PyObject *headers, Py_ssize_t index)
+static inline PyObject *
+wreath_headers_item_object(PyObject *headers, Py_ssize_t index, int value)
 {
     if (wreath_headers_is_block(headers)) {
         WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
         if (self->materialized == NULL && self->object_mode &&
-            index >= 0 && index < self->count) return Py_NewRef(self->names[index]);
+            index >= 0 && index < self->count) {
+            return Py_NewRef(value ? self->values[index] : self->names[index]);
+        }
     }
     PyObject *list = wreath_headers_materialize(headers);
     if (list == NULL) return NULL;
@@ -350,29 +352,22 @@ wreath_headers_name_object(PyObject *headers, Py_ssize_t index)
         PyErr_SetString(PyExc_IndexError, "header index out of range");
         return NULL;
     }
-    PyObject *result = Py_NewRef(PyTuple_GET_ITEM(PyList_GET_ITEM(list, index), 0));
+    PyObject *result = Py_NewRef(
+        PyTuple_GET_ITEM(PyList_GET_ITEM(list, index), value));
     Py_DECREF(list);
     return result;
 }
 
 PyObject *
+wreath_headers_name_object(PyObject *headers, Py_ssize_t index)
+{
+    return wreath_headers_item_object(headers, index, 0);
+}
+
+PyObject *
 wreath_headers_value_object(PyObject *headers, Py_ssize_t index)
 {
-    if (wreath_headers_is_block(headers)) {
-        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
-        if (self->materialized == NULL && self->object_mode &&
-            index >= 0 && index < self->count) return Py_NewRef(self->values[index]);
-    }
-    PyObject *list = wreath_headers_materialize(headers);
-    if (list == NULL) return NULL;
-    if (index < 0 || index >= PyList_GET_SIZE(list)) {
-        Py_DECREF(list);
-        PyErr_SetString(PyExc_IndexError, "header index out of range");
-        return NULL;
-    }
-    PyObject *result = Py_NewRef(PyTuple_GET_ITEM(PyList_GET_ITEM(list, index), 1));
-    Py_DECREF(list);
-    return result;
+    return wreath_headers_item_object(headers, index, 1);
 }
 
 PyObject *

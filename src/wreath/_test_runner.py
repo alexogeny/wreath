@@ -1351,15 +1351,7 @@ def _has_xdist_distribution(arguments: list[str]) -> bool:
 
 
 def _resolve_workers(raw: str) -> int:
-    if raw == "auto":
-        return min(_MAX_AUTO_WORKERS, os.cpu_count() or 1)
-    try:
-        workers = int(raw)
-    except ValueError:
-        raise ValueError(f"--workers expects 'auto' or a positive integer, got {raw!r}") from None
-    if workers < 1:
-        raise ValueError("--workers must be at least 1")
-    return workers
+    return _resolve_worker_count(raw, option="--workers", auto_cap=_MAX_AUTO_WORKERS)
 
 
 def _mutation_arguments(namespace: Any) -> list[str]:
@@ -1405,16 +1397,21 @@ def _mutation_arguments(namespace: Any) -> list[str]:
 
 
 def _resolve_mutant_workers(raw: str) -> int:
+    return _resolve_worker_count(
+        raw, option="--mutant-workers", auto_cap=_MAX_AUTO_MUTANT_WORKERS
+    )
+
+
+def _resolve_worker_count(raw: str, *, option: str, auto_cap: int) -> int:
+    """Resolve one worker option through the shared positive/auto contract."""
     if raw == "auto":
-        return min(_MAX_AUTO_MUTANT_WORKERS, os.cpu_count() or 1)
+        return min(auto_cap, os.cpu_count() or 1)
     try:
         workers = int(raw)
     except ValueError:
-        raise ValueError(
-            f"--mutant-workers expects 'auto' or a positive integer, got {raw!r}"
-        ) from None
+        raise ValueError(f"{option} expects 'auto' or a positive integer, got {raw!r}") from None
     if workers < 1:
-        raise ValueError("--mutant-workers must be at least 1")
+        raise ValueError(f"{option} must be at least 1")
     return workers
 
 

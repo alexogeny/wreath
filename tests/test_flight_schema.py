@@ -70,6 +70,30 @@ def test_correlation_cell_round_trips_128_bit_trace() -> None:
     assert fs.CorrelationCell.decode(cell.encode()) == cell
 
 
+def test_client_facts_cell_round_trip_is_privacy_bounded() -> None:
+    cell = fs.ClientFactsCell(
+        request_id=42,
+        flags=(
+            fs.ClientFactFlag.UA_KNOWN
+            | fs.ClientFactFlag.BOT_CLAIMED
+            | fs.ClientFactFlag.AGENT_VERIFIED
+            | fs.ClientFactFlag.IP_KNOWN
+            | fs.ClientFactFlag.GEO_KNOWN
+        ),
+        user_agent_rule_id=17,
+        country="au",
+    )
+    encoded = cell.encode()
+    assert len(encoded) == fs.CELL_SIZE
+    assert b"ClaudeBot" not in encoded
+    assert fs.ClientFactsCell.decode(encoded) == fs.ClientFactsCell(
+        request_id=42,
+        flags=cell.flags,
+        user_agent_rule_id=17,
+        country="AU",
+    )
+
+
 def test_completion_decode_rejects_bad_input() -> None:
     good = fs.CompletionCell(1, 1, 1, 1, 1, 200, 0, 0).encode()
     with pytest.raises(fs.SchemaError):
@@ -452,6 +476,12 @@ def test_c_header_defines_match_python() -> None:
 
     assert flag("WREATH_NFR_FLAG_SAMPLED") == fs.FLAG_SAMPLED
     assert flag("WREATH_NFR_FLAG_HAS_CORRELATION") == fs.FLAG_HAS_CORRELATION
+    assert flag("WREATH_NFR_FLAG_HAS_CLIENT_FACTS") == fs.FLAG_HAS_CLIENT_FACTS
+    assert flag("WREATH_NFR_FLAG_POLICY_REFUSED") == fs.FLAG_POLICY_REFUSED
+    assert (
+        flag("WREATH_NFR_FLAG_AI_SCRAPING_REFUSED")
+        == fs.FLAG_AI_SCRAPING_REFUSED
+    )
 
 
 def test_c_enums_match_python() -> None:
@@ -464,6 +494,7 @@ def test_c_enums_match_python() -> None:
 
     assert enum_value("WREATH_NFR_KIND_COMPLETION") == fs.EventKind.COMPLETION
     assert enum_value("WREATH_NFR_KIND_CORRELATION") == fs.EventKind.CORRELATION
+    assert enum_value("WREATH_NFR_KIND_CLIENT_FACTS") == fs.EventKind.CLIENT_FACTS
     assert enum_value("WREATH_NFR_KIND_CAPTURE") == fs.EventKind.CAPTURE
     assert enum_value("WREATH_NFR_MODE_FORENSIC") == fs.Mode.FORENSIC
     assert enum_value("WREATH_NFR_PROTO_HTTP3") == fs.Protocol.HTTP3

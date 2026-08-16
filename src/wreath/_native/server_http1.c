@@ -2244,6 +2244,20 @@ send_policy_reply(WreathHttpProtocol *self, int keep_alive,
 
 
 static int
+send_recorded_policy_reply(WreathHttpProtocol *self, int keep_alive,
+                           PyObject *headers, WreathPolicyReply *reply)
+{
+    uint64_t started_ns = wreath_flight_now_ns();
+    if (send_policy_reply(self, keep_alive, reply) < 0) return -1;
+    wreath_policy_record_completion(
+        flight_capi, self->nfr_worker, self->nfr_connection_id,
+        WREATH_NFR_PROTO_HTTP1, started_ns, wreath_flight_now_ns(), headers,
+        reply, self->nfr_bytes_in, self->nfr_bytes_out);
+    return 0;
+}
+
+
+static int
 begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *path,
                 PyObject *raw_path, PyObject *query_string, PyObject *headers)
 {
@@ -2526,11 +2540,12 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     }
     {
         int policy_result = wreath_policy_ingress(
-            &self->policy, &self->policy_state, method, self->scheme,
+            &self->policy, &self->policy_state, method, path, self->scheme,
             self->client_address, headers, &policy_reply);
         if (policy_result < 0) goto done;
         if (policy_result > 0) {
-            result = send_policy_reply(self, keep_alive, &policy_reply) < 0 ? -1 : 0;
+            result = send_recorded_policy_reply(
+                self, keep_alive, headers, &policy_reply) < 0 ? -1 : 0;
             goto done;
         }
     }
@@ -2539,7 +2554,8 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
             &self->policy, headers, &policy_reply);
         if (origin_result < 0) goto done;
         if (origin_result > 0) {
-            result = send_policy_reply(self, keep_alive, &policy_reply) < 0 ? -1 : 0;
+            result = send_recorded_policy_reply(
+                self, keep_alive, headers, &policy_reply) < 0 ? -1 : 0;
             goto done;
         }
         if (kind == 2 || length > 0 || send_continue) {

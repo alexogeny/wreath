@@ -2139,9 +2139,8 @@ transport_capi_check(PyObject *op)
 }
 
 static int
-transport_capi_write(PyObject *op, PyObject *data)
+transport_capi_finish_write(PyObject *op, PyObject *result)
 {
-    PyObject *result = st_write(op, data);
     if (result == NULL) {
         return -1;
     }
@@ -2154,18 +2153,15 @@ transport_capi_write(PyObject *op, PyObject *data)
 }
 
 static int
+transport_capi_write(PyObject *op, PyObject *data)
+{
+    return transport_capi_finish_write(op, st_write(op, data));
+}
+
+static int
 transport_capi_writelines(PyObject *op, PyObject *parts)
 {
-    PyObject *result = st_writelines(op, parts);
-    if (result == NULL) {
-        return -1;
-    }
-    Py_DECREF(result);
-    SocketTransport *transport = (SocketTransport *)op;
-    if (transport->metal == NULL || transport->metal->diagnostics) {
-        transport->direct_protocol_writes++;
-    }
-    return 0;
+    return transport_capi_finish_write(op, st_writelines(op, parts));
 }
 
 static PyObject *

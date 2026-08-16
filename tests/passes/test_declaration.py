@@ -188,8 +188,13 @@ def test_apply_needs_something_callable():
 
 
 def test_a_table_name_must_be_a_plain_identifier():
-    with pytest.raises(PassDeclarationError, match="plain SQL identifier"):
-        Table("replays; DROP TABLE treks")
+    for bad in ("replays; DROP TABLE treks", "Replays", "r" * 64):
+        with pytest.raises(PassDeclarationError, match="plain SQL identifier|63-byte"):
+            Table(bad)
+
+
+def test_a_table_name_uses_the_canonical_postgresql_vocabulary():
+    assert Table("replays$archive").sql == "replays$archive"
 
 
 def test_a_qualified_table_renders_both_parts_quoted():

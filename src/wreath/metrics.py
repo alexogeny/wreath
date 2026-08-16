@@ -37,7 +37,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from ._native import _core
 
-__all__ = ["Counters", "CounterSource", "collect", "flatten"]
+__all__ = [
+    "Counters",
+    "CounterSource",
+    "SnapshotSource",
+    "collect",
+    "flatten",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,15 +54,24 @@ class Counters:
     (`"work"`) — a deployment runs several queues and several buses, and a
     reading that cannot say which is a reading nobody can act on.
 
-    Values are plain `int`. A counter that only rises and a gauge that moves
-    both fit, and the distinction belongs to whatever renders them: Prometheus
-    wants it, StatsD does not, and encoding it here would make this module
-    care about an exposition format.
+    Values are plain `int`. Names in `gauges` may move both ways; every other
+    value is a monotonic counter. Keeping that semantic distinction here lets a
+    delta-oriented sink avoid turning a falling gauge into a negative event
+    without coupling this module to any exposition format.
     """
 
     subsystem: str
     instance: str
     values: Mapping[str, int]
+    gauges: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        unknown = self.gauges.difference(self.values)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(
+                f"Counters gauges must name values in the same reading; unknown: {names}"
+            )
 
     def prefixed(self, namespace: str = "wreath") -> dict[str, int]:
         """`{namespace}_{subsystem}_{name}` for every value.
@@ -82,6 +97,43 @@ class CounterSource(Protocol):
         ...
 
 
+@runtime_checkable
+class SnapshotSource(Protocol):
+    """The aggregate source every Flight metrics renderer layers over."""
+
+    def snapshot(self) -> Any:
+        """A consistent projector snapshot."""
+        ...
+
+
+def _snapshot_source(source: Any, *, bridge: str) -> SnapshotSource:
+    """Validate the shared renderer source once, at bridge construction."""
+    if not callable(getattr(source, "snapshot", None)):
+        raise TypeError(f"{bridge} source must expose snapshot()")
+    return source
+
+
+def _read_snapshot(source: SnapshotSource) -> tuple[Any, Any]:
+    """Read the projector state and its optional recorder-loss companion."""
+    snapshot = source.snapshot()
+    loss = getattr(source, "recorder_loss", None)
+    return snapshot, loss() if callable(loss) else None
+
+
+def _counter_sources(
+    sources: Iterable[Any], *, bridge: str
+) -> tuple[Any, ...]:
+    """Validate explicit sources once, where a bridge is configured."""
+    explicit = tuple(sources)
+    for index, source in enumerate(explicit):
+        report = getattr(source, "counters", None)
+        if not callable(report):
+            raise TypeError(
+                f"{bridge} counter source {index} must expose counters()"
+            )
+    return explicit
+
+
 def _holders(app: Any) -> list[Any]:
     """Every registered object that might count something.
 
@@ -91,32 +143,32 @@ def _holders(app: Any) -> list[Any]:
     reach an application that way rather than through a registry of their own —
     the same reason the schema walk reaches them.
     """
-    holders: list[Any] = []
-    for attribute in (
-        "_job_runners", "_message_buses", "_entity_registries",
-        "_webhook_hubs", "_series_stores", "_http_clients", "_databases",
-    ):
-        registry = getattr(app, attribute, None)
-        if isinstance(registry, Mapping):
-            holders.extend(registry.values())
-    for attribute in ("_global_middleware", "_middleware"):
-        # The middleware registries hold `(priority, order, middleware)`.
-        for item in getattr(app, attribute, ()) or ():
-            holders.append(item[2] if isinstance(item, tuple) and len(item) > 2 else item)
-    return holders
+    registered = getattr(app, "_registered_holders", None)
+    if not callable(registered):
+        raise TypeError(
+            "metrics app must expose _registered_holders(); pass counter_sources="
+            " for standalone sources"
+        )
+    return list(registered())
 
 
-def collect(app: Any) -> tuple[Counters, ...]:
-    """Every registered subsystem's counters, in registration order.
+def collect(
+    app: Any = None, counter_sources: Iterable[Any] = ()
+) -> tuple[Counters, ...]:
+    """Every registered or explicit subsystem's counters, in declaration order.
 
     A holder that raises is skipped rather than failing the scrape: a metrics
     read must not be able to take down the thing it is measuring, and one
     subsystem's bug must not blank every other subsystem's numbers. The
-    omission is visible — that instance simply has no row.
+    omission is visible in the application's `metrics_collection_errors` or
+    `metrics_invalid_sources` counter. `counter_sources` is the canonical
+    layering seam used by Prometheus, OpenMetrics and StatsD; bridges do not
+    maintain their own collection policy.
     """
     readings: list[Counters] = []
     seen: set[tuple[str, str]] = set()
-    for holder in _holders(app):
+    holders = [*_holders(app), *counter_sources] if app is not None else list(counter_sources)
+    for holder in holders:
         for candidate in (holder, *getattr(holder, "counter_sources", ())):
             report = getattr(candidate, "counters", None)
             if report is None or not callable(report):
@@ -124,8 +176,12 @@ def collect(app: Any) -> tuple[Counters, ...]:
             try:
                 reading = report()
             except Exception:  # noqa: BLE001 - see the docstring
+                if app is not None:
+                    app.metrics_collection_errors += 1
                 continue
             if not isinstance(reading, Counters):
+                if app is not None:
+                    app.metrics_invalid_sources += 1
                 continue
             key = (reading.subsystem, reading.instance)
             if key in seen:

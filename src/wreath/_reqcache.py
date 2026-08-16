@@ -28,7 +28,9 @@ whether a coordinate reaches a caller entitled to none.
 
 Slots are the caller's to choose and are not namespaced here -- they are private
 attribute names on a per-request namespace, and the modules that use them
-already derive stable ones.
+already derive stable ones. A logical value with several providers uses the
+keyed variants, which keep the same absence and `None` rules without making
+each subsystem rebuild a provider-to-value dictionary.
 """
 
 from __future__ import annotations
@@ -86,4 +88,53 @@ async def resolve_once_async[T](
     return resolved
 
 
-__all__ = ["resolve_once", "resolve_once_async"]
+def resolve_keyed_once[K, T](
+    request: Any,
+    slot: str,
+    key: K,
+    resolve: Callable[[], T],
+) -> T:
+    """Resolve one key in a request-local dictionary at most once."""
+    state = request.state
+    cache = state.get(slot, _MISSING)
+    if cache is not _MISSING:
+        if not isinstance(cache, dict):
+            raise TypeError(f"request.state.{slot} must be a keyed request cache")
+        if key in cache:
+            return cast(T, cache[key])
+    resolved = resolve()
+    if cache is _MISSING:
+        cache = {}
+        state.__setattr__(slot, cache)
+    cache[key] = resolved
+    return resolved
+
+
+async def resolve_keyed_once_async[K, T](
+    request: Any,
+    slot: str,
+    key: K,
+    resolve: Callable[[], Awaitable[T]],
+) -> T:
+    """`resolve_keyed_once` for a resolver that must await."""
+    state = request.state
+    cache = state.get(slot, _MISSING)
+    if cache is not _MISSING:
+        if not isinstance(cache, dict):
+            raise TypeError(f"request.state.{slot} must be a keyed request cache")
+        if key in cache:
+            return cast(T, cache[key])
+    resolved = await resolve()
+    if cache is _MISSING:
+        cache = {}
+        state.__setattr__(slot, cache)
+    cache[key] = resolved
+    return resolved
+
+
+__all__ = [
+    "resolve_keyed_once",
+    "resolve_keyed_once_async",
+    "resolve_once",
+    "resolve_once_async",
+]

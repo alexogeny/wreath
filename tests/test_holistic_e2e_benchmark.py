@@ -84,16 +84,22 @@ async def _drive_http2(app: Any, name: str) -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 async def test_holistic_target_reaches_template_egress(monkeypatch: Any) -> None:
     monkeypatch.setattr(holistic_e2e, "_e2e_ensure", _dependencies)
-    async with TestClient(holistic_e2e.app) as client:
-        response = await _request(client, "dashboard")
+    async with TestClient(holistic_e2e.app):
+        sent = await _drive_http2(holistic_e2e.app, "dashboard")
 
-    assert response.status == 200
-    headers = dict(response.headers)
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    assert start["status"] == 200
+    headers = dict(start["headers"])
     assert headers[b"content-type"] == b"text/html; charset=utf-8"
     assert headers[b"content-encoding"] == b"zstd"
     assert headers[b"cache-control"] == b"private, no-store"
     assert b"wreath_state=" in headers[b"set-cookie"]
-    body = zstd.decompress(response.body)
+    compressed = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    body = zstd.decompress(compressed)
     assert b"Quarterly &lt;report&gt;" in body
     assert b"holistic-user / 42" in body
     assert b"POST:/v1/holistic/42" in body
@@ -109,6 +115,9 @@ async def test_holistic_target_reaches_template_egress(monkeypatch: Any) -> None
     assert b'data-protobuf="' in body
     assert b'data-msgpack="' in body
     assert b'data-metrics="5"' in body
+    assert b'data-client-country="US"' in body
+    assert b'data-client-agent="Chrome"' in body
+    assert b'data-client-bot="false"' in body
     assert b"<svg" in body and b'<path d="M' in body
     assert b'data-distance="732"' in body
 
@@ -176,8 +185,25 @@ async def test_additional_declarative_http_arms_are_real_success_paths(
     assert b'"status":"ready"' in readiness.body
     assert metrics.status == 200
     assert b"wreath_holistic_http_requests_total" in metrics.body
+    assert b"wreath_holistic_client_facts_geo_known" in metrics.body
     assert openapi.status == 200
     assert b'"/v1/sync/accounts/mine"' in openapi.body
+
+
+@pytest.mark.asyncio
+async def test_holistic_ai_policy_measures_selective_admission_and_refusal(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(holistic_e2e, "_e2e_ensure", _dependencies)
+    async with TestClient(holistic_e2e.app) as client:
+        admitted = await _request(client, "ai-search-opt-in")
+        refused = await _request(client, "ai-scraper-refusal")
+        metrics = await _request(client, "metrics")
+
+    assert admitted.status == 200
+    assert refused.status == 403
+    assert b'"detail":"AI scraper traffic is disabled by default"' in refused.body
+    assert b"wreath_holistic_ai_scraping_policy_refused" in metrics.body
 
 
 @pytest.mark.asyncio

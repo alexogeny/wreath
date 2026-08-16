@@ -3,23 +3,26 @@
 
 #include <Python.h>
 #include <stdint.h>
+#include "flight.h"
 #include "header_block.h"
+#include "wreathcore.h"
 
 /* Frozen descriptor indexes; mirrored by policy.HttpPolicy._freeze_native. */
 enum {
     WREATH_POLICY_TAG = 0,
     WREATH_POLICY_PROXY = 1,
     WREATH_POLICY_TRUSTED_HOST = 2,
-    WREATH_POLICY_RATE = 3,
-    WREATH_POLICY_REQUEST_ID = 4,
-    WREATH_POLICY_TIMING = 5,
-    WREATH_POLICY_CORS = 6,
-    WREATH_POLICY_CSRF = 7,
-    WREATH_POLICY_SECURITY = 8,
-    WREATH_POLICY_WEBSOCKET_ORIGIN = 9,
-    WREATH_POLICY_CACHE = 10,
-    WREATH_POLICY_COMPRESSION = 11,
-    WREATH_POLICY_SIZE = 12,
+    WREATH_POLICY_AI_SCRAPING = 3,
+    WREATH_POLICY_RATE = 4,
+    WREATH_POLICY_REQUEST_ID = 5,
+    WREATH_POLICY_TIMING = 6,
+    WREATH_POLICY_CORS = 7,
+    WREATH_POLICY_CSRF = 8,
+    WREATH_POLICY_SECURITY = 9,
+    WREATH_POLICY_WEBSOCKET_ORIGIN = 10,
+    WREATH_POLICY_CACHE = 11,
+    WREATH_POLICY_COMPRESSION = 12,
+    WREATH_POLICY_SIZE = 13,
 };
 
 enum {
@@ -35,6 +38,7 @@ enum {
 
 typedef struct {
     PyObject *descriptor;  /* owned immutable tuple, NULL means no native policy */
+    const WreathCoreCAPI *core; /* borrowed immutable capsule table */
     unsigned char response_transform;
 } WreathPolicyProgram;
 
@@ -57,6 +61,7 @@ typedef struct {
 
 typedef struct {
     int status;
+    uint16_t flight_flags;
     PyObject *headers; /* owned list */
     PyObject *body;    /* owned bytes */
 } WreathPolicyReply;
@@ -66,11 +71,18 @@ void wreath_policy_program_clear(WreathPolicyProgram *);
 void wreath_policy_state_init(WreathPolicyState *);
 void wreath_policy_state_clear(WreathPolicyState *);
 void wreath_policy_reply_clear(WreathPolicyReply *);
+void wreath_policy_record_completion(const WreathFlightCAPI *, wreath_nfr_worker *,
+                                     uint64_t connection_id, uint8_t protocol,
+                                     uint64_t start_ns, uint64_t end_ns,
+                                     PyObject *headers,
+                                     const WreathPolicyReply *, uint64_t bytes_in,
+                                     uint64_t bytes_out);
 
 /* 0 continues into the framework, 1 supplies a complete reply, -1 is error. */
 int wreath_policy_ingress(WreathPolicyProgram *, WreathPolicyState *,
-                          PyObject *method, PyObject *scheme, PyObject *client,
-                          PyObject *headers, WreathPolicyReply *reply);
+                          PyObject *method, PyObject *path, PyObject *scheme,
+                          PyObject *client, PyObject *headers,
+                          WreathPolicyReply *reply);
 
 /* Mutates the response header list in C immediately before serialization. */
 int wreath_policy_egress(WreathPolicyProgram *, WreathPolicyState *,

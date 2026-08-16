@@ -129,11 +129,12 @@ request will examine (`max_filter_scan`, refused with `tooMany` over the
 ceiling). A filter is the one place a directory hands your process a program to
 run.
 
-## What is not implemented
+## Sorting and what is not implemented
 
-Sorting, bulk operations and `ETag` versions. `ServiceProviderConfig` reports all
-three as unsupported, and a request that sorts anyway is answered 501 rather than
-silently in an arbitrary order.
+`sortBy` and `sortOrder` work for published top-level attributes and are applied
+before paging. Unsupported attributes and orders are refused rather than
+silently ignored. Bulk operations and `ETag` versions remain absent;
+`ServiceProviderConfig` reports both as unsupported.
 
 Reference: [`wreath.organizations`](../reference/organizations.md).
 Recipe: [Connect an identity provider over SCIM](../cookbook/recipes/scim-provisioning.md).

@@ -1045,22 +1045,6 @@ static PyMethodDef endpoint_methods[] = {
 };
 
 static int
-read_ssize(PyObject *config, const char *name, Py_ssize_t *out)
-{
-    PyObject *v = PyObject_GetAttrString(config, name);
-    if (v == NULL) {
-        return -1;
-    }
-    Py_ssize_t val = PyLong_AsSsize_t(v);
-    Py_DECREF(v);
-    if (val == -1 && PyErr_Occurred()) {
-        return -1;
-    }
-    *out = val;
-    return 0;
-}
-
-static int
 endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
 {
     WreathH3Endpoint *ep = (WreathH3Endpoint *)op;
@@ -1113,21 +1097,21 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     ep->reap_len = 0;
     ep->reap_cap = 0;
     ep->local_addrlen_store = 0;
-    if (read_ssize(config, "max_concurrent_streams", &ep->max_concurrent_streams) < 0 ||
-        read_ssize(config, "max_body_bytes", &ep->max_body_bytes) < 0 ||
-        read_ssize(config, "max_body_chunks", &ep->max_body_chunks) < 0 ||
-        read_ssize(config, "max_header_count", &ep->max_header_count) < 0 ||
-        read_ssize(config, "read_high_water", &ep->read_high_water) < 0 ||
-        read_ssize(config, "read_high_water_messages", &ep->read_high_water_messages) < 0 ||
-        read_ssize(config, "response_high_water", &ep->response_high_water) < 0 ||
-        read_ssize(config, "response_low_water", &ep->response_low_water) < 0 ||
-        read_ssize(config, "response_high_water_segments", &ep->response_high_water_segments) < 0 ||
-        read_ssize(config, "response_low_water_segments", &ep->response_low_water_segments) < 0 ||
-        read_ssize(config, "max_header_list_bytes", &ep->max_header_list_bytes) < 0 ||
-        read_ssize(config, "initial_stream_window", &ep->initial_stream_window) < 0 ||
-        read_ssize(config, "initial_connection_window", &ep->initial_connection_window) < 0 ||
-        read_ssize(config, "qpack_table_bytes", &ep->qpack_table_bytes) < 0 ||
-        read_ssize(config, "qpack_blocked_streams", &ep->qpack_blocked_streams) < 0) {
+    if (wreath_read_ssize_attr(config, "max_concurrent_streams", &ep->max_concurrent_streams) < 0 ||
+        wreath_read_ssize_attr(config, "max_body_bytes", &ep->max_body_bytes) < 0 ||
+        wreath_read_ssize_attr(config, "max_body_chunks", &ep->max_body_chunks) < 0 ||
+        wreath_read_ssize_attr(config, "max_header_count", &ep->max_header_count) < 0 ||
+        wreath_read_ssize_attr(config, "read_high_water", &ep->read_high_water) < 0 ||
+        wreath_read_ssize_attr(config, "read_high_water_messages", &ep->read_high_water_messages) < 0 ||
+        wreath_read_ssize_attr(config, "response_high_water", &ep->response_high_water) < 0 ||
+        wreath_read_ssize_attr(config, "response_low_water", &ep->response_low_water) < 0 ||
+        wreath_read_ssize_attr(config, "response_high_water_segments", &ep->response_high_water_segments) < 0 ||
+        wreath_read_ssize_attr(config, "response_low_water_segments", &ep->response_low_water_segments) < 0 ||
+        wreath_read_ssize_attr(config, "max_header_list_bytes", &ep->max_header_list_bytes) < 0 ||
+        wreath_read_ssize_attr(config, "initial_stream_window", &ep->initial_stream_window) < 0 ||
+        wreath_read_ssize_attr(config, "initial_connection_window", &ep->initial_connection_window) < 0 ||
+        wreath_read_ssize_attr(config, "qpack_table_bytes", &ep->qpack_table_bytes) < 0 ||
+        wreath_read_ssize_attr(config, "qpack_blocked_streams", &ep->qpack_blocked_streams) < 0) {
         return -1;
     }
 

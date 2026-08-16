@@ -577,16 +577,9 @@ class Ledger:
         reported, never structural -- the moment a count is load-bearing inside
         the primitive, a range source that counts no rows stops fitting.
         """
-        tag = await executor.execute(
-            f"UPDATE {self._table} SET cursor = $3::jsonb, units_done = units_done + 1, "
-            "last_advance = clock_timestamp(), last_error = NULL "
-            "WHERE name = $1 AND tenant = $2 AND cursor IS NOT DISTINCT FROM $4::jsonb",
-            self._name,
-            self._tenant,
-            _encode(cursor),
-            _encode(expected),
+        return await self._move_cursor(
+            executor, expected=expected, cursor=cursor, count=True
         )
-        return _affected(tag) == 1
 
     async def skip_to(self, executor: Any, *, expected: Any, cursor: Any) -> bool:
         """Move the cursor past a hole without counting the chunk as done.
@@ -595,9 +588,22 @@ class Ledger:
         of work completed, and letting it count would make the percentage claim
         progress the pass did not make.
         """
+        return await self._move_cursor(
+            executor, expected=expected, cursor=cursor, count=False
+        )
+
+    async def _move_cursor(
+        self, executor: Any, *, expected: Any, cursor: Any, count: bool
+    ) -> bool:
+        update = (
+            "cursor = $3::jsonb, units_done = units_done + 1, "
+            "last_advance = clock_timestamp(), last_error = NULL"
+            if count
+            else "cursor = $3::jsonb, last_advance = clock_timestamp()"
+        )
         tag = await executor.execute(
-            f"UPDATE {self._table} SET cursor = $3::jsonb, last_advance = clock_timestamp() "
-            "WHERE name = $1 AND tenant = $2 AND cursor IS NOT DISTINCT FROM $4::jsonb",
+            f"UPDATE {self._table} SET {update} WHERE name = $1 AND tenant = $2 "
+            "AND cursor IS NOT DISTINCT FROM $4::jsonb",
             self._name,
             self._tenant,
             _encode(cursor),

@@ -390,22 +390,21 @@ def read_step_recording(data: bytes) -> WorkflowStepRecord:
     leaves a file with no step in it and "this file holds no step recording"
     would send a reader looking for another file rather than at the truncation.
     """
-    decoded = read_recording(data)
-    if not decoded.clean:
-        raise SchemaError(
+    return _read_one_recording(
+        data,
+        field="steps",
+        truncated=(
             "workflow-step recording is truncated: the file has no footer, so the "
             "process died while writing it and the compensations it had not "
             "written yet cannot be counted"
-        )
-    if not decoded.steps:
-        raise SchemaError("this recording holds no workflow-step recording")
-    if len(decoded.steps) > 1:
-        raise SchemaError(
-            f"this recording holds {len(decoded.steps)} workflow-step recordings; "
-            "one file is one step, because step 3 of an instance is a different "
-            "execution from step 4 and a reader can only characterise one"
-        )
-    return decoded.steps[0]
+        ),
+        missing="this recording holds no workflow-step recording",
+        multiple=(
+            "this recording holds {count} workflow-step recordings; one file is "
+            "one step, because step 3 of an instance is a different execution from "
+            "step 4 and a reader can only characterise one"
+        ),
+    )
 
 
 def _text(value: str) -> bytes:
@@ -439,29 +438,46 @@ def read_attempt_recording(data: bytes) -> AttemptRecord:
     enumerate. A file with no footer, more than one attempt, or none at all is
     refused by name rather than reported as the thing it nearly is.
     """
-    decoded = read_recording(data)
-    # The tear is checked *first*, and the order is the diagnosis. A cut that
-    # lands inside the `ATMP` chunk leaves a file with no attempt in it, and
-    # reporting "this file holds no attempt recording" would send a reader
-    # looking for the wrong file rather than at the truncation in front of them.
-    if not decoded.clean:
-        raise SchemaError(
-            "attempt recording is truncated: the file has no footer, so the "
-            "process died while writing it and the boundaries it had not "
-            "written yet cannot be counted"
-        )
-    if not decoded.attempts:
-        raise SchemaError(
+    return _read_one_recording(
+        data,
+        field="attempts",
+        truncated=(
+            "attempt recording is truncated: the file has no footer, so the process "
+            "died while writing it and the boundaries it had not written yet cannot "
+            "be counted"
+        ),
+        missing=(
             "this recording holds no attempt recording; `wreath replay to-test` "
             "reads a job attempt from an `ATMP` record and this file has none"
-        )
-    if len(decoded.attempts) > 1:
-        raise SchemaError(
-            f"this recording holds {len(decoded.attempts)} attempt recordings; one "
-            "file is one attempt, because attempt 4 of a job is a different "
-            "execution from attempt 3 and a test can only characterise one"
-        )
-    return decoded.attempts[0]
+        ),
+        multiple=(
+            "this recording holds {count} attempt recordings; one file is one "
+            "attempt, because attempt 4 of a job is a different execution from "
+            "attempt 3 and a test can only characterise one"
+        ),
+    )
+
+
+def _read_one_recording(
+    data: bytes,
+    *,
+    field: str,
+    truncated: str,
+    missing: str,
+    multiple: str,
+) -> Any:
+    """Read one strict record after the shared footer/cardinality checks."""
+    decoded = read_recording(data)
+    # First by design: a tear inside the record also makes its collection empty,
+    # and "none" would diagnose the wrong file rather than the partial write.
+    if not decoded.clean:
+        raise SchemaError(truncated)
+    records = getattr(decoded, field)
+    if not records:
+        raise SchemaError(missing)
+    if len(records) > 1:
+        raise SchemaError(multiple.format(count=len(records)))
+    return records[0]
 
 
 class WFR1Writer:

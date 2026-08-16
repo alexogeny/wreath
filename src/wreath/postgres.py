@@ -211,6 +211,7 @@ class Pool:
         "_available", "_borrowed", "_config", "_connections",
         "_connector", "_drained", "_dsn", "_high_water", "_read_only",
         "_shared", "_started", "_statements", "_stopping", "_waiters",
+        "_active_waiters",
     )
 
     def __init__(
@@ -239,6 +240,7 @@ class Pool:
         # two lock round-trips per database request on the path whose whole
         # design goal is eliding frames.
         self._waiters: deque[asyncio.Future[Any]] = deque()
+        self._active_waiters: set[asyncio.Future[Any]] = set()
         self._drained: asyncio.Future[None] | None = None
         #: Share counts for connections lent out for batching, by identity.
         #: A connection appears here only while it has shared borrowers; an
@@ -280,6 +282,9 @@ class Pool:
                 "max_size": reading.max_size,
                 "queue_high_water": reading.queue_high_water,
             },
+            gauges=frozenset(
+                {"borrowed", "available", "waiters", "max_size", "queue_high_water"}
+            ),
         )
 
     def snapshot(self) -> PoolSnapshot:
@@ -287,7 +292,7 @@ class Pool:
         return PoolSnapshot(
             borrowed=len(self._borrowed),
             available=len(self._available),
-            waiters=len(self._waiters),
+            waiters=len(self._active_waiters),
             max_size=self._config.max_size,
             queue_high_water=self._high_water,
         )
@@ -396,7 +401,7 @@ class Pool:
                 self._borrowed.add(connection)
                 return connection
 
-            if len(self._waiters) >= self._config.max_queue:
+            if len(self._active_waiters) >= self._config.max_queue:
                 raise InterfaceError("PostgreSQL pool queue is full")
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -409,10 +414,11 @@ class Pool:
             # above without ever reaching here.
             waiter: asyncio.Future[Any] = loop.create_future()
             self._waiters.append(waiter)
+            self._active_waiters.add(waiter)
             # Recorded on the way in: a sampler polling `waiters` will usually
             # miss a queue that formed and drained between two polls, and that
             # queue is the whole signal.
-            self._high_water = max(self._high_water, len(self._waiters))
+            self._high_water = max(self._high_water, len(self._active_waiters))
             timer = loop.call_later(remaining, self._expire, waiter)
             try:
                 handed = await waiter
@@ -596,10 +602,12 @@ class Pool:
             )
 
     def _unqueue(self, waiter: asyncio.Future[Any]) -> None:
-        try:
-            self._waiters.remove(waiter)
-        except ValueError:
-            pass
+        self._active_waiters.discard(waiter)
+        if not self._active_waiters:
+            # Cancelled futures are tombstones in the FIFO. Clearing once when
+            # the last live waiter leaves makes cancellation O(1) each and the
+            # eventual cleanup O(total waiters), rather than O(waiters²).
+            self._waiters.clear()
 
     def _hand_off(self, connection: Any) -> bool:
         """Give a returned connection straight to the longest-waiting caller.
@@ -611,8 +619,9 @@ class Pool:
         """
         while self._waiters:
             waiter = self._waiters.popleft()
-            if waiter.done():
+            if waiter not in self._active_waiters:
                 continue
+            self._active_waiters.discard(waiter)
             self._borrowed.add(connection)
             waiter.set_result(connection)
             return True
@@ -622,7 +631,8 @@ class Pool:
         """Tell one queued caller that capacity freed, so it can open."""
         while self._waiters:
             waiter = self._waiters.popleft()
-            if not waiter.done():
+            if waiter in self._active_waiters:
+                self._active_waiters.discard(waiter)
                 waiter.set_result(None)
                 return
 
@@ -706,7 +716,8 @@ class Pool:
         # callers that are going to fail anyway.
         while self._waiters:
             waiter = self._waiters.popleft()
-            if not waiter.done():
+            if waiter in self._active_waiters:
+                self._active_waiters.discard(waiter)
                 waiter.set_exception(
                     InterfaceError("PostgreSQL pool is shutting down")
                 )
@@ -1165,6 +1176,9 @@ class Database:
             subsystem="pool",
             instance=self._name,
             values={**totals, "queue_high_water": high_water},
+            gauges=frozenset(
+                {"borrowed", "available", "waiters", "max_size", "queue_high_water"}
+            ),
         )
 
     def pool(self, workload: Workload) -> Pool:

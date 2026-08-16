@@ -30,19 +30,19 @@ Routes (any subset via `operations=`): `GET /` (paginated list),
 
 from __future__ import annotations
 
-import datetime
 import inspect
 import re
-import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ._auth.geofence import WITHHELD as _WITHHELD
 from ._auth.geofence import coarsen as _coarsen
 from ._auth.geofence import resolve_precision as _resolve_precision
-from .geospatial import Coordinate as _Coordinate
+from .binding import _jsonable_any as _jsonable
+from .pagination import DEFAULT_SIZE as _DEFAULT_PAGE_SIZE
+from .pagination import MAX_SIZE as _MAX_PAGE_SIZE
+from .pagination import _page_params as _parse_page_params
 from .response import JSONResponse, Response
 
 if TYPE_CHECKING:
@@ -276,8 +276,6 @@ SENSITIVE_FIELD = re.compile(
 )
 
 _DEFAULT_OPERATIONS = ("list", "retrieve", "create", "update", "delete")
-_DEFAULT_PAGE_SIZE = 20
-_MAX_PAGE_SIZE = 100
 
 
 def sensitive_fields(model: type) -> frozenset[str]:
@@ -304,23 +302,6 @@ def retrieval_fields(model: type) -> frozenset[str]:
         for name, item in _as_model(model).__wreath_column_map__.items()
         if _is_retrieval_type(item.pg_type)
     )
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
-        return value.isoformat()
-    if isinstance(value, (Decimal, uuid.UUID)):
-        return str(value)
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value).hex()
-    if isinstance(value, _Coordinate):
-        # Deferred to the type's own canonical REST form rather than spelled
-        # again here. `Coordinate.__jsonable__` is what the JSON encoder uses,
-        # so a route that serialises through CRUD and one that returns the
-        # value directly cannot disagree about the shape -- which they could
-        # while this branch built its own dict.
-        return value.__jsonable__()
-    return value
 
 
 def crud_router(
@@ -773,6 +754,14 @@ def _resource_fn(resource: Any) -> Any:
     return resource
 
 
+def _page_params(request: Any, default_size: int) -> tuple[int, int]:
+    """CRUD's compatibility view over the canonical bounded page parser."""
+    params = _parse_page_params(
+        request, default_size=default_size, max_size=_MAX_PAGE_SIZE
+    )
+    return params.page, params.size
+
+
 async def _object_ok(
     authorizer: Callable[..., Any], request: Any, op: str, instance: Any,
 ) -> bool:
@@ -782,26 +771,6 @@ async def _object_ok(
         result = await result
     allowed = getattr(result, "allowed", None)
     return bool(result) if allowed is None else bool(allowed)
-
-
-def _page_params(request: Any, default_size: int) -> tuple[int, int]:
-    from urllib.parse import parse_qs
-
-    from .pagination import MAX_PAGE
-
-    query = parse_qs(request.query_string.decode("latin-1"))
-    # Bounded above as well as below: `OFFSET (page-1)*size` makes the database
-    # walk every skipped row, so an unbounded page number is a scan on request.
-    page = min(MAX_PAGE, max(1, _as_int(query.get("page", ["1"])[0], 1)))
-    raw_size = _as_int(query.get("size", [str(default_size)])[0], default_size)
-    return page, min(_MAX_PAGE_SIZE, max(1, raw_size))
-
-
-def _as_int(value: str, fallback: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return fallback
 
 
 def _not_found() -> Response:

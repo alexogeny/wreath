@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from wreath import Wreath
+from wreath._native import _core
 from wreath.auth import authenticated
 from wreath.signatures import (
     PaymentRequired,
@@ -81,11 +82,19 @@ def test_a_parameterised_path_is_reduced_to_its_static_prefix():
 def test_robots_txt_lists_disallow_before_allow():
     body = robots_txt(sample_app(), sitemap="https://x/sitemap.xml", crawl_delay=5)
     lines = body.splitlines()
-    assert lines[0] == "User-agent: *"
+    assert "User-agent: gptbot" in lines
+    assert lines.index("User-agent: gptbot") < lines.index("User-agent: *")
+    assert lines.index("Disallow: /") < lines.index("User-agent: *")
     assert lines.index("Disallow: /admin/users") < lines.index("Allow: /")
     assert "Crawl-delay: 5" in lines
     assert "Sitemap: https://x/sitemap.xml" in lines
     assert body.endswith("\n")
+
+
+def test_robots_txt_reflects_ai_scraping_opt_in() -> None:
+    body = robots_txt(Wreath(ai_scraping="allow"))
+    assert "User-agent: gptbot" not in body
+    assert body.startswith("User-agent: *\n")
 
 
 def test_disallow_collapses_to_covering_prefixes():
@@ -104,6 +113,35 @@ def test_disallow_collapses_to_covering_prefixes():
         return {}
 
     assert robots_disallow(app) == ("/admin/a",)
+
+
+def test_native_prefix_reduction_agrees_with_an_independent_definition() -> None:
+    """The native sort/walk is checked against ordinary Python prefix semantics."""
+    paths = tuple(
+        reversed(
+            [
+                *(f"/private/{index:04x}" for index in range(1024)),
+                "/private/0001/child",
+                "/private/0001",
+                "/π",
+                "/π/child",
+                "/z",
+            ]
+        )
+    )
+    expected: list[str] = []
+    for path in sorted(paths):
+        if not any(path.startswith(prefix) for prefix in expected):
+            expected.append(path)
+
+    assert _core.minimal_prefixes(paths) == tuple(expected)
+
+
+def test_native_prefix_reduction_accepts_an_iterable() -> None:
+    assert _core.minimal_prefixes(iter(("/api", "/api/private", "/z"))) == (
+        "/api",
+        "/z",
+    )
 
 
 def test_a_path_with_any_protected_method_is_not_advertised_open():

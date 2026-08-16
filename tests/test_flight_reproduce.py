@@ -22,6 +22,7 @@ import sys
 import pytest
 
 import wreath
+import wreath.errors  # register framework sites in both parent and crash child
 from wreath import logging as log
 from wreath.recording import read_ring_file
 from wreath.replay import ReplayError, record_transport_segments, reproduce_from_ring

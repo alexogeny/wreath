@@ -1,4 +1,4 @@
-"""`wreath port` codemod internals (Phase 0: static analysis + report).
+"""`wreath port` codemod internals: analysis, emission, and verification.
 
 Pure-stdlib and import-light: nothing here imports the `wreath` package or the
 native `_core`, so the analyzer runs standalone (design 07's "never import the
@@ -18,6 +18,14 @@ from .inventory import (
     inventory_projects,
 )
 from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED, Finding, Report, SkippedFile
+from .verify import (
+    Difference,
+    RequestCase,
+    ResponseSnapshot,
+    VerificationReport,
+    load_cases,
+    verify_apps,
+)
 
 __all__ = [
     "analyze",
@@ -37,4 +45,10 @@ __all__ = [
     "ProjectReport",
     "RouteContract",
     "inventory_projects",
+    "Difference",
+    "RequestCase",
+    "ResponseSnapshot",
+    "VerificationReport",
+    "load_cases",
+    "verify_apps",
 ]

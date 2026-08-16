@@ -43,7 +43,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from .._pgname import validate_unquoted_identifier
+
 _SQL_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_ ]*$")
 
 #: Column defaults the registry can prove assign values in increasing order, so
@@ -134,10 +135,9 @@ class Key:
     descending: bool = False
 
     def __post_init__(self) -> None:
-        if not _IDENTIFIER.fullmatch(self.name):
-            raise PassDeclarationError(
-                f"key column {self.name!r} must be a plain SQL identifier"
-            )
+        validate_unquoted_identifier(
+            self.name, "key column", error=PassDeclarationError
+        )
         if not _SQL_TYPE.fullmatch(self.type):
             raise PassDeclarationError(
                 f"key column {self.name!r} has type {self.type!r}, which is not a "

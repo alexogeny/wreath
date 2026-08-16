@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.telemetry import SpanContextView, activate_otel, current_span, server_span
+from wreath.client_facts import ClientFacts, IPFacts, UserAgentFacts
+from wreath.telemetry import (
+    SpanContextView,
+    activate_otel,
+    annotate_otel,
+    current_span,
+    server_span,
+)
 
 _VALID = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
@@ -105,3 +112,23 @@ def test_activate_otel_unpropagated_returns_empty_view() -> None:
     result = activate_otel(FakeRequest())
     assert isinstance(result, SpanContextView)
     assert not result.is_valid
+
+
+def test_annotate_otel_projects_bounded_client_fact_attributes() -> None:
+    class Span:
+        attributes: dict[str, str | bool]
+
+        def set_attributes(self, attributes: dict[str, str | bool]) -> None:
+            self.attributes = attributes
+
+    span = Span()
+    facts = ClientFacts(
+        ip=IPFacts("2001:db8::1", "socket", 6, False, True, False),
+        user_agent=UserAgentFacts("secret", browser="Firefox", bot=False),
+    )
+    annotate_otel(span, facts)
+    assert span.attributes == {
+        "user_agent.name": "Firefox",
+        "network.type": "ipv6",
+        "wreath.client.address_source": "socket",
+    }

@@ -22,6 +22,7 @@ from ..geospatial import Coordinate
 from ..pagination import Page
 from ..response import FileResponse, PreparedResponse, Response, StreamingResponse
 from ..temporal import Instant
+from ._names import pascal as _pascal
 from .model import (
     BOOLEAN,
     DATE,
@@ -79,22 +80,6 @@ _JS_KEYWORDS = frozenset(
         "await", "async",
     }
 )
-
-
-def _pascal(text: str) -> str:
-    """`"get_item"` -> `"GetItem"`. The one spelling for the whole layer.
-
-    Separators are word breaks, so a name made entirely of them has no words to
-    capitalize. Returning `""` there would emit a nameless
-    `export interface  {`, so the original is kept instead -- which is also
-    what `wreath.typegen.typescript_renderer._pascal` does, and the two must agree: the
-    planner declares the parameter interface and the renderer references it, each
-    deriving the name from the operation id independently.
-    """
-    parts = [part for part in text.replace("-", "_").split("_") if part]
-    if not parts:
-        return text
-    return "".join(part[:1].upper() + part[1:] for part in parts)
 
 
 def derive_operation_id(method: str, path: str) -> str:

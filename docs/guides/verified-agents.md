@@ -185,10 +185,22 @@ server already use for *does this endpoint ask anything of the caller*. Put
 second file to remember. A path with parameters is reduced to its static prefix,
 because `robots.txt` has no notion of `{slug}`.
 
+The generated document also mirrors `AIScrapingPolicy`: a default application
+puts every blocked autonomous AI product in a specific `Disallow: /` group,
+while an all-scraper or named opt-in removes the corresponding declarations.
+Wreath permits those products to fetch `GET` or `HEAD /robots.txt`; it does not
+make the common mistake of returning a policy refusal before the crawler can
+read the policy.
+
 Be clear-eyed about what these are: **honour-system controls**. A crawler that
 ignores your `robots.txt` is not stopped by it. Their value here is that they
 cannot go stale. The enforced half of the story is the signature check above and
-the policy behind it.
+the policy behind it. Even that enforced default recognizes declared product
+tokens, not intent: a generic-browser User-Agent can be a person or an
+undeclared scraper. Web Bot Auth proves who a signed agent is; it cannot prove
+that an unsigned request is human. Authenticate valuable content, rate-limit
+anonymous work, and use edge bot management when browser/network behavior is in
+the threat model.
 
 ## Asking for payment instead of saying no
 

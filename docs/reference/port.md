@@ -1,8 +1,9 @@
 # `wreath.port`
 
-The `wreath port` FastAPI-to-wreath codemod: static analysis, translation, and
-the migration report. `inventory_projects` preserves source ownership while it
-inventories routes, access declarations, generic policy candidates, Python 3.14
-dependencies, and explicitly retired pre-baseline migrations.
+The `wreath port` application codemod: static analysis, whole-tree translation,
+migration inventory, and explicit behavioural comparison. Analysis and
+emission never import the source application; `wreath port --verify` is the
+separate runtime step that intentionally imports two ASGI targets and drives the
+same declared request corpus through both.
 
 ::: wreath.port

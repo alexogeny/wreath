@@ -137,7 +137,7 @@ async def test_the_service_provider_config_describes_this_implementation() -> No
         body = (await client.get("/scim/v2/ServiceProviderConfig", headers=AUTH)).json()
     assert body["patch"]["supported"] is True
     assert body["filter"]["supported"] is True
-    assert body["sort"]["supported"] is False
+    assert body["sort"]["supported"] is True
     assert body["bulk"]["supported"] is False
     assert body["etag"]["supported"] is False
     assert body["authenticationSchemes"][0]["type"] == "oauthbearertoken"
@@ -580,16 +580,45 @@ async def test_a_filtered_list_refuses_an_organisation_over_the_scan_ceiling() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("collection", ["Users", "Groups"])
-async def test_a_sort_request_is_refused_rather_than_answered_in_any_order(
-    collection: str,
-) -> None:
+async def test_users_are_sorted_before_the_page_is_selected() -> None:
+    async with directory().client() as client:
+        for name in ("charlie@example.com", "alice@example.com", "bob@example.com"):
+            await provision(client, name)
+        response = await client.get(
+            "/scim/v2/Users?sortBy=userName&sortOrder=descending&startIndex=2&count=1",
+            headers=AUTH,
+        )
+    assert response.status == 200
+    assert [row["userName"] for row in response.json()["Resources"]] == [
+        "bob@example.com"
+    ]
+
+
+async def test_groups_can_be_sorted_by_display_name() -> None:
     async with directory().client() as client:
         response = await client.get(
-            f"/scim/v2/{collection}?sortBy=displayName", headers=AUTH
+            "/scim/v2/Groups?sortBy=displayName&sortOrder=descending", headers=AUTH
         )
-    assert response.status == 501
-    assert "does not implement sorting" in response.json()["detail"]
+    assert response.status == 200
+    assert [row["displayName"] for row in response.json()["Resources"]] == [
+        "member",
+        "billing",
+        "admin",
+    ]
+
+
+async def test_sorting_refuses_an_unknown_attribute_and_order() -> None:
+    async with directory().client() as client:
+        attribute = await client.get(
+            "/scim/v2/Users?sortBy=displayName", headers=AUTH
+        )
+        order = await client.get(
+            "/scim/v2/Users?sortBy=userName&sortOrder=sideways", headers=AUTH
+        )
+    assert attribute.status == 400
+    assert attribute.json()["scimType"] == "invalidValue"
+    assert order.status == 400
+    assert "ascending" in order.json()["detail"]
 
 
 @pytest.mark.asyncio

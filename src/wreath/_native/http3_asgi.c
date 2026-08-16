@@ -1296,31 +1296,34 @@ start_request(WreathH3Stream *s)
             policy_headers = PyObject_GetAttrString(scope, "headers");
         }
         PyObject *policy_method = PyObject_GetAttrString(scope, "method");
+        PyObject *policy_path = PyObject_GetAttrString(scope, "path");
         PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
         PyObject *policy_client = PyObject_GetAttrString(scope, "client");
         WreathPolicyReply reply = {0};
-        if (policy_headers == NULL || policy_method == NULL ||
+        if (policy_headers == NULL || policy_method == NULL || policy_path == NULL ||
             policy_scheme == NULL || policy_client == NULL) {
             Py_XDECREF(policy_headers);
             Py_XDECREF(policy_method);
+            Py_XDECREF(policy_path);
             Py_XDECREF(policy_scheme);
             Py_XDECREF(policy_client);
             return -1;
         }
         int policy_result = wreath_policy_ingress(
-            &c->endpoint->policy, &s->policy_state, policy_method,
+            &c->endpoint->policy, &s->policy_state, policy_method, policy_path,
             policy_scheme, policy_client, policy_headers, &reply);
-        Py_DECREF(policy_headers);
-        policy_headers = NULL;
         Py_DECREF(policy_method);
+        Py_DECREF(policy_path);
         Py_DECREF(policy_scheme);
         Py_DECREF(policy_client);
         if (policy_result < 0) {
+            Py_CLEAR(policy_headers);
             wreath_policy_reply_clear(&reply);
             return -1;
         }
         wreath_h3_request_capi->set_policy(scope, &s->policy_state);
         if (policy_result > 0) {
+            uint64_t refusal_started_ns = wreath_h3_timestamp();
             PyObject *status = PyLong_FromLong(reply.status);
             PyObject *started = status != NULL
                 ? h3_response_start(s, status, reply.headers) : NULL;
@@ -1328,9 +1331,19 @@ start_request(WreathH3Stream *s)
             PyObject *finished = started != NULL
                 ? h3_response_body(s, reply.body, 0) : NULL;
             Py_XDECREF(started);
-            wreath_policy_reply_clear(&reply);
-            if (finished == NULL) return -1;
+            if (finished == NULL) {
+                Py_CLEAR(policy_headers);
+                wreath_policy_reply_clear(&reply);
+                return -1;
+            }
+            wreath_policy_record_completion(
+                wreath_h3_flight_capi, c->endpoint->nfr_worker,
+                c->nfr_connection_id, WREATH_NFR_PROTO_HTTP3,
+                refusal_started_ns, wreath_h3_timestamp(), policy_headers,
+                &reply, 0, (uint64_t)PyBytes_GET_SIZE(reply.body));
             Py_DECREF(finished);
+            wreath_policy_reply_clear(&reply);
+            Py_CLEAR(policy_headers);
             return 0;
         }
         wreath_policy_reply_clear(&reply);

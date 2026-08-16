@@ -95,7 +95,7 @@ object is not left with a hole.
     database: `SELECT search::text FROM documents`.
 
     For the same reason it does not appear in a [generated CRUD](crud.md)
-    response — a hex blob derived from columns already in the same payload — nor
+    response — base64 text derived from columns already in the same payload — nor
     in [pagination](pagination.md)'s default sort allow-list. `expose=("search",)`
     puts it back in a response; nothing makes it writable, because nothing can.
 

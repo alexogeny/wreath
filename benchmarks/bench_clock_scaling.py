@@ -41,7 +41,7 @@ Arms are cumulative, so each adjacent difference is one layer:
     params      + a path parameter to extract
     bound       + typed parameter binding
     validated   + a return annotation, so the response is validated
-    policy      + the seven first-class native HTTP controls
+    policy      + the eight first-class native HTTP controls
 
 ## Running it
 
@@ -429,7 +429,12 @@ def _policy(tick: Any) -> tuple[Wreath, bytes]:
         policy_from_components,
     )
 
-    app = Wreath(http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES]))
+    app = Wreath(
+        http_policy=policy_from_components(
+            [factory() for factory in POLICY_FACTORIES]
+        ),
+        ai_scraping="allow",
+    )
     body = Response(_BODY)
 
     @app.get("/plain")
@@ -449,7 +454,10 @@ def _policy_subset(index: int) -> Any:
             policy_from_components,
         )
 
-        app = Wreath(http_policy=policy_from_components([POLICY_FACTORIES[index]()]))
+        app = Wreath(
+            http_policy=policy_from_components([POLICY_FACTORIES[index]()]),
+            ai_scraping="allow",
+        )
         body = Response(_BODY)
 
         @app.get("/plain")
@@ -477,7 +485,10 @@ def _policy_prefix(count: int) -> Any:
         )
 
         components = [factory() for factory in POLICY_FACTORIES[:count]]
-        app = Wreath(http_policy=policy_from_components(components))
+        app = Wreath(
+            http_policy=policy_from_components(components),
+            ai_scraping="allow",
+        )
         body = Response(_BODY)
 
         @app.get("/plain")
@@ -494,7 +505,7 @@ def _policy_empty(tick: Any) -> tuple[Wreath, bytes]:
     """The fixed native policy-program dispatch with no configured controls."""
     from wreath.policy import HttpPolicy
 
-    app = Wreath(http_policy=HttpPolicy())
+    app = Wreath(http_policy=HttpPolicy(), ai_scraping="allow")
     body = Response(_BODY)
 
     @app.get("/plain")
@@ -507,7 +518,7 @@ def _policy_empty(tick: Any) -> tuple[Wreath, bytes]:
 
 def _policy_csrf_fetch(tick: Any) -> tuple[Wreath, bytes]:
     """CSRF's modern-browser fast path, settled by Fetch Metadata."""
-    app, raw = _policy_subset(3)(tick)
+    app, raw = _policy_subset(4)(tick)
     return app, raw[:-2] + b"sec-fetch-site: same-origin\r\n\r\n"
 
 
@@ -858,13 +869,14 @@ ARMS: dict[str, Any] = {
     "policy-empty": _policy_empty,
     "policy": _policy,
     "policy-proxy": _policy_subset(0),
-    "policy-rate": _policy_subset(1),
-    "policy-cors": _policy_subset(2),
-    "policy-csrf": _policy_subset(3),
+    "policy-ai": _policy_subset(1),
+    "policy-rate": _policy_subset(2),
+    "policy-cors": _policy_subset(3),
+    "policy-csrf": _policy_subset(4),
     "policy-csrf-fetch": _policy_csrf_fetch,
-    "policy-security": _policy_subset(4),
-    "policy-request-id": _policy_subset(5),
-    "policy-timing": _policy_subset(6),
+    "policy-security": _policy_subset(5),
+    "policy-request-id": _policy_subset(6),
+    "policy-timing": _policy_subset(7),
     "policy-prefix-1": _policy_prefix(1),
     "policy-prefix-2": _policy_prefix(2),
     "policy-prefix-3": _policy_prefix(3),
@@ -872,6 +884,7 @@ ARMS: dict[str, Any] = {
     "policy-prefix-5": _policy_prefix(5),
     "policy-prefix-6": _policy_prefix(6),
     "policy-prefix-7": _policy_prefix(7),
+    "policy-prefix-8": _policy_prefix(8),
     # The tape's own cost, separated from what the shipped hooks do.
     "hooks-0": _empty_hooks(0),
     "hooks-1": _empty_hooks(1),

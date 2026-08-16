@@ -28,7 +28,7 @@ import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from time import monotonic, time
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from . import _secondfactor, _userkit
 from ._secondfactor import (  # re-export the stdlib-only second-factor surface
@@ -39,6 +39,7 @@ from ._secondfactor import (  # re-export the stdlib-only second-factor surface
     DEFAULT_PERIOD,
     DEFAULT_RECOVERY_CODES,
     DEFAULT_SKEW,
+    DiscoverableSecondFactorStore,
     InMemorySecondFactorStore,
     MemoryChallengeStore,
     SecondFactor,
@@ -75,6 +76,7 @@ from .router import Router
 
 __all__ = [
     "CapturingEmailSender",
+    "DiscoverableSecondFactorStore",
     "EmailSender",
     "InMemorySecondFactorStore",
     "InMemoryUserStore",
@@ -953,6 +955,7 @@ def second_factor_router(
     webauthn_label: str = "Security key",
     webauthn_ttl: float = 300.0,
     user_verification: str = "preferred",
+    passkey_login: bool = False,
     clock: Callable[[], float] = time,
 ) -> Router:
     """Build a mountable `Router` for TOTP enrolment, verification, and step-up.
@@ -972,12 +975,20 @@ def second_factor_router(
     full session. Pass the same `SecondFactorStore` to both and none of that
     machinery is reached; the coupling exists for the deployment that did not.
 
-    Pass `rp_id` and four more routes appear: `POST /webauthn/begin` and
+    Pass `rp_id` and four routes appear: `POST /webauthn/begin` and
     `POST /webauthn/confirm` register a passkey or security key, and
     `POST /webauthn/verify/begin` and `POST /webauthn/verify` are the assertion
     half, serving a pending login and a step-up with one pair exactly as
     `POST /verify` does for codes. Without `rp_id` the router is TOTP-only, so
     an application gets passkey endpoints only when it asks for them.
+
+    Set `passkey_login=True` to add `POST /webauthn/login/begin` and
+    `POST /webauthn/login`. These are a discoverable, usernameless first factor:
+    begin sends no `allowCredentials`, the authenticator chooses a resident
+    passkey, and completion resolves its owner with one indexed store lookup.
+    Enrolments made by this router then require a resident credential and user
+    verification; existing non-discoverable second-factor keys continue to work
+    on the verify routes but cannot identify an account at login.
 
     A WebAuthn ceremony's challenge is minted by `begin`, held wherever
     `enrolments` says, **bound to the user who began it**, and deleted on every
@@ -1101,6 +1112,10 @@ def second_factor_router(
             can, and let a security key with no PIN still work. The outcome is
             recorded on the session as `second_factor_uv` either way, so a
             policy that cares can read it rather than guess.
+        passkey_login: mount discoverable first-factor passkey login. Requires
+            `rp_id`, a `DiscoverableSecondFactorStore.credential`
+            implementation, resident credentials at enrolment, and user
+            verification on every login.
         clock: Unix-seconds source. It is what TOTP steps are counted from as
             well as what the two timeouts are measured with, so a server whose
             clock has drifted more than `skew` steps from its users' phones
@@ -1123,6 +1138,14 @@ def second_factor_router(
         # Origins without an RP ID would configure routes that are not mounted,
         # which reads as "WebAuthn is on" while it is off.
         raise ValueError("origins are only meaningful together with rp_id")
+    if passkey_login and not rp_id:
+        raise ValueError("passkey_login requires a non-empty rp_id")
+    if passkey_login and not isinstance(factors, DiscoverableSecondFactorStore):
+        raise TypeError(
+            "passkey_login requires "
+            "DiscoverableSecondFactorStore.credential(credential_id)"
+        )
+    discoverable_factors = cast(DiscoverableSecondFactorStore, factors)
     accepted_origins = tuple(origins) if origins else (default_origins(rp_id) if rp_id else ())
     if rp_id and any(not origin for origin in accepted_origins):
         raise ValueError("every accepted origin must be non-empty")
@@ -1704,7 +1727,8 @@ def second_factor_router(
                 rp_id=rp_id,
                 rp_name=rp_name,
                 existing=existing,
-                user_verification=user_verification,
+                user_verification=("required" if passkey_login else user_verification),
+                discoverable=passkey_login,
             )
             return await _begin_ceremony(session, ceremony, user.id)
 
@@ -1751,6 +1775,7 @@ def second_factor_router(
                     rp_id=rp_id,
                     origins=accepted_origins,
                     label=data.label or webauthn_label,
+                    require_user_verification=passkey_login,
                     at=clock(),
                     recovery_codes=recovery_codes,
                 )
@@ -1778,6 +1803,89 @@ def second_factor_router(
                 },
                 status=200,
             )
+
+        if passkey_login:
+            _PASSKEY_LOGIN_SUBJECT = "wreath:passkey-login"
+
+            @router.post("/webauthn/login/begin")
+            async def webauthn_login_begin(request: Any):
+                session = _session(request)
+                if session is None:
+                    return JSONResponse(
+                        {"error": "session_middleware_required"}, status=500
+                    )
+                ceremony = _secondfactor.begin_webauthn_assertion(
+                    (), rp_id=rp_id, user_verification="required"
+                )
+                return await _begin_ceremony(
+                    session, ceremony, _PASSKEY_LOGIN_SUBJECT
+                )
+
+            @router.post("/webauthn/login")
+            async def webauthn_login(
+                request: Any, data: Annotated[WebAuthnAssertionInput, Body()]
+            ):
+                session = _session(request)
+                if session is None:
+                    return JSONResponse(
+                        {"error": "session_middleware_required"}, status=500
+                    )
+                marker = session.get(webauthn_key)
+                if not isinstance(marker, dict):
+                    return JSONResponse(
+                        {"error": "no_ceremony_in_progress"}, status=400
+                    )
+                record, _ = await _take_ceremony(
+                    session,
+                    marker,
+                    subject=_PASSKEY_LOGIN_SUBJECT,
+                    kind=CHALLENGE_WEBAUTHN_ASSERT,
+                )
+                if record is None:
+                    return JSONResponse({"error": "ceremony_expired"}, status=400)
+                subject: str | None = None
+                try:
+                    public_id = b64url_decode(data.id)
+                    credential = await discoverable_factors.credential(
+                        _secondfactor.discoverable_credential_id(public_id)
+                    )
+                    if credential is None or credential.kind != "webauthn":
+                        raise WebAuthnError("no such discoverable credential")
+                    subject = credential.user_id
+                    if not limiter.allow(subject):
+                        return _throttled()
+                    result = await _secondfactor.verify_webauthn_assertion(
+                        factors,
+                        subject,
+                        challenge=b64url_decode(str(record.get("challenge", ""))),
+                        credential_id=public_id,
+                        client_data=b64url_decode(data.client_data),
+                        authenticator_data=b64url_decode(data.authenticator_data),
+                        signature=b64url_decode(data.signature),
+                        rp_id=rp_id,
+                        origins=accepted_origins,
+                        require_user_verification=True,
+                        at=clock(),
+                    )
+                except (ValueError, WebAuthnError):
+                    if subject is not None:
+                        limiter.record_failure(subject)
+                    return JSONResponse({"error": "invalid_assertion"}, status=401)
+                user = await users.get_by_id(subject)
+                if user is None or not user.is_active:
+                    limiter.record_failure(subject)
+                    return JSONResponse({"error": "invalid_assertion"}, status=401)
+                limiter.record_success(subject)
+                rotate_session(request)
+                session.pop(pending_key, None)
+                session[session_key] = {
+                    "sub": user.id,
+                    "type": "User",
+                    "roles": [],
+                    "second_factor_at": int(clock()),
+                    "second_factor_uv": result.user_verified,
+                }
+                return JSONResponse(_profile(user), status=200)
 
         @router.post("/webauthn/verify/begin")
         async def webauthn_verify_begin(request: Any):
@@ -2196,6 +2304,11 @@ class OrmSecondFactorStore:
         """Every credential belonging to `user_id`. An empty list is an answer."""
         query = self._model.select().where(self._model.user_id == user_id)
         return [self._to_record(row) for row in await self._session.fetch(query)]
+
+    async def credential(self, credential_id: str) -> SecondFactor | None:
+        """Return one credential by indexed primary key, or `None`."""
+        row = await self._row(credential_id)
+        return None if row is None else self._to_record(row)
 
     async def add(self, credential: SecondFactor) -> SecondFactor:
         """Insert one credential and flush; returns the argument.

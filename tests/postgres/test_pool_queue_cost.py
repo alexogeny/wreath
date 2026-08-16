@@ -172,3 +172,33 @@ async def test_a_cancelled_acquire_leaves_nothing_in_the_queue() -> None:
         await pool.release(held)
     finally:
         await database.stop()
+
+
+@pytest.mark.asyncio
+async def test_reverse_cancellation_never_scans_the_waiter_fifo() -> None:
+    """A cancellation storm has one O(1) deletion per caller.
+
+    Newest-first is the hostile order for ``deque.remove``: every deletion
+    would walk all older entries and make the aggregate quadratic.
+    """
+    database = await _pool_of_one()
+    pool = database.pool("read")
+    counting = CountingDeque(pool._waiters)
+    pool._waiters = counting
+    try:
+        held = await pool.acquire()
+        queued = [asyncio.ensure_future(pool.acquire()) for _ in range(32)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(pool._active_waiters) == len(queued)
+
+        for task in reversed(queued):
+            task.cancel()
+        await asyncio.gather(*queued, return_exceptions=True)
+
+        assert counting.removes == 0
+        assert not pool._active_waiters
+        assert not counting
+        await pool.release(held)
+    finally:
+        await database.stop()

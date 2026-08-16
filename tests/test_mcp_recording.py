@@ -219,13 +219,7 @@ async def test_the_verified_caller_is_on_the_marker() -> None:
 
 
 async def test_stats_reports_every_counter_by_name() -> None:
-    """The scrape shape, so an exporter does not learn a name per counter.
-
-    Nothing bridges these automatically -- Prometheus, OpenMetrics, StatsD and
-    OTLP all render the projector's per-route aggregates and never go looking
-    for a subsystem's own counters -- so `stats()` is what a deployment mounts
-    behind a route it controls, exactly as `MessageBus.stats()` is.
-    """
+    """The mapping and canonical metrics reading cannot drift apart."""
     app, mcp = build()
     assert mcp.stats() == {
         "tool_calls": 0,
@@ -274,6 +268,7 @@ async def test_stats_reports_every_counter_by_name() -> None:
     # Every attribute the dict names is the attribute itself, so the two cannot
     # answer differently once one of them is read by an exporter.
     assert counters == {name: getattr(mcp, name) for name in counters}
+    assert mcp.counters().values == counters
 
 
 async def test_a_tool_called_with_no_recorder_running_still_works() -> None:

@@ -970,6 +970,60 @@ class BoundaryTrace:
         return tuple(self._events)
 
 
+def _init_recorder(
+    recorder: Any,
+    policy: AttemptPolicy | WorkflowStepPolicy,
+    *,
+    directory: str,
+    scope: object | None,
+    image: object | None,
+) -> None:
+    """Initialise the storage and accounting shared by strict recorders."""
+    recorder._policy = policy
+    recorder._directory = directory
+    recorder._image = image
+    recorder.scope = scope
+    recorder.written = 0
+    recorder.refused_oversize = 0
+    recorder.errors = 0
+
+
+def _write_recording(
+    recorder: Any,
+    record: AttemptRecord | WorkflowStepRecord,
+    trace: BoundaryTrace | None,
+    path: str,
+) -> str | None:
+    """Write one strict recording with the shared refusal/error accounting."""
+    import os
+
+    from ._flight_schema import SCHEMA_VERSION, MetadataImage
+    from ._recording_format import WFR1Writer
+
+    if trace is not None and trace.overflowed:
+        recorder.refused_oversize += 1
+        return None
+    image = recorder._image
+    if image is None:
+        image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            writer = WFR1Writer(handle, image)
+            if isinstance(record, AttemptRecord):
+                writer.write_attempt(record)
+            else:
+                writer.write_step(record)
+            writer.close()
+    except OSError:
+        # A full disk or missing directory may not take down the operation the
+        # recorder observes. Encoder defects remain visible rather than caught.
+        recorder.errors += 1
+        return None
+    recorder.written += 1
+    return path
+
+
 class AttemptRecorder:
     """Decides which job attempts are kept, and writes the ones that are.
 
@@ -987,6 +1041,14 @@ class AttemptRecorder:
         "written", "refused_oversize", "errors",
     )
 
+    _directory: str
+    _image: object | None
+    _policy: AttemptPolicy
+    errors: int
+    refused_oversize: int
+    scope: object | None
+    written: int
+
     def __init__(
         self,
         policy: AttemptPolicy,
@@ -995,25 +1057,11 @@ class AttemptRecorder:
         scope: object | None = None,
         image: object | None = None,
     ) -> None:
-        self._policy = policy
-        self._directory = directory
-        self._image = image
-        #: The application whose `_databases`/`_http_clients`/`_object_stores`
-        #: an attempt is watched through, or None to watch only the runner's own
-        #: database. A `JobRunner` has no reference to its application, and
-        #: inventing one to record a job would put the recorder's needs into the
-        #: queue's public shape.
-        self.scope = scope
-        #: Recordings written to disk.
-        self.written = 0
-        #: Attempts an operator armed and this refused to write because their
-        #: boundary trace crossed `max_boundaries`. Counted rather than
-        #: truncated: a recording nobody can open is still a recording, and one
-        #: that quietly holds half a trace is not.
-        self.refused_oversize = 0
-        #: Recordings that could not be written -- a full disk, a missing
-        #: directory. The attempt itself is untouched; only the evidence is.
-        self.errors = 0
+        # Without a scope this watches only the runner's own database; a runner
+        # has no application reference to infer the other resources from.
+        _init_recorder(
+            self, policy, directory=directory, scope=scope, image=image
+        )
 
     @property
     def policy(self) -> AttemptPolicy:
@@ -1050,32 +1098,10 @@ class AttemptRecorder:
         """
         import os
 
-        from ._flight_schema import SCHEMA_VERSION, MetadataImage
-        from ._recording_format import WFR1Writer
-
-        if trace is not None and trace.overflowed:
-            self.refused_oversize += 1
-            return None
-        image = self._image
-        if image is None:
-            image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
         path = os.path.join(
             self._directory, f"{record.queue}-{record.job_id}-{record.attempt}.wfr1"
         )
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                writer = WFR1Writer(handle, image)  # ty: ignore[invalid-argument-type]
-                writer.write_attempt(record)
-                writer.close()
-        except OSError:
-            # Narrow on purpose: a full disk or a missing directory is the
-            # failure this survives. Anything else is a defect in the encoder
-            # and must not be swallowed into a counter nobody reads.
-            self.errors += 1
-            return None
-        self.written += 1
-        return path
+        return _write_recording(self, record, trace, path)
 
 
 # --- durable work: arming a workflow step ------------------------------------
@@ -1217,6 +1243,14 @@ class WorkflowStepRecorder:
     __slots__ = ("_directory", "_image", "_policy", "errors", "refused_oversize",
                  "scope", "written")
 
+    _directory: str
+    _image: object | None
+    _policy: WorkflowStepPolicy
+    errors: int
+    refused_oversize: int
+    scope: object | None
+    written: int
+
     def __init__(
         self,
         policy: WorkflowStepPolicy,
@@ -1225,24 +1259,11 @@ class WorkflowStepRecorder:
         scope: object | None = None,
         image: object | None = None,
     ) -> None:
-        self._policy = policy
-        self._directory = directory
-        self._image = image
-        #: The application whose boundaries a step is watched through, or None to
-        #: watch nothing. A `Workflow` holds no database of its own -- its steps
-        #: reach for whatever the application gave them -- so unlike a job runner
-        #: there is no slot to observe and an unscoped recorder records an empty
-        #: boundary trace. That is the truth rather than a gap, exactly as it is
-        #: for a lease expiry nobody was present for.
-        self.scope = scope
-        #: Recordings written to disk.
-        self.written = 0
-        #: Steps an operator armed and this refused because the boundary trace
-        #: crossed `max_boundaries`.
-        self.refused_oversize = 0
-        #: Recordings that could not be written. The saga is untouched; only the
-        #: evidence is.
-        self.errors = 0
+        # A workflow has no database of its own, so an unscoped recorder watches
+        # no boundaries rather than guessing which application owns the step.
+        _init_recorder(
+            self, policy, directory=directory, scope=scope, image=image
+        )
 
     @property
     def policy(self) -> WorkflowStepPolicy:
@@ -1275,31 +1296,12 @@ class WorkflowStepRecorder:
         """
         import os
 
-        from ._flight_schema import SCHEMA_VERSION, MetadataImage
-        from ._recording_format import WFR1Writer
-
-        if trace is not None and trace.overflowed:
-            self.refused_oversize += 1
-            return None
-        image = self._image
-        if image is None:
-            image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
         name = (
             f"{_slug(record.workflow)}-{_slug(record.instance)}"
             f"-{record.position}-{_slug(record.step)}.wfr1"
         )
         path = os.path.join(self._directory, name)
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                writer = WFR1Writer(handle, image)  # ty: ignore[invalid-argument-type]
-                writer.write_step(record)
-                writer.close()
-        except OSError:
-            self.errors += 1
-            return None
-        self.written += 1
-        return path
+        return _write_recording(self, record, trace, path)
 
 
 #: Longest slug one component of a recording's filename may reach. An instance

@@ -58,7 +58,7 @@ class StatsDBridge:
 
     __slots__ = (
         "_source", "_addr", "_prefix", "_dogstatsd", "_tags", "_route_labels",
-        "_sock", "_deltas", "_app",
+        "_sock", "_deltas", "_app", "_counter_sources",
     )
 
     def __init__(
@@ -72,13 +72,16 @@ class StatsDBridge:
         tags: dict[str, str] | None = None,
         route_labels: RouteLabels = None,
         app: Any = None,
+        counter_sources: tuple[Any, ...] = (),
     ) -> None:
-        if not hasattr(source, "snapshot"):
-            raise TypeError("statsd source must expose snapshot()")
+        from .metrics import _counter_sources, _snapshot_source
+
+        explicit_sources = _counter_sources(counter_sources, bridge="StatsD")
         #: Asked for subsystem counters on every flush. Optional, as on the
         #: Prometheus bridge and for the same reason.
         self._app = app
-        self._source = source
+        self._counter_sources = explicit_sources
+        self._source = _snapshot_source(source, bridge="statsd")
         self._addr = (host, port)
         self._prefix = prefix.rstrip(".")
         self._dogstatsd = dogstatsd
@@ -121,16 +124,15 @@ class StatsDBridge:
         """Every registered subsystem's counters, as gauges.
 
         Gauges rather than counters, and deliberately *not* delta-tracked like
-        the route aggregates above: this bridge cannot tell a monotonic counter
-        from a value that moves both ways, and sending a decrease as an
-        increment would make a falling gauge read as a negative rate. A gauge is
-        the reading that is true either way.
+        the route aggregates above. Canonical subsystem rows have historically
+        been current readings in StatsD; preserving that shape avoids changing
+        an existing series from a gauge into an increment stream. CloudWatch's
+        separately documented SUM contract uses `Counters.gauges` to distinguish
+        the values that must remain absolute.
         """
-        if self._app is None:
-            return
         from .metrics import collect
 
-        for reading in collect(self._app):
+        for reading in collect(self._app, self._counter_sources):
             for name, value in reading.values.items():
                 self._emit(
                     out, f"{reading.subsystem}.{name}", int(value), "g",
@@ -139,15 +141,23 @@ class StatsDBridge:
 
     def flush(self) -> int:
         """Read one snapshot, send its metrics; returns the line count."""
-        snapshot = self._source.snapshot()
-        recorder_loss = None
-        getter = getattr(self._source, "recorder_loss", None)
-        if callable(getter):
-            recorder_loss = getter()
-        lines = self._lines(snapshot, recorder_loss)
-        self._counter_lines(lines)
-        self._send(lines)
-        return len(lines)
+        from .metrics import _read_snapshot, collect
+
+        snapshot, recorder_loss = _read_snapshot(self._source)
+        packets, line_count = _core.statsd_packets(
+            snapshot,
+            recorder_loss,
+            self._prefix,
+            self._dogstatsd,
+            self._tags,
+            self._route_labels,
+            self._deltas,
+            collect(self._app, self._counter_sources),
+            MAX_PACKET_BYTES,
+        )
+        for packet in packets:
+            self._send_datagram(packet)
+        return line_count
 
     def _send(self, lines: list[str]) -> None:
         packet: list[str] = []
@@ -163,8 +173,11 @@ class StatsDBridge:
             self._send_packet(packet)
 
     def _send_packet(self, packet: list[str]) -> None:
+        self._send_datagram("\n".join(packet).encode("utf-8"))
+
+    def _send_datagram(self, packet: bytes) -> None:
         try:
-            self._sock.sendto("\n".join(packet).encode("utf-8"), self._addr)
+            self._sock.sendto(packet, self._addr)
         except OSError:
             pass  # telemetry never breaks the app
 
@@ -193,9 +206,12 @@ def activate_statsd(
     dogstatsd: bool = False,
     tags: dict[str, str] | None = None,
     route_labels: RouteLabels = None,
+    app: Any = None,
+    counter_sources: tuple[Any, ...] = (),
 ) -> StatsDBridge:
     """Wrap a snapshot source in a StatsD/DogStatsD push bridge (see module doc)."""
     return StatsDBridge(
         source, host=host, port=port, prefix=prefix,
         dogstatsd=dogstatsd, tags=tags, route_labels=route_labels,
+        app=app, counter_sources=counter_sources,
     )

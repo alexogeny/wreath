@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import importlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from .._target import load_target
 
 __all__ = ["add_infra_parser", "execute"]
 
@@ -52,13 +53,29 @@ def add_infra_parser(commands: Any) -> None:
         "--format", dest="infra_format", default="text", choices=("text", "json"),
         help="text (default) or json",
     )
-
-
-def _split(spec: str, *, what: str) -> tuple[str, str]:
-    module, separator, attribute = spec.partition(":")
-    if not separator or not module or not attribute:
-        raise ValueError(f"{what} {spec!r} must be spelled module:attribute")
-    return module, attribute
+    bundle = actions.add_parser(
+        "bundle",
+        help="render an inspectable Compose bundle from a gap-free inferred plan",
+    )
+    bundle.add_argument("target", help="application target as module:attribute")
+    bundle.add_argument("--image", required=True, help="immutable OCI image@sha256:digest")
+    bundle.add_argument("--output", required=True, metavar="DIRECTORY")
+    bundle.add_argument("--service", default="wreath-app")
+    bundle.add_argument("--port", type=int, default=8000)
+    bundle.add_argument("--factory", action="store_true")
+    bundle.add_argument("--force", action="store_true")
+    bundle.add_argument(
+        "--settings", action="append", default=[], metavar="SPEC",
+        help="settings dataclass as module:Class or module:Class=PREFIX (repeatable)",
+    )
+    bundle.add_argument(
+        "--env", action="append", default=[], metavar="PATH",
+        help="dotenv supplier checked against the settings contract (repeatable)",
+    )
+    bundle.add_argument(
+        "--environ", action="store_true",
+        help="also treat this process's environment as a supplier",
+    )
 
 
 def _settings_models(specs: list[str]) -> list[tuple[type, str, str]]:
@@ -71,19 +88,7 @@ def _settings_models(specs: list[str]) -> list[tuple[type, str, str]]:
     models: list[tuple[type, str, str]] = []
     for spec in specs:
         target, _, prefix = spec.partition("=")
-        module_name, attribute = _split(target, what="settings model")
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError as error:
-            raise ValueError(
-                f"could not import settings module {module_name!r}: {error}"
-            ) from error
-        try:
-            model = getattr(module, attribute)
-        except AttributeError as error:
-            raise ValueError(
-                f"settings module {module_name!r} has no attribute {attribute!r}"
-            ) from error
+        model = load_target(target, label="settings")
         if not (dataclasses.is_dataclass(model) and isinstance(model, type)):
             raise ValueError(
                 f"settings target {target!r} is not a dataclass type; "
@@ -137,7 +142,7 @@ def execute(
     """
     from . import infer, render_json, render_text
 
-    if namespace.infra_action != "infer":  # pragma: no cover - argparse rejects first
+    if namespace.infra_action not in {"infer", "bundle"}:
         raise ValueError(f"unknown infra action {namespace.infra_action!r}")
     models = _settings_models(namespace.settings)
     supplied, dotenv = _suppliers(namespace.env, environ=namespace.environ)
@@ -149,6 +154,23 @@ def execute(
         supplied=supplied,
         dotenv_keys=dotenv,
     )
+    if namespace.infra_action == "bundle":
+        from . import deployment_bundle
+
+        if plan.gaps:
+            print(render_text(plan), end="")
+            return 1
+        bundle = deployment_bundle(
+            plan,
+            image=namespace.image,
+            service=namespace.service,
+            port=namespace.port,
+            factory=namespace.factory,
+        )
+        written = bundle.write(namespace.output, force=namespace.force)
+        for path in written:
+            print(f"wrote {path}")
+        return 0
     render = render_json if namespace.infra_format == "json" else render_text
     print(render(plan), end="")
     return 1 if plan.gaps else 0

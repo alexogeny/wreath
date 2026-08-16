@@ -633,22 +633,28 @@ class AuthorizationServer:
 
     # -- signing ------------------------------------------------------------
 
-    def counters(self) -> dict[str, float]:
+    def counters(self) -> Any:
         """What signing has cost, so the ceiling is watched rather than warned about.
 
         `wreath.metrics.collect` gathers by asking anything that offers
         `counters()`, so these reach a dashboard with no second registration.
 
         ES256 signing is synchronous CPU work, so the request issuing a token
-        waits for it even when unrelated requests do not. `signing_seconds`
-        divided by wall time is the fraction of a core this issuer is spending,
-        which is the number to alert on; a threshold baked in here would be one
-        guess applied to every deployment's latency budget.
+        waits for it even when unrelated requests do not. Divide
+        `signing_nanoseconds` by elapsed wall-clock nanoseconds for the fraction
+        of a core this issuer is spending; a threshold baked in here would be
+        one guess applied to every deployment's latency budget.
         """
-        return {
-            "tokens_issued": float(self._issued),
-            "signing_seconds": self._signing_seconds,
-        }
+        from .metrics import Counters
+
+        return Counters(
+            subsystem="oauth",
+            instance=self._issuer,
+            values={
+                "tokens_issued": self._issued,
+                "signing_nanoseconds": int(self._signing_seconds * 1_000_000_000),
+            },
+        )
 
     def _encode(self, claims: Mapping[str, Any]) -> str:
         if self._signer is not None:

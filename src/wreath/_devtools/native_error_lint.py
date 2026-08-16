@@ -10,8 +10,8 @@ from .native_lint import (
     _enclosing_function,
     _waivers,
     iter_sources,
+    lint_entrypoint,
     repo_root,
-    run_lint,
     strip_c,
     waiver_pattern,
 )
@@ -174,15 +174,13 @@ def scan_text(path: str, text: str) -> list[Finding]:
     return sorted(findings, key=lambda finding: (finding.path, finding.line, finding.code))
 
 
-def main(argv: list[str] | None = None) -> int:
-    return run_lint(
-        argv,
-        prog="wreath-native-error-lint",
-        description="Find CPython exception and return-value protocol mistakes in Wreath's C.",
-        rules=RULES,
-        scan=scan_text,
-        default_roots=DEFAULT_ROOTS,
-    )
+main = lint_entrypoint(
+    prog="wreath-native-error-lint",
+    description="Find CPython exception and return-value protocol mistakes in Wreath's C.",
+    rules=RULES,
+    scan=scan_text,
+    default_roots=DEFAULT_ROOTS,
+)
 
 
 if __name__ == "__main__":

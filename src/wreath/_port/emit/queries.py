@@ -251,25 +251,28 @@ class _QueryPlan:
         selected = ", ".join(
             f"{self.model}.{attribute}" for _key, attribute in self.projection_pairs
         )
-        query = f"{self.model}.select({selected})" if selected else f"{self.model}.select()"
+        query = [
+            f"{self.model}.select({selected})" if selected else f"{self.model}.select()"
+        ]
         if self.wheres:
-            query += f".where({', '.join(self.wheres)})"
+            query.append(f".where({', '.join(self.wheres)})")
         for relation in self.includes:
-            query += f".include({relation})"
+            query.append(f".include({relation})")
         if self.orders:
-            query += f".order_by({', '.join(self.orders)})"
+            query.append(f".order_by({', '.join(self.orders)})")
         if self.limit is not None:
-            query += f".limit({self.limit})"
+            query.append(f".limit({self.limit})")
         if self.offset is not None:
-            query += f".offset({self.offset})"
+            query.append(f".offset({self.offset})")
+        rendered = "".join(query)
         if self.runner is None:
-            return query
+            return rendered
         if self.runner == "values" and self.row_name is not None:
             pairs = ", ".join(
                 f"{key!r}: {self.row_name}.{attribute}"
                 for key, attribute in self.projection_pairs
             )
-            return f"[{{{pairs}}} for {self.row_name} in await {session}.fetch({query})]"
+            return f"[{{{pairs}}} for {self.row_name} in await {session}.fetch({rendered})]"
         if self.runner == "values_list" and self.row_name is not None:
             values = ", ".join(
                 f"{self.row_name}.{attribute}"
@@ -277,14 +280,14 @@ class _QueryPlan:
             )
             if len(self.projection_pairs) == 1:
                 values += ","
-            return f"[({values}) for {self.row_name} in await {session}.fetch({query})]"
+            return f"[({values}) for {self.row_name} in await {session}.fetch({rendered})]"
         if self.runner == "exists":
             # Wreath has no `exists()`; the count is the same round trip.
-            return f"await {session}.count({query}) > 0"
+            return f"await {session}.count({rendered}) > 0"
         if self.runner == "update_where":
             values = ", ".join(self.write_values)
-            return f"await {session}.update_where({query}, {values})"
-        return f"await {session}.{self.runner}({query})"
+            return f"await {session}.update_where({rendered}, {values})"
+        return f"await {session}.{self.runner}({rendered})"
 
 
 class _QueryRewrite(_EmitterState):

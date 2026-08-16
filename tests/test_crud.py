@@ -575,7 +575,7 @@ async def test_expose_can_read_a_generated_column_but_never_write_one() -> None:
     routes = _routes(crud_router(Doc, lambda request: session, expose=("search",)))
 
     row = json.loads((await routes[("GET", "/doc/{id}")](_Req(path_params={"id": "1"}))).body)
-    assert row["search"] == b"'llama':1".hex()
+    assert row["search"] == "J2xsYW1hJzox"
     response = await routes[("PATCH", "/doc/{id}")](
         _Req(path_params={"id": "1"}, body={"search": "'alpaca':1"})
     )

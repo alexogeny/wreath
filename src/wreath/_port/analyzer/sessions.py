@@ -6,7 +6,7 @@ from __future__ import annotations
 import ast
 import builtins
 import os
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 from .imports import _Imports
@@ -205,14 +205,19 @@ def session_functions(
         count = definitions.get(name, 0)
         resolvable = count == 1 or (count == 2 and stubs[name] == 1 and name in runs)
         return resolvable and name not in _AMBIGUOUS_CALL_NAMES
+
+    callers_by_target: dict[str, set[str]] = {}
+    for caller, called in calls.items():
+        for target in called:
+            callers_by_target.setdefault(target, set()).add(caller)
     needs = {name for name in runs if usable(name)}
-    changed = True
-    while changed:                            # climb the call graph to a fixed point
-        changed = False
-        for name, called in calls.items():
-            if name not in needs and usable(name) and called & needs:
-                needs.add(name)
-                changed = True
+    pending = deque(needs)
+    while pending:                            # climb each reverse edge once
+        target = pending.popleft()
+        for caller in callers_by_target.get(target, ()):
+            if caller not in needs and usable(caller):
+                needs.add(caller)
+                pending.append(caller)
     return frozenset(needs)
 
 
@@ -505,19 +510,20 @@ def session_sites(
             if targets:
                 edges.setdefault(caller, []).append((call, frozenset(targets)))
 
+    callers_by_target: dict[FunctionKey, set[FunctionKey]] = {}
+    for caller, calls in edges.items():
+        for _call, called in calls:
+            for target in called:
+                callers_by_target.setdefault(target, set()).add(caller)
+
     needs = set(direct)
-    changed = True
-    while changed:
-        changed = False
-        for key in tuple(needs):
-            for peer in overrides.get(key, ()):
-                if peer not in needs:
-                    needs.add(peer)
-                    changed = True
-        for caller, calls in edges.items():
-            if caller not in needs and any(targets & needs for _call, targets in calls):
-                needs.add(caller)
-                changed = True
+    pending = deque(needs)
+    while pending:
+        key = pending.popleft()
+        for candidate in (*overrides.get(key, ()), *callers_by_target.get(key, ())):
+            if candidate not in needs:
+                needs.add(candidate)
+                pending.append(candidate)
 
     # A signature change is only complete when the requirement reaches a place
     # Wreath already supplies a session: a route (or a function that already
@@ -561,31 +567,20 @@ def session_sites(
         and not is_test_path(key[0])
         and key not in blocked_by_test
     )
-    changed = True
-    while changed:
-        changed = False
-        for caller in tuple(supported):
-            # `called` rather than `targets`: the name is already bound to a
-            # `set` at function scope above, and rebinding it here to the
-            # `frozenset` the edge carries is a type error rather than a shadow.
-            for _call, called in edges.get(caller, ()):
-                for target in called & needs:
-                    if (
-                        target not in supported
-                        and not is_test_path(target[0])
-                        and target not in blocked_by_test
-                    ):
-                        supported.add(target)
-                        changed = True
-            for peer in overrides.get(caller, ()):
-                if (
-                    peer in needs
-                    and peer not in supported
-                    and not is_test_path(peer[0])
-                    and peer not in blocked_by_test
-                ):
-                    supported.add(peer)
-                    changed = True
+    pending = deque(supported)
+    while pending:
+        caller = pending.popleft()
+        candidates = set(overrides.get(caller, ()))
+        for _call, called in edges.get(caller, ()):
+            candidates.update(called)
+        for candidate in candidates & needs:
+            if (
+                candidate not in supported
+                and not is_test_path(candidate[0])
+                and candidate not in blocked_by_test
+            ):
+                supported.add(candidate)
+                pending.append(candidate)
     needs = supported
 
     definition_sites = frozenset(

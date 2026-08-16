@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.admin._doubles import FakeSession, routes
+from wreath._admin import registry as admin_registry
 from wreath.admin import Admin, AdminError, FieldAccess
 from wreath.crud import Access
 
@@ -76,6 +77,24 @@ async def test_expose_opts_a_withheld_column_back_in(account_model: type) -> Non
     # Readable is not writable: `expose` widens what may be seen, and a
     # sensitive column is never settable from a generated form.
     assert "password_hash" not in entry.editable
+
+
+async def test_registration_scans_sensitive_names_once(
+    account_model: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = admin_registry.sensitive_fields
+    calls = 0
+
+    def counted(model: type) -> frozenset[str]:
+        nonlocal calls
+        calls += 1
+        return original(model)
+
+    monkeypatch.setattr(admin_registry, "sensitive_fields", counted)
+
+    _admin().register(account_model)
+
+    assert calls == 1
 
 
 async def test_the_primary_key_is_never_editable(account_model: type) -> None:

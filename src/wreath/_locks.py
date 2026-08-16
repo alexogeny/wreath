@@ -82,6 +82,25 @@ def _default_jitter(base: float) -> float:
     return random.random() * base * 0.25
 
 
+def _init_session_lock(
+    lock: Any,
+    database: Database,
+    key: str,
+    namespace: str | None,
+    mode: str,
+    workload: Workload,
+) -> None:
+    """Validate and initialise the state common to session lock handles."""
+    _validate_mode(mode)
+    _reject_read_only(database, workload)
+    lock._database = database
+    lock._key = key
+    lock._namespace = namespace if namespace is not None else database.name
+    lock._mode = mode
+    lock._workload = workload
+    lock._connection = None
+
+
 # Each session-scoped advisory lock pins a pooled connection for its whole
 # lifetime, so holding too many at once starves the pool of connections for
 # ordinary queries. Track the live count per (database, workload) so an acquire
@@ -122,7 +141,37 @@ def _exit_held(database: Database, workload: Workload) -> None:
         _held_locks.pop(key, None)
 
 
-class AdvisoryLock:
+class _SessionLockExit:
+    """The common release protocol for session-scoped lock handles."""
+
+    __slots__ = ()
+
+    _connection: Any
+    _database: Database
+    _key: str
+    _mode: str
+    _namespace: str
+    _workload: Workload
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return False
+        _exit_held(self._database, self._workload)
+        await _release(
+            self._database,
+            self._workload,
+            connection,
+            self._mode,
+            self._namespace,
+            self._key,
+            unlock=True,
+        )
+        return False
+
+
+class AdvisoryLock(_SessionLockExit):
     """A blocking, session-scoped advisory lock held for an `async with` block.
 
     The lock pins a single connection from *workload* (default `"write"`, i.e.
@@ -145,14 +194,7 @@ class AdvisoryLock:
         mode: str = "exclusive",
         workload: Workload = "write",
     ) -> None:
-        _validate_mode(mode)
-        _reject_read_only(database, workload)
-        self._database = database
-        self._key = key
-        self._namespace = namespace if namespace is not None else database.name
-        self._mode = mode
-        self._workload = workload
-        self._connection: Any = None
+        _init_session_lock(self, database, key, namespace, mode, workload)
 
     async def __aenter__(self) -> AdvisoryLock:
         connection = await self._database.acquire(self._workload)
@@ -172,18 +214,7 @@ class AdvisoryLock:
         _enter_held(self._database, self._workload)
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        connection = self._connection
-        self._connection = None
-        if connection is None:
-            return False
-        _exit_held(self._database, self._workload)
-        await _release(self._database, self._workload, connection, self._mode,
-                       self._namespace, self._key, unlock=True)
-        return False
-
-
-class AdvisoryTryLock:
+class AdvisoryTryLock(_SessionLockExit):
     """A non-blocking (or timeout-bounded) session-scoped advisory lock.
 
     Used as `async with db.try_lock(key) as held:` -- *held* is the lock handle
@@ -207,15 +238,8 @@ class AdvisoryTryLock:
         mode: str = "exclusive",
         workload: Workload = "write",
     ) -> None:
-        _validate_mode(mode)
-        _reject_read_only(database, workload)
-        self._database = database
-        self._key = key
-        self._namespace = namespace if namespace is not None else database.name
-        self._mode = mode
+        _init_session_lock(self, database, key, namespace, mode, workload)
         self._timeout = timeout
-        self._workload = workload
-        self._connection: Any = None
 
     async def __aenter__(self) -> AdvisoryTryLock | None:
         connection = await self._database.acquire(self._workload)
@@ -264,17 +288,6 @@ class AdvisoryTryLock:
         finally:
             # Never leak a non-default timeout onto the pooled connection.
             await connection.execute("SET lock_timeout = DEFAULT")
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        connection = self._connection
-        self._connection = None
-        if connection is None:
-            return False
-        _exit_held(self._database, self._workload)
-        await _release(self._database, self._workload, connection, self._mode,
-                       self._namespace, self._key, unlock=True)
-        return False
-
 
 class SingletonRunner:
     """Run one coroutine at a time across the whole fleet, via an advisory lock.

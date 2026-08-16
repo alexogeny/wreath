@@ -1,0 +1,376 @@
+from __future__ import annotations
+
+import ipaddress
+import json
+from importlib.resources import files
+from types import SimpleNamespace
+
+import pytest
+
+from wreath import Wreath
+from wreath.client_facts import (
+    AgentFacts,
+    ClientFacts,
+    ClientFactsProvider,
+    GeoIPRecord,
+    IPFacts,
+    UserAgentDatabase,
+    UserAgentFacts,
+    WreathGeoIP,
+    client_fact_attributes,
+)
+from wreath.metrics import collect
+from wreath.policy import AIScrapingPolicy, HttpPolicy
+from wreath.policy.proxy import ProxyPolicy
+from wreath.request import Request
+
+
+async def receive() -> dict[str, object]:
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+class Geo:
+    def lookup(self, address: str) -> GeoIPRecord:
+        assert address == "203.0.113.8"
+        return GeoIPRecord(country="AU", asn=64500)
+
+
+def _varint(value: int) -> bytes:
+    encoded = bytearray()
+    while value >= 0x80:
+        encoded.append((value & 0x7f) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _range_records(ranges: list[tuple[int, int]]) -> bytes:
+    encoded = bytearray()
+    previous_end = -1
+    for start, end in ranges:
+        encoded.extend(_varint(start - previous_end - 1))
+        encoded.extend(_varint(end - start))
+        encoded.append(0)
+        previous_end = end
+    return bytes(encoded)
+
+
+def test_client_facts_distinguish_socket_from_trusted_forwarding() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "client": ("10.0.0.4", 1234),
+            "headers": [
+                (b"x-forwarded-for", b"203.0.113.8, 10.0.0.4"),
+                (b"user-agent", b"Mozilla/5.0 Chrome/120 Linux"),
+                (b"sec-ch-ua", b'"Chromium";v="120", "Not_A Brand";v="99"'),
+                (b"sec-ch-ua-platform", b'"Linux"'),
+                (b"sec-ch-ua-mobile", b"?0"),
+            ],
+        },
+        receive,
+    )
+    before = ClientFactsProvider().resolve(request)
+    assert before.ip is not None
+    assert (before.ip.address, before.ip.source) == ("10.0.0.4", "socket")
+
+    ProxyPolicy(trusted=["10.0.0.0/8"])._ingress_sync(request)
+    after = ClientFactsProvider(Geo()).resolve(request)
+    assert after.ip is not None
+    assert (after.ip.address, after.ip.source, after.ip.geo) == (
+        "203.0.113.8",
+        "forwarded",
+        GeoIPRecord(country="AU", asn=64500),
+    )
+    assert after.user_agent.browser == "Chromium"
+    assert after.user_agent.browser_version == "120"
+    assert after.user_agent.platform == "Linux"
+    assert after.user_agent.mobile is False
+
+
+def test_client_fact_metrics_are_fixed_aggregate_counts() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "client": ("203.0.113.8", None),
+            "headers": [(b"user-agent", b"ClaudeBot/1.0 Mobile")],
+        },
+        receive,
+    )
+    provider = ClientFactsProvider(Geo(), name="public")
+    provider.resolve(request)
+    reading = provider.counters()
+    assert (reading.subsystem, reading.instance) == ("client_facts", "public")
+    assert reading.values == {
+        "resolutions": 1,
+        "ip_known": 1,
+        "ip_forwarded": 0,
+        "ipv4": 1,
+        "ipv6": 0,
+        "geo_known": 1,
+        "ua_known": 1,
+        "bot": 1,
+        "bot_verified": 0,
+        "bot_claimed_verified": 0,
+        "mobile_known": 0,
+        "mobile": 0,
+        "country_au": 1,
+    }
+
+
+def test_client_fact_attributes_follow_otel_names_without_identifiers() -> None:
+    facts = ClientFacts(
+        ip=IPFacts(
+            address="203.0.113.8",
+            source="forwarded",
+            version=4,
+            is_global=False,
+            is_private=True,
+            is_loopback=False,
+            geo=GeoIPRecord(country="au", city="Brisbane", asn=64500),
+        ),
+        user_agent=UserAgentFacts(
+            raw="ClaudeBot/1.0 private-fragment",
+            browser="ClaudeBot",
+            browser_version="1.0",
+            platform="Linux",
+            mobile=False,
+            bot=True,
+        ),
+        agent=AgentFacts(
+            claimed=True,
+            verified=True,
+            identity="https://agent.example/.well-known/bots.json",
+        ),
+    )
+    attributes = client_fact_attributes(facts)
+    assert attributes == {
+        "user_agent.name": "ClaudeBot",
+        "user_agent.version": "1.0",
+        "user_agent.os.name": "Linux",
+        "browser.mobile": False,
+        "user_agent.synthetic.type": "bot",
+        "wreath.client.agent.claimed": True,
+        "wreath.client.agent.verified": True,
+        "wreath.client.agent.identity": "https://agent.example/.well-known/bots.json",
+        "network.type": "ipv4",
+        "wreath.client.address_source": "forwarded",
+        "geo.country.iso_code": "AU",
+    }
+    assert facts.ip.address not in attributes.values()
+    assert facts.user_agent.raw not in attributes.values()
+
+
+def test_provider_caches_and_fuses_verified_agent_once_per_request() -> None:
+    class Verified:
+        calls = 0
+
+        def facts(self, request: Request) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(
+                verified=True,
+                agent="https://claude.ai/.well-known/http-message-signatures-directory",
+            )
+
+    signatures = Verified()
+    provider = ClientFactsProvider(signatures=signatures)
+    request = Request(
+        {
+            "type": "http",
+            "client": ("203.0.113.8", None),
+            "headers": [(b"user-agent", b"ClaudeBot/1.0")],
+        },
+        receive,
+    )
+    first = provider.resolve(request)
+    assert provider(request) is first
+    assert signatures.calls == 1
+    assert first.agent == AgentFacts(
+        claimed=True,
+        verified=True,
+        identity="https://claude.ai/.well-known/http-message-signatures-directory",
+    )
+    assert provider.counters().values["resolutions"] == 1
+    assert provider.counters().values["bot_claimed_verified"] == 1
+
+
+def test_app_owns_client_facts_and_metrics_discovers_it() -> None:
+    app = Wreath(ai_scraping="allow")
+    provider = app.client_facts("public", geoip=None)
+    assert app.state.client_facts_public is provider
+    assert collect(app) == (provider.counters(), app.counters())
+    with pytest.raises(ValueError, match="duplicate client-facts provider: public"):
+        app.client_facts("public")
+
+
+def test_default_ai_policy_and_client_facts_share_one_user_agent_database() -> None:
+    app = Wreath()
+    provider = app.client_facts("public", geoip=None)
+    assert app._http_policy.ai_scraping._database is provider._user_agents
+
+
+def test_explicit_ai_policy_and_client_facts_share_one_user_agent_database() -> None:
+    policy = AIScrapingPolicy(allow=("gptbot",))
+    app = Wreath(http_policy=HttpPolicy(ai_scraping=policy))
+    provider = app.client_facts("public", geoip=None)
+    assert policy._database is provider._user_agents
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        [],
+        [(b"host", b"example.com"), (b"user-agent", b"Mozilla/5.0")],
+        [(b"user-agent", b"GPTBot/1.0"), (b"accept", b"*/*")],
+        [[b"host", b"example.com"], [b"user-agent", b"ClaudeBot/1.0"]],
+    ),
+)
+def test_native_ai_header_scan_matches_the_independent_two_step_path(headers) -> None:
+    policy = AIScrapingPolicy()
+    database = policy._database._database
+    user_agent = next(
+        (value for name, value in headers if name == b"user-agent"),
+        b"",
+    )
+    expected = database.blocked(user_agent, policy._blocked_table)
+    assert database.blocked_headers(headers, policy._blocked_table) is expected
+
+
+def test_native_user_agent_database_scans_products_without_regexes(tmp_path) -> None:
+    database = UserAgentDatabase()
+    browser, version, platform, mobile, bot = database.lookup(
+        "Mozilla/5.0 (Linux; Android 14) Chrome/124.0 Mobile Safari/537.36"
+    )
+    assert (browser, version, platform, mobile, bot) == (
+        "Chrome",
+        "124.0",
+        "Android",
+        True,
+        False,
+    )
+    path = tmp_path / "agents.json"
+    path.write_text(json.dumps({"entries": [{
+        "token": "wreathprobe",
+        "browser": "Wreath Probe",
+        "bot": True,
+        "priority": 100,
+    }]}))
+    custom = UserAgentDatabase.from_path(path)
+    assert custom.lookup("wreathprobe/2.1") == (
+        "Wreath Probe",
+        "2.1",
+        None,
+        None,
+        True,
+    )
+
+
+def test_bundled_user_agent_database_is_real_bounded_data() -> None:
+    image = files("wreath").joinpath("_data", "user_agent.wua").read_bytes()
+    assert image.startswith(b"WUA1")
+    assert len(image) <= 5_000
+    database = UserAgentDatabase()
+    assert database.lookup("Googlebot-Image/1.0") == (
+        "Googlebot",
+        "1.0",
+        None,
+        None,
+        True,
+    )
+    assert database.lookup("Mozilla/5.0 HeadlessChrome/124.0 Linux") == (
+        "Headless Chrome",
+        "124.0",
+        "Linux",
+        False,
+        True,
+    )
+
+
+@pytest.mark.parametrize(("user_agent", "client"), [
+    (
+        "Mozilla/5.0 Chrome/131.0; compatible; OAI-SearchBot/1.4",
+        "OpenAI SearchBot",
+    ),
+    ("Claude-SearchBot/1.0", "Claude SearchBot"),
+    ("Perplexity-User/1.0", "Perplexity User"),
+    ("Meta-ExternalAgent/1.1", "Meta External Agent"),
+    ("Bytespider/1.0", "Bytespider"),
+    ("Scrapy/2.13", "Scrapy"),
+])
+def test_bundled_user_agent_database_covers_contemporary_automation(
+    user_agent: str, client: str
+) -> None:
+    browser, _, _, _, bot = UserAgentDatabase().lookup(user_agent)
+    assert (browser, bot) == (client, True)
+
+
+@pytest.mark.parametrize(("user_agent", "client"), [
+    ("python-requests/2.32.4", "Python Requests"),
+    ("aws-sdk-go-v2/1.38.0", "AWS SDK for Go"),
+    ("Mozilla/5.0 HuaweiBrowser/15.0 Mobile", "Huawei Browser"),
+])
+def test_bundled_user_agent_database_covers_clients_without_calling_them_bots(
+    user_agent: str, client: str
+) -> None:
+    browser, _, _, _, bot = UserAgentDatabase().lookup(user_agent)
+    assert (browser, bot) == (client, False)
+
+
+def test_bundled_geoip_database_is_exact_bounded_ipv4_and_ipv6_data() -> None:
+    image = files("wreath").joinpath("_data", "country.wgd").read_bytes()
+    assert image.startswith(b"WGD2")
+    assert len(image) <= 20_000
+    database = WreathGeoIP()
+    assert database.lookup("4.1.1.1") == GeoIPRecord(country="US")
+    assert database.lookup("2001:8000::1") == GeoIPRecord(country="AU")
+    assert database.lookup("127.0.0.1") is None
+
+
+def test_wreath_geoip_uses_exact_ranges_across_lookup_directories(tmp_path) -> None:
+    v4 = [
+        (int(ipaddress.IPv4Address("1.255.255.250")),
+         int(ipaddress.IPv4Address("2.0.0.5"))),
+        (int(ipaddress.IPv4Address("203.0.113.0")),
+         int(ipaddress.IPv4Address("203.0.113.255"))),
+    ]
+    first_v6 = int(ipaddress.IPv6Address("2001:db8::")) >> 64
+    image = (
+        b"WGD2\x01\x02\x00\x01\x00AU"
+        + _range_records(v4)
+        + _range_records([(first_v6, first_v6)])
+    )
+    path = tmp_path / "exact.wgd"
+    path.write_bytes(image)
+    database = WreathGeoIP(path)
+
+    assert database.lookup("1.255.255.249") is None
+    assert database.lookup("1.255.255.250") == GeoIPRecord(country="AU")
+    assert database.lookup("2.0.0.5") == GeoIPRecord(country="AU")
+    assert database.lookup("2.0.0.6") is None
+    assert database.lookup("2001:db8::dead") == GeoIPRecord(country="AU")
+    assert database.lookup("2001:db9::") is None
+
+
+def test_oversized_user_agent_remains_a_raw_unclassified_fact() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"user-agent", b"x" * 8193)],
+        },
+        receive,
+    )
+    facts = ClientFactsProvider().resolve(request).user_agent
+    assert facts.raw == "x" * 8193
+    assert (facts.browser, facts.platform, facts.mobile, facts.bot) == (
+        None,
+        None,
+        None,
+        False,
+    )
+
+
+def test_wreath_geoip_refuses_an_oversized_database(tmp_path) -> None:
+    path = tmp_path / "oversized.wgd"
+    path.write_bytes(b"WGD2" + bytes(19_997))
+    with pytest.raises(ValueError, match="9..20000-byte WGD2"):
+        WreathGeoIP(path)

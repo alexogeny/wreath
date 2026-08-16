@@ -491,17 +491,9 @@ def spine(
     DST change. The native operation takes only temporal data and a unit index;
     it knows nothing about a series declaration, model, connection or SQL.
     """
-    width = (
-        bucket
-        if isinstance(bucket, Bucket)
-        else (BUCKETS.get(bucket) if isinstance(bucket, str) else None)
+    start_instant, end_instant, unit, tz = _spine_args(
+        start, end, bucket=bucket, in_zone=in_zone
     )
-    if width is None:
-        raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
-    start_instant = start if type(start) is Instant else Instant.of(start)
-    end_instant = end if type(end) is Instant else Instant.of(end)
-    tz = _tzinfo(in_zone)
-    unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
     return _core.series_spine(start_instant, end_instant, unit, tz, _DATETIME_CAPI)
 
 
@@ -518,6 +510,22 @@ def spine_length(
     when only cardinality crosses the boundary, such as sizing a chart or
     enforcing a result limit.
     """
+    start_instant, end_instant, unit, tz = _spine_args(
+        start, end, bucket=bucket, in_zone=in_zone
+    )
+    return _core.series_spine_length(
+        start_instant, end_instant, unit, tz, _DATETIME_CAPI
+    )
+
+
+def _spine_args(
+    start: datetime.datetime,
+    end: datetime.datetime,
+    *,
+    bucket: str | Bucket,
+    in_zone: str | datetime.tzinfo,
+) -> tuple[Instant, Instant, int, datetime.tzinfo]:
+    """Normalize the arguments shared by materialized and cardinality spines."""
     width = (
         bucket
         if isinstance(bucket, Bucket)
@@ -527,11 +535,9 @@ def spine_length(
         raise TemporalError(f"unknown bucket {bucket!r}; one of {', '.join(sorted(BUCKETS))}")
     start_instant = start if type(start) is Instant else Instant.of(start)
     end_instant = end if type(end) is Instant else Instant.of(end)
-    tz = _tzinfo(in_zone)
+    zone = _tzinfo(in_zone)
     unit = ("minute", "hour", "day", "week", "month", "quarter", "year").index(width.name)
-    return _core.series_spine_length(
-        start_instant, end_instant, unit, tz, _DATETIME_CAPI
-    )
+    return start_instant, end_instant, unit, zone
 
 
 def spine_lengths(

@@ -25,12 +25,12 @@ see `CsrfPolicy` for why the origin check depends on it.
 from __future__ import annotations
 
 import hmac
-import re
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
+from .._http import _is_http_token
 from .._native import _core
 from .._webpolicy import (
     append_vary,
@@ -51,7 +51,6 @@ _csrf_sign: Any = _core.csrf_sign
 _csrf_new_token: Any = _core.csrf_new_token
 _csrf_validate: Any = _core.csrf_validate
 
-_TOKEN_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _STATE_TOKEN = "_wreath_csrf_token"
 _STATE_ISSUE = "_wreath_csrf_issue"
@@ -266,7 +265,7 @@ class CsrfPolicy:
         secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
         if len(secret_bytes) < 32:
             raise ValueError("CSRF secret must contain at least 32 bytes")
-        if not _TOKEN_NAME.fullmatch(cookie_name) or not _TOKEN_NAME.fullmatch(header_name):
+        if not _is_http_token(cookie_name) or not _is_http_token(header_name):
             raise ValueError("CSRF cookie and header names must be valid HTTP tokens")
         # The browser enforces these prefixes by *dropping* a cookie that does
         # not meet them, so a mismatch here is a CSRF cookie that silently never

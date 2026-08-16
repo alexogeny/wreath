@@ -16,8 +16,11 @@ import pytest
 
 from wreath._flight_schema import (
     CELL_SIZE,
+    FLAG_HAS_CLIENT_FACTS,
     FLAG_HAS_CORRELATION,
     FLAG_SLOW_PROMOTED,
+    ClientFactFlag,
+    ClientFactsCell,
     CompletionCell,
     CorrelationCell,
     LossReason,
@@ -156,6 +159,21 @@ def test_completion_correlation_phases_join_in_order() -> None:
     assert trace.parent_span_id == 0x111
     assert trace.has_correlation
     assert [p.phase_id for p in trace.phases] == [PhaseKind.HANDLER, PhaseKind.SERIALIZE]
+
+
+def test_client_facts_cell_joins_completion() -> None:
+    rec = FakeRecorder()
+    facts = ClientFactsCell(
+        request_id=12,
+        flags=ClientFactFlag.UA_KNOWN | ClientFactFlag.AGENT_VERIFIED,
+        user_agent_rule_id=19,
+        country="AU",
+    )
+    rec.feed(completion(12, flags=FLAG_HAS_CLIENT_FACTS), facts.encode())
+    proj = Projector(rec)
+    drain_until_settled(proj)
+    (trace,) = proj.snapshot().recent
+    assert trace.client_facts == facts
 
 
 def test_reordered_tail_before_completion_still_joins() -> None:

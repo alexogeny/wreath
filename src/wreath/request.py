@@ -554,6 +554,7 @@ class Request:
         "_body",
         "_app",
         "_cookies",
+        "_client_source",
         "_form",
         "_header_map",
         "_header_scanned",
@@ -592,6 +593,7 @@ class Request:
             self._scope = None
             self._context = scope
         self._receive = receive
+        self._client_source = "socket"
         self._app = app
         # A conforming ASGI server gets the ordinary dict below. Wreath's own
         # server supplies its request-owned native header index instead, so
@@ -851,6 +853,16 @@ class Request:
         return scope.get("client")
 
     @property
+    def client_source(self) -> str:
+        """Why `client` is trusted: `socket` or `forwarded`.
+
+        `forwarded` is set only when `ProxyPolicy` accepted the immediate
+        socket peer and successfully parsed its forwarding chain. Merely sending
+        an `X-Forwarded-For` header never changes this value.
+        """
+        return self._client_source
+
+    @property
     def scheme(self) -> str:
         """The request scheme, `"http"` or `"https"`, defaulting to `"http"`.
 
@@ -869,18 +881,21 @@ class Request:
             raise RuntimeError("request scope is unavailable")
         return scope.get("scheme", "http")
 
-    def _set_client(self, client: tuple[str, int | None]) -> None:
+    def _set_client(
+        self, client: tuple[str, int | None], *, source: str = "socket"
+    ) -> None:
         # ProxyPolicy rewrites the peer from X-Forwarded-For. The
         # write goes to the context when one backs this request so the ASGI
         # scope is never materialized just to carry it.
         context = self._context
         if context is not None:
             context._set_client(client)
-            return
-        scope = self._scope
-        if scope is None:
-            raise RuntimeError("request scope is unavailable")
-        scope["client"] = client
+        else:
+            scope = self._scope
+            if scope is None:
+                raise RuntimeError("request scope is unavailable")
+            scope["client"] = client
+        self._client_source = source
 
     def _set_scheme(self, scheme: str) -> None:
         context = self._context

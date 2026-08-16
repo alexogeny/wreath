@@ -272,8 +272,8 @@ def service_provider_config(
     """What this provider supports, per section 5 of RFC 7643.
 
     Every entry is a statement about *this* implementation rather than a copy of
-    the specification's example. `sort` and `bulk` are false because neither is
-    implemented; `etag` is false because the resources have no version this
+    the specification's example. `bulk` is false because it is not implemented;
+    `etag` is false because the resources have no version this
     provider can compute without a second source of truth for modification time.
     """
     return {
@@ -282,7 +282,7 @@ def service_provider_config(
         "bulk": {"supported": False, "maxOperations": 0, "maxPayloadSize": 0},
         "filter": {"supported": True, "maxResults": max_results},
         "changePassword": {"supported": True},
-        "sort": {"supported": False},
+        "sort": {"supported": True},
         "etag": {"supported": False},
         "authenticationSchemes": [scheme],
         "meta": {

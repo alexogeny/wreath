@@ -20,6 +20,7 @@ Run them individually while you work:
 | `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |
 | `uv run wreath-native-lint` | C complexity patterns; its siblings `wreath-native-error-lint`, `wreath-native-gil-lint`, and `wreath-native-memory-lint` cover error-handling, GIL, and memory. `0` means clean. |
 | `uv run wreath-request-trace --check` | The Python↔native boundary — that you didn't add crossings. |
+| `uv run wreath-complexity-probe --discover-check` | That you added no *new* superlinear shape. A static sweep of `src/wreath` for a linear operation inside a loop that does not shrink, checked against the acknowledged set in `docs/agents/complexity-discovery.json`. |
 | `uv run wreath-port-golden` | That `tests/port/golden/` still matches the emitter. `--update` rewrites what drifted. |
 
 ## The two reports that are not gates
@@ -31,6 +32,7 @@ the question comes up.
 |---|---|
 | `uv run wreath-dup-scan` | Which function bodies share a *structure* — the same body under different names, locals, and literals, which is how copy-paste survives here. Ranked by the lines a collapse would remove. Many of its findings are legitimate near-twins, which is exactly why it is not a gate: as one, it would train everyone to ignore it. |
 | `uv run wreath port <app> --by-rule` | What a codebase needs in bulk, rather than one finding per line in file order. `--rule ID --context 3` then shows that rule's sites with their source. |
+| `uv run wreath-complexity-probe --discover` | Where a superlinear shape *might* be, ranked with the high-confidence ones printed in full. A probe proves a contract somebody already suspected; this is how you find the ones nobody has written a probe for. Most candidates are bounded by something the scanner cannot read — a cap, a partition that already made the loop run once — which is why the report is not a gate and `--discover-check` only fails on a **new** one. |
 
 ## Fixing the map instead of hand-editing it
 

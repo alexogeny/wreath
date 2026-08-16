@@ -47,12 +47,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .complexity_discover import Finding, discover
 from .native_lint import repo_root
 
 ProbeFn = Callable[[int], "float | tuple[float, dict[str, int]]"]
 
 #: Checked-in complexity assumptions for the request-hot probes.
 BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
+#: acknowledged output of the static discovery sweep. A probe proves a contract
+#: somebody already suspected; the sweep finds the shapes nobody has written a
+#: probe for yet, and this file is what keeps a *new* one from joining the
+#: scenery. See `complexity_discover`.
+DISCOVERY_PATH = Path("docs/agents/complexity-discovery.json")
 BASELINE_VERSION = 1
 
 #: exponent -> printable class, in fit order. Past cubic the names exist so a
@@ -3555,6 +3561,461 @@ def _privacy_topology_disconnected_control(n: int):
     return _privacy_topology_harness(n, chain=False)
 
 
+# --- superlinear-removal contracts -----------------------------------------
+
+
+def _cedar_store_harness(n: int, *, chain: bool) -> float:
+    from wreath._auth.cedar_engine import CedarEntity, EntityUid, _build_store
+
+    root = EntityUid("Group", "g0")
+    entities = [CedarEntity(root)]
+    for index in range(1, n):
+        parent = EntityUid("Group", f"g{index - 1}" if chain else "g0")
+        entities.append(CedarEntity(EntityUid("Group", f"g{index}"), parents=(parent,)))
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        store = _build_store(entities)
+    elapsed = (time.perf_counter() - before) / loops
+    if len(store) != n:
+        raise RuntimeError("Cedar store probe lost an entity")
+    return elapsed
+
+
+@probe(
+    "cedar-store-chain", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="entities in one direct-parent chain",
+    assumption="Cedar construction materializes every entity and direct edge once",
+    stage="authorization", group="web",
+)
+def _cedar_store_chain(n: int):
+    """A deep hierarchy stays linear because transitive closure remains native."""
+    return _cedar_store_harness(n, chain=True)
+
+
+@probe(
+    "cedar-store-flat-control", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="same entity and edge count in a flat hierarchy",
+    assumption="the same-size flat Cedar construction control is linear",
+    stage="authorization", group="web",
+)
+def _cedar_store_flat_control(n: int):
+    """Same-size control: all non-root entities share one direct parent."""
+    return _cedar_store_harness(n, chain=False)
+
+
+def _signature_index_harness(n: int, *, late_match: bool) -> float:
+    import hashlib
+
+    from wreath.webhooks import _constant_time_signature_match
+
+    expected = tuple(hashlib.sha256(f"expected-{index}".encode()).digest()
+                     for index in range(n))
+    supplied = [hashlib.sha256(f"supplied-{index}".encode()).digest()
+                for index in range(n)]
+    if late_match:
+        supplied[-1] = expected[-1]
+    loops = 100
+    before = time.perf_counter()
+    for _ in range(loops):
+        matched = _constant_time_signature_match(expected, supplied)
+    elapsed = (time.perf_counter() - before) / loops
+    if matched is not late_match:
+        raise RuntimeError("signature index probe returned the wrong decision")
+    return elapsed
+
+
+@probe(
+    "webhook-signature-index-miss", expect=1.0, sizes=(32, 64, 128, 256),
+    axis="configured secrets and supplied signatures with no match",
+    assumption="webhook multi-signature verification indexes both collections linearly",
+    stage="authentication", group="web",
+)
+def _webhook_signature_index_miss(n: int):
+    """Disjoint expected and supplied signature collections remain linear."""
+    return _signature_index_harness(n, late_match=False)
+
+
+@probe(
+    "webhook-signature-index-match-control", expect=1.0,
+    sizes=(32, 64, 128, 256),
+    axis="same signature collections with one late match",
+    assumption="the same-size successful verification control remains linear",
+    stage="authentication", group="web",
+)
+def _webhook_signature_index_match_control(n: int):
+    """Same-size control: the final expected signature has one indexed match."""
+    return _signature_index_harness(n, late_match=True)
+
+
+def _queue_waiter_harness(n: int, *, cancel: bool) -> float:
+    import asyncio
+
+    from wreath.queue import Queue
+
+    async def drive() -> float:
+        queue = Queue(capacity=n)
+        tasks = [asyncio.create_task(queue.get()) for _ in range(n)]
+        await asyncio.sleep(0)
+        before = time.perf_counter()
+        if cancel:
+            for task in tasks:
+                task.cancel()
+        else:
+            for index in range(n):
+                queue.offer(index)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed = time.perf_counter() - before
+        if queue.waiting:
+            raise RuntimeError("queue waiter probe left a live waiter")
+        return elapsed
+
+    return asyncio.run(drive())
+
+
+@probe(
+    "queue-waiter-mass-cancel", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="simultaneously cancelled queue getters",
+    assumption="waiter cancellation leaves FIFO tombstones and cleans them in aggregate O(n)",
+    stage="queue", group="web",
+)
+def _queue_waiter_mass_cancel(n: int):
+    """Cancelling every parked getter never linearly removes each future."""
+    return _queue_waiter_harness(n, cancel=True)
+
+
+@probe(
+    "queue-waiter-wake-control", expect=1.0, sizes=(250, 500, 1000, 2000),
+    axis="same parked getters woken by items",
+    assumption="the same-size successful wake control is linear",
+    stage="queue", group="web",
+)
+def _queue_waiter_wake_control(n: int):
+    """Same-size control: every parked getter receives one item."""
+    return _queue_waiter_harness(n, cancel=False)
+
+
+def _route_registration_harness(n: int, *, named: bool) -> float:
+    from wreath import Wreath
+
+    async def endpoint(request):
+        return None
+
+    app = Wreath(ai_scraping="allow")
+    before = time.perf_counter()
+    for index in range(n):
+        options = {"name": f"route-{index}"} if named else {}
+        app.get(f"/route-{index}", **options)(endpoint)
+    elapsed = time.perf_counter() - before
+    if len(app._routes) != n:
+        raise RuntimeError("route registration probe lost a route")
+    return elapsed
+
+
+@probe(
+    "named-route-registration", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    axis="uniquely named routes registered on one application",
+    assumption="route-name uniqueness uses the application-owned hash index",
+    stage="startup", group="web",
+)
+def _named_route_registration(n: int):
+    """Registering uniquely named routes is linear in route count."""
+    return _route_registration_harness(n, named=True)
+
+
+@probe(
+    "unnamed-route-registration-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="same static routes without names",
+    assumption="the same-size router-add control is linear",
+    stage="startup", group="web",
+)
+def _unnamed_route_registration_control(n: int):
+    """Same-size control: native static registration without the name index."""
+    return _route_registration_harness(n, named=False)
+
+
+def _protobuf_wide_fixture(n: int):
+    from wreath.protobuf import field, message
+
+    annotations = {f"field_{index}": int for index in range(n)}
+    namespace: dict[str, Any] = {"__annotations__": annotations}
+    namespace.update({name: field(index + 1)
+                      for index, name in enumerate(annotations)})
+    cls = message(type(f"WideProbe{n}", (), namespace))
+    snake = {name: index + 1 for index, name in enumerate(annotations)}
+    camel = {name.replace("_", ""): value for name, value in snake.items()}
+    return cls, snake, camel
+
+
+def _protobuf_wide_harness(n: int, *, operation: str) -> float:
+    from wreath._native import _core
+    from wreath.protobuf import encode
+
+    cls, snake, camel = _protobuf_wide_fixture(n)
+    positional = tuple(snake.values())
+    instance = cls(*positional)
+    loops = 20
+    before = time.perf_counter()
+    for _ in range(loops):
+        if operation == "encode-json":
+            result = _core.protobuf_encode_otlp_json(cls, camel)
+        elif operation == "decode-json":
+            result = _core.protobuf_otlp_from_json(cls, camel)
+        elif operation == "encode-object":
+            result = encode(instance)
+        else:
+            result = cls(*positional)
+    elapsed = (time.perf_counter() - before) / loops
+    if result is None:
+        raise RuntimeError("protobuf wide-field probe produced no result")
+    return elapsed
+
+
+@probe(
+    "protobuf-otlp-wide-encode", expect=1.0, sizes=(50, 100, 200, 400),
+    axis="OTLP/JSON keys against an equally wide protobuf descriptor",
+    assumption="native OTLP encoding performs one descriptor hash lookup per key",
+    stage="serialization", group="web",
+)
+def _protobuf_otlp_wide_encode(n: int):
+    """Encoding a dict with every declared field is linear in field count."""
+    return _protobuf_wide_harness(n, operation="encode-json")
+
+
+@probe(
+    "protobuf-object-wide-encode-control", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="same protobuf fields encoded from a constructed object",
+    assumption="the same-size compiled object encoder control is linear",
+    stage="serialization", group="web",
+)
+def _protobuf_object_wide_encode_control(n: int):
+    """Same-size control: the ordinary compiled object encoder visits each field."""
+    return _protobuf_wide_harness(n, operation="encode-object")
+
+
+@probe(
+    "protobuf-otlp-wide-decode", expect=1.0, sizes=(50, 100, 200, 400),
+    axis="OTLP/JSON keys converted into an equally wide protobuf object",
+    assumption="native OTLP conversion performs one descriptor hash lookup per key",
+    stage="serialization", group="web",
+)
+def _protobuf_otlp_wide_decode(n: int):
+    """Constructing a message from every JSON field is linear in field count."""
+    return _protobuf_wide_harness(n, operation="decode-json")
+
+
+@probe(
+    "protobuf-object-wide-init-control", expect=1.0,
+    sizes=(50, 100, 200, 400),
+    axis="same protobuf fields passed directly to its dataclass initializer",
+    assumption="the same-size Python object-construction control is linear",
+    stage="serialization", group="web",
+)
+def _protobuf_object_wide_init_control(n: int):
+    """Same-size control: materialize the identical output without JSON lookup."""
+    return _protobuf_wide_harness(n, operation="init-object")
+
+
+def _css_media_harness(n: int, *, media: bool) -> float:
+    from wreath._audit.contrast import _strip_media
+
+    block = "@media screen{.x{color:red}}"
+    css = block * n if media else "x" * (len(block) * n)
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        result = _strip_media(css)
+    elapsed = (time.perf_counter() - before) / loops
+    if (not media and result != css) or (media and result):
+        raise RuntimeError("CSS media probe returned the wrong remainder")
+    return elapsed
+
+
+@probe(
+    "css-many-media-blocks", expect=1.0, sizes=(100, 200, 400, 800),
+    axis="media blocks spread through one stylesheet",
+    assumption="media stripping advances regex position without copying suffixes",
+    stage="audit", group="extended",
+)
+def _css_many_media_blocks(n: int):
+    """Removing many media blocks is linear in total stylesheet bytes."""
+    return _css_media_harness(n, media=True)
+
+
+@probe(
+    "css-no-media-control", expect=1.0, sizes=(100, 200, 400, 800),
+    axis="same stylesheet bytes containing no media blocks",
+    assumption="the same-size regex scan control is linear",
+    stage="audit", group="extended",
+)
+def _css_no_media_control(n: int):
+    """Same-size control: one failed media search consumes the stylesheet."""
+    return _css_media_harness(n, media=False)
+
+
+def _postgres_waiter_harness(n: int, *, cancel: bool) -> float:
+    """Price queue removal with the successful FIFO drain as control."""
+    import asyncio
+
+    from wreath.postgres import Pool, PoolConfig
+
+    async def connector(_dsn: str):
+        raise RuntimeError("the waiter probe never opens a connection")
+
+    async def drive() -> float:
+        pool = Pool(
+            "postgresql://probe",
+            PoolConfig(min_size=0, max_size=1, max_queue=n),
+            connector=connector,
+            read_only=False,
+            statements=tuple,
+        )
+        loop = asyncio.get_running_loop()
+        waiters = [loop.create_future() for _ in range(n)]
+        pool._waiters.extend(waiters)
+        pool._active_waiters.update(waiters)
+        before = time.perf_counter()
+        if cancel:
+            waiters.reverse()
+            for waiter in waiters:
+                waiter.cancel()
+                pool._unqueue(waiter)
+        else:
+            for _ in waiters:
+                pool._wake_one()
+        elapsed = time.perf_counter() - before
+        if pool._waiters or pool._active_waiters:
+            raise RuntimeError("PostgreSQL waiter probe leaked queue state")
+        return elapsed
+
+    return asyncio.run(drive())
+
+
+@probe(
+    "postgres-waiter-reverse-cancel", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="queued PostgreSQL acquisitions cancelled newest-first",
+    assumption="cancellation marks each waiter inactive and clears tombstones once",
+    stage="postgres-pool", group="extended",
+)
+def _postgres_waiter_reverse_cancel(n: int):
+    """Reverse cancellation must not scan the remaining FIFO per waiter."""
+    return _postgres_waiter_harness(n, cancel=True)
+
+
+@probe(
+    "postgres-waiter-wake-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="same queued PostgreSQL acquisitions resolved in FIFO order",
+    assumption="the same-size successful wake control is linear",
+    stage="postgres-pool", group="extended",
+)
+def _postgres_waiter_wake_control(n: int):
+    """Same-size control: resolve every live waiter from the head."""
+    return _postgres_waiter_harness(n, cancel=False)
+
+
+def _livedoc_close_harness(n: int, *, shared_principal: bool) -> float:
+    """Price subscription release with principal distribution as control."""
+    import asyncio
+
+    from wreath._livedoc import LiveDocument
+
+    async def drive() -> float:
+        document = LiveDocument(
+            channel="complexity-probe",
+            max_subscribers=n,
+            max_per_principal=n,
+        )
+        for index in range(n):
+            principal = "shared" if shared_principal else f"principal-{index}"
+            if document.subscribe(principal) is None:
+                raise RuntimeError("LiveDocument probe refused a subscription")
+        before = time.perf_counter()
+        document.close_all()
+        elapsed = time.perf_counter() - before
+        if document.subscribers:
+            raise RuntimeError("LiveDocument probe leaked subscriptions")
+        return elapsed
+
+    return asyncio.run(drive())
+
+
+@probe(
+    "livedoc-one-principal-close", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="subscriptions closed from one principal bucket",
+    assumption="subscription release deletes directly from an insertion-ordered map",
+    stage="livedoc", group="extended",
+)
+def _livedoc_one_principal_close(n: int):
+    """Closing one principal's subscribers is linear in subscriber count."""
+    return _livedoc_close_harness(n, shared_principal=True)
+
+
+@probe(
+    "livedoc-many-principals-control", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="same subscriptions split across one principal each",
+    assumption="the same-size one-entry-bucket control is linear",
+    stage="livedoc", group="extended",
+)
+def _livedoc_many_principals_control(n: int):
+    """Same-size control: each release empties a one-entry principal bucket."""
+    return _livedoc_close_harness(n, shared_principal=False)
+
+
+def _port_session_propagation_harness(n: int, *, chain: bool) -> float:
+    """Price session propagation over equal-size call graphs."""
+    import tempfile
+
+    from wreath._port.analyzer.sessions import session_functions
+
+    lines = []
+    for index in range(n):
+        target = f"f{index + 1}" if chain and index + 1 < n else "query_leaf"
+        lines.append(f"async def f{index}():\n    return await {target}()\n")
+    lines.append(
+        "async def query_leaf():\n"
+        "    return await Llama.objects.all()\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="wreath-complexity-") as directory:
+        path = Path(directory) / "application.py"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        before = time.perf_counter()
+        needs = session_functions([path])
+        elapsed = time.perf_counter() - before
+    if len(needs) != n + 1:
+        raise RuntimeError("port session propagation lost a call-graph node")
+    return elapsed
+
+
+@probe(
+    "port-session-propagation-chain", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="functions in a deep session-requirement call chain",
+    assumption="reverse worklist propagation visits each call-graph edge once",
+    stage="port-analysis", group="extended",
+)
+def _port_session_propagation_chain(n: int):
+    """A deepest-leaf query must not require one whole-graph pass per caller."""
+    return _port_session_propagation_harness(n, chain=True)
+
+
+@probe(
+    "port-session-propagation-star-control", expect=1.0,
+    sizes=(100, 200, 400, 800),
+    axis="same functions each calling one query leaf",
+    assumption="the same-size one-layer propagation control is linear",
+    stage="port-analysis", group="extended",
+)
+def _port_session_propagation_star_control(n: int):
+    """Same-size control: every caller is one edge from the query leaf."""
+    return _port_session_propagation_harness(n, chain=False)
+
+
 def _todo_document(todo: Todo | None) -> dict[str, Any] | None:
     if todo is None:
         return None
@@ -3586,6 +4047,75 @@ def _contract(p: Probe) -> dict[str, Any]:
 
 def _baseline_path() -> Path:
     return repo_root() / BASELINE_PATH
+
+
+def _discovery_path() -> Path:
+    return repo_root() / DISCOVERY_PATH
+
+
+def _run_discovery() -> list[Finding]:
+    return discover(repo_root() / "src" / "wreath")
+
+
+def _print_discovery(findings: list[Finding]) -> None:
+    by_code: dict[str, int] = {}
+    for finding in findings:
+        by_code[finding.code] = by_code.get(finding.code, 0) + 1
+    for finding in findings:
+        if finding.confidence == "high":
+            print(f"{finding.file}:{finding.line} {finding.func}() "
+                  f"[{finding.code}] {finding.message}")
+            if finding.source:
+                print(f"    | {finding.source}")
+    print()
+    print(f"{len(findings)} candidates "
+          f"({sum(1 for f in findings if f.confidence == 'high')} high confidence)")
+    for code, count in sorted(by_code.items(), key=lambda kv: -kv[1]):
+        print(f"  {code:<20} {count}")
+
+
+def _write_discovery(findings: list[Finding]) -> int:
+    """Record every current candidate as acknowledged."""
+    payload = {
+        "version": 1,
+        "note": "Acknowledged output of the static superlinear sweep "
+                "(wreath-complexity-probe --discover). A candidate here has "
+                "been seen, not necessarily fixed: most are bounded by "
+                "something the scanner cannot read. --discover-check fails "
+                "only on a candidate that is NOT in this file, so a quadratic "
+                "introduced tomorrow arrives as a diff rather than as scenery.",
+        "keys": sorted({finding.key for finding in findings}),
+        "candidates": [finding.document() for finding in findings],
+    }
+    path = _discovery_path()
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"wreath-complexity-probe: wrote {DISCOVERY_PATH} "
+          f"({len(findings)} candidates)")
+    return 0
+
+
+def _check_discovery(findings: list[Finding]) -> int:
+    path = _discovery_path()
+    if not path.exists():
+        print(f"wreath-complexity-probe: no discovery baseline at {DISCOVERY_PATH}; "
+              f"run --update-discovery", file=sys.stderr)
+        return 1
+    known = set(json.loads(path.read_text(encoding="utf-8"))["keys"])
+    fresh = [finding for finding in findings if finding.key not in known]
+    if fresh:
+        print(f"wreath-complexity-probe: {len(fresh)} unacknowledged superlinear "
+              f"candidate(s)", file=sys.stderr)
+        for finding in fresh:
+            print(f"  {finding.file}:{finding.line} {finding.func}() "
+                  f"[{finding.code}] {finding.message}", file=sys.stderr)
+            if finding.source:
+                print(f"      | {finding.source}", file=sys.stderr)
+        print("\nEither write a probe for it, restructure it, or acknowledge it "
+              "with --update-discovery and say why in the change.", file=sys.stderr)
+        return 1
+    print(f"wreath-complexity-probe: no new superlinear candidates "
+          f"({len(findings)} acknowledged in {DISCOVERY_PATH})")
+    return 0
 
 
 def _write_baseline(names: list[str]) -> int:
@@ -3701,10 +4231,30 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"rerun and check assumptions in {BASELINE_PATH}")
     parser.add_argument("--update-baseline", action="store_true",
                         help=f"record assumptions and observations in {BASELINE_PATH}")
+    parser.add_argument("--discover", action="store_true",
+                        help="statically sweep src/wreath for superlinear shapes "
+                             "no probe covers yet, and report them")
+    parser.add_argument("--discover-check", action="store_true",
+                        help=f"fail on any candidate not acknowledged in {DISCOVERY_PATH}")
+    parser.add_argument("--update-discovery", action="store_true",
+                        help=f"acknowledge every current candidate in {DISCOVERY_PATH}")
     options = parser.parse_args(argv)
 
     if options.check and options.update_baseline:
         parser.error("--check and --update-baseline are exclusive")
+    if sum((options.discover, options.discover_check, options.update_discovery)) > 1:
+        parser.error("--discover, --discover-check and --update-discovery are exclusive")
+
+    # The sweep is static: it runs no probe and needs no timing, so it answers
+    # before any of the probe selection below.
+    if options.discover or options.discover_check or options.update_discovery:
+        findings = _run_discovery()
+        if options.update_discovery:
+            return _write_discovery(findings)
+        if options.discover_check:
+            return _check_discovery(findings)
+        _print_discovery(findings)
+        return 0
     if options.list_probes:
         for p in _REGISTRY.values():
             bound = ("PINNED " if p.todo else "at most") + f" {_classify(p.expect):<7}"

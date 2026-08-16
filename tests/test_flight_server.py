@@ -406,6 +406,109 @@ async def _drive_app(recorder, app, request: bytes) -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_ai_refusal_is_a_structured_flight_completion() -> None:
+    from wreath import Wreath
+    from wreath.metrics import collect
+
+    app = Wreath()
+    reached = False
+
+    @app.get("/")
+    async def handler(request):
+        nonlocal reached
+        reached = True
+        return "not reached"
+
+    recorder = _flight.Recorder(
+        _flight.MODE_PULSE, ring_records=64, active_requests=8
+    )
+    await _drive_app(
+        recorder,
+        app,
+        b"GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: GPTBot/1.0\r\n\r\n",
+    )
+    assert reached is False
+    assert recorder.requests == 1
+    assert recorder.completions == 1
+    cell = fs.CompletionCell.decode(recorder.drain())
+    assert cell.status == 403
+    assert cell.terminal is fs.TerminalStatus.OK
+    assert cell.flags & fs.FLAG_POLICY_REFUSED
+    assert cell.flags & fs.FLAG_AI_SCRAPING_REFUSED
+    readings = {(row.subsystem, row.instance): row.values for row in collect(app)}
+    assert readings[("ai_scraping_policy", "default")] == {"refused": 1}
+
+
+@pytest.mark.asyncio
+async def test_native_cors_preflight_is_a_non_refusal_completion() -> None:
+    from wreath import Wreath
+    from wreath.policy import CorsPolicy, HttpPolicy
+
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cors=CorsPolicy(
+                allow_origins=["https://app.example"], allow_methods=["GET"]
+            )
+        )
+    )
+    recorder = _flight.Recorder(
+        _flight.MODE_PULSE, ring_records=64, active_requests=8
+    )
+    await _drive_app(
+        recorder,
+        app,
+        b"OPTIONS / HTTP/1.1\r\nHost: x\r\n"
+        b"Origin: https://app.example\r\n"
+        b"Access-Control-Request-Method: GET\r\n\r\n",
+    )
+
+    assert recorder.requests == 1
+    assert recorder.completions == 1
+    cell = fs.CompletionCell.decode(recorder.drain())
+    assert cell.status == 204
+    assert cell.terminal is fs.TerminalStatus.OK
+    assert not cell.flags & fs.FLAG_POLICY_REFUSED
+    assert not cell.flags & fs.FLAG_AI_SCRAPING_REFUSED
+
+
+@pytest.mark.asyncio
+async def test_client_facts_resolve_into_a_compact_flight_cell() -> None:
+    from wreath import Response, Wreath
+    from wreath.request import Request
+
+    app = Wreath(ai_scraping="allow")
+    client_facts = app.client_facts(geoip=None)
+
+    @app.get("/facts")
+    async def handler(request: Request) -> Response:
+        facts = client_facts(request)
+        assert facts.user_agent.bot is True
+        return Response(b"ok")
+
+    app._compile_routes()
+    recorder = _flight.Recorder(
+        _flight.MODE_PULSE, ring_records=64, active_requests=8
+    )
+    await _drive_app(
+        recorder,
+        app,
+        b"GET /facts HTTP/1.1\r\nHost: x\r\nUser-Agent: ClaudeBot/1.0\r\n\r\n",
+    )
+    blob = recorder.drain()
+    cells = [
+        blob[offset : offset + fs.CELL_SIZE]
+        for offset in range(0, len(blob), fs.CELL_SIZE)
+    ]
+    completion = fs.CompletionCell.decode(cells[0])
+    assert completion.flags & fs.FLAG_HAS_CLIENT_FACTS
+    client = fs.ClientFactsCell.decode(cells[1])
+    assert client.request_id == completion.request_id
+    assert client.flags & fs.ClientFactFlag.UA_KNOWN
+    assert client.flags & fs.ClientFactFlag.BOT_CLAIMED
+    assert client.user_agent_rule_id != 0
+
+
+@pytest.mark.asyncio
 async def test_armed_request_emits_handler_and_serialize_phases() -> None:
     # Detailed at rate 1.0 arms every request: dispatch times the handler body
     # and response coercion and records one phase for each. The completion cell

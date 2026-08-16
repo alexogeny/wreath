@@ -134,10 +134,10 @@ def render_exposition(
     # every sample of a family to be contiguous and a scraper rejects the text
     # outright when they are not -- two queues would otherwise interleave into
     # two HELP blocks for one name.
-    # `gauge`, not `counter`: a reading may be either -- `jobs.run_errors`
-    # only rises, `pool.borrowed` moves both ways -- and this layer cannot tell
-    # them apart. Declaring a falling series a counter makes a scraper read
-    # every decrease as a process restart and invent a rate spike.
+    # `gauge`, not `counter`: canonical rows preserve their names and expose the
+    # current reading. `Counters.gauges` lets delta-oriented push bridges avoid
+    # subtracting live values, but changing only some Prometheus families to
+    # counters would also add `_total` and break the existing public names.
     counter_block = _core.prometheus_counter_block(counters, ns)
     return _core.prometheus_document(
         route_blocks,
@@ -159,7 +159,10 @@ class PrometheusBridge:
     request path.
     """
 
-    __slots__ = ("_app", "_source", "_namespace", "_route_labels", "_openmetrics")
+    __slots__ = (
+        "_app", "_counter_sources", "_source", "_namespace", "_route_labels",
+        "_openmetrics",
+    )
 
     def __init__(
         self,
@@ -169,15 +172,20 @@ class PrometheusBridge:
         route_labels: RouteLabels = None,
         openmetrics: bool = False,
         app: Any = None,
+        counter_sources: Sequence[Any] = (),
     ) -> None:
-        if not hasattr(source, "snapshot"):
-            raise TypeError("prometheus source must expose snapshot()")
+        from .metrics import _counter_sources, _snapshot_source
+
+        explicit_sources = _counter_sources(
+            counter_sources, bridge="Prometheus"
+        )
         #: The application whose registered subsystems are asked for counters on
         #: every render. Optional and defaulted absent: the projector half works
         #: without one, and a bridge built for a test double should not have to
         #: invent an app to satisfy this.
         self._app = app
-        self._source = source
+        self._counter_sources = explicit_sources
+        self._source = _snapshot_source(source, bridge="prometheus")
         self._namespace = namespace
         self._route_labels = route_labels
         self._openmetrics = openmetrics
@@ -188,16 +196,10 @@ class PrometheusBridge:
 
     def render(self) -> str:
         """A fresh exposition text for the current snapshot."""
-        snapshot = self._source.snapshot()
-        readings: tuple[Any, ...] = ()
-        if self._app is not None:
-            from .metrics import collect
+        from .metrics import _read_snapshot, collect
 
-            readings = collect(self._app)
-        recorder_loss = None
-        getter = getattr(self._source, "recorder_loss", None)
-        if callable(getter):
-            recorder_loss = getter()
+        readings = collect(self._app, self._counter_sources)
+        snapshot, recorder_loss = _read_snapshot(self._source)
         return render_exposition(
             snapshot,
             recorder_loss=recorder_loss,
@@ -229,9 +231,17 @@ def prometheus_handler(
     *,
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
+    counter_sources: Sequence[Any] = (),
+    app: Any = None,
 ) -> Callable[[Any], Any]:
     """Convenience: a ready async `/metrics` handler for a snapshot source."""
-    return PrometheusBridge(source, namespace=namespace, route_labels=route_labels).handler()
+    return PrometheusBridge(
+        source,
+        namespace=namespace,
+        route_labels=route_labels,
+        counter_sources=counter_sources,
+        app=app,
+    ).handler()
 
 
 def openmetrics_handler(
@@ -239,10 +249,17 @@ def openmetrics_handler(
     *,
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
+    counter_sources: Sequence[Any] = (),
+    app: Any = None,
 ) -> Callable[[Any], Any]:
     """Convenience: a ready async `/metrics` handler emitting OpenMetrics 1.0.0."""
     return PrometheusBridge(
-        source, namespace=namespace, route_labels=route_labels, openmetrics=True,
+        source,
+        namespace=namespace,
+        route_labels=route_labels,
+        openmetrics=True,
+        counter_sources=counter_sources,
+        app=app,
     ).handler()
 
 
@@ -252,17 +269,24 @@ def metrics_router(
     path: str = "/metrics",
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
+    counter_sources: Sequence[Any] = (),
+    app: Any = None,
 ):
     """Convenience: a `wreath.router.Router` exposing `GET <path>`.
 
-    The consumer `include_router`s it. Kept here (not wired into `app.py`) so
-    a future `app.metrics()` convenience is an additive follow-up.
+    The consumer `include_router`s it. `Wreath.metrics()` is the application-
+    owned convenience and passes its app through this same collector seam.
     """
-    # TODO(app-wiring): an `app.metrics(path=..., auth=...)` convenience on the
-    #   application factory would mirror `app.http_client`/`app.objects`; deferred
-    #   because app.py is owned by a concurrent workstream.
     from .router import Router
 
     router = Router()
-    router.get(path)(prometheus_handler(source, namespace=namespace, route_labels=route_labels))
+    router.get(path)(
+        prometheus_handler(
+            source,
+            namespace=namespace,
+            route_labels=route_labels,
+            counter_sources=counter_sources,
+            app=app,
+        )
+    )
     return router

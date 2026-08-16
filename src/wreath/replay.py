@@ -41,15 +41,19 @@ from ._replay_adapters import (
     AdapterFault,
     DatabaseDouble,
     FaultyHttpClient,
+    HttpReplayError,
     ObjectStoreDouble,
+    RecordedHttpExchange,
     ReplayAdapters,
 )
+from ._replay_errors import ReplayError
 from ._replay_plan import (
     CanonicalRequest,
     PlanMode,
     PlanReplayResult,
     replay_endpoint_plan,
 )
+from ._target import parse_target
 from .server import ServerConfig
 
 __all__ = [
@@ -76,8 +80,10 @@ __all__ = [
     "AdapterFault",
     "DatabaseDouble",
     "FaultyHttpClient",
+    "HttpReplayError",
     "ObjectStoreDouble",
     "ReplayAdapters",
+    "RecordedHttpExchange",
     "ReplayError",
     "generate_test",
     "recorded_request",
@@ -95,10 +101,6 @@ __all__ = [
     "replay_attempt",
     "generate_attempt_test",
 ]
-
-
-class ReplayError(Exception):
-    """A recording or fault schedule is malformed, or a replay could not run."""
 
 
 # --- checksummed container framing (shape shared with _recording_format) -----
@@ -1430,9 +1432,18 @@ async def generate_test(
             content=request.body,
         )
 
-    module, _, attribute = target.partition(":")
-    import_line = f"from {module} import {attribute}" if attribute else f"import {module}"
-    application = attribute or f"{module}.app"
+    parsed_target = parse_target(
+        target, label="replay application", default_attribute="app"
+    )
+    module = parsed_target.module
+    attribute = parsed_target.attribute
+    explicit_attribute = ":" in target
+    import_line = (
+        f"from {module} import {attribute}"
+        if explicit_attribute
+        else f"import {module}"
+    )
+    application = attribute if explicit_attribute else f"{module}.{attribute}"
     headers = {
         name_.decode("latin-1"): value.decode("latin-1")
         for name_, value in request.headers
@@ -1766,9 +1777,18 @@ async def generate_attempt_test(
     """
     result = await replay_attempt(runner, record, args=args, scope=scope)
 
-    module, _, attribute = target.partition(":")
-    import_line = f"from {module} import {attribute}" if attribute else f"import {module}"
-    queue = attribute or f"{module}.jobs"
+    parsed_target = parse_target(
+        target, label="replay job runner", default_attribute="jobs"
+    )
+    module = parsed_target.module
+    attribute = parsed_target.attribute
+    explicit_attribute = ":" in target
+    import_line = (
+        f"from {module} import {attribute}"
+        if explicit_attribute
+        else f"import {module}"
+    )
+    queue = attribute if explicit_attribute else f"{module}.{attribute}"
     where = f" from {origin}" if origin else ""
     tenant = f" for tenant {record.tenant!r}" if record.tenant else ""
     cause = (

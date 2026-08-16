@@ -186,8 +186,9 @@ def scim_router(
 
     ## What it does not implement, and why the refusals are loud
 
-    Sorting, bulk operations and `ETag` are absent, and `ServiceProviderConfig`
-    says so. `POST` and `DELETE` on `/Groups` answer 501: a group here is a role
+    Bulk operations and `ETag` are absent, and `ServiceProviderConfig` says so.
+    Lists support bounded `sortBy`/`sortOrder`. `POST` and `DELETE` on `/Groups`
+    answer 501: a group here is a role
     in the declared vocabulary, which is configuration a policy names by string,
     not a row a client may mint. A filter naming an attribute this provider does
     not hold -- `externalId`, `name.givenName`, anything else section 4.1 makes
@@ -434,19 +435,55 @@ def scim_router(
             values.setdefault(key.lower(), value)
         return values
 
-    def sorting_refused(query: Mapping[str, str]) -> ScimResponse | None:
-        """501 for a sort this provider does not implement, per section 3.4.2.3.
+    def sort_documents(
+        documents: list[dict[str, Any]],
+        query: Mapping[str, str],
+        shape: resources.Shape,
+    ) -> list[dict[str, Any]]:
+        """Apply SCIM section 3.4.2.3 sorting before paging.
 
-        Refused rather than ignored: a client that asked for an order and got an
-        arbitrary one has been answered wrongly, and it has no way to tell.
+        Only stored/published top-level attributes are accepted. Missing values
+        sort after present ones in both directions; a multi-valued attribute uses
+        its primary value, or first value when none is primary.
         """
-        if "sortby" not in query:
-            return None
-        return _error(
-            501,
-            "this provider does not implement sorting; ServiceProviderConfig "
-            "reports sort.supported as false",
-        )
+        requested = query.get("sortby")
+        if requested is None:
+            return documents
+        key = requested.lower()
+        if "." in key or key not in shape.queryable:
+            raise PatchError(
+                "invalidValue",
+                f"sortBy names unsupported attribute {requested!r}; expected one of "
+                + ", ".join(sorted(shape.canonical[name] for name in shape.queryable)),
+            )
+        order = query.get("sortorder", "ascending").lower()
+        if order not in {"ascending", "descending"}:
+            raise PatchError(
+                "invalidValue",
+                f"sortOrder must be 'ascending' or 'descending' (got {order!r})",
+            )
+        wire_name = shape.canonical[key]
+
+        def sortable(document: dict[str, Any]) -> tuple[bool, str]:
+            value = document.get(wire_name)
+            if isinstance(value, list):
+                primary = next(
+                    (item for item in value
+                     if isinstance(item, Mapping) and item.get("primary") is True),
+                    value[0] if value else None,
+                )
+                value = primary.get("value") if isinstance(primary, Mapping) else primary
+            if value is None:
+                return True, ""
+            if isinstance(value, bool):
+                return False, "1" if value else "0"
+            return False, str(value).casefold()
+
+        present = [document for document in documents if not sortable(document)[0]]
+        missing = [document for document in documents if sortable(document)[0]]
+        present.sort(key=lambda document: sortable(document)[1],
+                     reverse=order == "descending")
+        return present + missing
 
     def paging(query: Mapping[str, str]) -> tuple[int, int]:
         """`(startIndex, count)`, per section 3.4.2.4, or raise `PatchError`.
@@ -481,6 +518,7 @@ def scim_router(
         if expression:
             node = parse_filter(expression, attributes=shape.queryable)
             documents = select(node, documents)
+        documents = sort_documents(documents, query, shape)
         start, count = paging(query)
         window = documents[start - 1 : start - 1 + count]
         return ScimResponse(
@@ -595,11 +633,8 @@ def scim_router(
         org = org_of(request)
         base = base_of(request)
         query = query_of(request)
-        refusal = sorting_refused(query)
-        if refusal is not None:
-            return refusal
         try:
-            if query.get("filter"):
+            if query.get("filter") or query.get("sortby"):
                 return selected(
                     await user_documents(org, base, max_filter_scan),
                     query,
@@ -754,9 +789,6 @@ def scim_router(
     async def scim_list_groups(request: Any) -> Response:
         org = org_of(request)
         query = query_of(request)
-        refusal = sorting_refused(query)
-        if refusal is not None:
-            return refusal
         try:
             return selected(
                 await group_documents(org, base_of(request)), query, resources.GROUP

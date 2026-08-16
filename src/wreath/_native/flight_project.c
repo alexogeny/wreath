@@ -8,6 +8,7 @@
 #define FLIGHT_CORRELATION 2
 #define FLIGHT_PHASE 3
 #define FLIGHT_LOG 6
+#define FLIGHT_CLIENT_FACTS 7
 
 typedef struct {
     PyObject_HEAD
@@ -15,6 +16,7 @@ typedef struct {
     Py_ssize_t cycle;
     unsigned char completion[FLIGHT_CELL_BYTES];
     unsigned char correlation[FLIGHT_CELL_BYTES];
+    unsigned char client_facts[FLIGHT_CELL_BYTES];
     unsigned char *phases;
     unsigned char *logs;
     Py_ssize_t phase_count;
@@ -23,6 +25,7 @@ typedef struct {
     Py_ssize_t log_capacity;
     unsigned int has_completion : 1;
     unsigned int has_correlation : 1;
+    unsigned int has_client_facts : 1;
 } FlightAssembly;
 
 static PyObject *
@@ -164,6 +167,54 @@ flight_ingest_correlation(PyObject *projector, PyObject *pending,
     FlightAssembly *assembly = (FlightAssembly *)entry;
     memcpy(assembly->correlation, cell, FLIGHT_CELL_BYTES);
     assembly->has_correlation = 1;
+    Py_DECREF(entry); Py_DECREF(request_id);
+    return 0;
+error:
+    Py_XDECREF(entry); Py_DECREF(request_id);
+    return -1;
+}
+
+static PyObject *
+flight_client_facts_cell(const unsigned char *cell, PyObject *cell_type)
+{
+    PyObject *country = NULL, *result;
+    if (cell[6] == 0 && cell[7] == 0) {
+        country = Py_NewRef(Py_None);
+    }
+    else if (cell[6] >= 'A' && cell[6] <= 'Z' &&
+             cell[7] >= 'A' && cell[7] <= 'Z') {
+        country = PyUnicode_DecodeASCII((const char *)cell + 6, 2, "strict");
+    }
+    else {
+        PyErr_SetString(PyExc_ValueError,
+                        "flight client-facts country is malformed");
+        return NULL;
+    }
+    if (country == NULL) return NULL;
+    result = PyObject_CallFunction(
+        cell_type, "KIIO",
+        (unsigned long long)wreath_load_u64_le(cell + 8),
+        wreath_load_u16_le(cell + 2), wreath_load_u16_le(cell + 4), country);
+    Py_DECREF(country);
+    return result;
+}
+
+static int
+flight_ingest_client_facts(PyObject *projector, PyObject *pending,
+                           PyObject *assembly_type, PyObject *config,
+                           PyObject *cycle, Py_ssize_t max_pending,
+                           const unsigned char *cell)
+{
+    PyObject *request_id = PyLong_FromUnsignedLongLong(
+        wreath_load_u64_le(cell + 8));
+    PyObject *entry = NULL;
+    if (request_id == NULL) return -1;
+    entry = flight_slot(projector, pending, assembly_type, config, cycle,
+                        max_pending, request_id);
+    if (entry == NULL) goto error;
+    FlightAssembly *assembly = (FlightAssembly *)entry;
+    memcpy(assembly->client_facts, cell, FLIGHT_CELL_BYTES);
+    assembly->has_client_facts = 1;
     Py_DECREF(entry); Py_DECREF(request_id);
     return 0;
 error:
@@ -392,9 +443,9 @@ flight_assembly_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
             args, kwargs, "O!:FlightAssembly", keywords, &PyTuple_Type, &config)) {
         return NULL;
     }
-    if (PyTuple_GET_SIZE(config) != 14) {
+    if (PyTuple_GET_SIZE(config) != 15) {
         PyErr_SetString(PyExc_ValueError,
-                        "flight assembly config must have fourteen items");
+                        "flight assembly config must have fifteen items");
         return NULL;
     }
     self = (FlightAssembly *)type->tp_alloc(type, 0);
@@ -409,6 +460,7 @@ flight_assembly_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->log_capacity = 0;
     self->has_completion = 0;
     self->has_correlation = 0;
+    self->has_client_facts = 0;
     return (PyObject *)self;
 }
 
@@ -475,6 +527,14 @@ flight_assembly_get_correlation(FlightAssembly *self, void *Py_UNUSED(closure))
 }
 
 static PyObject *
+flight_assembly_get_client_facts(FlightAssembly *self, void *Py_UNUSED(closure))
+{
+    if (!self->has_client_facts) return Py_NewRef(Py_None);
+    return flight_client_facts_cell(
+        self->client_facts, PyTuple_GET_ITEM(self->config, 14));
+}
+
+static PyObject *
 flight_assembly_get_phases(FlightAssembly *self, void *Py_UNUSED(closure))
 {
     PyObject *result = PyList_New(self->phase_count);
@@ -521,6 +581,7 @@ static PyGetSetDef flight_assembly_getset[] = {
      (setter)flight_assembly_set_cycle, NULL, NULL},
     {"completion", (getter)flight_assembly_get_completion, NULL, NULL, NULL},
     {"correlation", (getter)flight_assembly_get_correlation, NULL, NULL, NULL},
+    {"client_facts", (getter)flight_assembly_get_client_facts, NULL, NULL, NULL},
     {"phases", (getter)flight_assembly_get_phases, NULL, NULL, NULL},
     {"logs", (getter)flight_assembly_get_logs, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
@@ -610,9 +671,9 @@ wreath_flight_project_cells(PyObject *Py_UNUSED(self), PyObject *args)
     unsigned long errors = 0;
     if (!PyArg_ParseTuple(args, "Oy*O!:flight_project_cells", &projector, &view,
                           &PyTuple_Type, &config)) return NULL;
-    if (PyTuple_GET_SIZE(config) != 14) {
+    if (PyTuple_GET_SIZE(config) != 15) {
         PyBuffer_Release(&view);
-        PyErr_SetString(PyExc_ValueError, "flight projection config must have fourteen items");
+        PyErr_SetString(PyExc_ValueError, "flight projection config must have fifteen items");
         return NULL;
     }
     pending = PyObject_GetAttrString(projector, "_pending");
@@ -655,6 +716,11 @@ wreath_flight_project_cells(PyObject *Py_UNUSED(self), PyObject *args)
                 PyTuple_GET_ITEM(config, 13));
             if (result < 0) goto error;
             errors += result;
+            break;
+        case FLIGHT_CLIENT_FACTS:
+            if (flight_ingest_client_facts(
+                    projector, pending, PyTuple_GET_ITEM(config, 5), config, cycle,
+                    max_pending, cell) < 0) goto error;
             break;
         default:
             break;
@@ -699,21 +765,27 @@ static int
 flight_count_orphans(PyObject *entry, PyObject *loss)
 {
     PyObject *correlation = PyObject_GetAttrString(entry, "correlation");
+    PyObject *client_facts = PyObject_GetAttrString(entry, "client_facts");
     PyObject *phases = PyObject_GetAttrString(entry, "phases");
     PyObject *logs = PyObject_GetAttrString(entry, "logs");
     int phase_truth, log_truth;
-    if (correlation == NULL || phases == NULL || logs == NULL) goto error;
+    if (correlation == NULL || client_facts == NULL || phases == NULL || logs == NULL)
+        goto error;
     phase_truth = PyObject_IsTrue(phases);
     log_truth = PyObject_IsTrue(logs);
     if (phase_truth < 0 || log_truth < 0) goto error;
     if (correlation != Py_None && flight_increment(loss, "orphan_correlation") < 0)
         goto error;
+    if (client_facts != Py_None &&
+        flight_increment(loss, "orphan_client_facts") < 0) goto error;
     if (phase_truth && flight_increment(loss, "orphan_phase") < 0) goto error;
     if (log_truth && flight_increment(loss, "orphan_log") < 0) goto error;
-    Py_DECREF(logs); Py_DECREF(phases); Py_DECREF(correlation);
+    Py_DECREF(logs); Py_DECREF(phases); Py_DECREF(client_facts);
+    Py_DECREF(correlation);
     return 0;
 error:
-    Py_XDECREF(logs); Py_XDECREF(phases); Py_XDECREF(correlation);
+    Py_XDECREF(logs); Py_XDECREF(phases); Py_XDECREF(client_facts);
+    Py_XDECREF(correlation);
     return -1;
 }
 
@@ -1314,28 +1386,18 @@ flight_decode_clear(PyObject **values, Py_ssize_t count)
     for (Py_ssize_t index = 0; index < count; index++) Py_XDECREF(values[index]);
 }
 
+typedef PyObject *(*FlightRowDecoder)(FlightMetadataReader *, PyObject *);
+
 static PyObject *
-flight_decode_routes(FlightMetadataReader *reader, PyObject *route_type)
+flight_decode_rows(FlightMetadataReader *reader, PyObject *row_type,
+                   FlightRowDecoder decode_row)
 {
     uint32_t count;
     if (flight_decode_count(reader, &count) < 0) return NULL;
     PyObject *rows = PyList_New(0);
     if (rows == NULL) return NULL;
     for (uint32_t index = 0; index < count; index++) {
-        PyObject *values[10] = {NULL};
-        values[0] = flight_decode_u32_object(reader);
-        values[1] = values[0] != NULL ? flight_decode_text(reader) : NULL;
-        values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
-        values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
-        values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
-        values[5] = values[4] != NULL ? flight_decode_texts(reader) : NULL;
-        values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
-        values[7] = values[6] != NULL ? flight_decode_ids(reader) : NULL;
-        values[8] = values[7] != NULL ? flight_decode_u32_object(reader) : NULL;
-        values[9] = values[8] != NULL ? flight_decode_text(reader) : NULL;
-        PyObject *row = values[9] != NULL
-            ? PyObject_Vectorcall(route_type, values, 10, NULL) : NULL;
-        flight_decode_clear(values, 10);
+        PyObject *row = decode_row(reader, row_type);
         if (row == NULL || PyList_Append(rows, row) < 0) {
             Py_XDECREF(row);
             Py_DECREF(rows);
@@ -1350,6 +1412,32 @@ flight_decode_routes(FlightMetadataReader *reader, PyObject *route_type)
     PyObject *result = PyList_AsTuple(rows);
     Py_DECREF(rows);
     return result;
+}
+
+static PyObject *
+flight_decode_route(FlightMetadataReader *reader, PyObject *route_type)
+{
+    PyObject *values[10] = {NULL};
+    values[0] = flight_decode_u32_object(reader);
+    values[1] = values[0] != NULL ? flight_decode_text(reader) : NULL;
+    values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
+    values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
+    values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
+    values[5] = values[4] != NULL ? flight_decode_texts(reader) : NULL;
+    values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
+    values[7] = values[6] != NULL ? flight_decode_ids(reader) : NULL;
+    values[8] = values[7] != NULL ? flight_decode_u32_object(reader) : NULL;
+    values[9] = values[8] != NULL ? flight_decode_text(reader) : NULL;
+    PyObject *row = values[9] != NULL
+        ? PyObject_Vectorcall(route_type, values, 10, NULL) : NULL;
+    flight_decode_clear(values, 10);
+    return row;
+}
+
+static PyObject *
+flight_decode_routes(FlightMetadataReader *reader, PyObject *route_type)
+{
+    return flight_decode_rows(reader, route_type, flight_decode_route);
 }
 
 static PyObject *
@@ -1380,38 +1468,26 @@ flight_decode_params(FlightMetadataReader *reader)
 }
 
 static PyObject *
+flight_decode_plan(FlightMetadataReader *reader, PyObject *plan_type)
+{
+    PyObject *values[7] = {NULL};
+    values[0] = flight_decode_u32_object(reader);
+    values[1] = values[0] != NULL ? flight_decode_params(reader) : NULL;
+    values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
+    values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
+    values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
+    values[5] = values[4] != NULL ? flight_decode_u32_object(reader) : NULL;
+    values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
+    PyObject *row = values[6] != NULL
+        ? PyObject_Vectorcall(plan_type, values, 7, NULL) : NULL;
+    flight_decode_clear(values, 7);
+    return row;
+}
+
+static PyObject *
 flight_decode_plans(FlightMetadataReader *reader, PyObject *plan_type)
 {
-    uint32_t count;
-    if (flight_decode_count(reader, &count) < 0) return NULL;
-    PyObject *rows = PyList_New(0);
-    if (rows == NULL) return NULL;
-    for (uint32_t index = 0; index < count; index++) {
-        PyObject *values[7] = {NULL};
-        values[0] = flight_decode_u32_object(reader);
-        values[1] = values[0] != NULL ? flight_decode_params(reader) : NULL;
-        values[2] = values[1] != NULL ? flight_decode_text(reader) : NULL;
-        values[3] = values[2] != NULL ? flight_decode_text(reader) : NULL;
-        values[4] = values[3] != NULL ? flight_decode_u32_object(reader) : NULL;
-        values[5] = values[4] != NULL ? flight_decode_u32_object(reader) : NULL;
-        values[6] = values[5] != NULL ? flight_decode_ids(reader) : NULL;
-        PyObject *row = values[6] != NULL
-            ? PyObject_Vectorcall(plan_type, values, 7, NULL) : NULL;
-        flight_decode_clear(values, 7);
-        if (row == NULL || PyList_Append(rows, row) < 0) {
-            Py_XDECREF(row);
-            Py_DECREF(rows);
-            return NULL;
-        }
-        Py_DECREF(row);
-        if ((index & 63U) == 63U && PyErr_CheckSignals() < 0) {
-            Py_DECREF(rows);
-            return NULL;
-        }
-    }
-    PyObject *result = PyList_AsTuple(rows);
-    Py_DECREF(rows);
-    return result;
+    return flight_decode_rows(reader, plan_type, flight_decode_plan);
 }
 
 static PyObject *

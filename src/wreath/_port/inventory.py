@@ -796,12 +796,15 @@ def inventory_projects(
     target = _version_tuple(target_python)
     paths = [Path(root) for root in roots]
     base_names = [path.name or path.parent.name for path in paths]
+    totals: dict[str, int] = {}
+    for base_name in base_names:
+        totals[base_name] = totals.get(base_name, 0) + 1
     seen: dict[str, int] = {}
     projects: list[ProjectReport] = []
     for root, base_name in zip(paths, base_names, strict=True):
         seen[base_name] = seen.get(base_name, 0) + 1
         suffix = seen[base_name]
-        name = base_name if base_names.count(base_name) == 1 else f"{base_name}-{suffix}"
+        name = base_name if totals[base_name] == 1 else f"{base_name}-{suffix}"
         projects.append(
             ProjectReport(
                 name=name,

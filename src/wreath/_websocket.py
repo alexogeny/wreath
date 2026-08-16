@@ -1,8 +1,8 @@
 """WebSocket frame primitives (RFC 6455).
 
-`parse_frame(buffer)` returns `(fin, opcode, payload, consumed)` with the
-payload already unmasked, or `None` when the buffer holds an incomplete
-frame. `mask(data, key)` applies the 4-byte XOR mask (masking and unmasking
+`parse_frame(buffer, offset=0)` returns `(fin, opcode, payload, consumed)` with
+the payload already unmasked, or `None` when the buffer holds an incomplete
+frame at that offset. `mask(data, key)` applies the 4-byte XOR mask (masking and unmasking
 are the same operation). `build_frame(opcode, payload, fin=True,
 mask_key=None)` serializes one frame; servers send unmasked, clients pass a
 4-byte key.
@@ -28,7 +28,7 @@ from ._native import _core
 #: removes it.
 mask: Callable[[bytes, bytes], bytes] = _core.ws_mask
 
-#: `ws_parse_frame(data, offset)` -- `(fin, opcode, payload, consumed)`, or
+#: `ws_parse_frame(data, offset=0)` -- `(fin, opcode, payload, consumed)`, or
 #: `None` while the frame is incomplete. Raises `ValueError` on a malformed one.
 parse_frame: Callable[..., tuple[bool, int, bytes, int] | None] = _core.ws_parse_frame
 

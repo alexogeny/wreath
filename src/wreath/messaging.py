@@ -341,14 +341,7 @@ class MessageBus:
         channels sharing a wire name means ephemeral payloads are dispatched to
         the wrong subscribers -- a delivery bug that looks like a handler bug.
         """
-        wire = f"wm_{self._schema}_{channel}"
-        if len(wire.encode("utf-8")) > 63:
-            raise ValueError(
-                f"the wire channel for {channel!r} is {len(wire.encode('utf-8'))} "
-                "bytes; PostgreSQL truncates a channel name at 63, which would "
-                "collide with another channel. Shorten the channel or the schema."
-            )
-        return wire
+        return validate_identifier(f"wm_{self._schema}_{channel}", "wire channel")
 
     # -- registration --------------------------------------------------------
 
@@ -1120,4 +1113,3 @@ class MessageBus:
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
                 await wake.wait()
-

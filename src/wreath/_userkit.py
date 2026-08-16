@@ -642,14 +642,7 @@ class SmtpEmailSender:
         blocked by `smtplib`. Anything `smtplib` raises propagates — delivery
         failure is not swallowed here.
         """
-        await self.send(
-            Message(
-                to=email,
-                subject=self.verify_subject,
-                body=f"Verify your email:\n\n{link}\n",
-                mail_class=MailClass.TRANSACTIONAL,
-            )
-        )
+        await self._send_link(email, link, self.verify_subject, "Verify your email")
 
     async def send_password_reset(self, email: str, link: str) -> None:
         """Send a plain-text password-reset mail carrying `link`.
@@ -657,11 +650,16 @@ class SmtpEmailSender:
         Subject is `reset_subject`; otherwise identical to
         `send_verification`, transactional class and all.
         """
+        await self._send_link(email, link, self.reset_subject, "Reset your password")
+
+    async def _send_link(
+        self, email: str, link: str, subject: str, instruction: str
+    ) -> None:
         await self.send(
             Message(
                 to=email,
-                subject=self.reset_subject,
-                body=f"Reset your password:\n\n{link}\n",
+                subject=subject,
+                body=f"{instruction}:\n\n{link}\n",
                 mail_class=MailClass.TRANSACTIONAL,
             )
         )

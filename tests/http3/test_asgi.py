@@ -334,6 +334,48 @@ async def test_h3_pulse_records_a_completion_with_bytes() -> None:
 
 @requires_curl_h3
 @pytest.mark.network
+async def test_h3_native_ai_refusal_is_a_structured_completion() -> None:
+    """Native ingress refusals remain visible without activating the ASGI app."""
+    pytest.importorskip("wreath._native._flight")
+    from wreath import Wreath
+    from wreath import _flight_schema as fs
+    from wreath.metrics import collect
+    from wreath.telemetry import Mode, TelemetryConfig
+
+    app = Wreath()
+    reached = False
+
+    @app.get("/")
+    async def handler(request):
+        nonlocal reached
+        reached = True
+        return "not reached"
+
+    telemetry = TelemetryConfig(mode=Mode.PULSE, ring_records=64, active_requests=16)
+    server, port = await _serve_h3_telemetry(app, telemetry)
+    try:
+        rc, out = await curl_http3(port, "/", "-A", "GPTBot/1.0")
+        assert rc == 0, f"curl failed rc={rc}"
+        assert b'"status":403' in out
+        assert reached is False
+        recorder = server.recorder
+        assert recorder is not None
+        assert recorder.requests == 1
+        assert recorder.completions == 1
+        cell = fs.CompletionCell.decode(recorder.drain())
+        assert cell.protocol is fs.Protocol.HTTP3
+        assert cell.status == 403
+        assert cell.terminal is fs.TerminalStatus.OK
+        assert cell.flags & fs.FLAG_POLICY_REFUSED
+        assert cell.flags & fs.FLAG_AI_SCRAPING_REFUSED
+        readings = {(row.subsystem, row.instance): row.values for row in collect(app)}
+        assert readings[("ai_scraping_policy", "default")] == {"refused": 1}
+    finally:
+        await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
 async def test_large_request_body_uploads_past_the_flow_control_window() -> None:
     """A request body larger than the initial QUIC stream window (~64 KiB) must
     upload fully. Without crediting DATA payload to flow control the upload

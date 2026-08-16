@@ -2,22 +2,13 @@
 
 `CedarPolicies.is_authorized(entities=...)` used to rebuild the entity store
 from scratch on every call, which made row-level authorization cost
-`rows x O(hierarchy)`. It now layers the request entities over the store built
-at construction, falling back to a full rebuild in the two cases where reuse
-would be unsound.
+`rows x O(hierarchy)`. It now layers compact direct-parent nodes over the store
+built at construction; native evaluation resolves the final graph, including
+uid replacement and dangling-parent completion, without rebuilding it.
 
-Every test here holds the same invariant: **the layered store is the store a
-full rebuild would have produced**, byte for byte. That is stronger than
-comparing decisions -- the evaluators are pure functions of (policies, uids,
-context, store), so an identical store cannot yield a different decision on any
-input, including ones no test enumerates. Decisions are compared as well, at the
-`is_authorized` seam, because a store that is equal but reached differently is
-still worth pinning end to end.
-
-The two fallback conditions get their own tests *and* an assertion that the
-fallback actually fired, because a fallback that silently never runs and a
-fallback that silently always runs both pass a naive equality check -- and the
-second one would mean the fix does nothing.
+Every test here holds the same invariant: **the layered direct graph is the
+graph a full rebuild would have produced**, byte for byte. Transitive behavior
+is then checked at `is_authorized`, the native boundary that owns traversal.
 """
 
 from __future__ import annotations
@@ -26,7 +17,6 @@ import random
 
 import pytest
 
-from wreath._auth import cedar_engine
 from wreath._auth.cedar_engine import (
     CedarEntity,
     CedarPolicies,
@@ -91,10 +81,13 @@ def test_a_request_entity_parented_to_another_request_entity() -> None:
         CedarEntity(uid("User", "u1"), parents=(uid("Team", "t1"),)),
     )
     assert_layer_matches_rebuild(statics, request)
-    # And the transitive step really is transitive, not just present.
     policies = engine(*statics)
-    layered = _layer_store(policies._store, policies._dangling, statics, request)
-    assert ("Group", "staff") in layered[("User", "u1")][1]
+    assert policies.is_authorized(
+        principal=uid("User", "u1"),
+        action=uid("Action", "edit"),
+        resource=uid("Doc", "d1"),
+        entities=request,
+    ).allowed
 
 
 def test_a_request_entity_with_no_parents_and_nested_attributes() -> None:
@@ -118,12 +111,10 @@ def test_no_request_entities_reuses_the_construction_store_object() -> None:
     ).allowed is False
 
 
-# --- the two fallback conditions ----------------------------------------------
+# --- graph replacement conditions ---------------------------------------------
 
 
-def test_a_request_entity_overriding_a_static_uid_falls_back(monkeypatch) -> None:
-    """A request entity may replace a static one, changing its descendants'
-    closures -- so the layered path must not be taken."""
+def test_a_request_entity_overriding_a_static_uid_changes_descendants() -> None:
     statics = (
         CedarEntity(uid("Group", "staff")),
         CedarEntity(uid("Group", "eng"), parents=(uid("Group", "staff"),)),
@@ -132,15 +123,17 @@ def test_a_request_entity_overriding_a_static_uid_falls_back(monkeypatch) -> Non
     # `eng` no longer sits under `staff`, so u0 must lose that ancestor.
     request = (CedarEntity(uid("Group", "eng")),)
 
-    calls = _count_rebuilds(monkeypatch)
     assert_layer_matches_rebuild(statics, request)
-    assert calls, "the collision fallback did not fire"
+    policies = engine(*statics)
+    assert not policies.is_authorized(
+        principal=uid("User", "u0"),
+        action=uid("Action", "edit"),
+        resource=uid("Doc", "d1"),
+        entities=request,
+    ).allowed
 
-    rebuilt = _build_store(statics + request)
-    assert ("Group", "staff") not in rebuilt[("User", "u0")][1]
 
-
-def test_a_request_entity_completing_a_dangling_parent_falls_back(monkeypatch) -> None:
+def test_a_request_entity_completes_a_dangling_parent() -> None:
     """The inverted case: a static entity names a parent nobody defined, and the
     request defines it. Every static entity above the gap gains ancestors."""
     statics = (CedarEntity(uid("User", "u0"), parents=(uid("Team", "t1"),)),)
@@ -149,46 +142,40 @@ def test_a_request_entity_completing_a_dangling_parent_falls_back(monkeypatch) -
     policies = engine(*statics)
     assert ("Team", "t1") in policies._dangling
 
-    calls = _count_rebuilds(monkeypatch)
     assert_layer_matches_rebuild(statics, request)
-    assert calls, "the dangling-completion fallback did not fire"
+    assert not policies.is_authorized(
+        principal=uid("User", "u0"),
+        action=uid("Action", "edit"),
+        resource=uid("Doc", "d1"),
+    ).allowed
+    assert policies.is_authorized(
+        principal=uid("User", "u0"),
+        action=uid("Action", "edit"),
+        resource=uid("Doc", "d1"),
+        entities=request,
+    ).allowed
 
-    # The static entity's closure genuinely grew -- otherwise the fallback
-    # would be guarding nothing.
-    before = policies._store[("User", "u0")][1]
-    after = _build_store(statics + request)[("User", "u0")][1]
-    assert ("Group", "staff") not in before
-    assert ("Group", "staff") in after
 
-
-def test_the_ordinary_path_does_not_fall_back(monkeypatch) -> None:
-    """Without this, both fallback tests above would still pass if the layered
-    path had been deleted and everything rebuilt."""
+def test_the_ordinary_path_does_not_rebuild(monkeypatch) -> None:
     statics = (
         CedarEntity(uid("Group", "staff")),
         CedarEntity(uid("User", "u0"), parents=(uid("Group", "staff"),)),
     )
     request = (CedarEntity(uid("Doc", "d1"), attrs={"owner": uid("User", "u0")}),)
 
-    calls = _count_rebuilds(monkeypatch)
-    policies = engine(*statics)
-    calls.clear()  # construction legitimately builds once
-    _layer_store(policies._store, policies._dangling, statics, request)
-    assert not calls, "the layered path rebuilt the whole hierarchy"
-
-
-def _count_rebuilds(monkeypatch) -> list[int]:
-    """Record every `_build_store` call made through the module attribute."""
     seen: list[int] = []
-    real = cedar_engine._build_store
+    original = _build_store
 
     def counting(entities):
-        result = real(entities)
+        result = original(entities)
         seen.append(len(result))
         return result
 
-    monkeypatch.setattr(cedar_engine, "_build_store", counting)
-    return seen
+    monkeypatch.setattr("wreath._auth.cedar_engine._build_store", counting)
+    policies = engine(*statics)
+    seen.clear()  # construction legitimately builds once
+    _layer_store(policies._store, policies._dangling, statics, request)
+    assert not seen, "the layered path rebuilt the whole hierarchy"
 
 
 # --- cycles -------------------------------------------------------------------

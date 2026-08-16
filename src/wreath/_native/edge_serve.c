@@ -1490,21 +1490,30 @@ edge_client_prepare_read(EdgeClient *self, Py_ssize_t sizehint,
 }
 
 
-static int
-edge_client_getbuffer(PyObject *op, Py_buffer *view, int flags)
+static inline int
+edge_getbuffer(PyObject *op, Py_buffer *view, int flags, EdgeBuf *input,
+               Py_ssize_t offer_offset, Py_ssize_t offer_size, int *exports)
 {
-    EdgeClient *self = (EdgeClient *)op;
-    if (self->offer_size <= 0) {
+    if (offer_size <= 0) {
         PyErr_SetString(PyExc_BufferError, "no active receive offer");
         view->obj = NULL;
         return -1;
     }
-    if (PyBuffer_FillInfo(view, op, self->in.data + self->offer_offset,
-                          self->offer_size, 0, flags) < 0) {
+    if (PyBuffer_FillInfo(view, op, input->data + offer_offset,
+                          offer_size, 0, flags) < 0) {
         return -1;
     }
-    self->exports++;
+    (*exports)++;
     return 0;
+}
+
+
+static int
+edge_client_getbuffer(PyObject *op, Py_buffer *view, int flags)
+{
+    EdgeClient *self = (EdgeClient *)op;
+    return edge_getbuffer(op, view, flags, &self->in, self->offer_offset,
+                          self->offer_size, &self->exports);
 }
 
 
@@ -2215,17 +2224,8 @@ static int
 edge_conn_getbuffer(PyObject *op, Py_buffer *view, int flags)
 {
     EdgeConn *self = (EdgeConn *)op;
-    if (self->offer_size <= 0) {
-        PyErr_SetString(PyExc_BufferError, "no active receive offer");
-        view->obj = NULL;
-        return -1;
-    }
-    if (PyBuffer_FillInfo(view, op, self->in.data + self->offer_offset,
-                          self->offer_size, 0, flags) < 0) {
-        return -1;
-    }
-    self->exports++;
-    return 0;
+    return edge_getbuffer(op, view, flags, &self->in, self->offer_offset,
+                          self->offer_size, &self->exports);
 }
 
 

@@ -987,8 +987,13 @@ def event(
     return LogEvent(site)
 
 
-def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -> None:
-    """The ergonomic tier: intern lazily, dispatch argument types at runtime."""
+def _emit_values(
+    severity: Severity,
+    template: str,
+    specs: tuple[LogField, ...],
+    values: tuple[object, ...],
+) -> None:
+    """Emit values whose field declarations have already been resolved."""
     runtime = _RUNTIME
     if severity < runtime.capture_level:
         return
@@ -1000,7 +1005,6 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
         held_buffer = buffer
     else:
         held_buffer = None
-    specs = tuple(infer_field(name, value) for name, value in values.items())
     site = runtime.registry.intern_template(template, severity, specs)
     site_id = site.site_id
     if not buffered and not runtime.limiter.allow(site_id, severity):
@@ -1009,13 +1013,13 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
         site,
         0 if buffer is None else buffer.request_id,
         severity,
-        tuple(values.values()),
+        values,
         specs=specs_for(site, specs),
     ):
         return
     flags = 0
     packed: list[LogArg] = []
-    for spec, value in zip(specs, values.values(), strict=True):
+    for spec, value in zip(specs, values, strict=True):
         arg, mismatched = pack_value(runtime.registry, value, spec)
         if mismatched:
             runtime.counters.type_mismatch += 1
@@ -1034,6 +1038,12 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
         held_buffer.add(cell)
         return
     runtime.emit(cell)
+
+
+def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -> None:
+    """The ergonomic tier: intern lazily, dispatch argument types at runtime."""
+    specs = tuple(infer_field(name, value) for name, value in values.items())
+    _emit_values(severity, template, specs, tuple(values.values()))
 
 
 def _emit_prepared(
@@ -1042,51 +1052,8 @@ def _emit_prepared(
     pairs: tuple[tuple[tuple[str, type, CaptureDisposition], object], ...],
 ) -> None:
     """Emit with explicit field specs, for callers that already have them."""
-    runtime = _RUNTIME
-    if severity < runtime.capture_level:
-        return
-    buffer = _SCRATCH.get(None)
-    buffered = severity < runtime.level
-    if buffered:
-        if buffer is None:
-            return
-        held_buffer = buffer
-    else:
-        held_buffer = None
     specs = tuple(LogField(name, type_, disp) for (name, type_, disp), _v in pairs)
-    site = runtime.registry.intern_template(template, severity, specs)
-    site_id = site.site_id
-    if not buffered and not runtime.limiter.allow(site_id, severity):
-        return
-    if not buffered and runtime.publish(
-        site,
-        0 if buffer is None else buffer.request_id,
-        severity,
-        tuple(value for _decl, value in pairs),
-        specs=specs_for(site, specs),
-    ):
-        return
-    flags = 0
-    packed: list[LogArg] = []
-    for spec, (_decl, value) in zip(specs, pairs, strict=True):
-        arg, mismatched = pack_value(runtime.registry, value, spec)
-        if mismatched:
-            runtime.counters.type_mismatch += 1
-        if arg.redacted:
-            flags |= LOG_FLAG_REDACTED
-        packed.append(arg)
-    cell = LogCell(
-        request_id=0 if buffer is None else buffer.request_id,
-        site_id=site_id,
-        severity=severity,
-        args=tuple(packed),
-        flags=flags,
-        dropped_siblings=0 if buffered else runtime.limiter.take_dropped(site_id),
-    )
-    if held_buffer is not None:
-        held_buffer.add(cell)
-        return
-    runtime.emit(cell)
+    _emit_values(severity, template, specs, tuple(value for _decl, value in pairs))
 
 
 def trace(template: str, **values: object) -> None:

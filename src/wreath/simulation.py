@@ -439,15 +439,25 @@ class WebSocketSimulator:
     def _decode(self, data: bytes) -> tuple[SimulatedWebSocketFrame, ...]:
         self._frame_buffer += data
         fresh: list[SimulatedWebSocketFrame] = []
-        while self._frame_buffer:
-            parsed = parse_frame(bytes(self._frame_buffer))
-            if parsed is None:
-                break
-            fin, opcode, payload, consumed = parsed
-            del self._frame_buffer[:consumed]
-            frame = SimulatedWebSocketFrame(fin, opcode, payload)
-            self._frames.append(frame)
-            fresh.append(frame)
+        cursor = 0
+        try:
+            while cursor < len(self._frame_buffer):
+                parsed = parse_frame(self._frame_buffer, cursor)
+                if parsed is None:
+                    break
+                fin, opcode, payload, consumed = parsed
+                # The integer cursor advances once by each disjoint frame
+                # width; it never accumulates or copies a container.
+                cursor = cursor + consumed
+                frame = SimulatedWebSocketFrame(fin, opcode, payload)
+                self._frames.append(frame)
+                fresh.append(frame)
+        finally:
+            # One compaction after the native parser has walked the owned
+            # buffer keeps packed frames linear. Deleting every frame's prefix
+            # shifted the whole unread tail once per public frame.
+            if cursor:
+                del self._frame_buffer[:cursor]
         return tuple(fresh)
 
 

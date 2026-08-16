@@ -80,14 +80,7 @@ def _channel(schema: str, queue: str) -> str:
     bytes would share one doorbell and wake each other's workers -- which
     presents as latency, not as an error.
     """
-    channel = f"wj_{schema}_{queue}"
-    if len(channel.encode("utf-8")) > 63:
-        raise ValueError(
-            f"the doorbell channel for schema {schema!r} and queue {queue!r} is "
-            f"{len(channel.encode('utf-8'))} bytes; PostgreSQL truncates a channel "
-            "name at 63, which would collide with another queue. Shorten one of them."
-        )
-    return channel
+    return validate_identifier(f"wj_{schema}_{queue}", "doorbell channel")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1892,5 +1885,4 @@ async def _has_trace_column(connection: Any, *, schema: str) -> bool:
     return await column_exists(
         connection, schema=schema, table="jobs", column="trace_context"
     )
-
 

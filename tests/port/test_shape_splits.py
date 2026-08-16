@@ -19,7 +19,11 @@ conversion costs more than an honest TODO earns, and the ``status_code`` case is
 the proof: the emitter used to wrap any single-``return`` body in
 ``JSONResponse(...)``, which is broken code whenever the handler returns a DTO.
 """
+import ast
+
 import pytest
+
+from wreath._port.analyzer.routes import _names_crossing
 
 port = pytest.importorskip("wreath.port")
 
@@ -32,6 +36,13 @@ def _analyze(tmp_path, source: str, name: str = "module.py"):
 
 def _rule_ids(tmp_path, source: str, name: str = "module.py") -> list[str]:
     return [f.rule_id for f in _analyze(tmp_path, source, name)]
+
+
+def test_lifespan_crossing_names_keep_first_binding_order() -> None:
+    before = ast.parse("first = 1\nsecond = 2\nfirst = 3\nthird = 4").body
+    after = ast.parse("print(third, first)").body
+
+    assert _names_crossing(before, after) == ["first", "third"]
 
 
 def _one(tmp_path, source: str, prefix: str):

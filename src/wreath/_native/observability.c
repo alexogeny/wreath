@@ -1309,6 +1309,7 @@ typedef struct {
     Py_ssize_t name_length;
     uint64_t integer;
     double real;
+    PyObject *object;
     unsigned char kind;
     unsigned char occupied;
     unsigned char is_real;
@@ -1465,6 +1466,37 @@ metric_delta_double(MetricDeltaState *state, unsigned char kind,
     return 0;
 }
 
+static int
+metric_delta_pyint(MetricDeltaState *state, unsigned char kind,
+                   const char *name, Py_ssize_t name_length,
+                   PyObject *current, PyObject **result)
+{
+    PyMutex_Lock(&state->mutex);
+    int created;
+    MetricDeltaEntry *entry = metric_delta_get(
+        state, kind, 0, name, name_length, 3, &created);
+    if (entry == NULL) {
+        PyMutex_Unlock(&state->mutex);
+        return -1;
+    }
+    int reset = created ? 1 : PyObject_RichCompareBool(
+        current, entry->object, Py_LT);
+    if (reset < 0) {
+        PyMutex_Unlock(&state->mutex);
+        return -1;
+    }
+    PyObject *emitted = reset ? Py_NewRef(current)
+        : PyNumber_Subtract(current, entry->object);
+    if (emitted == NULL) {
+        PyMutex_Unlock(&state->mutex);
+        return -1;
+    }
+    Py_XSETREF(entry->object, Py_NewRef(current));
+    *result = emitted;
+    PyMutex_Unlock(&state->mutex);
+    return 0;
+}
+
 static void
 metric_delta_free(PyObject *capsule)
 {
@@ -1473,6 +1505,8 @@ metric_delta_free(PyObject *capsule)
         PyErr_Clear();
         return;
     }
+    for (size_t index = 0; index < state->capacity; index++)
+        Py_XDECREF(state->entries[index].object);
     for (size_t index = 0; index < state->capacity; index++)
         PyMem_Free(state->entries[index].name);
     PyMem_Free(state->entries);
@@ -1536,18 +1570,105 @@ statsd_delta(MetricDeltaState *state, unsigned char kind,
     return PyLong_FromUnsignedLongLong(delta);
 }
 
+typedef struct {
+    PyObject *out;
+    WreathBytesWriter packet;
+    Py_ssize_t max_packet_bytes;
+    Py_ssize_t packet_size;
+    Py_ssize_t line_count;
+    int packets;
+} StatsdSink;
+
 static int
-statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tags,
-            const char *name, PyObject *value, char kind, PyObject *labels)
+statsd_sink_init(StatsdSink *sink, int packets, Py_ssize_t max_packet_bytes)
+{
+    *sink = (StatsdSink){
+        .out = PyList_New(0),
+        .max_packet_bytes = max_packet_bytes,
+        .packets = packets,
+    };
+    if (sink->out == NULL) return -1;
+    if (packets && wreath_writer_init(&sink->packet, max_packet_bytes) < 0) {
+        Py_CLEAR(sink->out);
+        return -1;
+    }
+    return 0;
+}
+
+static int
+statsd_sink_flush_packet(StatsdSink *sink)
+{
+    if (sink->packet.len == 0) return 0;
+    PyObject *packet = wreath_writer_finish(&sink->packet);
+    if (packet == NULL) return -1;
+    int appended = PyList_Append(sink->out, packet);
+    Py_DECREF(packet);
+    if (appended < 0) return -1;
+    sink->packet_size = 0;
+    return wreath_writer_init(&sink->packet, sink->max_packet_bytes);
+}
+
+static int
+statsd_sink_line(StatsdSink *sink, WreathBytesWriter *line)
+{
+    if (!sink->packets) {
+        PyObject *encoded = wreath_writer_finish(line);
+        if (encoded == NULL) return -1;
+        PyObject *text = PyUnicode_DecodeUTF8(
+            PyBytes_AS_STRING(encoded), PyBytes_GET_SIZE(encoded), "strict");
+        Py_DECREF(encoded);
+        if (text == NULL) return -1;
+        int appended = PyList_Append(sink->out, text);
+        Py_DECREF(text);
+        if (appended < 0) return -1;
+        sink->line_count++;
+        return 0;
+    }
+
+    if (line->len == PY_SSIZE_T_MAX) return PyErr_NoMemory(), -1;
+    Py_ssize_t budget = line->len + 1;
+    if (sink->packet.len != 0 &&
+        (sink->packet_size >= sink->max_packet_bytes ||
+         budget > sink->max_packet_bytes - sink->packet_size)) {
+        if (statsd_sink_flush_packet(sink) < 0) return -1;
+    }
+    if ((sink->packet.len != 0 && wreath_writer_byte(&sink->packet, '\n') < 0) ||
+        wreath_writer_write(&sink->packet, line->buf, line->len) < 0) return -1;
+    Py_CLEAR(line->bytes);
+    line->buf = NULL;
+    line->len = line->cap = 0;
+    sink->packet_size += budget;
+    sink->line_count++;
+    return 0;
+}
+
+static void
+statsd_sink_clear(StatsdSink *sink)
+{
+    Py_XDECREF(sink->packet.bytes);
+    Py_XDECREF(sink->out);
+    *sink = (StatsdSink){0};
+}
+
+static int
+statsd_emit_parts(StatsdSink *sink, PyObject *prefix, int dogstatsd,
+                  PyObject *static_tags, const char *fixed_name,
+                  PyObject *name_prefix, PyObject *name_suffix,
+                  PyObject *value, char kind, PyObject *labels)
 {
     WreathBytesWriter writer = {0};
     PyObject *number = NULL, *merged = NULL, *items = NULL;
-    PyObject *line = NULL, *encoded = NULL;
     if (wreath_writer_init(&writer, 96) < 0 ||
         statsd_write_sanitized(&writer, prefix, 0) < 0 ||
-        wreath_writer_byte(&writer, '.') < 0 ||
-        wreath_writer_write(&writer, name, (Py_ssize_t)strlen(name)) < 0)
+        wreath_writer_byte(&writer, '.') < 0)
         goto error;
+    if (fixed_name != NULL) {
+        if (wreath_writer_write(
+                &writer, fixed_name, (Py_ssize_t)strlen(fixed_name)) < 0) goto error;
+    }
+    else if (statsd_write_sanitized(&writer, name_prefix, 0) < 0 ||
+             wreath_writer_byte(&writer, '.') < 0 ||
+             statsd_write_sanitized(&writer, name_suffix, 0) < 0) goto error;
     if (!dogstatsd) {
         PyObject *values = PyDict_Values(labels);
         if (values == NULL) goto error;
@@ -1589,26 +1710,38 @@ statsd_emit(PyObject *out, PyObject *prefix, int dogstatsd, PyObject *static_tag
             }
         }
     }
-    encoded = wreath_writer_finish(&writer);
-    if (encoded == NULL) goto error;
-    line = PyUnicode_DecodeUTF8(
-        PyBytes_AS_STRING(encoded), PyBytes_GET_SIZE(encoded), "strict");
-    if (line == NULL || PyList_Append(out, line) < 0) goto error;
-    Py_DECREF(line);
-    Py_DECREF(encoded);
+    if (statsd_sink_line(sink, &writer) < 0) goto error;
     Py_XDECREF(items);
     Py_XDECREF(merged);
     Py_DECREF(number);
     return 0;
 
 error:
-    Py_XDECREF(line);
-    Py_XDECREF(encoded);
     Py_XDECREF(items);
     Py_XDECREF(merged);
     Py_XDECREF(number);
     Py_XDECREF(writer.bytes);
     return -1;
+}
+
+static int
+statsd_emit(StatsdSink *sink, PyObject *prefix, int dogstatsd,
+            PyObject *static_tags, const char *name, PyObject *value,
+            char kind, PyObject *labels)
+{
+    return statsd_emit_parts(
+        sink, prefix, dogstatsd, static_tags, name, NULL, NULL,
+        value, kind, labels);
+}
+
+static int
+statsd_emit_counter(StatsdSink *sink, PyObject *prefix, int dogstatsd,
+                    PyObject *static_tags, PyObject *subsystem, PyObject *name,
+                    PyObject *value, PyObject *labels)
+{
+    return statsd_emit_parts(
+        sink, prefix, dogstatsd, static_tags, NULL, subsystem, name,
+        value, 'g', labels);
 }
 
 static PyObject *
@@ -1656,19 +1789,11 @@ statsd_reason_name(PyObject *reason)
     return lower;
 }
 
-PyObject *
-wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
+static int
+statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
+              PyObject *prefix, int dogstatsd, PyObject *static_tags,
+              PyObject *route_resolver, MetricDeltaState *state)
 {
-    PyObject *snapshot, *recorder_loss, *prefix, *static_tags;
-    PyObject *route_resolver, *state_capsule;
-    int dogstatsd;
-    if (!PyArg_ParseTuple(args, "OOUiO!OO:statsd_lines", &snapshot,
-                          &recorder_loss, &prefix, &dogstatsd,
-                          &PyDict_Type, &static_tags, &route_resolver,
-                          &state_capsule)) return NULL;
-    MetricDeltaState *state = metric_delta_state(state_capsule);
-    if (state == NULL) return NULL;
-    PyObject *out = PyList_New(0);
     PyObject *empty_labels = PyDict_New();
     PyObject *empty_routes = PyTuple_New(0);
     PyObject *routes_value = empty_routes != NULL
@@ -1681,7 +1806,7 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
     }
     Py_XDECREF(routes_value);
     Py_XDECREF(empty_routes);
-    if (out == NULL || empty_labels == NULL || routes == NULL) goto error;
+    if (empty_labels == NULL || routes == NULL) goto error;
 
     Py_ssize_t route_count = PyTuple_GET_SIZE(routes);
     for (Py_ssize_t index = 0; index < route_count; index++) {
@@ -1692,7 +1817,7 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
         PyObject *value = route_id != NULL ? statsd_int_attr(route, "count") : NULL;
         value = value != NULL ? statsd_delta(state, 1, route_id, value) : NULL;
         if (labels == NULL || value == NULL || statsd_emit(
-                out, prefix, dogstatsd, static_tags, "http.requests",
+                sink, prefix, dogstatsd, static_tags, "http.requests",
                 value, 'c', labels) < 0) {
             Py_XDECREF(value); Py_XDECREF(labels); Py_XDECREF(route_id); goto error;
         }
@@ -1700,7 +1825,7 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
         value = statsd_int_attr(route, "errors");
         value = value != NULL ? statsd_delta(state, 2, route_id, value) : NULL;
         if (value == NULL || statsd_emit(
-                out, prefix, dogstatsd, static_tags, "http.errors",
+                sink, prefix, dogstatsd, static_tags, "http.errors",
                 value, 'c', labels) < 0) {
             Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
         }
@@ -1708,14 +1833,14 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
         value = statsd_ms_attr(route, "duration_us_sum");
         value = value != NULL ? statsd_delta(state, 3, route_id, value) : NULL;
         if (value == NULL || statsd_emit(
-                out, prefix, dogstatsd, static_tags, "http.duration.sum_ms",
+                sink, prefix, dogstatsd, static_tags, "http.duration.sum_ms",
                 value, 'c', labels) < 0) {
             Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
         }
         Py_DECREF(value);
         value = statsd_ms_attr(route, "duration_us_max");
         if (value == NULL || statsd_emit(
-                out, prefix, dogstatsd, static_tags, "http.duration.max_ms",
+                sink, prefix, dogstatsd, static_tags, "http.duration.max_ms",
                 value, 'g', labels) < 0) {
             Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
         }
@@ -1729,14 +1854,14 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *value = statsd_int_attr(snapshot, "assembled");
     value = value != NULL ? statsd_delta(state, 4, NULL, value) : NULL;
     if (value == NULL || statsd_emit(
-            out, prefix, dogstatsd, static_tags, "flight.assembled",
+            sink, prefix, dogstatsd, static_tags, "flight.assembled",
             value, 'c', empty_labels) < 0) {
         Py_XDECREF(value); goto error;
     }
     Py_DECREF(value);
     value = statsd_int_attr(snapshot, "pending");
     if (value == NULL || statsd_emit(
-            out, prefix, dogstatsd, static_tags, "flight.pending",
+            sink, prefix, dogstatsd, static_tags, "flight.pending",
             value, 'g', empty_labels) < 0) {
         Py_XDECREF(value); goto error;
     }
@@ -1754,7 +1879,7 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
         value = value != NULL
             ? statsd_delta(state, (unsigned char)(10 + index), NULL, value) : NULL;
         if (labels == NULL || value == NULL || statsd_emit(
-                out, prefix, dogstatsd, static_tags, "flight.projector_loss",
+                sink, prefix, dogstatsd, static_tags, "flight.projector_loss",
                 value, 'c', labels) < 0) {
             Py_XDECREF(value); Py_XDECREF(labels); Py_DECREF(loss); goto error;
         }
@@ -1779,7 +1904,7 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
                 value = value != NULL
                     ? statsd_delta(state, 20, name, value) : NULL;
                 if (value == NULL || statsd_emit(
-                        out, prefix, dogstatsd, static_tags,
+                        sink, prefix, dogstatsd, static_tags,
                         "flight.recorder_loss", value, 'c', labels) < 0) {
                     Py_XDECREF(value); Py_XDECREF(labels); Py_XDECREF(name);
                     Py_DECREF(items); goto error;
@@ -1792,13 +1917,132 @@ wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
         }
     }
     Py_DECREF(empty_labels);
-    return out;
+    return 0;
 
 error:
     Py_XDECREF(routes);
     Py_XDECREF(empty_labels);
-    Py_XDECREF(out);
-    return NULL;
+    return -1;
+}
+
+static int
+statsd_render_counters(StatsdSink *sink, PyObject *readings, PyObject *prefix,
+                       int dogstatsd, PyObject *static_tags)
+{
+    Py_ssize_t reading_count = PyTuple_GET_SIZE(readings);
+    for (Py_ssize_t reading_index = 0;
+         reading_index < reading_count; reading_index++) {
+        PyObject *reading = PyTuple_GET_ITEM(readings, reading_index);
+        PyObject *subsystem_raw = PyObject_GetAttrString(reading, "subsystem");
+        PyObject *instance_raw = PyObject_GetAttrString(reading, "instance");
+        PyObject *values = PyObject_GetAttrString(reading, "values");
+        PyObject *subsystem = subsystem_raw != NULL
+            ? PyObject_Str(subsystem_raw) : NULL;
+        PyObject *instance = instance_raw != NULL
+            ? PyObject_Str(instance_raw) : NULL;
+        PyObject *labels = instance != NULL
+            ? Py_BuildValue("{s:O}", "instance", instance) : NULL;
+        PyObject *items = values != NULL ? PyMapping_Items(values) : NULL;
+        Py_XDECREF(subsystem_raw);
+        Py_XDECREF(instance_raw);
+        Py_XDECREF(instance);
+        Py_XDECREF(values);
+        if (subsystem == NULL || labels == NULL || items == NULL) {
+            Py_XDECREF(items);
+            Py_XDECREF(labels);
+            Py_XDECREF(subsystem);
+            return -1;
+        }
+        Py_ssize_t value_count = PyList_GET_SIZE(items);
+        for (Py_ssize_t value_index = 0; value_index < value_count; value_index++) {
+            PyObject *item = PyList_GET_ITEM(items, value_index);
+            PyObject *name = PyObject_Str(PyTuple_GET_ITEM(item, 0));
+            PyObject *value = name != NULL
+                ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
+            if (name == NULL || value == NULL || statsd_emit_counter(
+                    sink, prefix, dogstatsd, static_tags, subsystem,
+                    name, value, labels) < 0) {
+                Py_XDECREF(value);
+                Py_XDECREF(name);
+                Py_DECREF(items);
+                Py_DECREF(labels);
+                Py_DECREF(subsystem);
+                return -1;
+            }
+            Py_DECREF(value);
+            Py_DECREF(name);
+        }
+        Py_DECREF(items);
+        Py_DECREF(labels);
+        Py_DECREF(subsystem);
+        if ((reading_index & 63) == 63 && PyErr_CheckSignals() < 0) return -1;
+    }
+    return 0;
+}
+
+PyObject *
+wreath_statsd_lines(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *snapshot, *recorder_loss, *prefix, *static_tags;
+    PyObject *route_resolver, *state_capsule;
+    int dogstatsd;
+    if (!PyArg_ParseTuple(args, "OOUiO!OO:statsd_lines", &snapshot,
+                          &recorder_loss, &prefix, &dogstatsd,
+                          &PyDict_Type, &static_tags, &route_resolver,
+                          &state_capsule)) return NULL;
+    MetricDeltaState *state = metric_delta_state(state_capsule);
+    StatsdSink sink;
+    if (state == NULL || statsd_sink_init(&sink, 0, 0) < 0) return NULL;
+    if (statsd_render(
+            &sink, snapshot, recorder_loss, prefix, dogstatsd,
+            static_tags, route_resolver, state) < 0) {
+        statsd_sink_clear(&sink);
+        return NULL;
+    }
+    PyObject *result = sink.out;
+    sink.out = NULL;
+    statsd_sink_clear(&sink);
+    return result;
+}
+
+PyObject *
+wreath_statsd_packets(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *snapshot, *recorder_loss, *prefix, *static_tags;
+    PyObject *route_resolver, *state_capsule, *readings;
+    Py_ssize_t max_packet_bytes;
+    int dogstatsd;
+    if (!PyArg_ParseTuple(args, "OOUiO!OOO!n:statsd_packets", &snapshot,
+                          &recorder_loss, &prefix, &dogstatsd,
+                          &PyDict_Type, &static_tags, &route_resolver,
+                          &state_capsule, &PyTuple_Type, &readings,
+                          &max_packet_bytes)) return NULL;
+    if (max_packet_bytes <= 0) {
+        PyErr_SetString(PyExc_ValueError, "StatsD max packet bytes must be positive");
+        return NULL;
+    }
+    MetricDeltaState *state = metric_delta_state(state_capsule);
+    StatsdSink sink;
+    if (state == NULL || statsd_sink_init(
+            &sink, 1, max_packet_bytes) < 0) return NULL;
+    if (statsd_render(
+            &sink, snapshot, recorder_loss, prefix, dogstatsd,
+            static_tags, route_resolver, state) < 0 ||
+        statsd_render_counters(
+            &sink, readings, prefix, dogstatsd, static_tags) < 0 ||
+        statsd_sink_flush_packet(&sink) < 0) {
+        statsd_sink_clear(&sink);
+        return NULL;
+    }
+    PyObject *packets = PyList_AsTuple(sink.out);
+    PyObject *line_count = packets != NULL
+        ? PyLong_FromSsize_t(sink.line_count) : NULL;
+    PyObject *result = line_count != NULL
+        ? PyTuple_Pack(2, packets, line_count) : NULL;
+    Py_XDECREF(line_count);
+    Py_XDECREF(packets);
+    statsd_sink_clear(&sink);
+    return result;
 }
 
 typedef struct {
@@ -1822,6 +2066,7 @@ typedef struct {
     double real;
     unsigned char is_real;
     unsigned char owns_name;
+    PyObject *py_integer;
 } EmfMetric;
 
 static void
@@ -2004,6 +2249,16 @@ emf_write_double(WreathBytesWriter *writer, double value)
 static int
 emf_write_metric_value(WreathBytesWriter *writer, const EmfMetric *metric)
 {
+    if (metric->py_integer != NULL) {
+        PyObject *text = PyObject_Str(metric->py_integer);
+        if (text == NULL) return -1;
+        Py_ssize_t length;
+        const char *data = PyUnicode_AsUTF8AndSize(text, &length);
+        int result = data == NULL ? -1
+            : wreath_writer_write(writer, data, length);
+        Py_DECREF(text);
+        return result;
+    }
     return metric->is_real
         ? emf_write_double(writer, metric->real)
         : prom_write_uint64(writer, metric->integer);
@@ -2147,8 +2402,10 @@ metric_double_attr(PyObject *object, const char *name, double *result)
 static void
 emf_metrics_clear(EmfMetric *metrics, Py_ssize_t count)
 {
-    for (Py_ssize_t index = 0; index < count; index++)
+    for (Py_ssize_t index = 0; index < count; index++) {
+        Py_XDECREF(metrics[index].py_integer);
         if (metrics[index].owns_name) PyMem_Free((void *)metrics[index].name);
+    }
 }
 
 static int
@@ -2170,18 +2427,208 @@ emf_dynamic_metric(EmfMetric *metric, const char *prefix,
     return 0;
 }
 
+static int
+emf_counter_metric(EmfMetric *metric, PyObject *subsystem,
+                   PyObject *name, PyObject *value)
+{
+    Py_ssize_t subsystem_length, name_length;
+    const char *subsystem_data = PyUnicode_AsUTF8AndSize(
+        subsystem, &subsystem_length);
+    const char *name_data = PyUnicode_AsUTF8AndSize(name, &name_length);
+    if (subsystem_data == NULL || name_data == NULL ||
+        subsystem_length > PY_SSIZE_T_MAX - 1 ||
+        name_length > PY_SSIZE_T_MAX - 1 - subsystem_length)
+        return PyErr_Occurred() ? -1 : (PyErr_NoMemory(), -1);
+    Py_ssize_t length = subsystem_length + 1 + name_length;
+    char *wire_name = PyMem_Malloc((size_t)length);
+    if (wire_name == NULL) return PyErr_NoMemory(), -1;
+    memcpy(wire_name, subsystem_data, (size_t)subsystem_length);
+    wire_name[subsystem_length] = '_';
+    memcpy(
+        wire_name + subsystem_length + 1, name_data, (size_t)name_length);
+    *metric = (EmfMetric){
+        .name = wire_name,
+        .name_length = length,
+        .unit = "None",
+        .unit_length = 4,
+        .owns_name = 1,
+        .py_integer = Py_NewRef(value),
+    };
+    return 0;
+}
+
+static int
+emf_counter_delta(MetricDeltaState *state, PyObject *subsystem,
+                  PyObject *instance, PyObject *name, PyObject *current,
+                  PyObject **result)
+{
+    Py_ssize_t subsystem_length, instance_length, name_length;
+    const char *subsystem_data = PyUnicode_AsUTF8AndSize(
+        subsystem, &subsystem_length);
+    const char *instance_data = PyUnicode_AsUTF8AndSize(
+        instance, &instance_length);
+    const char *name_data = PyUnicode_AsUTF8AndSize(name, &name_length);
+    if (subsystem_data == NULL || instance_data == NULL || name_data == NULL ||
+        subsystem_length > PY_SSIZE_T_MAX - 2 ||
+        instance_length > PY_SSIZE_T_MAX - 2 - subsystem_length ||
+        name_length > PY_SSIZE_T_MAX - 2 - subsystem_length - instance_length)
+        return PyErr_Occurred() ? -1 : (PyErr_NoMemory(), -1);
+    Py_ssize_t length = subsystem_length + instance_length + name_length + 2;
+    char *key = PyMem_Malloc((size_t)length);
+    if (key == NULL) return PyErr_NoMemory(), -1;
+    char *cursor = key;
+    memcpy(cursor, subsystem_data, (size_t)subsystem_length);
+    cursor += subsystem_length;
+    *cursor++ = '\0';
+    memcpy(cursor, instance_data, (size_t)instance_length);
+    cursor += instance_length;
+    *cursor++ = '\0';
+    memcpy(cursor, name_data, (size_t)name_length);
+    int status = metric_delta_pyint(
+        state, 30, key, length, current, result);
+    PyMem_Free(key);
+    return status;
+}
+
+static int
+emf_instance_labels(PyObject *instance, MetricLabelTape *labels)
+{
+    labels->items = PyMem_Calloc(1, sizeof(*labels->items));
+    if (labels->items == NULL) return PyErr_NoMemory(), -1;
+    labels->count = 1;
+    labels->items[0].key = PyMem_Malloc(8);
+    if (labels->items[0].key == NULL) {
+        metric_labels_clear(labels);
+        return PyErr_NoMemory(), -1;
+    }
+    memcpy(labels->items[0].key, "Instance", 8);
+    labels->items[0].key_length = 8;
+    if (metric_copy_unicode(
+            instance, &labels->items[0].value,
+            &labels->items[0].value_length) < 0) {
+        metric_labels_clear(labels);
+        return -1;
+    }
+    return 0;
+}
+
+static int
+emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
+                    PyObject *readings, const char *namespace,
+                    Py_ssize_t namespace_length, uint64_t timestamp,
+                    int cumulative, MetricDeltaState *state,
+                    Py_ssize_t max_metrics)
+{
+    Py_ssize_t reading_count = PyTuple_GET_SIZE(readings);
+    for (Py_ssize_t reading_index = 0;
+         reading_index < reading_count; reading_index++) {
+        PyObject *reading = PyTuple_GET_ITEM(readings, reading_index);
+        PyObject *subsystem_raw = PyObject_GetAttrString(reading, "subsystem");
+        PyObject *instance_raw = PyObject_GetAttrString(reading, "instance");
+        PyObject *values = PyObject_GetAttrString(reading, "values");
+        PyObject *gauges = PyObject_GetAttrString(reading, "gauges");
+        PyObject *subsystem = subsystem_raw != NULL
+            ? PyObject_Str(subsystem_raw) : NULL;
+        PyObject *instance = instance_raw != NULL
+            ? PyObject_Str(instance_raw) : NULL;
+        PyObject *items = values != NULL ? PyMapping_Items(values) : NULL;
+        MetricLabelTape labels = {0};
+        Py_XDECREF(subsystem_raw);
+        Py_XDECREF(instance_raw);
+        Py_XDECREF(values);
+        if (subsystem == NULL || instance == NULL || gauges == NULL ||
+            items == NULL || emf_instance_labels(instance, &labels) < 0) {
+            Py_XDECREF(items);
+            Py_XDECREF(gauges);
+            Py_XDECREF(instance);
+            Py_XDECREF(subsystem);
+            metric_labels_clear(&labels);
+            return -1;
+        }
+
+        Py_ssize_t value_count = PyList_GET_SIZE(items);
+        for (Py_ssize_t offset = 0; offset < value_count;
+             offset += max_metrics) {
+            Py_ssize_t batch_count = value_count - offset;
+            if (batch_count > max_metrics) batch_count = max_metrics;
+            EmfMetric *metrics = PyMem_Calloc(
+                (size_t)batch_count, sizeof(*metrics));
+            if (metrics == NULL) {
+                PyErr_NoMemory();
+                Py_DECREF(items); Py_DECREF(gauges);
+                Py_DECREF(instance); Py_DECREF(subsystem);
+                metric_labels_clear(&labels);
+                return -1;
+            }
+            Py_ssize_t built = 0;
+            for (; built < batch_count; built++) {
+                PyObject *item = PyList_GET_ITEM(items, offset + built);
+                PyObject *name_raw = PyTuple_GET_ITEM(item, 0);
+                PyObject *name = PyObject_Str(name_raw);
+                PyObject *integer = name != NULL
+                    ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
+                int gauge = integer != NULL
+                    ? PySet_Contains(gauges, name_raw) : -1;
+                PyObject *emitted = integer != NULL ? Py_NewRef(integer) : NULL;
+                if (emitted != NULL && !cumulative && !gauge) {
+                    Py_CLEAR(emitted);
+                    if (emf_counter_delta(
+                            state, subsystem, instance, name,
+                            integer, &emitted) < 0) emitted = NULL;
+                }
+                if (name == NULL || integer == NULL || gauge < 0 ||
+                    emitted == NULL || emf_counter_metric(
+                        &metrics[built], subsystem, name, emitted) < 0) {
+                    Py_XDECREF(emitted);
+                    Py_XDECREF(integer);
+                    Py_XDECREF(name);
+                    emf_metrics_clear(metrics, built);
+                    PyMem_Free(metrics);
+                    Py_DECREF(items); Py_DECREF(gauges);
+                    Py_DECREF(instance); Py_DECREF(subsystem);
+                    metric_labels_clear(&labels);
+                    return -1;
+                }
+                Py_DECREF(emitted);
+                Py_DECREF(integer);
+                Py_DECREF(name);
+            }
+            if (emf_write_document(
+                    writer, base, &labels, metrics, batch_count,
+                    namespace, namespace_length, timestamp) < 0) {
+                emf_metrics_clear(metrics, batch_count);
+                PyMem_Free(metrics);
+                Py_DECREF(items); Py_DECREF(gauges);
+                Py_DECREF(instance); Py_DECREF(subsystem);
+                metric_labels_clear(&labels);
+                return -1;
+            }
+            emf_metrics_clear(metrics, batch_count);
+            PyMem_Free(metrics);
+        }
+        Py_DECREF(items);
+        Py_DECREF(gauges);
+        Py_DECREF(instance);
+        Py_DECREF(subsystem);
+        metric_labels_clear(&labels);
+        if ((reading_index & 63) == 63 && PyErr_CheckSignals() < 0) return -1;
+    }
+    return 0;
+}
+
 PyObject *
 wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *snapshot, *recorder_loss, *namespace_object, *dimensions_object;
-    PyObject *resolver, *state_capsule;
+    PyObject *resolver, *state_capsule, *readings = NULL;
     unsigned long long timestamp;
     int cumulative;
     Py_ssize_t max_metrics;
     if (!PyArg_ParseTuple(
-            args, "OKOUO!OiOn:emf_render", &snapshot, &timestamp,
+            args, "OKOUO!OiOn|O!:emf_render", &snapshot, &timestamp,
             &recorder_loss, &namespace_object, &PyDict_Type, &dimensions_object,
-            &resolver, &cumulative, &state_capsule, &max_metrics)) return NULL;
+            &resolver, &cumulative, &state_capsule, &max_metrics,
+            &PyTuple_Type, &readings)) return NULL;
     MetricDeltaState *state = metric_delta_state(state_capsule);
     Py_ssize_t namespace_length;
     const char *namespace = PyUnicode_AsUTF8AndSize(
@@ -2328,6 +2775,9 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
             namespace, namespace_length, timestamp) < 0) goto global_error;
     emf_metrics_clear(global, global_count);
     PyMem_Free(global);
+    if (readings != NULL && emf_render_counters(
+            &writer, &base, readings, namespace, namespace_length,
+            timestamp, cumulative, state, max_metrics) < 0) goto error;
     metric_labels_clear(&base);
     PyObject *bytes = wreath_writer_finish(&writer);
     if (bytes == NULL) return NULL;

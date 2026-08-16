@@ -266,6 +266,8 @@ def test_direct_metric_writer_keeps_an_empty_request_empty() -> None:
 
 def test_direct_trace_writer_matches_the_declared_mapping() -> None:
     from wreath._flight_schema import (
+        ClientFactFlag,
+        ClientFactsCell,
         PhaseCoverage,
         PhaseKind,
         PhaseRecord,
@@ -293,6 +295,18 @@ def test_direct_trace_writer_matches_the_declared_mapping() -> None:
             trace_id=(1 << 127) | 99,
             span_id=(1 << 63) | 7,
             parent_span_id=5,
+            client_facts=ClientFactsCell(
+                request_id=1,
+                flags=(
+                    ClientFactFlag.UA_KNOWN
+                    | ClientFactFlag.BOT_CLAIMED
+                    | ClientFactFlag.AGENT_VERIFIED
+                    | ClientFactFlag.IP_KNOWN
+                    | ClientFactFlag.GEO_KNOWN
+                ),
+                user_agent_rule_id=4,
+                country="AU",
+            ),
             phases=(
                 PhaseRecord(
                     phase_id=PhaseKind.DB_QUERY,

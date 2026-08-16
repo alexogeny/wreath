@@ -16,7 +16,7 @@ import json
 import os
 
 from wreath import Wreath
-from wreath._mcp.stdio import serve
+from wreath._mcp.stdio import _pump, serve
 from wreath.mcp import MCP, PROTOCOL_VERSION
 
 
@@ -77,6 +77,24 @@ def build() -> Wreath:
         return {"summary": answer["content"]["text"]}
 
     return app
+
+
+async def test_stream_pump_reassembles_one_data_line_from_many_fragments() -> None:
+    payload = b'{"jsonrpc":"2.0","method":"notifications/progress"}'
+    chunks = tuple(bytes((byte,)) for byte in b"data: " + payload + b"\n")
+    written: list[bytes] = []
+
+    class FragmentedClient:
+        def _scope(self, *_args, **_kwargs):
+            return {}, b""
+
+        async def app(self, _scope, _receive, send):
+            for chunk in chunks:
+                await send({"type": "http.response.body", "body": chunk})
+
+    await _pump(FragmentedClient(), "/rpc", "session", written.append, asyncio.Lock())
+
+    assert written == [payload]
 
 
 async def test_a_tool_can_be_called_over_the_pipe() -> None:

@@ -800,10 +800,11 @@ class _Parser:
 # -- the entity store ---------------------------------------------------------
 
 
-#: One entry of the evaluator's store: an entity's converted attributes and the
-#: transitive closure of its ancestors.
+#: One entry of the evaluator's store: converted attributes and direct parents.
+#: Native evaluation owns graph traversal, so construction materializes each
+#: edge once instead of a separate transitive frozenset for every entity.
 _Uid = tuple[str, str]
-_StoreEntry = tuple[dict[str, object], frozenset[_Uid]]
+_StoreEntry = tuple[dict[str, object], tuple[_Uid, ...]]
 _Store = dict[_Uid, _StoreEntry]
 _Parents = dict[_Uid, tuple[_Uid, ...]]
 
@@ -835,50 +836,20 @@ def _entity_maps(
     return attrs, parents
 
 
-def _ancestors(
-    uid: _Uid, parents: Mapping[_Uid, tuple[_Uid, ...]], base: _Store
-) -> frozenset[_Uid]:
-    """The transitive ancestors of `uid`, walking `parents`.
-
-    `base` is a store whose closures are already complete: reaching one of its
-    entities contributes that entity's whole ancestor set in a single step
-    instead of continuing the walk. With an empty `base` this is a plain
-    fixed-point closure over `parents`; with the static store as `base` it is
-    the same result reached without re-walking the static hierarchy.
-
-    A parent that appears in neither map contributes itself and nothing more,
-    so a dangling reference is a fact about the hierarchy rather than an error.
-    Cycles terminate: an entity is never its own ancestor unless a cycle makes
-    it one, which is what a fixed-point closure means.
-    """
-    seen: set[_Uid] = set()
-    frontier = list(parents.get(uid, ()))
-    while frontier:
-        parent = frontier.pop()
-        if parent in seen:
-            continue
-        seen.add(parent)
-        closed = base.get(parent)
-        if closed is not None:
-            seen |= closed[1]
-        else:
-            frontier.extend(parents.get(parent, ()))
-    return frozenset(seen)
-
-
 def _build_store(entities: Iterable[CedarEntity]) -> _Store:
-    """Compile entities into the evaluator's store: uid -> (attrs, ancestors).
+    """Compile entities into the evaluator's store: uid -> (attrs, parents).
 
-    Ancestors are the *transitive* closure, precomputed here so neither
-    evaluator walks the hierarchy while evaluating — `in` is one set membership
-    test.
+    The graph is compact: each declared edge appears once. The native evaluator
+    performs cycle-safe reachability without returning through Python. A chain
+    therefore costs O(entities + edges) to construct rather than materializing
+    O(entities²) ancestor tuples at this boundary.
 
     This is the whole-hierarchy build, run once per policy set at construction.
     `CedarPolicies.is_authorized` does **not** call it for ordinary per-request
     entities; see `_layer_store`, and the note on that function for why.
     """
     attrs, parents = _entity_maps(entities)
-    return {uid: (values, _ancestors(uid, parents, {})) for uid, values in attrs.items()}
+    return {uid: (values, parents.get(uid, ())) for uid, values in attrs.items()}
 
 
 def _layer_store(
@@ -887,7 +858,7 @@ def _layer_store(
     static: tuple[CedarEntity, ...],
     entities: tuple[CedarEntity, ...],
 ) -> _Store:
-    """`base` with `entities` layered over it, reusing `base`'s closures.
+    """`base` with `entities` layered over it, replacing matching graph nodes.
 
     Row-level authorization calls `is_authorized(entities=...)` once per row
     against an unchanging static hierarchy, so rebuilding that hierarchy each
@@ -896,26 +867,14 @@ def _layer_store(
     the hierarchy is a chain. Layering pays only for the entities the caller
     actually supplied.
 
-    Reuse is only sound when the request entities cannot change a *static*
-    entity's closure, which takes two conditions:
-
-    * **No uid collision.** A request entity sharing a static uid replaces its
-      parents, so any static descendant's closure may change.
-    * **No dangling completion.** `dangling` is the set of uids the static
-      entities name as parents but do not define. Defining one now extends the
-      closure of every static entity above it.
-
-    Either one falls back to the full rebuild, which is always correct. The
-    conditions are two set intersections against sets computed once, so the
-    check costs nothing on the path that skips it.
+    Direct-parent storage makes overrides compositional: native reachability
+    resolves every visited uid against this final mapping, so a collision or a
+    newly completed dangling parent needs no whole-hierarchy rebuild.
     """
     attrs, parents = _entity_maps(entities)
-    supplied = attrs.keys()
-    if not supplied.isdisjoint(base) or not supplied.isdisjoint(dangling):
-        return _build_store(static + entities)
     store = dict(base)
     for uid, values in attrs.items():
-        store[uid] = (values, _ancestors(uid, parents, base))
+        store[uid] = (values, parents.get(uid, ()))
     return store
 
 
@@ -968,14 +927,13 @@ class CedarPolicies:
         }
         self._entities = tuple(entities)
         self._store = _build_store(self._entities)
-        # Parent uids the static hierarchy names but does not define. A
-        # per-request entity that fills one of these changes what the static
-        # entities above it can reach, which is one of the two conditions that
-        # make the layered store unsound -- see `_layer_store`.
+        # Parent uids the static hierarchy names but does not define. Kept as a
+        # compact inventory for the layering surface; direct-parent traversal
+        # now resolves a request-time definition without rebuilding the store.
         self._dangling = frozenset(
             parent
-            for _, ancestors in self._store.values()
-            for parent in ancestors
+            for _, parents in self._store.values()
+            for parent in parents
             if parent not in self._store
         )
 

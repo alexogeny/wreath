@@ -89,10 +89,12 @@ def lifespan_shape(node) -> tuple[str, str]:
 def _names_crossing(before: list[ast.stmt], after: list[ast.stmt]) -> list[str]:
     """Names bound in `before` and read in `after`, in binding order."""
     bound: list[str] = []
+    seen: set[str] = set()
     for statement in before:
         for node in ast.walk(statement):
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                if node.id not in bound:
+                if node.id not in seen:
+                    seen.add(node.id)
                     bound.append(node.id)
     read = {
         node.id for statement in after for node in ast.walk(statement)

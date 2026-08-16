@@ -63,7 +63,6 @@ source that counts no rows at all.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,6 +80,7 @@ from ._passes.keyset import Key, PassDeclarationError
 from ._passes.ledger import Hole, PendingFact, PublishedFact
 from ._passes.pace import DutyCycle
 from ._passes.progress import Denominator, Estimated, Exact, Keyspace, Progress
+from ._pgname import validate_unquoted_identifier
 from .telemetry import trace_id_of as _trace_id
 
 
@@ -110,10 +110,9 @@ class Table:
 
     def __post_init__(self) -> None:
         for part in (self.name, *(() if self.schema is None else (self.schema,))):
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part):
-                raise PassDeclarationError(
-                    f"table {part!r} must be a plain SQL identifier"
-                )
+            validate_unquoted_identifier(
+                part, "table", error=PassDeclarationError
+            )
 
     @property
     def sql(self) -> str:

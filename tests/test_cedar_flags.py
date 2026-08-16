@@ -21,7 +21,7 @@ from wreath import Wreath
 from wreath._auth.cedar_engine import CedarPolicies, EntityUid
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, authorize
-from wreath.flags import FeatureFlags
+from wreath.flags import FeatureFlags, Flag
 from wreath.testing import TestClient
 
 FLAG_POLICY = """
@@ -55,10 +55,10 @@ class CountingFlags(FeatureFlags):
         #: one request would put two answers here for one name.
         self.answers: set[tuple[str, bool]] = set()
 
-    def enabled(self, name: str, context: Any = None) -> bool:
+    def resolve(self, flag: Flag[Any], context: Any = None) -> Any:
         self.calls += 1
-        answer = super().enabled(name, context)
-        self.answers.add((name, answer))
+        answer = super().resolve(flag, context)
+        self.answers.add((flag.name, bool(answer)))
         return answer
 
     def all(self, context: Any = None) -> dict[str, bool]:
@@ -206,12 +206,24 @@ async def test_an_exactly_scoped_other_action_does_not_resolve_its_flags() -> No
 class OpaqueFlags:
     """A provider that answers one name at a time and cannot list its vocabulary.
 
-    The shape an external service (Unleash, LaunchDarkly) has: `enabled` costs a
+    The shape an external service (Unleash, LaunchDarkly) has: `resolve` costs a
     lookup it can do, `names` would cost a round trip it may not want to make.
-    It is what the `FlagProvider` protocol actually requires, and it is the only
+    It is what the `TypedFlagProvider` protocol requires, and it is the only
     place the "unknown flag denies at request time" path is reachable -- with an
     enumerable provider, startup validation refuses the policy set first.
     """
+
+    def __init__(self, on: set[str]) -> None:
+        self._on = on
+        self.asked: list[str] = []
+
+    def resolve(self, flag: Flag[Any], context: Any = None) -> Any:
+        self.asked.append(flag.name)
+        return flag.name in self._on
+
+
+class LegacyOpaqueFlags:
+    """The original public boolean provider shape, without enumeration."""
 
     def __init__(self, on: set[str]) -> None:
         self._on = on
@@ -234,6 +246,16 @@ async def test_a_flag_nobody_configured_is_absent_rather_than_false() -> None:
         app = build(flags=OpaqueFlags({"other_flag"}))
 
     assert (await invoke(app, "alice"))["status"] == 403
+
+
+@pytest.mark.asyncio
+async def test_original_boolean_provider_uses_the_same_cedar_resolution_path() -> None:
+    flags = LegacyOpaqueFlags({"new_ui"})
+    with pytest.warns(RuntimeWarning, match="cannot enumerate"):
+        app = build(flags=flags)
+
+    assert (await invoke(app, "alice"))["status"] == 200
+    assert flags.asked == ["new_ui"]
 
 
 @pytest.mark.asyncio
@@ -469,14 +491,14 @@ def test_the_rollout_subject_is_the_principal_not_the_anonymous_bucket() -> None
     seen: list[Any] = []
 
     class Recording:
-        def enabled(self, name: str, context: Any = None) -> bool:
+        def resolve(self, flag: Flag[Any], context: Any = None) -> bool:
             seen.append(context)
             return True
 
     class FakeRequest:
         def __init__(self, identity: Any) -> None:
             self.identity = identity
-            self.state = type("S", (), {"get": lambda s, k: None,
+            self.state = type("S", (), {"get": lambda s, k, default=None: default,
                                         "__setattr__": object.__setattr__})()
 
     request_flags(FakeRequest(Identity("alice")), Recording(), frozenset({"f"}))

@@ -16,6 +16,7 @@ connection on garbage or reject a head that had merely not finished arriving.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -27,6 +28,13 @@ from ._native import _core
 _parse: Callable[[bytes], tuple[str, bytes, int, list[tuple[bytes, bytes]], int] | None] = (
     _core.http_parse_request
 )
+
+_HTTP_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def _is_http_token(value: str) -> bool:
+    """Whether `value` is one non-empty RFC 9110 token."""
+    return _HTTP_TOKEN.fullmatch(value) is not None
 
 
 class RequestHead(NamedTuple):

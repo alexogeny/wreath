@@ -28,14 +28,23 @@ from wreath._flight_schema import (
     CELL_SIZE,
     RING_FILE_CURSOR_OFFSET,
     RING_FILE_HEADER_BYTES,
+    SCHEMA_VERSION,
+    ClientFactsCell,
+    CompletionCell,
+    CorrelationCell,
     EventKind,
     LogArg,
     LogCell,
     LossReason,
+    PhaseBatchCell,
+    PhaseKind,
+    PhaseRecord,
     RingFileHeader,
+    SchemaError,
     Severity,
     ring_file_bytes,
 )
+from wreath._ring_file import decode_cell
 from wreath.recording import read_ring_file
 
 _flight = pytest.importorskip("wreath._native._flight", exc_type=ImportError)
@@ -173,6 +182,33 @@ def test_records_survive_a_child_that_is_killed(ring_path) -> None:
     assert read_ring_file(ring_path).live == 6
 
 
+def test_native_in_flight_index_matches_the_independent_definition(ring_path) -> None:
+    recorder = _recorder(ring_path, records=16)
+    completed = recorder.begin(1, 1, 0)
+    completed.route(7, 3)
+    recorder.publish_log(LogCell(
+        request_id=completed.request_id,
+        site_id=3,
+        severity=Severity.INFO,
+    ).encode())
+    completed.finish(1_000, 200, 0, 0, 0, 12)
+    first = recorder.begin(1, 1, 0)
+    second = recorder.begin(1, 1, 0)
+    for request_id in (first.request_id, first.request_id, second.request_id, 0):
+        recorder.publish_log(LogCell(
+            request_id=request_id,
+            site_id=3,
+            severity=Severity.INFO,
+        ).encode())
+    del recorder
+
+    ring = read_ring_file(ring_path)
+    assert ring.in_flight() == (first.request_id, second.request_id)
+    assert ring.in_flight() == ring._in_flight_reference()
+    assert ring.logs_for(first.request_id) == ring._logs_for_reference(first.request_id)
+    assert len(ring.logs_for(first.request_id)) == 2
+
+
 @pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif(_SANITIZED, reason="ASan intercepts SIGSEGV")
 def test_the_request_in_flight_when_it_died_is_the_one_with_no_completion(
@@ -308,6 +344,91 @@ def test_a_cell_that_will_not_decode_costs_only_itself(ring_path) -> None:
     ring = read_ring_file(ring_path)
     assert ring.undecodable == 1
     assert ring.live == 3, "the other three must still be readable"
+
+
+def _ring_reader_cell_corpus() -> tuple[bytes, ...]:
+    completion = bytearray(
+        CompletionCell(1, 0, 0, 0, 1, 200, 0, 0).encode()
+    )
+    correlation = CorrelationCell(1, 2, 3).encode()
+    phase = bytearray(
+        PhaseBatchCell(1, (PhaseRecord(PhaseKind.INGRESS, 1),)).encode()
+    )
+    log = bytearray(LogCell(1, 1, Severity.INFO, args=(LogArg.text("x"),)).encode())
+    facts = bytearray(ClientFactsCell(1, country="AU").encode())
+    control = bytes((SCHEMA_VERSION, int(EventKind.CONTROL))) + bytes(CELL_SIZE - 2)
+
+    bad_version = completion.copy()
+    bad_version[0] = 0xFF
+    bad_phase_count = phase.copy()
+    bad_phase_count[2] = 0
+    bad_log_bytes = log.copy()
+    bad_log_bytes[27] = 33
+    bad_log_count = log.copy()
+    bad_log_count[26] = 2
+    bad_log_kind = log.copy()
+    bad_log_kind[26] = 1
+    bad_log_kind[27] = 1
+    bad_log_kind[32] = 0xFF
+    bad_country = facts.copy()
+    bad_country[6:8] = b"au"
+    return (
+        bytes(completion),
+        correlation,
+        bytes(phase),
+        bytes(log),
+        bytes(facts),
+        control,
+        bytes(bad_version),
+        bytes(bad_phase_count),
+        bytes(bad_log_bytes),
+        bytes(bad_log_count),
+        bytes(bad_log_kind),
+        bytes(bad_country),
+    )
+
+
+@pytest.mark.parametrize(
+    "cell",
+    _ring_reader_cell_corpus(),
+    ids=(
+        "completion",
+        "correlation",
+        "phase",
+        "log",
+        "client-facts",
+        "control",
+        "bad-version",
+        "bad-phase-count",
+        "bad-log-bytes",
+        "bad-log-count",
+        "bad-log-kind",
+        "bad-country",
+    ),
+)
+def test_native_ring_reader_matches_the_independent_cell_decoders(
+    ring_path, cell: bytes
+) -> None:
+    recorder = _recorder(ring_path, records=8)
+    del recorder
+    with open(ring_path, "r+b") as handle:
+        handle.seek(RING_FILE_HEADER_BYTES)
+        handle.write(cell)
+    _write_cursor(ring_path, head=1, tail=0)
+
+    try:
+        decoded = decode_cell(cell)
+    except SchemaError:
+        expected_live, expected_undecodable = 0, 1
+    else:
+        expected_live, expected_undecodable = (0, 0) if decoded is None else (1, 0)
+
+    ring = read_ring_file(ring_path)
+    assert ring.live == expected_live
+    assert ring.undecodable == expected_undecodable
+    if ring.records:
+        assert ring.records[0].raw == cell
+        assert ring.records[0].decode() == decoded
 
 
 def test_a_file_that_is_not_a_ring_file_is_refused(tmp_path) -> None:

@@ -102,6 +102,13 @@ async def test_a_scripted_mapping_keeps_its_column_names() -> None:
     assert not hasattr(row, "values")
 
 
+def test_duplicate_scripted_columns_keep_the_drivers_first_match_rule() -> None:
+    """The O(1) name index preserves the old tuple.index first-column result."""
+    row = ScriptedRecord(("value", "value"), ("first", "second"))
+
+    assert row["value"] == "first"
+
+
 async def test_a_declared_oid_refuses_a_value_the_driver_would_not_return() -> None:
     """The guard that would have caught the introspection defect on day one.
 

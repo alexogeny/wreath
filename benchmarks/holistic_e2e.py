@@ -51,6 +51,9 @@ from wreath.authorization import (
 from wreath.background import BackgroundTask
 from wreath.binding import Body, Cookie, Depends, Field, File, Form, Header, Path, Query
 from wreath.cache_control import CacheControl
+from wreath.client_facts import (
+    ClientFacts,
+)
 from wreath.crud import Access, crud_router
 from wreath.flags import FlagView, flags_dependency
 from wreath.geospatial import BoundingBox, Coordinate, Trajectory, distance, grid
@@ -79,7 +82,7 @@ from wreath.orm.types import (
     Vector,
 )
 from wreath.pagination import Page, PageParams, _rank_indices, page_params
-from wreath.policy import HttpPolicy
+from wreath.policy import AIScrapingPolicy, HttpPolicy
 from wreath.policy.cache import CachePolicy
 from wreath.policy.compression import CompressionPolicy
 from wreath.policy.cors import CorsPolicy
@@ -159,6 +162,8 @@ REQUEST_HEADERS = {
     "Sec-Fetch-Site": "same-origin",
     "X-Trace": "holistic-trace-42",
     "Cookie": "session=holistic-session",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
+    "X-Forwarded-For": "4.1.1.1",
 }
 
 
@@ -279,7 +284,9 @@ class OperationsQuery:
 
 _PAGE = Template.from_string(
     "<!doctype html><title>{{ view.title }}</title>"
-    '<main data-trace="{{ view.trace }}" data-session="{{ view.session }}">'
+    '<main data-trace="{{ view.trace }}" data-session="{{ view.session }}" '
+    'data-client-country="{{ client_country }}" '
+    'data-client-agent="{{ client_agent }}" data-client-bot="{{ client_bot }}">'
     "<h1>{{ principal }} / {{ view.id }}</h1>"
     "<p>{{ dependency }}:{{ view.account_id }}:{{ upstream_status }}</p>"
     "<ul>{% for line in lines %}"
@@ -563,6 +570,7 @@ _HTTP_POLICY = HttpPolicy(
     trusted_host=TrustedHostPolicy(
         ["operations.example.com", "127.0.0.1", "localhost", "testserver"]
     ),
+    ai_scraping=AIScrapingPolicy(allow=("oai-searchbot",)),
     rate_limit=RateLimitPolicy(limit=1_000_000_000),
     principal_rate_limit=TieredRateLimitPolicy(
         tiers={"billing": (1_000_000_000, 60.0)},
@@ -589,6 +597,8 @@ _HTTP_POLICY = HttpPolicy(
     ),
 )
 app = Wreath(http_policy=_HTTP_POLICY)
+_CLIENT_FACTS = app.client_facts("holistic")
+_CLIENT_FACTS_DEPENDENCY = _CLIENT_FACTS
 app.add_global_middleware(TenancyMiddleware(_TENANCY, optional=True))
 _FLAGS = app.flags(dense_dashboard=True, compact_exports="50%")
 _FLAGS_DEPENDENCY = flags_dependency(_FLAGS)
@@ -712,6 +722,7 @@ async def holistic(
     dependency: str = Depends(_request_dependency),
     pagination: PageParams = Depends(page_params),
     feature_flags: FlagView = Depends(_FLAGS_DEPENDENCY),
+    client_facts: ClientFacts = Depends(_CLIENT_FACTS_DEPENDENCY),
 ) -> HTMLResponse:
     state = await _e2e_ensure()
     fetch = asyncio.create_task(state["client"].get("/data"))
@@ -847,6 +858,13 @@ async def holistic(
             "protobuf_bytes": len(protobuf_blob),
             "msgpack_bytes": len(messagepack_blob),
             "metric_count": len(counters),
+            "client_country": (
+                "unknown"
+                if client_facts.ip is None or client_facts.ip.geo is None
+                else client_facts.ip.geo.country or "unknown"
+            ),
+            "client_agent": client_facts.user_agent.browser or "unknown",
+            "client_bot": str(client_facts.user_agent.bot).lower(),
             "chart_path": "".join(paths),
             "chart_ticks": tick_text,
         }
@@ -1019,6 +1037,7 @@ _V1.include_router(
         _METRIC_SOURCE,
         namespace="wreath_holistic",
         route_labels={42: {"method": "POST", "path": "/v1/holistic/{item_id}"}},
+        app=app,
     )
 )
 
@@ -1246,6 +1265,8 @@ app.enable_api_docs(
 _COMMON_GET_HEADERS = {
     "Authorization": "Bearer holistic-user",
     "Host": "operations.example.com",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
+    "X-Forwarded-For": "4.1.1.1",
 }
 _COMMON_POST_HEADERS = {
     **_COMMON_GET_HEADERS,
@@ -1431,6 +1452,16 @@ ARMS: dict[str, Arm] = {
         b"{}",
     ),
     "readiness": Arm("GET", "/v1/ready", _COMMON_GET_HEADERS),
+    "ai-search-opt-in": Arm(
+        "GET",
+        "/v1/ready",
+        {**_COMMON_GET_HEADERS, "User-Agent": "OAI-SearchBot/1.0"},
+    ),
+    "ai-scraper-refusal": Arm(
+        "GET",
+        "/v1/ready",
+        {**_COMMON_GET_HEADERS, "User-Agent": "GPTBot/1.0"},
+    ),
     "metrics": Arm("GET", "/v1/metrics", _COMMON_GET_HEADERS),
     "openapi": Arm("GET", "/v1/openapi.json", _COMMON_GET_HEADERS),
 }

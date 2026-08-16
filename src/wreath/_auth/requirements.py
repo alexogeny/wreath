@@ -276,38 +276,31 @@ def add_second_factor(endpoint: Any, max_age: float) -> Any:
 
 
 def add_roles(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
-    current = _protected_requirement(endpoint)
-    return set_requirement(
-        endpoint,
-        replace(
-            current,
-            authenticated=True,
-            role_checks=current.role_checks + (SetRequirement(values, mode),),
-        ),
+    return _append_check(
+        endpoint, "role_checks", SetRequirement(values, mode)
     )
 
 
 def add_policy(
     endpoint: Any, action: str, resource: object | Callable[[Any], object]
 ) -> Any:
-    current = _protected_requirement(endpoint)
-    return set_requirement(
-        endpoint,
-        replace(
-            current,
-            authenticated=True,
-            policies=current.policies + (PolicyRequirement(action, resource),),
-        ),
-    )
+    return _append_check(endpoint, "policies", PolicyRequirement(action, resource))
 
 
 def add_permissions(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
+    return _append_check(
+        endpoint, "permission_checks", SetRequirement(values, mode)
+    )
+
+
+def _append_check(endpoint: Any, field: str, check: Any) -> Any:
+    """Append one authentication check without three copies of the merge."""
     current = _protected_requirement(endpoint)
     return set_requirement(
         endpoint,
         replace(
             current,
             authenticated=True,
-            permission_checks=current.permission_checks + (SetRequirement(values, mode),),
+            **{field: getattr(current, field) + (check,)},
         ),
     )

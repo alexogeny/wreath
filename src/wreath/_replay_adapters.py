@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ._http_replay import HttpReplayError, RecordedHttpExchange, decode_exchange
 from .http_client import ClientResponse, HTTPClient
 from .postgres import InterfaceError, OperationalError, PostgresError
 
@@ -42,8 +43,10 @@ __all__ = [
     "AdapterFault",
     "DatabaseDouble",
     "FaultyHttpClient",
+    "HttpReplayError",
     "ObjectStoreDouble",
     "ReplayAdapters",
+    "RecordedHttpExchange",
     "SILENT_FAULTS",
     "ScriptedRecord",
     "driver_row_value",
@@ -334,17 +337,21 @@ class ScriptedRecord:
     a dict-shaped fake quietly diverges from the driver.
     """
 
-    __slots__ = ("_columns", "_values")
+    __slots__ = ("_columns", "_positions", "_values")
 
     def __init__(self, columns: tuple[str, ...], values: tuple[Any, ...]) -> None:
         self._columns = tuple(columns)
         self._values = tuple(values)
+        positions: dict[str, int] = {}
+        for index, name in enumerate(self._columns):
+            positions.setdefault(name, index)
+        self._positions = positions
 
     def __getitem__(self, key: Any) -> Any:
         if isinstance(key, str):
             try:
-                return self._values[self._columns.index(key)]
-            except ValueError:
+                return self._values[self._positions[key]]
+            except KeyError:
                 raise KeyError(key) from None
         if isinstance(key, int):
             if not -len(self._values) <= key < len(self._values):
@@ -888,10 +895,14 @@ class FaultyHttpClient(HTTPClient):
         *,
         base_url: str = "http://replay.invalid",
         responses: tuple[ClientResponse, ...] = (),
+        exchanges: tuple[RecordedHttpExchange, ...] = (),
         request_faults: dict[int, AdapterFault] | None = None,
     ) -> None:
+        if responses and exchanges:
+            raise ValueError("an HTTP replay client takes responses or exchanges, not both")
         super().__init__(name, base_url=base_url)
         self._replay_responses = responses
+        self._replay_exchanges = exchanges
         self._replay_faults = request_faults or {}
         self._replay_index = 0
 
@@ -903,6 +914,35 @@ class FaultyHttpClient(HTTPClient):
             raise ConnectionError("connect failed")
         if fault is AdapterFault.READ_TIMEOUT:
             raise TimeoutError("response read timed out")
+        if index < len(self._replay_exchanges):
+            exchange = self._replay_exchanges[index]
+            actual = (
+                method.upper(), target, tuple(headers), bytes(body), idempotency_key
+            )
+            expected = (
+                exchange.method.upper(),
+                exchange.target,
+                exchange.request_headers,
+                exchange.request_body,
+                exchange.idempotency_key,
+            )
+            if actual != expected:
+                labels = ("method", "target", "headers", "body", "idempotency_key")
+                changed = ", ".join(
+                    label for label, got, wanted in zip(labels, actual, expected, strict=True)
+                    if got != wanted
+                )
+                raise HttpReplayError(
+                    f"outbound HTTP replay diverged for {self.name!r} request {index}: "
+                    f"{changed} differs from the recording"
+                )
+            return ClientResponse(
+                status=exchange.response_status,
+                headers=exchange.response_headers,
+                body=exchange.response_body,
+                http_version=exchange.http_version,
+                reason=exchange.reason,
+            )
         if index < len(self._replay_responses):
             return self._replay_responses[index]
         return ClientResponse(status=200, headers=(), body=b"", http_version="1.1")
@@ -1130,6 +1170,65 @@ class ReplayAdapters:
     databases: dict[str, DatabaseDouble] = field(default_factory=dict)
     clients: dict[str, FaultyHttpClient] = field(default_factory=dict)
     object_stores: dict[str, ObjectStoreDouble] = field(default_factory=dict)
+
+    @classmethod
+    def from_recording(
+        cls, recording: Any, *, request_id: int | None = None
+    ) -> ReplayAdapters:
+        """Build HTTP doubles from exact exchanges retained in a WFR1 recording.
+
+        A capture must be raw and complete.  Redacted or truncated dependency
+        data is useful forensic evidence but cannot be turned back into a peer's
+        answer, so it is refused by name rather than partially replayed.
+        """
+        from ._flight_schema import CaptureDisposition, CaptureFieldClass
+
+        candidates = [
+            slab for slab in recording.slabs
+            if request_id is None or slab.request_id == request_id
+        ]
+        request_ids = {slab.request_id for slab in candidates}
+        if request_id is None and len(request_ids) > 1:
+            raise HttpReplayError(
+                "recording contains multiple request ids; pass request_id to select one"
+            )
+        names = {entry.entry_id: entry.name for entry in recording.image.clients}
+        grouped: dict[str, list[RecordedHttpExchange]] = {}
+        for slab in candidates:
+            for captured in slab.fields:
+                if captured.field_class is not CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE:
+                    continue
+                if captured.disposition is not CaptureDisposition.RAW:
+                    raise HttpReplayError(
+                        "outbound HTTP exchange was redacted; record dependencies with "
+                        "BodyCapture.STRUCTURED to replay them"
+                    )
+                if captured.truncated:
+                    raise HttpReplayError(
+                        "outbound HTTP exchange was truncated; raise the forensic capture "
+                        "byte budget and record it again"
+                    )
+                exchange = decode_exchange(captured.payload)
+                if exchange.headers_redacted:
+                    raise HttpReplayError(
+                        "outbound HTTP exchange omitted forbidden headers; exact replay "
+                        "is unavailable for this recording"
+                    )
+                name = names.get(exchange.dependency_id)
+                if name is None:
+                    raise HttpReplayError(
+                        f"outbound HTTP exchange names unknown client id "
+                        f"{exchange.dependency_id}"
+                    )
+                grouped.setdefault(name, []).append(exchange)
+        for exchanges in grouped.values():
+            exchanges.sort(key=lambda exchange: exchange.sequence)
+        return cls(
+            clients={
+                name: FaultyHttpClient(name, exchanges=tuple(exchanges))
+                for name, exchanges in grouped.items()
+            }
+        )
 
     @classmethod
     def from_faults(cls, adapter_faults: Any) -> ReplayAdapters:

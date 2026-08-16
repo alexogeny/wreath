@@ -362,21 +362,23 @@ def test_signing_cost_is_counted_so_the_ceiling_can_be_watched() -> None:
     A threshold baked into wreath would be one guess applied to every
     deployment's latency budget, so instead the cost is a counter
     `wreath.metrics.collect` picks up by asking, and the number to alert on is
-    `signing_seconds` over wall time: the fraction of a core this is spending.
+    `signing_nanoseconds` over wall time: the fraction of a core this is spending.
     """
     server, _ = _es256_server()
     for _ in range(5):
         server.issue_access(subject="u", audience="a")
     counters = server.counters()
-    assert counters["tokens_issued"] == 5
-    assert counters["signing_seconds"] > 0
+    assert counters.values["tokens_issued"] == 5
+    assert counters.values["signing_nanoseconds"] > 0
 
 
 def test_the_hmac_path_counts_tokens_but_not_signing_time(server) -> None:
     """Measuring a ~12 us HMAC would cost a meaningful fraction of what it
     measures -- the trap `AGENTS.md` names about cProfile, one order down."""
     server.issue_access(subject="u", audience="a")
-    assert server.counters() == {"tokens_issued": 1.0, "signing_seconds": 0.0}
+    counters = server.counters()
+    assert counters.subsystem == "oauth"
+    assert counters.values == {"tokens_issued": 1, "signing_nanoseconds": 0}
 
 
 # --- the code endpoint's preconditions --------------------------------------

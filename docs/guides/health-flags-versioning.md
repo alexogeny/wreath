@@ -45,7 +45,9 @@ Pass `is_live=` to make `/health` report draining during shutdown. See
 
 ## Feature flags
 
-Register a provider and gate code on it. Flags come from the environment (`WREATH_FLAG_*`), explicit values, or your own `FlagProvider`:
+Register a provider and gate code on it. Flags come from the environment
+(`WREATH_FLAG_*`), explicit values, your own `TypedFlagProvider`, or an existing
+boolean `FlagProvider`:
 
 ```python
 app.flags(new_checkout="25%", beta_ui=True)     # or app.flags() to read the env
@@ -53,9 +55,40 @@ app.flags(new_checkout="25%", beta_ui=True)     # or app.flags() to read the env
 from wreath.flags import flags_dependency
 ```
 
-`FeatureFlags.enabled(name, context)` understands booleans and a small rule language, including percentage rollouts (`"25%"`) that are **deterministic** — the same subject always lands the same side of the line, computed with blake2s rather than a coin flip, so a user's experience is stable across requests and processes.
+`TypedFlagProvider.resolve(Flag(name, default), context)` is the canonical
+provider contract. For boolean call sites, `FeatureFlags.enabled(name, context)`
+is a convenience layered over `resolve`. The original
+`FlagProvider.enabled(name, context)` protocol remains accepted through one
+compatibility adapter; typed declarations require `TypedFlagProvider`.
+Percentage rollouts (`"25%"`) are
+**deterministic** — the same subject always lands the same side of the line,
+computed with blake2s rather than a coin flip, so a user's experience is stable
+across requests and processes.
 
-`FeatureFlags.names()` lists the flags a provider holds. It is deliberately not part of the `FlagProvider` protocol: an external provider may not be able to enumerate without a network call, and a protocol method some implementations cannot answer is worse than an optional one they can be asked for. Callers probe for it and degrade when it is absent.
+`FeatureFlags.names()` lists the flags a provider holds. It is deliberately not
+part of either provider protocol: an external provider may not be able to
+enumerate without a network call, and a protocol method some implementations
+cannot answer is worse than an optional one they can be asked for. Callers probe
+for it and degrade when it is absent.
+
+### Typed flags and OpenFeature
+
+Declare scalar types and defaults once when a flag value is more than on/off:
+
+```python
+from wreath.flags import Flag, FlagSet, OpenFeatureProvider
+
+checkout_timeout = Flag("checkout_timeout", 2.5)
+flags = FlagSet(OpenFeatureProvider(openfeature_client), (checkout_timeout,))
+
+timeout = flags.value(checkout_timeout, {"id": user.id})  # float
+```
+
+`FlagSet` refuses an undeclared name or a declaration reused with a different
+type. `FeatureFlags` provides the same typed surface over explicit values or the
+environment. `OpenFeatureProvider` adapts an application-owned OpenFeature
+client; Wreath does not install a global provider. When a provider exposes
+`start()`/`close()`, `app.flags(provider)` wires those methods into ASGI lifespan.
 
 ### A flag a policy can read
 

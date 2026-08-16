@@ -91,6 +91,16 @@ static PyMethodDef core_methods[] = {
      "Canonicalize SigV4 headers and their signed-name list."},
     {"sigv4_canonical", wreath_sigv4_canonical, METH_VARARGS,
      "Build one AWS Signature Version 4 canonical request."},
+    {"zip_entry_count", wreath_zip_entry_count, METH_VARARGS,
+     "Count bounded ZIP central-directory records without materializing them."},
+    {"http_exchange_encode", wreath_http_exchange_encode, METH_VARARGS,
+     "Encode one complete outbound HTTP replay exchange."},
+    {"http_exchange_decode", wreath_http_exchange_decode, METH_VARARGS,
+     "Decode one complete outbound HTTP replay exchange."},
+    {"first_duplicate", wreath_first_duplicate, METH_O,
+     "Return the first repeated item in a sequence, or None."},
+    {"minimal_prefixes", wreath_minimal_prefixes, METH_O,
+     "Sort strings and retain only shortest covering prefixes."},
     {"fused_order", wreath_fused_order, METH_VARARGS,
      "Rank keys by reciprocal-rank fusion."},
     {"rank_indices", wreath_rank_indices, METH_VARARGS,
@@ -288,8 +298,12 @@ static PyMethodDef core_methods[] = {
      "prometheus_document(route_blocks, global, counters, families, openmetrics) -> text"},
     {"statsd_lines", wreath_statsd_lines, METH_VARARGS,
      "statsd_lines(snapshot, recorder_loss, prefix, dogstatsd, tags, labels, previous)"},
+    {"statsd_packets", wreath_statsd_packets, METH_VARARGS,
+     "statsd_packets(snapshot, recorder_loss, prefix, dogstatsd, tags, labels, "
+     "previous, counters, max_bytes) -> (packets, line_count)"},
     {"emf_render", wreath_emf_render, METH_VARARGS,
-     "emf_render(snapshot, timestamp, recorder_loss, namespace, dims, labels, cumulative, previous, max_metrics)"},
+     "emf_render(snapshot, timestamp, recorder_loss, namespace, dims, labels, "
+     "cumulative, previous, max_metrics, counters=())"},
     {"metric_delta_state", wreath_metric_delta_state, METH_NOARGS,
      "metric_delta_state() -> native per-bridge delta state"},
     {"series_reconcile", wreath_series_reconcile, METH_VARARGS,
@@ -368,6 +382,12 @@ static PyMethodDef core_methods[] = {
      "dkim_canonicalize_body(body) -> bytes"},
     {"recording_event_cells", wreath_recording_event_cells, METH_VARARGS,
      "recording_event_cells(payload, cell_size, version, error_type) -> tuple[bytes, ...]"},
+    {"ring_file_records", wreath_ring_file_records, METH_VARARGS,
+     "Recover and validate final RingRecord objects from a crash-ring image."},
+    {"ring_in_flight", wreath_ring_in_flight, METH_VARARGS,
+     "Return unique logged request ids without a completion cell."},
+    {"ring_logs_for", wreath_ring_logs_for, METH_VARARGS,
+     "Select one request's log records without decoding every cell."},
     {"scim_parse", wreath_scim_parse, METH_VARARGS,
      "scim_parse(source, attributes, types) -> filter"},
     {"scim_values_at", wreath_scim_values_at, METH_VARARGS,
@@ -386,7 +406,7 @@ static PyMethodDef core_methods[] = {
     {"simd_probe", wreath_simd_probe, METH_VARARGS,
      "simd_probe(kind, arm, data, key=None)\nRun one scanner arm by name."},
     {"ws_parse_frame", wreath_ws_parse_frame, METH_VARARGS,
-     "ws_parse_frame(buffer) -> (fin, opcode, payload, consumed) | None"},
+     "ws_parse_frame(buffer, offset=0) -> (fin, opcode, payload, consumed) | None"},
     {"ws_build_frame", (PyCFunction)(void (*)(void))wreath_ws_build_frame,
      METH_VARARGS | METH_KEYWORDS,
      "ws_build_frame(opcode, payload, fin=True, mask_key=None) -> bytes"},
@@ -534,6 +554,8 @@ static WreathCoreCAPI core_capi = {
     wreath_ws_parse_header_raw,
     wreath_ws_unmask_raw,
     wreath_parse_cookie_data_raw,
+    wreath_user_agent_blocked,
+    wreath_user_agent_database_check,
 };
 
 
@@ -554,6 +576,7 @@ PyInit__core(void)
         wreath_register_kv(module) < 0 || wreath_register_queue(module) < 0 ||
         wreath_register_grpc(module) < 0 || wreath_register_multipart(module) < 0 ||
         wreath_register_flight_project(module) < 0 ||
+        wreath_register_client_facts(module) < 0 ||
         wreath_register_zip_builder(module) < 0 ||
         wreath_register_data_kernels(module) < 0) {
         Py_DECREF(module);

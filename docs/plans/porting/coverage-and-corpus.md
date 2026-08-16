@@ -58,9 +58,9 @@ The value is **not** the percentage. It is that the untranslatable 40–55% is
 **precisely enumerated up front** in the report, instead of being discovered at
 runtime after a hand-port.
 
-## Measured (Phase 0, this corpus)
+## Original Phase 0 baseline
 
-Running the built report-only analyzer over the three app roots:
+The first report-only analyzer measured the following over the three app roots:
 
 - **234 recognized constructs** — 164 translated · 44 needs-review · 26 unsupported.
 - **Overall auto-translatable ≈ 70%** (within the honest 0.40–0.80 band the suite

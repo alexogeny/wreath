@@ -170,16 +170,14 @@ def test_a_schema_name_past_postgresqls_identifier_limit_is_refused() -> None:
 def test_the_byte_length_check_cannot_disagree_with_the_character_count() -> None:
     """Why there is no multibyte arm above, which is worth stating rather than omitting.
 
-    The check reads `len(value.encode("utf-8")) > 63`, and PostgreSQL's limit really
-    is bytes -- but `_SCHEMA_IDENTIFIER` is `[a-z_][a-z0-9_$]*`, so every name that
-    survives the regex is pure ASCII and encodes one byte per character. A multibyte
-    name is refused by the regex first and never reaches the length check, so the
-    `encode` is defensive rather than load-bearing and no input distinguishes the two
-    spellings. Asserting the refusal order is what keeps that a fact rather than an
-    assumption: widen the regex to allow non-ASCII and this test fails, which is
-    exactly when the `encode` would start to matter.
+    PostgreSQL's limit really is bytes, but the canonical unquoted-name grammar is
+    ASCII, so every name that survives it encodes one byte per character. A
+    multibyte name is refused by the grammar first and never reaches the length
+    check. Asserting the refusal order keeps that a fact rather than an assumption:
+    widen the grammar to allow non-ASCII and this test fails, which is exactly when
+    the byte count would start to distinguish the spellings.
     """
-    with pytest.raises(DeclarationError, match="not a valid unquoted"):
+    with pytest.raises(DeclarationError, match="plain SQL identifier"):
         SchemaMode.single("é" * 63)
     assert len(("é" * 63).encode("utf-8")) == 126
 
