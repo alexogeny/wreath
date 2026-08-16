@@ -6849,6 +6849,1126 @@
           {}
         ]
       }
+    },
+    "cedar-store-chain": {
+      "contract": {
+        "group": "web",
+        "stage": "authorization",
+        "axis": "entities in one direct-parent chain",
+        "assumption": "Cedar construction materializes every entity and direct edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "cedar-store-chain",
+        "group": "web",
+        "stage": "authorization",
+        "axis": "entities in one direct-parent chain",
+        "assumption": "Cedar construction materializes every entity and direct edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.084,
+        "tail_exponent": 1.08,
+        "local_exponents": [
+          1.095,
+          1.075,
+          1.084
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.000238819499645615,
+          0.0005101516995637212,
+          0.0010746066996944136,
+          0.0022787515496020204
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "cedar-store-flat-control": {
+      "contract": {
+        "group": "web",
+        "stage": "authorization",
+        "axis": "same entity and edge count in a flat hierarchy",
+        "assumption": "the same-size flat Cedar construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "cedar-store-flat-control",
+        "group": "web",
+        "stage": "authorization",
+        "axis": "same entity and edge count in a flat hierarchy",
+        "assumption": "the same-size flat Cedar construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.26,
+        "tail_exponent": 1.367,
+        "local_exponents": [
+          1.105,
+          1.084,
+          1.651
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.00024582215046393686,
+          0.0005288589498377405,
+          0.0011208263000298756,
+          0.003519326450623339
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "webhook-signature-index-miss": {
+      "contract": {
+        "group": "web",
+        "stage": "authentication",
+        "axis": "configured secrets and supplied signatures with no match",
+        "assumption": "webhook multi-signature verification indexes both collections linearly",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          32,
+          64,
+          128,
+          256
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "webhook-signature-index-miss",
+        "group": "web",
+        "stage": "authentication",
+        "axis": "configured secrets and supplied signatures with no match",
+        "assumption": "webhook multi-signature verification indexes both collections linearly",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.021,
+        "tail_exponent": 1.033,
+        "local_exponents": [
+          1.031,
+          0.918,
+          1.148
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          32,
+          64,
+          128,
+          256
+        ],
+        "seconds": [
+          3.044526994926855e-05,
+          6.220260009285994e-05,
+          0.00011750418998417445,
+          0.00026040244003525006
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "webhook-signature-index-match-control": {
+      "contract": {
+        "group": "web",
+        "stage": "authentication",
+        "axis": "same signature collections with one late match",
+        "assumption": "the same-size successful verification control remains linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          32,
+          64,
+          128,
+          256
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "webhook-signature-index-match-control",
+        "group": "web",
+        "stage": "authentication",
+        "axis": "same signature collections with one late match",
+        "assumption": "the same-size successful verification control remains linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.971,
+        "tail_exponent": 0.967,
+        "local_exponents": [
+          1.004,
+          0.898,
+          1.037
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          32,
+          64,
+          128,
+          256
+        ],
+        "seconds": [
+          2.902739986893721e-05,
+          5.8202070067636666e-05,
+          0.000108438710012706,
+          0.00022247868997510523
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "queue-waiter-mass-cancel": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "simultaneously cancelled queue getters",
+        "assumption": "waiter cancellation leaves FIFO tombstones and cleans them in aggregate O(n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "queue-waiter-mass-cancel",
+        "group": "web",
+        "stage": "queue",
+        "axis": "simultaneously cancelled queue getters",
+        "assumption": "waiter cancellation leaves FIFO tombstones and cleans them in aggregate O(n)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.107,
+        "tail_exponent": 1.031,
+        "local_exponents": [
+          1.168,
+          1.381,
+          0.681
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0007655320077901706,
+          0.001719699997920543,
+          0.004479980998439714,
+          0.007180909000453539
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "queue-waiter-wake-control": {
+      "contract": {
+        "group": "web",
+        "stage": "queue",
+        "axis": "same parked getters woken by items",
+        "assumption": "the same-size successful wake control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "queue-waiter-wake-control",
+        "group": "web",
+        "stage": "queue",
+        "axis": "same parked getters woken by items",
+        "assumption": "the same-size successful wake control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.11,
+        "tail_exponent": 1.123,
+        "local_exponents": [
+          1.155,
+          0.895,
+          1.351
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0007794589910190552,
+          0.0017355000018142164,
+          0.0032272509997710586,
+          0.008234154985984787
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "named-route-registration": {
+      "contract": {
+        "group": "web",
+        "stage": "startup",
+        "axis": "uniquely named routes registered on one application",
+        "assumption": "route-name uniqueness uses the application-owned hash index",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "named-route-registration",
+        "group": "web",
+        "stage": "startup",
+        "axis": "uniquely named routes registered on one application",
+        "assumption": "route-name uniqueness uses the application-owned hash index",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.008,
+        "tail_exponent": 1.064,
+        "local_exponents": [
+          0.878,
+          1.067,
+          1.06
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.00438057399878744,
+          0.008052762001170777,
+          0.01687659800518304,
+          0.035183751009753905
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "unnamed-route-registration-control": {
+      "contract": {
+        "group": "web",
+        "stage": "startup",
+        "axis": "same static routes without names",
+        "assumption": "the same-size router-add control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "unnamed-route-registration-control",
+        "group": "web",
+        "stage": "startup",
+        "axis": "same static routes without names",
+        "assumption": "the same-size router-add control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.018,
+        "tail_exponent": 1.079,
+        "local_exponents": [
+          0.889,
+          1.034,
+          1.125
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.0038930650043766946,
+          0.007207970003946684,
+          0.01475825600209646,
+          0.032177325992961414
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-otlp-wide-encode": {
+      "contract": {
+        "group": "web",
+        "stage": "serialization",
+        "axis": "OTLP/JSON keys against an equally wide protobuf descriptor",
+        "assumption": "native OTLP encoding performs one descriptor hash lookup per key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-otlp-wide-encode",
+        "group": "web",
+        "stage": "serialization",
+        "axis": "OTLP/JSON keys against an equally wide protobuf descriptor",
+        "assumption": "native OTLP encoding performs one descriptor hash lookup per key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.915,
+        "tail_exponent": 0.996,
+        "local_exponents": [
+          0.757,
+          0.897,
+          1.095
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          2.7647001843433827e-06,
+          4.673800140153616e-06,
+          8.704399806447328e-06,
+          1.859205003711395e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-object-wide-encode-control": {
+      "contract": {
+        "group": "web",
+        "stage": "serialization",
+        "axis": "same protobuf fields encoded from a constructed object",
+        "assumption": "the same-size compiled object encoder control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-object-wide-encode-control",
+        "group": "web",
+        "stage": "serialization",
+        "axis": "same protobuf fields encoded from a constructed object",
+        "assumption": "the same-size compiled object encoder control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.859,
+        "tail_exponent": 0.95,
+        "local_exponents": [
+          0.617,
+          1.039,
+          0.86
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          4.222950519761071e-06,
+          6.478699651779607e-06,
+          1.3315049727680162e-05,
+          2.4168050003936514e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-otlp-wide-decode": {
+      "contract": {
+        "group": "web",
+        "stage": "serialization",
+        "axis": "OTLP/JSON keys converted into an equally wide protobuf object",
+        "assumption": "native OTLP conversion performs one descriptor hash lookup per key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-otlp-wide-decode",
+        "group": "web",
+        "stage": "serialization",
+        "axis": "OTLP/JSON keys converted into an equally wide protobuf object",
+        "assumption": "native OTLP conversion performs one descriptor hash lookup per key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.021,
+        "tail_exponent": 1.114,
+        "local_exponents": [
+          0.819,
+          1.072,
+          1.156
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          4.182399425189942e-06,
+          7.378900045296178e-06,
+          1.5515749691985547e-05,
+          3.456809936324135e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "protobuf-object-wide-init-control": {
+      "contract": {
+        "group": "web",
+        "stage": "serialization",
+        "axis": "same protobuf fields passed directly to its dataclass initializer",
+        "assumption": "the same-size Python object-construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "protobuf-object-wide-init-control",
+        "group": "web",
+        "stage": "serialization",
+        "axis": "same protobuf fields passed directly to its dataclass initializer",
+        "assumption": "the same-size Python object-construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.083,
+        "tail_exponent": 1.104,
+        "local_exponents": [
+          1.1,
+          0.908,
+          1.3
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          50,
+          100,
+          200,
+          400
+        ],
+        "seconds": [
+          2.063850115519017e-06,
+          4.423849895829335e-06,
+          8.303649519803002e-06,
+          2.0449050498427824e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "css-many-media-blocks": {
+      "contract": {
+        "group": "extended",
+        "stage": "audit",
+        "axis": "media blocks spread through one stylesheet",
+        "assumption": "media stripping advances regex position without copying suffixes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "css-many-media-blocks",
+        "group": "extended",
+        "stage": "audit",
+        "axis": "media blocks spread through one stylesheet",
+        "assumption": "media stripping advances regex position without copying suffixes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.014,
+        "tail_exponent": 0.977,
+        "local_exponents": [
+          1.108,
+          0.956,
+          0.997
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          0.00013114629982737824,
+          0.00028262529987841843,
+          0.000548419679980725,
+          0.0010945993199129589
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "css-no-media-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "audit",
+        "axis": "same stylesheet bytes containing no media blocks",
+        "assumption": "the same-size regex scan control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "css-no-media-control",
+        "group": "extended",
+        "stage": "audit",
+        "axis": "same stylesheet bytes containing no media blocks",
+        "assumption": "the same-size regex scan control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.541,
+        "tail_exponent": 0.589,
+        "local_exponents": [
+          0.507,
+          0.355,
+          0.822
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          5.071400664746762e-07,
+          7.205599104054272e-07,
+          9.217401384375989e-07,
+          1.6296800458803772e-06
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "postgres-waiter-reverse-cancel": {
+      "contract": {
+        "group": "extended",
+        "stage": "postgres-pool",
+        "axis": "queued PostgreSQL acquisitions cancelled newest-first",
+        "assumption": "cancellation marks each waiter inactive and clears tombstones once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "postgres-waiter-reverse-cancel",
+        "group": "extended",
+        "stage": "postgres-pool",
+        "axis": "queued PostgreSQL acquisitions cancelled newest-first",
+        "assumption": "cancellation marks each waiter inactive and clears tombstones once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.971,
+        "tail_exponent": 0.901,
+        "local_exponents": [
+          1.162,
+          0.821,
+          0.981
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          5.511300696525723e-05,
+          0.0001233119983226061,
+          0.00021784999989904463,
+          0.00043010999797843397
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "postgres-waiter-wake-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "postgres-pool",
+        "axis": "same queued PostgreSQL acquisitions resolved in FIFO order",
+        "assumption": "the same-size successful wake control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "postgres-waiter-wake-control",
+        "group": "extended",
+        "stage": "postgres-pool",
+        "axis": "same queued PostgreSQL acquisitions resolved in FIFO order",
+        "assumption": "the same-size successful wake control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.945,
+        "tail_exponent": 0.845,
+        "local_exponents": [
+          1.154,
+          0.916,
+          0.773
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          7.39090028218925e-05,
+          0.00016447000962216407,
+          0.00031032499100547284,
+          0.0005303299985826015
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "livedoc-one-principal-close": {
+      "contract": {
+        "group": "extended",
+        "stage": "livedoc",
+        "axis": "subscriptions closed from one principal bucket",
+        "assumption": "subscription release deletes directly from an insertion-ordered map",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "livedoc-one-principal-close",
+        "group": "extended",
+        "stage": "livedoc",
+        "axis": "subscriptions closed from one principal bucket",
+        "assumption": "subscription release deletes directly from an insertion-ordered map",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.866,
+        "tail_exponent": 0.82,
+        "local_exponents": [
+          0.953,
+          0.884,
+          0.756
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.0002656599972397089,
+          0.0005141290021128953,
+          0.0009490779921179637,
+          0.0016022990021156147
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "livedoc-many-principals-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "livedoc",
+        "axis": "same subscriptions split across one principal each",
+        "assumption": "the same-size one-entry-bucket control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "livedoc-many-principals-control",
+        "group": "extended",
+        "stage": "livedoc",
+        "axis": "same subscriptions split across one principal each",
+        "assumption": "the same-size one-entry-bucket control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.222,
+        "tail_exponent": 1.24,
+        "local_exponents": [
+          1.255,
+          1.013,
+          1.468
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.00033668499963823706,
+          0.0008037540101213381,
+          0.0016216459916904569,
+          0.004486602992983535
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "port-session-propagation-chain": {
+      "contract": {
+        "group": "extended",
+        "stage": "port-analysis",
+        "axis": "functions in a deep session-requirement call chain",
+        "assumption": "reverse worklist propagation visits each call-graph edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "port-session-propagation-chain",
+        "group": "extended",
+        "stage": "port-analysis",
+        "axis": "functions in a deep session-requirement call chain",
+        "assumption": "reverse worklist propagation visits each call-graph edge once",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.114,
+        "tail_exponent": 1.22,
+        "local_exponents": [
+          0.887,
+          1.16,
+          1.28
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          0.00797952400171198,
+          0.014760339006897993,
+          0.032979586001602,
+          0.08011431100021582
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "port-session-propagation-star-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "port-analysis",
+        "axis": "same functions each calling one query leaf",
+        "assumption": "the same-size one-layer propagation control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "port-session-propagation-star-control",
+        "group": "extended",
+        "stage": "port-analysis",
+        "axis": "same functions each calling one query leaf",
+        "assumption": "the same-size one-layer propagation control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.057,
+        "tail_exponent": 1.017,
+        "local_exponents": [
+          1.185,
+          0.911,
+          1.123
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          100,
+          200,
+          400,
+          800
+        ],
+        "seconds": [
+          0.008041018998483196,
+          0.018276073009474203,
+          0.03437054700043518,
+          0.07483755800058134
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     }
   }
 }
