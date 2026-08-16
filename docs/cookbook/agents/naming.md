@@ -46,6 +46,51 @@ they describe the registry's present contents. A stream's started-versus-attache
 tally is `stats()`: it only ever grows, and it describes history rather than
 state.
 
+## Provider protocols and format bridges
+
+An integration has one operation-shaped protocol. A format or vendor adapter
+layers over that protocol; it does not invent another way to obtain the same
+answer.
+
+| Concern | Canonical provider operation | Layers over it |
+| --- | --- | --- |
+| feature flags | `TypedFlagProvider.resolve(Flag[T], context) -> T` | `FlagView.enabled()`, `FeatureFlags.enabled()`, and the original `FlagProvider.enabled()` compatibility adapter layer over the typed resolver; `OpenFeatureProvider` selects the SDK's typed method |
+| subsystem metrics | `CounterSource.counters() -> Counters` | `metrics.collect(app, counter_sources)` owns discovery, deduplication, shape checks and failure isolation; Prometheus, OpenMetrics and StatsD only encode its rows |
+| bot challenges | `BotChallenge.verify(token, request)` | `challenge_dependency()` obtains a token and delegates; Turnstile is one provider |
+| inbound webhooks | `WebhookVerifier.verify(body=, headers=, now=)` | provider profiles implement signature rules; `WebhookSource` calls only the public protocol |
+| error reporting | `ErrorReporter.report(ErrorEvent)` | vendor reporters forward; the Wreath application records OTLP/log events automatically and therefore refuses a registered `OtlpErrorReporter` |
+
+Do not add a boolean-only flag provider, a bridge-local counter walk, a
+provider-specific challenge dependency, or a private verifier fast path. Those
+are second provider contracts even when they happen to return the same value.
+
+## Runtime adapters and import targets
+
+Platform adapters translate their request and response envelopes, then hand an
+ordinary ASGI scope to the shared warm driver in `wreath._asgi_driver`. The
+driver alone owns the loop, lifespan, request receive state, and response state
+machine. AWS lives at `wreath.aws_lambda`; `wreath.serverless` contains the
+non-AWS adapters and does not re-export it.
+
+Every CLI spelling of `module:attribute` goes through `wreath._target`. A
+subcommand may add a type check or invoke an explicit factory after loading,
+but it must not repeat the partition/import/getattr sequence.
+
+## Request caches and PostgreSQL names
+
+Two internal primitives prevent small validation and caching rules from
+drifting between public subsystems:
+
+* A value resolved once per request goes through `wreath._reqcache.resolve_once`
+  or `resolve_once_async`. When one logical slot has several providers or keys,
+  use `resolve_keyed_once` or `resolve_keyed_once_async`; do not rebuild a
+  provider-to-value dictionary on `request.state`.
+* PostgreSQL names go through `wreath._pgname`. Use
+  `validate_unquoted_identifier` for names emitted without quotes: lower-case,
+  bounded to PostgreSQL's 63-byte limit, with no silent case folding or
+  truncation. Use `validate_identifier` only when the SQL emitter quotes the
+  result. A subsystem-specific regex is a second identifier vocabulary.
+
 ## Claiming tables in the wreath schema
 
 Four names, one mechanism, and the layering is the whole point. `wreath` owns a
@@ -105,7 +150,8 @@ than invent a twenty-first convention.
 | `UploadStore` | `create`, `read`, `advance`, `delete`, `expired` | `objects` |
 | `IdempotencyStore` | `reserve`, `store`, `release` | `middleware.idempotency` |
 | `RateLimitStore` | `configure`, `acquire` | `middleware.ratelimit` |
-| `FlagProvider` | `enabled` | `flags` |
+| `TypedFlagProvider` | `resolve` | `flags` |
+| `FlagProvider` (compatibility) | `enabled` | `flags` |
 | `Preferences` | `allows` | `notifications` |
 | `Channel` | `name`, `deliver` | `notifications` |
 | `MessageSender` | `send` | `notifications` |
