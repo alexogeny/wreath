@@ -273,11 +273,37 @@ inventing it.
   so `--settings module:Class[=PREFIX]` names it. Without it the contract is
   reported as unchecked rather than as satisfied.
 
-## What this stage is not
+## Render a deployment bundle without applying it
 
-This is stage one and it is read-only by design. There is no provider, no state
-file, no diff, and no `apply`. It emits a plan for a person to read, because an
-inference that is subtly wrong should be caught by a human before anything
+Once the plan has no gaps, Wreath can turn it into an inspectable runtime bundle
+for an OCI image that has already been built:
+
+```console
+wreath infra bundle camera_trap.app:app \
+  --image registry.example/camera-trap@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --settings camera_trap.config:Settings=CAMERA_TRAP \
+  --environ \
+  --output deploy/
+```
+
+The image reference must carry a SHA-256 digest; a mutable tag is refused before
+files are written. The bundle contains `compose.yaml`, `deployment.json`, the
+complete `infrastructure-plan.json`, and `SHA256SUMS`. Required environment keys
+are names, never values. Local object-store roots become named persistent
+volumes and must be absolute container paths; a relative root is refused because
+Compose cannot prove where the application will resolve it. The container root
+is read-only, and exact outbound origins remain in the deployment contract for
+a later platform-specific egress policy.
+
+This does not build or pull the image, provision PostgreSQL, translate hostnames
+into firewall rules, or run Compose. Those decisions remain visible instead of
+being guessed from incomplete information.
+
+## What this surface is not
+
+Inference and rendering are offline by design. There is no provider, no state
+file, no live diff, and no `apply`. They emit artifacts for a person to read,
+because an inference that is subtly wrong should be caught before anything
 touches an account rather than after.
 
 It is also not a replacement for Terraform's coverage. It covers what wreath

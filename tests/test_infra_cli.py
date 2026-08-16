@@ -164,3 +164,42 @@ def test_a_factory_target_is_supported(
 ) -> None:
     assert run("infer", "trek_infra_app:build", "--factory") == 0
     assert "db.internal:5432/trek" in capsys.readouterr().out
+
+
+def test_bundle_writes_a_checksummed_runtime_contract(
+    target: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "deploy"
+    image = "registry.example/trek@sha256:" + "a" * 64
+    assert run(
+        "bundle",
+        target,
+        "--image",
+        image,
+        "--output",
+        str(output),
+    ) == 0
+    assert (output / "compose.yaml").is_file()
+    assert image in (output / "compose.yaml").read_text()
+    assert (output / "SHA256SUMS").is_file()
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_bundle_reports_plan_gaps_before_writing(
+    target: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "deploy"
+    image = "registry.example/trek@sha256:" + "a" * 64
+    code = run(
+        "bundle",
+        target,
+        "--image",
+        image,
+        "--output",
+        str(output),
+        "--settings",
+        "trek_infra_app:Settings=TREK",
+    )
+    assert code == 1
+    assert "[missing] TREK_DSN" in capsys.readouterr().out
+    assert not output.exists()
