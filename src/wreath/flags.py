@@ -24,16 +24,21 @@ caller shares one bucket** and a percentage flag is all-or-nothing for them.
 Bucket on an authenticated principal when the split has to be a real split.
 
 There is no source layering: a `FeatureFlags` answers from exactly one mapping,
-and there is no fallback chain behind it. The provider is a `Protocol` --
-env/mapping now, external providers (Unleash, LaunchDarkly, ...) are future
-adapters implementing the same surface.
+and there is no fallback chain behind it. `TypedFlagProvider.resolve` is the
+canonical provider operation: `FeatureFlags` serves env/mapping values and
+`OpenFeatureProvider` adapts an application-owned OpenFeature client. The
+original boolean `FlagProvider.enabled` protocol remains accepted through one
+adapter, so existing providers keep working without creating a second internal
+resolution path.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Protocol, cast, runtime_checkable
 
 from .config import read_osenv
 
@@ -42,23 +47,189 @@ FLAG_PREFIX = "WREATH_FLAG_"
 _TRUE = frozenset({"on", "true", "1", "yes", "enabled"})
 _FALSE = frozenset({"off", "false", "0", "no", "disabled", ""})
 
-__all__ = ["FLAG_PREFIX", "FeatureFlags", "FlagProvider", "FlagView"]
+__all__ = [
+    "FLAG_PREFIX",
+    "FeatureFlags",
+    "Flag",
+    "FlagProvider",
+    "FlagSet",
+    "FlagView",
+    "OpenFeatureProvider",
+    "TypedFlagProvider",
+]
+
+type FlagScalar = bool | str | int | float
+
+
+@dataclass(frozen=True, slots=True)
+class Flag[T: FlagScalar]:
+    """One typed flag declaration with its fail-closed/default value."""
+
+    name: str
+    default: T
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("flag name cannot be empty")
+        if type(self.default) not in (bool, str, int, float):
+            raise TypeError("flag default must be bool, str, int, or float")
 
 
 @runtime_checkable
 class FlagProvider(Protocol):
-    """Anything that can answer whether a flag is on for a context.
+    """The original boolean provider contract, retained for compatibility.
 
-    `runtime_checkable`, so `isinstance(obj, FlagProvider)` holds for any object
-    carrying an `enabled` attribute -- a structural check on the name alone, not
-    on the signature. An implementation answers `False` for a flag it does not
-    know rather than raising; that fail-closed default is what lets a caller treat
-    "the provider had no answer" and "the flag is off" as the same thing.
+    Framework integrations adapt this operation once to
+    `TypedFlagProvider.resolve`; new providers should implement that typed
+    contract. Keeping this protocol preserves existing structural providers and
+    `isinstance(provider, FlagProvider)` checks.
     """
 
     def enabled(self, name: str, context: Mapping[str, Any] | None = None) -> bool:
-        """Whether `name` is on for `context`, which also supplies the bucket."""
+        """Whether `name` is on for `context`."""
         ...
+
+
+@runtime_checkable
+class TypedFlagProvider(Protocol):
+    """The canonical typed provider operation used inside Wreath."""
+
+    def resolve[T: FlagScalar](
+        self, flag: Flag[T], context: Mapping[str, Any] | None = None
+    ) -> T: ...
+
+
+class _LegacyFlagAdapter:
+    """Layer the original boolean protocol over the canonical typed operation."""
+
+    __slots__ = ("_provider",)
+
+    def __init__(self, provider: FlagProvider) -> None:
+        self._provider = provider
+
+    def resolve[T: FlagScalar](
+        self, flag: Flag[T], context: Mapping[str, Any] | None = None
+    ) -> T:
+        if type(flag.default) is not bool:
+            raise TypeError(
+                f"flag {flag.name!r} has a {type(flag.default).__name__} default; "
+                "a boolean FlagProvider can resolve only Flag(name, False). "
+                "Implement TypedFlagProvider.resolve(flag, context) for typed flags"
+            )
+        return cast(T, self._provider.enabled(flag.name, context))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+
+def _flag_resolver(provider: Any) -> TypedFlagProvider:
+    """Normalize either public provider shape to the one internal operation."""
+    if callable(getattr(provider, "resolve", None)):
+        return cast(TypedFlagProvider, provider)
+    if callable(getattr(provider, "enabled", None)):
+        return _LegacyFlagAdapter(cast(FlagProvider, provider))
+    raise TypeError(
+        "feature-flag provider must expose resolve(flag, context), or the "
+        "legacy enabled(name, context) boolean operation"
+    )
+
+
+class OpenFeatureProvider:
+    """Adapt an OpenFeature client to Wreath's typed declaration surface.
+
+    The adapter is structural: pass a client from the OpenFeature SDK you have
+    configured, and Wreath adds no mandatory dependency or process-global
+    provider. `from_default_client` is the opt-in convenience that imports the
+    optional SDK and reads its configured default client.
+    """
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: Any) -> None:
+        methods = (
+            "get_boolean_value", "get_string_value", "get_integer_value",
+            "get_float_value",
+        )
+        missing = tuple(name for name in methods if not callable(getattr(client, name, None)))
+        if missing:
+            raise TypeError(
+                "OpenFeature client is missing " + ", ".join(missing)
+            )
+        self._client = client
+
+    @classmethod
+    def from_default_client(cls, name: str = "wreath") -> OpenFeatureProvider:
+        try:
+            api = importlib.import_module("openfeature.api")
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenFeatureProvider.from_default_client requires the optional "
+                "'openfeature-sdk' package; install openfeature-sdk"
+            ) from exc
+        return cls(api.get_client(name))
+
+    def resolve[T: FlagScalar](
+        self, flag: Flag[T], context: Mapping[str, Any] | None = None
+    ) -> T:
+        method = {
+            bool: self._client.get_boolean_value,
+            str: self._client.get_string_value,
+            int: self._client.get_integer_value,
+            float: self._client.get_float_value,
+        }[type(flag.default)]
+        return method(flag.name, flag.default, context)
+
+    def enabled(self, name: str, context: Mapping[str, Any] | None = None) -> bool:
+        """Boolean convenience over the canonical typed provider seam."""
+        return self.resolve(Flag(name, False), context)
+
+
+class FlagSet:
+    """A startup-validated vocabulary bound to one typed provider."""
+
+    __slots__ = ("_by_name", "_provider")
+
+    def __init__(
+        self,
+        provider: TypedFlagProvider | FlagProvider,
+        flags: tuple[Flag[Any], ...],
+    ) -> None:
+        by_name: dict[str, Flag[Any]] = {}
+        for flag in flags:
+            key = flag.name.lower()
+            if key in by_name:
+                raise ValueError(f"duplicate flag declaration: {flag.name}")
+            by_name[key] = flag
+        resolved_provider = _flag_resolver(provider)
+        if isinstance(resolved_provider, _LegacyFlagAdapter):
+            for flag in flags:
+                if type(flag.default) is not bool:
+                    raise TypeError(
+                        f"flag {flag.name!r} has a "
+                        f"{type(flag.default).__name__} default; a boolean "
+                        "FlagProvider supports only bool declarations. Implement "
+                        "TypedFlagProvider.resolve(flag, context) for typed flags"
+                    )
+        self._provider = resolved_provider
+        self._by_name = by_name
+
+    def value[T: FlagScalar](
+        self, flag: Flag[T], context: Mapping[str, Any] | None = None
+    ) -> T:
+        declared = self._by_name.get(flag.name.lower())
+        if declared is None:
+            raise KeyError(
+                f"flag {flag.name!r} is not declared; add that Flag to FlagSet"
+            )
+        if type(declared.default) is not type(flag.default):
+            raise TypeError(
+                f"flag {flag.name!r} was declared as {type(declared.default).__name__}, "
+                f"not {type(flag.default).__name__}"
+            )
+        return cast(T, self._provider.resolve(declared, context))
+
+    def names(self) -> frozenset[str]:
+        return frozenset(self._by_name)
 
 
 def _subject(context: Mapping[str, Any] | None) -> str:
@@ -102,7 +273,7 @@ def evaluate_rule(value: str, name: str, context: Mapping[str, Any] | None = Non
 
 
 class FeatureFlags:
-    """A mapping-backed `FlagProvider` (env-sourced or explicit).
+    """A mapping-backed typed and boolean provider (env-sourced or explicit).
 
     Flag names fold to lower case on the way in and on every lookup, so
     `WREATH_FLAG_NEW_UI` and `enabled("new_ui")` name the same flag. Values are
@@ -137,10 +308,34 @@ class FeatureFlags:
         value is a percentage, so an on/off flag costs a dict lookup and a set
         membership test.
         """
-        raw = self._values.get(name.lower())
+        if type(self) is not FeatureFlags:
+            return self.resolve(Flag(name, False), context)
+        if not name:
+            raise ValueError("flag name cannot be empty")
+        key = name.lower()
+        raw = self._values.get(key)
+        return False if raw is None else evaluate_rule(raw, key, context)
+
+    def resolve[T: FlagScalar](
+        self, flag: Flag[T], context: Mapping[str, Any] | None = None
+    ) -> T:
+        """Resolve one typed declaration; malformed or absent values use its default."""
+        raw = self._values.get(flag.name.lower())
         if raw is None:
-            return False
-        return evaluate_rule(raw, name.lower(), context)
+            return flag.default
+        default = flag.default
+        if type(default) is bool:
+            return cast(T, evaluate_rule(raw, flag.name.lower(), context))
+        try:
+            if type(default) is str:
+                value: FlagScalar = raw
+            elif type(default) is int:
+                value = int(raw)
+            else:
+                value = float(raw)
+        except ValueError:
+            return default
+        return cast(T, value)
 
     def all(self, context: Mapping[str, Any] | None = None) -> dict[str, bool]:
         """Resolve every configured flag for `context`, keyed by lower-cased name.
@@ -149,13 +344,21 @@ class FeatureFlags:
         but nobody configured is absent here and off at `enabled`, so this is a
         view of the configuration rather than of the application's flag vocabulary.
         """
-        return {name: evaluate_rule(raw, name, context) for name, raw in self._values.items()}
+        if type(self) is not FeatureFlags:
+            return {
+                name: self.resolve(Flag(name, False), context)
+                for name in self._values
+            }
+        return {
+            name: evaluate_rule(raw, name, context)
+            for name, raw in self._values.items()
+        }
 
     def names(self) -> frozenset[str]:
         """Every flag name this provider holds, lower-cased.
 
         The enumeration half of the provider surface, and deliberately *not* on
-        the `FlagProvider` protocol: an external provider (Unleash,
+        the `TypedFlagProvider` protocol: an external provider (Unleash,
         LaunchDarkly) may not be able to list its vocabulary without a network
         call, and a protocol method that some implementations cannot answer is
         worse than an optional one they can be asked for.
@@ -193,18 +396,22 @@ class FlagView:
 
     __slots__ = ("_context", "_provider")
 
-    def __init__(self, provider: FlagProvider, context: Mapping[str, Any] | None = None) -> None:
-        self._provider = provider
+    def __init__(
+        self,
+        provider: TypedFlagProvider | FlagProvider,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._provider = _flag_resolver(provider)
         self._context = context
 
     def enabled(self, name: str) -> bool:
         """Whether `name` is on for the bound context."""
-        return self._provider.enabled(name, self._context)
+        return self._provider.resolve(Flag(name, False), self._context)
 
     __contains__ = enabled
 
 
-def flags_dependency(provider: FlagProvider):
+def flags_dependency(provider: TypedFlagProvider | FlagProvider):
     """Build a `Depends`-able yielding a request-scoped `FlagView`.
 
     The context is taken from `request.identity.id` when present, so percentage

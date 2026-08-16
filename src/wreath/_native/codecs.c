@@ -6,6 +6,66 @@
 #include <limits.h>
 #include <math.h>
 
+static Py_ssize_t
+zip_find_reverse(const uint8_t *data, Py_ssize_t start, Py_ssize_t end,
+                 const char signature[4])
+{
+    if (end - start < 4) return -1;
+    for (Py_ssize_t index = end - 4;; index--) {
+        if (memcmp(data + index, signature, 4) == 0) return index;
+        if (index == start) break;
+    }
+    return -1;
+}
+
+PyObject *
+wreath_zip_entry_count(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *raw;
+    Py_ssize_t limit;
+    if (!PyArg_ParseTuple(
+            args, "O!n:zip_entry_count", &PyBytes_Type, &raw, &limit)) return NULL;
+    const uint8_t *data = (const uint8_t *)PyBytes_AS_STRING(raw);
+    Py_ssize_t length = PyBytes_GET_SIZE(raw);
+    Py_ssize_t search_start = length > 65557 ? length - 65557 : 0;
+    Py_ssize_t eocd = zip_find_reverse(
+        data, search_start, length, "PK\x05\x06");
+    if (eocd < 0 || length - eocd < 22) Py_RETURN_NONE;
+    uint16_t comment_bytes = wreath_load_u16_le(data + eocd + 20);
+    if ((uint64_t)(length - eocd - 22) != (uint64_t)comment_bytes) Py_RETURN_NONE;
+
+    uint64_t directory_size = wreath_load_u32_le(data + eocd + 12);
+    Py_ssize_t directory_end = eocd;
+    Py_ssize_t locator = eocd - 20;
+    if (locator >= 0 && memcmp(data + locator, "PK\x06\x07", 4) == 0) {
+        Py_ssize_t zip64 = zip_find_reverse(data, 0, locator, "PK\x06\x06");
+        if (zip64 < 0 || locator - zip64 < 56) Py_RETURN_NONE;
+        uint64_t record_size = wreath_load_u64_le(data + zip64 + 4);
+        if (record_size != (uint64_t)(locator - zip64 - 12)) Py_RETURN_NONE;
+        directory_size = wreath_load_u64_le(data + zip64 + 40);
+        directory_end = zip64;
+    }
+    else if (directory_size == UINT32_MAX) Py_RETURN_NONE;
+
+    if (directory_size > (uint64_t)directory_end) Py_RETURN_NONE;
+    Py_ssize_t cursor = directory_end - (Py_ssize_t)directory_size;
+    Py_ssize_t count = 0;
+    while (cursor < directory_end) {
+        if (directory_end - cursor < 46 ||
+            memcmp(data + cursor, "PK\x01\x02", 4) != 0) Py_RETURN_NONE;
+        uint64_t record_size = 46U +
+            (uint64_t)wreath_load_u16_le(data + cursor + 28) +
+            (uint64_t)wreath_load_u16_le(data + cursor + 30) +
+            (uint64_t)wreath_load_u16_le(data + cursor + 32);
+        if (record_size > (uint64_t)(directory_end - cursor)) Py_RETURN_NONE;
+        cursor += (Py_ssize_t)record_size;
+        count++;
+        if (count > limit) return PyLong_FromSsize_t(count);
+        if ((count & 4095) == 0 && PyErr_CheckSignals() < 0) return NULL;
+    }
+    return PyLong_FromSsize_t(count);
+}
+
 static int
 expected_type(const char *expected, PyObject *value)
 {

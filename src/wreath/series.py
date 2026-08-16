@@ -748,10 +748,12 @@ class _Builder:
         serving a stale chart.
         """
         found: list[type] = [self._d.model]
+        seen = {self._d.model}
         for expression in (*self._d.predicates, self._d.group):
             for related in _related_columns(expression):
                 owner = related.column.owner
-                if owner is not None and owner not in found:
+                if owner is not None and owner not in seen:
+                    seen.add(owner)
                     found.append(owner)
         return tuple(found)
 
@@ -829,12 +831,13 @@ class _Builder:
         with different units on one pair of axes is a dual-axis chart, whose
         alignment is arbitrary and invents a correlation that is not in the data.
         """
+        existing = {name for name, _item in self._d.measures}
         for name, item in measures.items():
             if not isinstance(item, Measure):
                 raise SeriesError(
                     f"measure {name}= takes count(), sum_(), avg(), min_() or max_(), got {item!r}"
                 )
-            if name in dict(self._d.measures):
+            if name in existing:
                 raise SeriesError(f"measure {name!r} is declared twice")
         if not measures:
             raise SeriesError("measure() needs at least one named measure")
@@ -915,14 +918,16 @@ class _Builder:
         # parameter they left out, not which dict lookup failed.
         binders: list[Any] = []
         expected: list[str] = []
+        expected_set: set[str] = set()
         for predicate in self._d.predicates:
             found: list[Any] = []
             binders.append(compile_rebind(predicate, Placeholder, found))
             expected.extend(item.name for item in found)
+            expected_set.update(item.name for item in found)
         missing = [name for name in expected if name not in values]
         if missing:
             raise TypeError(f"run() is missing parameter {missing[0]!r}")
-        unexpected = [name for name in values if name not in expected]
+        unexpected = [name for name in values if name not in expected_set]
         if unexpected:
             raise TypeError(f"run() got an unexpected parameter {unexpected[0]!r}")
         return tuple(
@@ -1262,12 +1267,14 @@ class Series(_Builder):
         found = list(super().sources)
         if self._events is None:
             return tuple(found)
+        seen = set(found)
         for expression in (self._events.at, self._events.label, *self._events.predicates):
             for related in _related_columns(expression):
                 owner = related.column.owner
-                if owner is not None and owner not in found:
+                if owner is not None and owner not in seen:
+                    seen.add(owner)
                     found.append(owner)
-        if self._events.model not in found:
+        if self._events.model not in seen:
             found.append(self._events.model)
         return tuple(found)
 

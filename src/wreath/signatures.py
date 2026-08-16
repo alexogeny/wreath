@@ -1223,7 +1223,13 @@ def robots_txt(
     signature check and a policy. This is for the crawlers that do behave, and
     its value is that it cannot drift from what the application actually serves.
     """
-    lines = ["User-agent: *"]
+    http_policy = getattr(app, "_http_policy", None)
+    ai_scraping = getattr(http_policy, "ai_scraping", None)
+    blocked_products = getattr(ai_scraping, "blocked_products", ())
+    lines = [f"User-agent: {product}" for product in blocked_products]
+    if blocked_products:
+        lines += ["Disallow: /", ""]
+    lines += ["User-agent: *"]
     lines += [f"Disallow: {path}" for path in robots_disallow(app)]
     lines += [f"Allow: {path}" for path in crawler_policy(app).allow]
     if crawl_delay is not None:
@@ -1235,12 +1241,7 @@ def robots_txt(
 
 def robots_disallow(app: Any) -> tuple[str, ...]:
     """The protected paths, deduplicated to their shortest covering prefixes."""
-    paths = sorted(crawler_policy(app).disallow)
-    out: list[str] = []
-    for path in paths:
-        if not any(path.startswith(kept) for kept in out):
-            out.append(path)
-    return tuple(out)
+    return _core.minimal_prefixes(crawler_policy(app).disallow)
 
 
 def llms_txt(app: Any, *, title: str, summary: str | None = None) -> str:

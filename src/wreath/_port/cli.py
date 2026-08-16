@@ -35,16 +35,19 @@ not be read are work remaining (`1`), a tree with nothing to emit at all is
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 from collections.abc import Set as AbstractSet
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
+from .._target import load_target
 from .analyzer import analyze_all, detect_roots
 from .emit import port_tree
 from .ir import TRANSLATED, Finding, Report
+from .verify import load_cases, verify_apps
 
 #: Ran clean: nothing unsupported, nothing skipped. Includes an already-ported
 #: tree, which is a successful run that happens to have nothing left to do.
@@ -193,6 +196,49 @@ def _cedar_options(path: str | None) -> _CedarOptions | None:
 
 def execute(namespace) -> int:
     roots = [Path(s) for s in namespace.source]
+    verify_targets = getattr(namespace, "verify", None)
+    if verify_targets:
+        if roots:
+            raise ValueError(
+                "--verify takes application targets instead of source roots; "
+                "remove the positional source path"
+            )
+        if not getattr(namespace, "cases", None):
+            raise ValueError("--verify requires --cases PATH")
+        incompatible = [
+            option
+            for option, enabled in (
+                ("--inventory", getattr(namespace, "inventory", False)),
+                ("--output", getattr(namespace, "output", None)),
+                ("--in-place", getattr(namespace, "in_place", False)),
+                ("--by-rule", getattr(namespace, "by_rule", False)),
+                ("--rule", getattr(namespace, "rule", None)),
+            )
+            if enabled
+        ]
+        if incompatible:
+            raise ValueError(
+                f"--verify cannot be combined with {', '.join(incompatible)}"
+            )
+        source_app, candidate_app = (_application_target(spec) for spec in verify_targets)
+        cases = load_cases(namespace.cases)
+        report = asyncio.run(
+            verify_apps(
+                source_app,
+                candidate_app,
+                cases,
+                ignore_headers=tuple(namespace.ignore_header),
+            )
+        )
+        if getattr(namespace, "as_json", False):
+            print(json.dumps(report.as_dict(), indent=2))
+        else:
+            print(report.render_text(), end="")
+        return EXIT_OK if report.equivalent else EXIT_WORK_REMAINS
+    if getattr(namespace, "cases", None):
+        raise ValueError("--cases requires --verify SOURCE_APP CANDIDATE_APP")
+    if not roots:
+        raise ValueError("wreath port needs at least one source root, or --verify")
     missing = [str(r) for r in roots if not r.exists()]
     if missing:
         raise ValueError(f"source path(s) not found: {', '.join(missing)}")
@@ -331,6 +377,14 @@ def execute(namespace) -> int:
     if detection is not None and (detection.foreign or detection.monkeypatched):
         return EXIT_WORK_REMAINS
     return EXIT_OK
+
+
+def _application_target(spec: str) -> Any:
+    """Resolve the explicit runtime half of ``wreath port --verify``."""
+    app = load_target(spec, label="port verification application")
+    if not callable(app):
+        raise ValueError(f"port verification target {spec!r} is not an ASGI callable")
+    return app
 
 
 def _warn_about_stack(report) -> None:

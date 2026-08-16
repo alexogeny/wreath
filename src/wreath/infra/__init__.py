@@ -45,15 +45,18 @@ rate limiter all live in `main`, rather than printing one database and leaving
 you to conclude it. The absence of a broker is the finding nobody believes, so
 it is written down.
 
-This is stage one, and it is deliberately read-only: it emits a plan to read,
-not a stack to apply. There is no provider, no state file, and no `apply`. A
-human checks the plan before anything touches an account.
+Both shipped operations are deliberately offline. `infer` emits the plan;
+`bundle` combines a gap-free plan with an immutable OCI image digest and
+writes a checksummed Compose deployment contract. There is no provider, state
+file, image build, or `apply`. A human checks the artifacts before anything
+touches an account.
 
 Reference: `docs/reference/infra.md`. Guide: `docs/guides/infra.md`.
 """
 
 from __future__ import annotations
 
+from .deploy import DeploymentArtifact, DeploymentBundle, deployment_bundle
 from .inference import infer
 from .model import (
     ConnectionBudget,
@@ -78,6 +81,8 @@ from .settings import settings_keys
 __all__ = [
     "ConnectionBudget",
     "DatabaseRequirement",
+    "DeploymentArtifact",
+    "DeploymentBundle",
     "EgressRequirement",
     "Gap",
     "GapKind",
@@ -91,6 +96,7 @@ __all__ = [
     "SharedSubsystem",
     "WorkloadPool",
     "as_dict",
+    "deployment_bundle",
     "infer",
     "render_json",
     "render_text",

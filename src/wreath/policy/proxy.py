@@ -121,7 +121,7 @@ class ProxyPolicy:
                 # forwarding header carries the original one. Written through
                 # the request so a native context never materializes its ASGI
                 # scope just to carry the override.
-                request._set_client((client, None))
+                request._set_client((client, None), source="forwarded")
 
         if self._trust_proto:
             proto = headers.get(b"x-forwarded-proto")

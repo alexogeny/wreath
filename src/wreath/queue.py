@@ -60,8 +60,9 @@ class Awaiting:
     compositions callers want.
 
     Carries no instance layout of its own -- `__slots__` is empty here, and
-    **every concrete class that mixes this in must declare `_loop` and
-    `_waiters` in its own `__slots__`**. A mixin that declared them would give
+    **every concrete class that mixes this in must declare `_loop`, `_waiters`
+    and `_active_waiters` in its own `__slots__`**. A mixin that declared them
+    would give
     itself a `tp_basicsize` larger than `object`'s, and combining two such bases
     is the "multiple bases have instance lay-out conflict" this class exists to
     avoid. `Queue`, `PriorityQueue` and `RoundRobin` all do so.
@@ -89,6 +90,7 @@ class Awaiting:
         # step for no reader's benefit.
         super().__init__(*args, **kwargs)
         self._waiters: deque[asyncio.Future[None]] = deque()
+        self._active_waiters: set[asyncio.Future[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def _blocked(self) -> Any:
@@ -106,6 +108,7 @@ class Awaiting:
         while True:
             waiter = loop.create_future()
             self._waiters.append(waiter)
+            self._active_waiters.add(waiter)
             self.waiting = True
             # Re-checked *after* parking, which is the whole point of doing it
             # here as well as in `get()`: an item offered between `get()`
@@ -164,22 +167,20 @@ class Awaiting:
         """Hand the wake-up to the first waiter that can still use it."""
         while self._waiters:
             waiter = self._waiters.popleft()
-            if not waiter.done():
+            if waiter in self._active_waiters:
+                self._active_waiters.discard(waiter)
                 waiter.set_result(None)
-                if not self._waiters:
+                if not self._active_waiters:
                     self.waiting = False
                 return
         self.waiting = False
 
     def _discard(self, waiter: asyncio.Future[None]) -> None:
-        try:
-            self._waiters.remove(waiter)
-        except ValueError:
-            # Already handed a result by `_resolve`. The wake-up it carried is
-            # not lost: whatever item prompted it is still in the ring, and the
-            # next getter finds it.
-            pass
-        if not self._waiters:
+        self._active_waiters.discard(waiter)
+        if not self._active_waiters:
+            # Cancelled futures remain as FIFO tombstones until the last live
+            # waiter leaves. One clear makes the whole cancellation batch O(n).
+            self._waiters.clear()
             self.waiting = False
 
 
@@ -202,7 +203,7 @@ class Queue(Awaiting, _Ring):
         lifo: take the newest item first rather than the oldest.
     """
 
-    __slots__ = ("_loop", "_waiters")
+    __slots__ = ("_active_waiters", "_loop", "_waiters")
 
 
 class PriorityQueue(Awaiting, _Heap):
@@ -226,7 +227,7 @@ class PriorityQueue(Awaiting, _Heap):
             honest price of asking a min-heap for its maximum.
     """
 
-    __slots__ = ("_loop", "_waiters")
+    __slots__ = ("_active_waiters", "_loop", "_waiters")
 
 
 class _Lane(Queue):
@@ -279,8 +280,9 @@ class RoundRobin(Awaiting):
 
     # `_loop` and `_waiters` belong to `Awaiting` and are declared here for the
     # reason its docstring gives: the mixin cannot carry a layout of its own.
-    __slots__ = ("_capacity", "_closed", "_cursor", "_drop_oldest", "_lanes",
-                 "_loop", "_max_lanes", "_order", "_waiters")
+    __slots__ = ("_active_waiters", "_capacity", "_closed", "_cursor",
+                 "_drop_oldest", "_lanes", "_loop", "_max_lanes", "_order",
+                 "_waiters")
 
     def __init__(
         self,
@@ -320,7 +322,7 @@ class RoundRobin(Awaiting):
         lane.scheduler = self
         # A lane created while a getter is parked has to be armed on the spot,
         # or the very first item offered to a brand-new lane wakes nobody.
-        lane.waiting = bool(self._waiters)
+        lane.waiting = bool(self._active_waiters)
         self._lanes[name] = lane
         self._order.append(name)
         return lane
@@ -347,7 +349,7 @@ class RoundRobin(Awaiting):
         Setting it arms every lane, because a getter waits on *any* lane and the
         rings only call `_wake` for a lane that is armed.
         """
-        return bool(self._waiters)
+        return bool(self._active_waiters)
 
     @waiting.setter
     def waiting(self, value: bool) -> None:

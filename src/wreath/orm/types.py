@@ -608,6 +608,36 @@ def Array(element: PgType, *, nullable_elements: bool = False) -> _ArrayType:
 MAX_VECTOR_DIM = 16000
 
 
+def _vector_dimension(kind: str, dim: int, maximum: int) -> int:
+    """Validate the dimension shared by pgvector's dense vector types."""
+    if dim.__class__ is not int:
+        raise DeclarationError(f"{kind}() requires an int dimension, got {dim!r}")
+    if not 1 <= dim <= maximum:
+        raise DeclarationError(
+            f"{kind}({dim}) is out of range; pgvector allows 1 to {maximum} dimensions"
+        )
+    return dim
+
+
+def _dense_vector(
+    kind: str,
+    type_name: str,
+    dim: int,
+    maximum: int,
+    *,
+    half: bool,
+    codec_kind: int,
+) -> ExtensionType:
+    dim = _vector_dimension(kind, dim, maximum)
+
+    def coerce(value: Any) -> list[float]:
+        return _core.float_sequence(value, dim, half)
+
+    return ExtensionType(
+        "vector", type_name, f"{type_name}({dim})", coerce, kind=codec_kind
+    )
+
+
 def Vector(dim: int) -> ExtensionType:
     """Declare a pgvector `vector(dim)` column.
 
@@ -631,19 +661,8 @@ def Vector(dim: int) -> ExtensionType:
     # bool is an int subclass, and `Vector(True)` is a mistake rather than a
     # one-dimensional column. That also makes an `isinstance(dim, bool)` clause
     # here unreachable -- it was one, and a mutant sweep reported it as dead.
-    if dim.__class__ is not int:
-        raise DeclarationError(f"Vector() requires an int dimension, got {dim!r}")
-    if not 1 <= dim <= MAX_VECTOR_DIM:
-        raise DeclarationError(
-            f"Vector({dim}) is out of range; pgvector allows 1 to {MAX_VECTOR_DIM} "
-            "dimensions"
-        )
-
-    def coerce(value: Any) -> list[float]:
-        return _core.float_sequence(value, dim, False)
-
-    return ExtensionType(
-        "vector", "vector", f"vector({dim})", coerce, kind=EXT_KIND_VECTOR
+    return _dense_vector(
+        "Vector", "vector", dim, MAX_VECTOR_DIM, half=False, codec_kind=EXT_KIND_VECTOR
     )
 
 
@@ -694,22 +713,16 @@ def Halfvec(dim: int) -> ExtensionType:
 
     Requires `CREATE EXTENSION vector` (the same extension provides both types).
     """
-    if dim.__class__ is not int:
-        raise DeclarationError(f"Halfvec() requires an int dimension, got {dim!r}")
-    if not 1 <= dim <= MAX_HALFVEC_DIM:
-        raise DeclarationError(
-            f"Halfvec({dim}) is out of range; pgvector allows 1 to {MAX_HALFVEC_DIM} "
-            "dimensions"
-        )
-
-    def coerce(value: Any) -> list[float]:
-        return _core.float_sequence(value, dim, True)
-
     # The extension is `vector`, not `halfvec`: one `CREATE EXTENSION vector`
     # provides both types. Naming the type here would make the not-installed error
     # tell the reader to install an extension that does not exist.
-    return ExtensionType(
-        "vector", "halfvec", f"halfvec({dim})", coerce, kind=EXT_KIND_HALFVEC
+    return _dense_vector(
+        "Halfvec",
+        "halfvec",
+        dim,
+        MAX_HALFVEC_DIM,
+        half=True,
+        codec_kind=EXT_KIND_HALFVEC,
     )
 
 

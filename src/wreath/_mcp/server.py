@@ -491,10 +491,9 @@ class MCP:
 
         The same shape `messaging.MessageBus.stats()` returns, and for the same
         reason: read one attribute at a time, an exporter has to know each name
-        and gains nothing when one is added. Wreath's Prometheus, OpenMetrics,
-        StatsD and OTLP bridges render the *projector's* per-route aggregates
-        and do not discover subsystem counters, so publishing these is a route
-        of your own -- which is also where you decide who may scrape it.
+        and gains nothing when one is added. `counters()` layers this mapping
+        onto the canonical metrics protocol; mounting on a `Wreath` application
+        registers it for Prometheus, OpenMetrics, StatsD and CloudWatch.
         """
         return {
             "tool_calls": self.tool_calls,
@@ -516,6 +515,12 @@ class MCP:
             "client_request_timeouts": self.client_request_timeouts,
             "roots_refusals": self.roots_refusals,
         }
+
+    def counters(self) -> Any:
+        """This MCP server's counters, for `wreath.metrics.collect`."""
+        from ..metrics import Counters
+
+        return Counters(subsystem="mcp", instance=self._name, values=self.stats())
 
     @property
     def tools(self) -> tuple[Tool, ...]:
@@ -579,6 +584,9 @@ class MCP:
                 tags=("mcp",),
                 summary=f"OAuth 2.0 protected-resource metadata for {self._name}",
             )(self._metadata)
+        register_counters = getattr(app, "_register_counter_source", None)
+        if callable(register_counters):
+            register_counters(self)
 
     def tool(
         self,

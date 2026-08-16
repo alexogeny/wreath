@@ -473,11 +473,13 @@ def _routing_memory_section(documents: list[dict[str, Any]]) -> str:
     """Compiled size, lazy growth and peak RSS per routing backend, per shape."""
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     shapes: list[str] = []
+    seen_shapes: set[str] = set()
     for document in documents:
         for mode, rows in document.get("raw", {}).items():
             for row in rows:
                 shape = str(row.get("shape", "app"))
-                if shape not in shapes:
+                if shape not in seen_shapes:
+                    seen_shapes.add(shape)
                     shapes.append(shape)
                 grouped.setdefault((shape, mode), []).append(row)
     if not grouped:

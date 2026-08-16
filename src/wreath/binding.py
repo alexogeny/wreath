@@ -657,6 +657,19 @@ def _response_input(annotation: Any, value: Any) -> Any:
     return value
 
 
+def _jsonable_hook(value: Any, convert: Callable[[Any], Any]) -> Any:
+    """Apply the opt-in JSON protocol, then resume the canonical conversion."""
+    hook = getattr(type(value), "__jsonable__", None)
+    if not callable(hook):
+        return value
+    rendered = hook(value)
+    if rendered is value:
+        raise TypeError(
+            f"object of type {type(value).__name__} returned itself from __jsonable__"
+        )
+    return convert(rendered)
+
+
 def _jsonable(annotation: Any, value: Any) -> Any:
     annotation, _field = _field_annotation(annotation)
     if dataclasses.is_dataclass(annotation) and isinstance(value, annotation):
@@ -672,6 +685,8 @@ def _jsonable(annotation: Any, value: Any) -> Any:
         return str(value)
     if isinstance(value, bytes):
         return _b64encode_str(value)
+    if isinstance(value, (bytearray, memoryview)):
+        return _b64encode_str(bytes(value))
     if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
         return value.isoformat()
     origin = typing.get_origin(annotation)
@@ -682,7 +697,7 @@ def _jsonable(annotation: Any, value: Any) -> Any:
     if isinstance(value, Mapping):
         item_type = args[1] if origin is dict and len(args) == 2 else Any
         return {key: _jsonable(item_type, item) for key, item in value.items()}
-    return value
+    return _jsonable_hook(value, _jsonable_any)
 
 
 #: Error path every response check reports under, built once rather than per
@@ -744,6 +759,8 @@ def _jsonable_any(value: Any) -> Any:
         return str(value)
     if isinstance(value, bytes):
         return _b64encode_str(value)
+    if isinstance(value, (bytearray, memoryview)):
+        return _b64encode_str(bytes(value))
     if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
         return value.isoformat()
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -753,7 +770,7 @@ def _jsonable_any(value: Any) -> Any:
             key: (item if type(item) in _JSON_SCALARS else _jsonable_any(item))
             for key, item in value.items()
         }
-    return value
+    return _jsonable_hook(value, _jsonable_any)
 
 
 def _compile_response_input(
@@ -869,6 +886,26 @@ def _projection_is_identity(annotation: Any, seen: frozenset[Any] = frozenset())
     return True
 
 
+def _response_plan_is_wire_preserving(plan: tuple[Any, ...]) -> bool:
+    """Whether successful validation leaves every JSON node unchanged.
+
+    Such a plan can run straight from the handler's Python result to the
+    native JSON writer.  The validation kernel may inspect the input graph but
+    never constructs a replacement graph for these opcodes; its only Python
+    outputs are the final bytes or final validation errors.  Float widening
+    and dataclass construction are deliberately excluded because both change
+    values before they reach the wire.
+    """
+    opcode = plan[0]
+    if opcode in (_OP_ANY, _OP_NULL, _OP_INT, _OP_BOOL, _OP_STR):
+        return True
+    if opcode in (_OP_LIST, _OP_DICT, _OP_FIELD):
+        return _response_plan_is_wire_preserving(plan[1])
+    if opcode == _OP_UNION:
+        return all(map(_response_plan_is_wire_preserving, plan[2]))
+    return False
+
+
 def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Callable[[Any], Any]:
     """Compile `_jsonable`'s annotation walk once, at route-compile time.
 
@@ -943,6 +980,8 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
             return str(value)
         if isinstance(value, bytes):
             return _b64encode_str(value)
+        if isinstance(value, (bytearray, memoryview)):
+            return _b64encode_str(bytes(value))
         if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
             return value.isoformat()
         # Same inlining as the dataclass arm: a scalar element answers here
@@ -954,7 +993,7 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
                 key: (entry if type(entry) in _JSON_SCALARS else _mapping(entry))
                 for key, entry in value.items()
             }
-        return value
+        return _jsonable_hook(value, _jsonable_any)
 
     return jsonable_value
 
@@ -1030,12 +1069,15 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
 
     to_json = _compile_jsonable(annotation)
     planned_json: Callable[[Any], tuple[bytes | None, list[dict[str, Any]]]] | None = None
-    if projection_is_identity and typing.get_origin(annotation) is dict:
-        try:
-            response_plan = _compile_plan(annotation, frozenset())
-        except _PlanUnsupported:
-            pass
-        else:
+    try:
+        response_plan = _compile_plan(annotation, frozenset())
+    except _PlanUnsupported:
+        pass
+    else:
+        if (
+            response_plan[0] in (_OP_LIST, _OP_DICT)
+            and _response_plan_is_wire_preserving(response_plan)
+        ):
             run_validation_json = _core.run_validation_json
 
             def planned_json(  # type: ignore[no-redef]
@@ -1059,11 +1101,18 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
                 pass
             else:
                 if errors:
-                    error = ValidationError(errors)
-                    raise ResponseValidationError(errors) from error
-                if body is None:
-                    raise RuntimeError("native response encoder returned no body")
-                return _EncodedJSON(body)
+                    # A sequence projection may make a tuple/set acceptable,
+                    # including below a dict.  Only a plan whose projection is
+                    # provably identity may turn the first refusal into the
+                    # public response error; otherwise the canonical path gets
+                    # its chance to project and validate the value.
+                    if projection_is_identity:
+                        error = ValidationError(errors)
+                        raise ResponseValidationError(errors) from error
+                else:
+                    if body is None:
+                        raise RuntimeError("native response encoder returned no body")
+                    return _EncodedJSON(body)
         try:
             validated = check(value)
         except ValidationError as error:

@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import json
 import sys
 from collections import Counter
@@ -209,16 +208,12 @@ def _handler_codes(app: Any) -> frozenset[CodeType]:
 
 
 def _load_app(target: str) -> Any:
-    module_name, separator, attribute = target.partition(":")
-    if not separator:
-        raise SystemExit(f"wreath-request-trace: --app must be 'module:attribute', got {target!r}")
-    module = importlib.import_module(module_name)
+    from wreath._target import load_target
+
     try:
-        return getattr(module, attribute)
-    except AttributeError:
-        raise SystemExit(
-            f"wreath-request-trace: {module_name} has no attribute {attribute!r}"
-        ) from None
+        return load_target(target, label="request trace application")
+    except ValueError as error:
+        raise SystemExit(f"wreath-request-trace: {error}") from error
 
 
 

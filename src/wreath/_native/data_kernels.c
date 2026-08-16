@@ -23,6 +23,129 @@ typedef struct {
     Py_ssize_t index;
 } NumericRank;
 
+PyObject *
+wreath_first_duplicate(PyObject *Py_UNUSED(self), PyObject *source)
+{
+    PyObject *items = PySequence_Fast(source, "duplicate candidates must be a sequence");
+    PyObject *seen = NULL;
+    PyObject *result = NULL;
+    if (items == NULL) return NULL;
+    seen = PySet_New(NULL);
+    if (seen == NULL) goto done;
+    PyObject **values = PySequence_Fast_ITEMS(items);
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(items);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        int contained = PySet_Contains(seen, values[index]);
+        if (contained < 0) goto done;
+        if (contained) {
+            result = Py_NewRef(values[index]);
+            goto done;
+        }
+        if (PySet_Add(seen, values[index]) < 0) goto done;
+    }
+    result = Py_NewRef(Py_None);
+
+done:
+    Py_XDECREF(seen);
+    Py_DECREF(items);
+    return result;
+}
+
+static int
+data_unicode_before(PyObject *left, PyObject *right)
+{
+    return PyObject_RichCompareBool(left, right, Py_LT);
+}
+
+static int
+data_unicode_sort(PyObject **items, PyObject **scratch, Py_ssize_t count)
+{
+    PyObject **source = items, **target = scratch;
+    for (Py_ssize_t width = 1; width < count;) {
+        for (Py_ssize_t start = 0; start < count; start += width * 2) {
+            Py_ssize_t middle = start + width < count ? start + width : count;
+            Py_ssize_t end = middle + width < count ? middle + width : count;
+            Py_ssize_t left = start, right = middle, out = start;
+            while (left < middle && right < end) {
+                int before = data_unicode_before(source[right], source[left]);
+                if (before < 0) return -1;
+                target[out++] = before ? source[right++] : source[left++];
+            }
+            while (left < middle) target[out++] = source[left++];
+            while (right < end) target[out++] = source[right++];
+        }
+        PyObject **swap = source;
+        source = target;
+        target = swap;
+        if (width > count / 2) break;
+        width *= 2;
+    }
+    if (source != items) memcpy(items, source, (size_t)count * sizeof(*items));
+    return 0;
+}
+
+static int
+data_prefix_kept(PyObject *candidate, PyObject *kept)
+{
+    if (kept == NULL) return 1;
+    int covered = PyUnicode_Tailmatch(
+        candidate, kept, 0, PyUnicode_GET_LENGTH(candidate), -1);
+    return covered < 0 ? -1 : !covered;
+}
+
+PyObject *
+wreath_minimal_prefixes(PyObject *Py_UNUSED(self), PyObject *source)
+{
+    PyObject *sequence = PySequence_Tuple(source);
+    PyObject *result = NULL;
+    PyObject **items = NULL, **scratch = NULL;
+    if (sequence == NULL) return NULL;
+    Py_ssize_t count = PyTuple_GET_SIZE(sequence);
+    if ((size_t)count > SIZE_MAX / sizeof(*items)) {
+        PyErr_NoMemory();
+        goto done;
+    }
+    items = PyMem_Malloc((size_t)(count > 0 ? count : 1) * sizeof(*items));
+    scratch = PyMem_Malloc((size_t)(count > 0 ? count : 1) * sizeof(*scratch));
+    if (items == NULL || scratch == NULL) {
+        PyErr_NoMemory();
+        goto done;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PyTuple_GET_ITEM(sequence, index);
+        if (!PyUnicode_Check(item)) {
+            PyErr_Format(PyExc_TypeError,
+                         "prefix %zd must be str, got %.200s",
+                         index, Py_TYPE(item)->tp_name);
+            goto done;
+        }
+        items[index] = item;
+    }
+    if (data_unicode_sort(items, scratch, count) < 0) goto done;
+
+    Py_ssize_t selected = 0;
+    PyObject *kept = NULL;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        int retain = data_prefix_kept(items[index], kept);
+        if (retain < 0) goto done;
+        if (retain) {
+            kept = items[index];
+            scratch[selected++] = kept;
+        }
+    }
+    result = PyTuple_New(selected);
+    if (result == NULL) goto done;
+    for (Py_ssize_t index = 0; index < selected; index++) {
+        PyTuple_SET_ITEM(result, index, Py_NewRef(scratch[index]));
+    }
+
+done:
+    PyMem_Free(items);
+    PyMem_Free(scratch);
+    Py_DECREF(sequence);
+    return result;
+}
+
 static int
 numeric_rank_ascending(const void *left_pointer, const void *right_pointer)
 {

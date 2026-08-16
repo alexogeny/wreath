@@ -63,13 +63,12 @@ the log. Read-side consumers only.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, NamedTuple
 
 from ._native import _core
-from .store import Column, rows_affected, sql_identifier
+from .store import Column, _Statements, rows_affected, sql_identifier
 
 __all__ = [
     "ALIAS",
@@ -355,13 +354,6 @@ class Log:
 _ABSENT: Final = object()
 
 
-@dataclass(slots=True)
-class _Defined:
-    sql: str
-    workload: str
-    statement: Any = field(default=None)
-
-
 #: Rows returned by one `read`, when the caller names no limit. Large enough that
 #: a catching-up reader is not making a round trip per handful, small enough that
 #: one page fits comfortably in memory.
@@ -385,7 +377,7 @@ DEFAULT_LIMIT: Final = 512
 MAX_BATCH_ROWS: Final = 512
 
 
-class PostgresLog:
+class PostgresLog(_Statements):
     """An append-only log in a table every worker shares.
 
     Holds the disciplines named in this module's docstring, and generates the
@@ -422,18 +414,15 @@ class PostgresLog:
         "_rungs",
     )
 
+    _statement_owner = "log"
+
     def __init__(
         self, database: Any, declaration: Log, *, read_workload: str = "write"
     ) -> None:
         self._database = database
         self._declaration = declaration
-        self._defined: dict[str, _Defined] = {}
+        self._init_statements()
         self._dropped = 0
-        # Guards the lazy prepare, which two threads must not enter at once --
-        # `Database.statement` raises on a name it already holds, so the loser of
-        # the race gets `duplicate PostgreSQL statement` on an ordinary first
-        # call. `store.PostgresStore` guards the same seam the same way.
-        self._prepare_lock = threading.Lock()
 
         table = declaration.qualified_table
         stream = declaration.stream
@@ -544,47 +533,8 @@ class PostgresLog:
 
     # -- statements ----------------------------------------------------------
 
-    def define(self, name: str, sql: str, *, workload: str = "write") -> None:
-        """Register `sql` under `name` for lazy preparation."""
-        if name in self._defined:
-            raise ValueError(f"{name!r} is already defined on this log")
-        statement_name = self._statement_name(name)
-        # PostgreSQL *truncates* an over-long statement name rather than refusing
-        # it, so two logs agreeing in their first 63 bytes would quietly share one
-        # prepared statement. Checked here, at description time, rather than left
-        # to the first request that runs the wrong SQL.
-        if len(statement_name.encode("utf-8")) > 63:
-            raise ValueError(
-                f"prepared-statement name {statement_name!r} is "
-                f"{len(statement_name.encode('utf-8'))} bytes; PostgreSQL truncates "
-                "at 63, which would collide with another log. Shorten the table "
-                "name or the prefix."
-            )
-        self._defined[name] = _Defined(sql, workload)
-
     def _statement_name(self, name: str) -> str:
         return f"{self._declaration.prefix}_{name}_{self._declaration.table}"
-
-    def sql(self, name: str) -> str:
-        """The text registered under `name`. Useful when explaining a plan."""
-        return self._entry(name).sql
-
-    def statement(self, name: str) -> Any:
-        """The prepared statement for `name`, preparing it on first use."""
-        entry = self._entry(name)
-        if entry.statement is None:
-            with self._prepare_lock:
-                if entry.statement is None:
-                    entry.statement = self._database.statement(
-                        self._statement_name(name), entry.sql, workload=entry.workload
-                    )
-        return entry.statement
-
-    def _entry(self, name: str) -> _Defined:
-        entry = self._defined.get(name)
-        if entry is None:
-            raise ValueError(f"no SQL named {name!r} on this log")
-        return entry
 
     # -- appending -----------------------------------------------------------
 

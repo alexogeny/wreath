@@ -251,6 +251,7 @@ nav = Nav(
         Page("Application", "reference/app.md"),
         Page("Router", "reference/router.md"),
         Page("Request", "reference/request.md"),
+        Page("Client facts", "reference/client_facts.md"),
         Page("Responses", "reference/response.md"),
         Page("Binding and validation", "reference/binding.md"),
         Page("HTTP policy", "reference/policy.md"),
@@ -271,6 +272,7 @@ nav = Nav(
         Page("Outbound HTTP client", "reference/http_client.md"),
         Page("Service client", "reference/service_client.md"),
         Page("Webhooks", "reference/webhooks.md"),
+        Page("Bot challenges", "reference/bot.md"),
         Page("HTTP message signatures", "reference/signatures.md"),
         Page("Strict XML", "reference/xml.md"),
         Page("Templates", "reference/templates.md"),
@@ -331,6 +333,7 @@ nav = Nav(
         Page("Erasure and retention", "reference/privacy.md"),
         Page("Inspector", "reference/inspector.md"),
         Page("Telemetry", "reference/telemetry.md"),
+        Page("Error reporting", "reference/errors.md"),
         Page("Logging", "reference/logging.md"),
         Page("Recording policies", "reference/recording.md"),
         Page("Replay and fault injection", "reference/replay.md"),
@@ -343,6 +346,8 @@ nav = Nav(
         Page("Edge (proxy and load balancer)", "reference/edge.md"),
         Page("Exceptions", "reference/exceptions.md"),
         Page("CLI", "reference/cli.md"),
+        Page("AWS Lambda adapter", "reference/aws_lambda.md"),
+        Page("Serverless adapters", "reference/serverless.md"),
         Page("Reserved and in-progress surfaces", "reference/roadmap.md"),
     ),
     Section(
@@ -358,6 +363,7 @@ nav = Nav(
         # dead link. The release-notes skill adds a line here as well as to
         # the index.
         Page("Overview", "release_notes/index.md"),
+        Page("v0.3.0", "release_notes/0.3.0.md"),
         Page("v0.2.1", "release_notes/0.2.1.md"),
         Page("v0.2.0", "release_notes/0.2.0.md"),
         Page("v0.1.0a3", "release_notes/0.1.0a3.md"),

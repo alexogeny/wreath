@@ -1240,6 +1240,18 @@ wreath_nfr_context_end(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
         corr.span_id = ctx->span_id;
         ring_publish(worker, &corr);  /* a dropped correlation is counted by the ring */
     }
+    if (published && (ctx->flags & WREATH_NFR_FLAG_HAS_CLIENT_FACTS)) {
+        wreath_nfr_client_facts_cell facts;
+        memset(&facts, 0, sizeof(facts));
+        facts.schema_version = WREATH_NFR_SCHEMA_VERSION;
+        facts.kind = WREATH_NFR_KIND_CLIENT_FACTS;
+        facts.flags = ctx->client_flags;
+        facts.user_agent_rule_id = ctx->user_agent_rule_id;
+        facts.country[0] = ctx->client_country[0];
+        facts.country[1] = ctx->client_country[1];
+        facts.request_id = ctx->request_id;
+        ring_publish(worker, &facts);
+    }
     /* Detailed phase batches and the Forensic capture slab follow the completion
      * they belong to (armed only); a dropped completion drops both. */
     phase_finish(worker, ctx, published);

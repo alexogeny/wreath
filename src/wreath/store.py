@@ -45,9 +45,8 @@ from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Final, NamedTuple
 
+from ._pgname import MAX_IDENTIFIER_BYTES, validate_unquoted_identifier
 from .kv import KV
-
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: Reserved words that cannot be a bare identifier in PostgreSQL. Not the whole
 #: list -- that is hundreds long and mostly words nobody names a table -- but
@@ -125,14 +124,12 @@ def sql_identifier(value: str, *, what: str = "table") -> str:
     bound as parameters), so the only safe policy is to refuse anything that is
     not a plain identifier rather than to quote it.
     """
-    if not _IDENTIFIER.fullmatch(value):
-        raise ValueError(f"{what} must be a plain SQL identifier")
-    if value.lower() in _RESERVED:
+    if isinstance(value, str) and value.lower() in _RESERVED:
         raise ValueError(
             f"{what} {value!r} is a reserved SQL word; it reaches the generated "
             "statement unquoted and would fail there. Pick another name."
         )
-    return value
+    return validate_unquoted_identifier(value, what)
 
 
 class Column(NamedTuple):
@@ -255,10 +252,6 @@ class Keyed:
         return ";\n".join(self.statements())
 
 
-#: PostgreSQL truncates an identifier at NAMEDATALEN-1 bytes, silently.
-MAX_IDENTIFIER_BYTES: Final = 63
-
-
 def rows_affected(status: Any) -> int | None:
     """The row count in a PostgreSQL command tag, or None when unreadable.
 
@@ -315,7 +308,75 @@ class _Defined:
     statement: Any = field(default=None)
 
 
-class PostgresStore:
+class _Statements:
+    """Lazy PostgreSQL statements shared by stores and append-only logs."""
+
+    _database: Any
+    _defined: dict[str, _Defined]
+    _prepare_lock: threading.Lock
+    _statement_owner: str
+
+    def _init_statements(self) -> None:
+        self._defined = {}
+        # The call into Database.statement releases the GIL. Two first callers
+        # can therefore both observe an empty entry unless preparation is
+        # serialised, and PostgreSQL rejects the loser's duplicate name.
+        self._prepare_lock = threading.Lock()
+
+    def define(self, name: str, sql: str, *, workload: str = "write") -> None:
+        """Register `sql` under `name` for lazy preparation."""
+        if name in self._defined:
+            raise ValueError(
+                f"{name!r} is already defined on this {self._statement_owner}"
+            )
+        # PostgreSQL truncates rather than refuses an over-long prepared name.
+        # Refuse while the application is being described, before two distinct
+        # declarations can silently acquire the same server-side name.
+        statement_name = self._statement_name(name)
+        name_bytes = len(statement_name.encode("utf-8"))
+        if name_bytes > MAX_IDENTIFIER_BYTES:
+            raise ValueError(
+                f"prepared-statement name {statement_name!r} is {name_bytes} bytes; "
+                f"PostgreSQL truncates at {MAX_IDENTIFIER_BYTES}, which would "
+                f"collide with another {self._statement_owner}. Shorten the table "
+                "name or the prefix."
+            )
+        self._defined[name] = _Defined(sql, workload)
+
+    def _statement_name(self, name: str) -> str:
+        raise NotImplementedError
+
+    def sql(self, name: str) -> str:
+        """The text registered under `name`. Useful when explaining a plan."""
+        return self._entry(name).sql
+
+    def workload(self, name: str) -> str:
+        """The pool the statement registered under `name` runs against."""
+        return self._entry(name).workload
+
+    def statement(self, name: str) -> Any:
+        """The prepared statement for `name`, preparing it on first use."""
+        entry = self._entry(name)
+        if entry.statement is None:
+            with self._prepare_lock:
+                if entry.statement is None:
+                    entry.statement = self._database.statement(
+                        self._statement_name(name),
+                        entry.sql,
+                        workload=entry.workload,
+                    )
+        return entry.statement
+
+    def _entry(self, name: str) -> _Defined:
+        entry = self._defined.get(name)
+        if entry is None:
+            raise ValueError(
+                f"no SQL named {name!r} on this {self._statement_owner}"
+            )
+        return entry
+
+
+class PostgresStore(_Statements):
     """A keyed store in a table every worker shares.
 
     Holds the six disciplines named in this module's docstring, and generates
@@ -343,15 +404,14 @@ class PostgresStore:
 
     __slots__ = ("_database", "_declaration", "_defined", "_prepare_lock")
 
+    _statement_owner = "store"
+
     def __init__(
         self, database: Any, declaration: Keyed, *, read_workload: str = "write"
     ) -> None:
         self._database = database
         self._declaration = declaration
-        self._defined: dict[str, _Defined] = {}
-        # Guards the lazy prepare in `statement`, which is not safe for two
-        # threads to enter at once -- see the comment there.
-        self._prepare_lock = threading.Lock()
+        self._init_statements()
         table, key, stamp = declaration.table, declaration.key, declaration.stamp
         # The SQL is built here; the prepared statements are not. A store is
         # constructed while the application is being described, which is before
@@ -467,73 +527,8 @@ class PostgresStore:
             sql += f"\nRETURNING {returning}"
         return sql
 
-    def define(self, name: str, sql: str, *, workload: str = "write") -> None:
-        """Register `sql` under `name` for lazy preparation."""
-        if name in self._defined:
-            raise ValueError(f"{name!r} is already defined on this store")
-        # Checked here, at description time, rather than left to the first
-        # request: PostgreSQL *truncates* an over-long statement name instead of
-        # refusing it, so two stores whose names agree in their first 63 bytes
-        # would quietly share one prepared statement -- exactly the collision
-        # `prefix` exists to prevent, and invisible until the wrong SQL runs.
-        statement_name = self._statement_name(name)
-        if len(statement_name.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
-            raise ValueError(
-                f"prepared-statement name {statement_name!r} is "
-                f"{len(statement_name.encode('utf-8'))} bytes; PostgreSQL truncates "
-                f"at {MAX_IDENTIFIER_BYTES}, which would collide with another "
-                "store. Shorten the table name or the prefix."
-            )
-        self._defined[name] = _Defined(sql, workload)
-
     def _statement_name(self, name: str) -> str:
         return f"{self._declaration.prefix}_{name}_{self.table}"
-
-    def sql(self, name: str) -> str:
-        """The text registered under `name`. Useful when explaining a plan."""
-        return self._entry(name).sql
-
-    def workload(self, name: str) -> str:
-        """Which pool the statement registered under `name` runs against.
-
-        Raises:
-            ValueError: when nothing is registered under that name.
-        """
-        return self._entry(name).workload
-
-    def statement(self, name: str) -> Any:
-        """The prepared statement for `name`, preparing it on first use.
-
-        Locked, because the first use is not atomic: the window spans a call
-        into `Database.statement`, and two threads arriving together both see
-        `None` and both register. That is not a benign duplicate --
-        `Database.statement` *raises* on a name it already holds, so the loser
-        gets `duplicate PostgreSQL statement` on an ordinary first call.
-
-        This does not need a free-threaded interpreter to happen: the GIL is
-        released across that call, so plain threads reproduce it. A single event
-        loop cannot, because there is no `await` between the check and the
-        assignment -- which is why it has not been seen.
-
-        Double-checked so the settled path stays one attribute read: after the
-        first use of each statement the lock is never taken again.
-        """
-        entry = self._entry(name)
-        if entry.statement is None:
-            with self._prepare_lock:
-                if entry.statement is None:
-                    entry.statement = self._database.statement(
-                        self._statement_name(name),
-                        entry.sql,
-                        workload=entry.workload,
-                    )
-        return entry.statement
-
-    def _entry(self, name: str) -> _Defined:
-        entry = self._defined.get(name)
-        if entry is None:
-            raise ValueError(f"no SQL named {name!r} on this store")
-        return entry
 
     def schema_claim(self, name: str) -> Any:
         """This store's claim on the wreath schema, under `name`."""

@@ -53,7 +53,6 @@ import mimetypes
 import os
 import re
 import stat as _stat
-import struct
 import time
 import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
@@ -1340,46 +1339,7 @@ def _zip_entry_count(raw: bytes, limit: int) -> int | None:
     stdlib reader from materializing that object graph before `max_entries` is
     checked. Malformed framing is left for `zipfile` to diagnose.
     """
-    eocd = raw.rfind(b"PK\x05\x06", max(0, len(raw) - 65_557))
-    if eocd < 0 or eocd + 22 > len(raw):
-        return None
-    comment_bytes = struct.unpack_from("<H", raw, eocd + 20)[0]
-    if eocd + 22 + comment_bytes != len(raw):
-        return None
-
-    directory_size = struct.unpack_from("<I", raw, eocd + 12)[0]
-    directory_end = eocd
-    locator = eocd - 20
-    if locator >= 0 and raw[locator : locator + 4] == b"PK\x06\x07":
-        zip64 = raw.rfind(b"PK\x06\x06", 0, locator)
-        if zip64 < 0 or zip64 + 56 > locator:
-            return None
-        record_size = struct.unpack_from("<Q", raw, zip64 + 4)[0]
-        if zip64 + 12 + record_size != locator:
-            return None
-        directory_size = struct.unpack_from("<Q", raw, zip64 + 40)[0]
-        directory_end = zip64
-    elif directory_size == 0xFFFFFFFF:
-        return None
-
-    directory_start = directory_end - directory_size
-    if directory_start < 0:
-        return None
-    cursor = directory_start
-    count = 0
-    while cursor < directory_end:
-        if cursor + 46 > directory_end or raw[cursor : cursor + 4] != b"PK\x01\x02":
-            return None
-        name_bytes, extra_bytes, comment_bytes = struct.unpack_from(
-            "<HHH", raw, cursor + 28
-        )
-        cursor += 46 + name_bytes + extra_bytes + comment_bytes
-        if cursor > directory_end:
-            return None
-        count += 1
-        if count > limit:
-            return count
-    return count if cursor == directory_end else None
+    return _core.zip_entry_count(raw, limit)
 
 
 async def unzip_stream(

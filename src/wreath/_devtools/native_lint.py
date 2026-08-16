@@ -31,7 +31,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 # Scanned when no explicit paths are given, relative to the repository root.
 DEFAULT_ROOTS = ("src/wreath/_native",)
@@ -601,6 +601,32 @@ def run_lint(
             print(finding.render())
         print(f"\n{prog}: {len(findings)} finding(s) across {len(sources)} file(s).")
     return 1 if findings else 0
+
+
+class _LintEntrypoint(Protocol):
+    def __call__(self, argv: list[str] | None = None) -> int: ...
+
+
+def lint_entrypoint(
+    *,
+    prog: str,
+    description: str,
+    rules: dict[str, Rule],
+    scan: Callable[[str, str], list[Finding]],
+    default_roots: tuple[str, ...],
+) -> _LintEntrypoint:
+    """Bind one native lint's declarations to the shared command body."""
+    def main(argv: list[str] | None = None) -> int:
+        return run_lint(
+            argv,
+            prog=prog,
+            description=description,
+            rules=rules,
+            scan=scan,
+            default_roots=default_roots,
+        )
+
+    return main
 
 
 def main(argv: list[str] | None = None) -> int:

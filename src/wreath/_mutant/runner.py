@@ -35,6 +35,7 @@ import re
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -812,7 +813,7 @@ def _run_live_mutants(
             watched.setdefault((absolute, line), []).append((ordinal, mutation))
 
     positions: dict[Path, int] = {}
-    queued: list[tuple[int, Mutation, str]] = []
+    queued: deque[tuple[int, Mutation, str]] = deque()
     tried: set[int] = set()
     active: dict[int, tuple[RunningMutant, Mutation, str]] = {}
     killed: dict[int, Verdict] = {}
@@ -891,7 +892,7 @@ def _run_live_mutants(
                     queued.append((ordinal, mutation, nodeid))
 
         while queued and len(active) < jobs and not baseline_wait.exists():
-            ordinal, mutation, nodeid = queued.pop(0)
+            ordinal, mutation, nodeid = queued.popleft()
             probes += 1
             if first_started is None:
                 first_started = time.perf_counter() - origin

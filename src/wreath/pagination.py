@@ -172,8 +172,19 @@ def page_params(request: Any) -> PageParams:
     # `request.query_string`, not the scope: on the native server the scope is a
     # lazily materialized dict, so reading it here would build the whole thing
     # to reach one member. First value wins, matching the binding layer.
+    return _page_params(request, default_size=DEFAULT_SIZE)
+
+
+def _page_params(
+    request: Any,
+    *,
+    default_size: int,
+    max_page: int = MAX_PAGE,
+    max_size: int = MAX_SIZE,
+) -> PageParams:
+    """The shared bounded query parser, with a caller-selected default size."""
     page, size, sort = _core.page_params(
-        request.query_string, DEFAULT_SIZE, MAX_PAGE, MAX_SIZE
+        request.query_string, default_size, max_page, max_size
     )
     return PageParams(page=page, size=size, sort=sort)
 

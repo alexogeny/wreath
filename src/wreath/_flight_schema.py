@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 from typing import Final
 
 from ._native import _core
@@ -99,6 +99,21 @@ class EventKind(IntEnum):
     CONTROL = 4  # bounded arm/disarm/export control event
     CAPTURE = 5  # a forensic capture slab (Forensic mode; off the completion ring)
     LOG = 6  # one application log record, joined to its trace by request_id
+    CLIENT_FACTS = 7  # compact UA/Geo/Web Bot Auth classification
+
+
+class ClientFactFlag(IntFlag):
+    """Bounded classifications carried by a ``ClientFactsCell``."""
+
+    UA_KNOWN = 1 << 0
+    BOT_CLAIMED = 1 << 1
+    AGENT_VERIFIED = 1 << 2
+    MOBILE_KNOWN = 1 << 3
+    MOBILE = 1 << 4
+    IP_KNOWN = 1 << 5
+    IP_FORWARDED = 1 << 6
+    GEO_KNOWN = 1 << 7
+    IPV6 = 1 << 8
 
 
 class Mode(IntEnum):
@@ -199,6 +214,9 @@ FLAG_PROPAGATION_VALID: Final = 1 << 5
 FLAG_BODY_TRUNCATED: Final = 1 << 6
 FLAG_TELEMETRY_LOSS: Final = 1 << 7
 FLAG_HAS_CORRELATION: Final = 1 << 8  # a correlation cell follows
+FLAG_HAS_CLIENT_FACTS: Final = 1 << 9  # a compact client-facts cell follows
+FLAG_POLICY_REFUSED: Final = 1 << 10  # first-class ingress policy answered
+FLAG_AI_SCRAPING_REFUSED: Final = 1 << 11  # known autonomous crawler denied
 
 # --- histograms -------------------------------------------------------------
 
@@ -384,6 +402,81 @@ class CorrelationCell:
             span_id=span,
             parent_span_id=parent,
             flags=flags,
+        )
+
+
+# --- client-facts cell codec ----------------------------------------------
+#
+# Only bounded database identifiers and booleans cross the request boundary.
+# The original address, User-Agent, and Signature-Agent never enter the ring.
+#
+#   0  u8   schema_version
+#   1  u8   kind (EventKind.CLIENT_FACTS)
+#   2  u16  flags (ClientFactFlag)
+#   4  u16  user_agent_rule_id (0 = no WUA rule)
+#   6  char[2] country ISO code (NULs = unknown)
+#   8  u64  request_id
+#  16  48 bytes reserved
+_CLIENT_FACTS = struct.Struct(BYTE_ORDER + "BBHH2sQ48x")
+_require_layout(_CLIENT_FACTS.size, CELL_SIZE, "the client-facts cell")
+
+
+@dataclass(frozen=True, slots=True)
+class ClientFactsCell:
+    """A privacy-bounded UA, Geo, and verified-agent request projection."""
+
+    request_id: int
+    flags: ClientFactFlag = ClientFactFlag(0)
+    user_agent_rule_id: int = 0
+    country: str | None = None
+
+    def encode(self) -> bytes:
+        country = b"\x00\x00"
+        if self.country is not None:
+            normalized = self.country.upper()
+            if (
+                len(normalized) != 2
+                or not normalized.isascii()
+                or not normalized.isalpha()
+            ):
+                raise SchemaError(
+                    "client-facts country must be a two-letter ASCII code"
+                )
+            country = normalized.encode("ascii")
+        return _CLIENT_FACTS.pack(
+            SCHEMA_VERSION,
+            EventKind.CLIENT_FACTS,
+            int(self.flags) & 0xFFFF,
+            self.user_agent_rule_id & 0xFFFF,
+            country,
+            self.request_id & 0xFFFFFFFFFFFFFFFF,
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> ClientFactsCell:
+        if len(data) < CELL_SIZE:
+            raise SchemaError(
+                f"client-facts cell needs {CELL_SIZE} bytes, got {len(data)}"
+            )
+        version, kind, flags, rule_id, raw_country, request_id = (
+            _CLIENT_FACTS.unpack(data[:CELL_SIZE])
+        )
+        if version != SCHEMA_VERSION:
+            raise SchemaError(f"unsupported schema version {version}")
+        if kind != EventKind.CLIENT_FACTS:
+            raise SchemaError(f"expected client-facts kind, got {kind}")
+        country = None
+        if raw_country != b"\x00\x00":
+            if not all(65 <= byte <= 90 for byte in raw_country):
+                raise SchemaError(
+                    "client-facts country must contain uppercase ASCII letters"
+                )
+            country = raw_country.decode("ascii")
+        return cls(
+            request_id=request_id,
+            flags=ClientFactFlag(flags),
+            user_agent_rule_id=rule_id,
+            country=country,
         )
 
 
@@ -1182,6 +1275,7 @@ class CaptureFieldClass(IntEnum):
     DB_ROW = 7
     OUTBOUND_REQUEST = 8
     OUTBOUND_RESPONSE = 9
+    OUTBOUND_HTTP_EXCHANGE = 10
 
 
 class CaptureDisposition(IntEnum):

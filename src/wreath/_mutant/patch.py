@@ -285,12 +285,14 @@ class ValuePatch:
 def _slot_names(cls: type) -> tuple[str, ...]:
     """Every `__slots__` name `cls` and its bases declare, in definition order."""
     names: list[str] = []
+    seen: set[str] = set()
     for base in reversed(cls.__mro__):
         declared = base.__dict__.get("__slots__", ())
         if isinstance(declared, str):
             declared = (declared,)
         for name in declared:
-            if name not in names:
+            if name not in seen:
+                seen.add(name)
                 names.append(name)
     return tuple(names)
 

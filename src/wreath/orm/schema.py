@@ -7,10 +7,10 @@ immutable: once `Registry.compile()` returns, nothing re-derives them.
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from .._pgname import validate_unquoted_identifier
 from .errors import DeclarationError
 from .fields import Column, encode_default
 from .types import PgType
@@ -21,11 +21,6 @@ if TYPE_CHECKING:
 #: Bumped whenever the canonical fingerprint encoding changes, so fingerprints
 #: from different Wreath versions can never collide.
 FINGERPRINT_VERSION = b"wreath-orm-fingerprint-1"
-
-#: Matched with `fullmatch`, never `match`: `$` also matches immediately before
-#: a trailing newline, so `^...$` accepted `schema="app\n"` into the emitted DDL.
-_SCHEMA_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
-
 
 @dataclass(frozen=True, slots=True)
 class SchemaRef:
@@ -71,13 +66,9 @@ class SchemaMode:
 
 
 def _schema_identifier(value: str) -> str:
-    if not isinstance(value, str) or not _SCHEMA_IDENTIFIER.fullmatch(value):
-        raise DeclarationError(
-            f"schema name {value!r} is not a valid unquoted PostgreSQL identifier"
-        )
-    if len(value.encode("utf-8")) > 63:
-        raise DeclarationError(f"schema name {value!r} exceeds PostgreSQL's 63-byte limit")
-    return value
+    return validate_unquoted_identifier(
+        value, "schema name", error=DeclarationError
+    )
 
 
 @dataclass(frozen=True, slots=True)

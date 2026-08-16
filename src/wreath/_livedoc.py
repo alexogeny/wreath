@@ -245,7 +245,7 @@ class LiveDocument:
         max_per_principal: int = 4,
         keepalive: float = DEFAULT_KEEPALIVE,
     ) -> None:
-        self._by_principal: dict[str, list[Subscription]] = {}
+        self._by_principal: dict[str, dict[Subscription, None]] = {}
         self._count = 0
         self._max_subscribers = max_subscribers
         self._max_per_principal = max_per_principal
@@ -319,8 +319,8 @@ class LiveDocument:
             return None
         subscription = Subscription(self, principal, asyncio.get_running_loop())
         if holders is None:
-            self._by_principal[principal] = holders = []
-        holders.append(subscription)
+            self._by_principal[principal] = holders = {}
+        holders[subscription] = None
         self._count += 1
         if self._watch and not self._watching:
             # Registered on demand, and dropped again below when the last stream
@@ -335,7 +335,7 @@ class LiveDocument:
         holders = self._by_principal.get(subscription.principal)
         if holders is None or subscription not in holders:
             return
-        holders.remove(subscription)
+        del holders[subscription]
         if not holders:
             del self._by_principal[subscription.principal]
         self._count -= 1

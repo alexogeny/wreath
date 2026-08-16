@@ -56,6 +56,9 @@ typedef struct {
     uint8_t terminal;       /* WREATH_NFR_TERM_* */
     uint8_t error_class;
     uint8_t phase_count;    /* phase records written into the scratch block */
+    uint16_t client_flags;  /* WREATH_NFR_CLIENT_*; zero until resolved */
+    uint16_t user_agent_rule_id;
+    uint8_t client_country[2];
 } wreath_nfr_context;
 
 /* Loss counters, one per LossReason. */

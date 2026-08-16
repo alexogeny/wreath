@@ -35,25 +35,6 @@ trim_ows(const char **data, Py_ssize_t *length)
     }
 }
 
-static int
-parse_quality(const char *data, Py_ssize_t length)
-{
-    /* Return thousandths in [0,1000], malformed values are unacceptable. */
-    trim_ows(&data, &length);
-    if (length == 1 && data[0] == '0') return 0;
-    if (length == 1 && data[0] == '1') return 1000;
-    if (length < 3 || length > 5 || data[1] != '.' || (data[0] != '0' && data[0] != '1'))
-        return 0;
-    int value = data[0] == '1' ? 1000 : 0;
-    int scale = 100;
-    for (Py_ssize_t i = 2; i < length; i++, scale /= 10) {
-        if (data[i] < '0' || data[i] > '9') return 0;
-        if (data[0] == '1' && data[i] != '0') return 0;
-        if (data[0] == '0') value += (data[i] - '0') * scale;
-    }
-    return value;
-}
-
 PyObject *
 wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
 {
@@ -95,7 +76,7 @@ wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
             trim_ows(&name, &name_len);
             if (wreath_ascii_equal_ci_str(name, name_len, "q")) {
                 quality = equals < part_len
-                    ? parse_quality(part + equals + 1, part_len - equals - 1)
+                    ? wreath_parse_quality(part + equals + 1, part_len - equals - 1)
                     : 0;
             }
             parameter = end;

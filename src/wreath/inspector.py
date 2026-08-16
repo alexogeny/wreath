@@ -51,7 +51,12 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
-from ._flight_schema import LossReason, Protocol
+from ._flight_schema import (
+    FLAG_AI_SCRAPING_REFUSED,
+    FLAG_POLICY_REFUSED,
+    LossReason,
+    Protocol,
+)
 
 MAGIC = b"WFI1"
 PROTOCOL_VERSION = 1
@@ -542,6 +547,13 @@ class InspectorServer:
 def _trace_payload(trace: Any) -> dict[str, Any]:
     """Serialize a projected trace for the wire. 128/64-bit correlation IDs go as
     hex strings (OTLP's form) so no JSON integer precision is assumed."""
+    disposition = None
+    if trace.flags & FLAG_POLICY_REFUSED:
+        disposition = (
+            "ai_scraping"
+            if trace.flags & FLAG_AI_SCRAPING_REFUSED
+            else "refused"
+        )
     return {
         "request_id": trace.request_id,
         "connection_id": trace.connection_id,
@@ -554,6 +566,7 @@ def _trace_payload(trace: Any) -> dict[str, Any]:
         "protocol": _protocol_name(int(trace.protocol)),
         "error_class": trace.error_class,
         "flags": trace.flags,
+        "policy_disposition": disposition,
         "bytes_in": trace.bytes_in,
         "bytes_out": trace.bytes_out,
         "is_failure": trace.is_failure,

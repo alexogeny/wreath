@@ -864,6 +864,79 @@ context_flight_server_span(WreathRequestContext *self, PyObject *Py_UNUSED(ignor
                          (unsigned long long)self->nfr_ctx->span_id);
 }
 
+/* Reduce one resolved ClientFacts value into the request-owned recorder
+ * context. Python materializes the declarative facts; the native boundary keeps
+ * only bounded flags, a stable WUA rule id, and a two-byte country code. */
+static PyObject *
+context_flight_client_facts(WreathRequestContext *self, PyObject *const *args,
+                            Py_ssize_t nargs)
+{
+    Py_ssize_t country_len;
+    const char *country;
+    unsigned long flags, rule_id;
+    if (nargs != 3) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "_flight_client_facts expects (flags, user_agent_rule_id, country)");
+        return NULL;
+    }
+    flags = PyLong_AsUnsignedLong(args[0]);
+    if (flags == (unsigned long)-1 && PyErr_Occurred()) return NULL;
+    rule_id = PyLong_AsUnsignedLong(args[1]);
+    if (rule_id == (unsigned long)-1 && PyErr_Occurred()) return NULL;
+    if (flags > UINT16_MAX) {
+        PyErr_SetString(PyExc_ValueError,
+                        "client-facts flags must fit an unsigned 16-bit integer");
+        return NULL;
+    }
+    if (rule_id > UINT16_MAX) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "client-facts user_agent_rule_id must fit an unsigned 16-bit integer");
+        return NULL;
+    }
+    country = PyUnicode_AsUTF8AndSize(args[2], &country_len);
+    if (country == NULL) return NULL;
+    if (country_len != 0 &&
+        (country_len != 2 || country[0] < 'A' || country[0] > 'Z' ||
+         country[1] < 'A' || country[1] > 'Z')) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "client-facts country must be empty or two uppercase ASCII letters");
+        return NULL;
+    }
+    if (self->nfr_ctx != NULL && self->nfr_ctx->mode != WREATH_NFR_MODE_OFF) {
+        self->nfr_ctx->client_flags = (uint16_t)flags;
+        self->nfr_ctx->user_agent_rule_id = (uint16_t)rule_id;
+        self->nfr_ctx->client_country[0] = country_len == 2 ? (uint8_t)country[0] : 0;
+        self->nfr_ctx->client_country[1] = country_len == 2 ? (uint8_t)country[1] : 0;
+        self->nfr_ctx->flags |= WREATH_NFR_FLAG_HAS_CLIENT_FACTS;
+    }
+    Py_RETURN_NONE;
+}
+
+/* Attach a bounded first-class-policy disposition to the completion already
+ * owned by this request. Expected refusals remain successful recorder
+ * completions rather than application errors; exporters can distinguish the
+ * decision from an arbitrary 403 without an extra event or a Python object. */
+static PyObject *
+context_flight_policy_refusal(WreathRequestContext *self, PyObject *arg)
+{
+    unsigned long flags = PyLong_AsUnsignedLong(arg);
+    if (flags == (unsigned long)-1 && PyErr_Occurred()) return NULL;
+    if (flags > UINT16_MAX ||
+        (flags & WREATH_NFR_FLAG_POLICY_REFUSED) == 0) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "policy-refusal flags must fit 16 bits and include POLICY_REFUSED");
+        return NULL;
+    }
+    if (self->nfr_ctx != NULL && self->nfr_ctx->mode != WREATH_NFR_MODE_OFF) {
+        self->nfr_ctx->flags |= (uint16_t)flags;
+    }
+    Py_RETURN_NONE;
+}
+
 /* The recorder's own request id for this request, or 0 when no recorder context
  * is attached. Logging keys its per-request scope on this so a record joins the
  * completion the projector will assemble -- the join is by id, exactly as it is
@@ -893,6 +966,10 @@ static PyMethodDef context_methods[] = {
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
     {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
     {"_flight_server_span", (PyCFunction)context_flight_server_span, METH_NOARGS, NULL},
+    {"_flight_client_facts",
+     (PyCFunction)(void (*)(void))context_flight_client_facts, METH_FASTCALL, NULL},
+    {"_flight_policy_refusal", (PyCFunction)context_flight_policy_refusal,
+     METH_O, NULL},
     {"_flight_request_id", (PyCFunction)context_flight_request_id, METH_NOARGS, NULL},
     {"_set_client", (PyCFunction)context_set_client, METH_O, NULL},
     {"_set_scheme", (PyCFunction)context_set_scheme, METH_O, NULL},

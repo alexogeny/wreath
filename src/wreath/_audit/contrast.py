@@ -21,6 +21,7 @@ from .model import Finding, Severity
 _VAR = re.compile(r"var\(\s*(--[\w-]+)\s*\)")
 _DECL = re.compile(r"(--[\w-]+)\s*:\s*([^;}]+)")
 _HEX = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b")
+_MEDIA = re.compile(r"@media[^{]*\{")
 _NAMED = {"white": "#ffffff", "black": "#000000"}
 
 _NORMAL_AA = 4.5
@@ -117,13 +118,12 @@ def parse_tokens(css: str) -> dict[str, dict[str, str]]:
 def _strip_media(css: str) -> str:
     out, i = [], 0
     while True:
-        m = re.search(r"@media[^{]*\{", css[i:])
+        m = _MEDIA.search(css, i)
         if not m:
             out.append(css[i:])
             break
-        start = i + m.start()
-        out.append(css[i:start])
-        _body, end = _extract(css, i + m.end() - 1)
+        out.append(css[i:m.start()])
+        _body, end = _extract(css, m.end() - 1)
         i = end
     return "".join(out)
 

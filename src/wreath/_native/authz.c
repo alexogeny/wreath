@@ -17,7 +17,9 @@ add_capabilities(PyObject **mask, PyObject *capabilities, PyObject *values,
             PyErr_SetString(PyExc_TypeError, "identity capabilities must be strings");
             return -1;
         }
-        PyObject *key = PyUnicode_FromFormat("%s:%U", prefix, value);
+        PyObject *key = prefix != NULL
+            ? PyUnicode_FromFormat("%s:%U", prefix, value)
+            : Py_NewRef(value);
         Py_DECREF(value);
         if (key == NULL) {
             Py_DECREF(iterator);
@@ -66,40 +68,6 @@ wreath_build_capability_mask(PyObject *Py_UNUSED(self), PyObject *args)
 }
 
 static int
-add_compiled_capabilities(PyObject **mask, PyObject *capabilities,
-                          PyObject *values)
-{
-    PyObject *iterator = PyObject_GetIter(values);
-    if (iterator == NULL) {
-        return -1;
-    }
-    PyObject *value;
-    while ((value = PyIter_Next(iterator)) != NULL) {
-        if (!PyUnicode_Check(value)) {
-            Py_DECREF(value);
-            Py_DECREF(iterator);
-            PyErr_SetString(PyExc_TypeError, "identity capabilities must be strings");
-            return -1;
-        }
-        PyObject *capability = PyDict_GetItemWithError(capabilities, value);
-        Py_DECREF(value);
-        if (capability != NULL) {
-            PyObject *combined = PyNumber_Or(*mask, capability);
-            if (combined == NULL) {
-                Py_DECREF(iterator);
-                return -1;
-            }
-            Py_SETREF(*mask, combined);
-        } else if (PyErr_Occurred()) {
-            Py_DECREF(iterator);
-            return -1;
-        }
-    }
-    Py_DECREF(iterator);
-    return PyErr_Occurred() ? -1 : 0;
-}
-
-static int
 unpack_compiled_descriptor(PyObject *descriptor, PyObject **authenticated,
                            PyObject **role_capabilities,
                            PyObject **permission_capabilities)
@@ -129,8 +97,8 @@ wreath_compiled_capability_mask(PyObject *descriptor, PyObject *roles,
         return NULL;
     }
     PyObject *mask = Py_NewRef(authenticated);
-    if (add_compiled_capabilities(&mask, role_capabilities, roles) < 0 ||
-        add_compiled_capabilities(&mask, permission_capabilities, permissions) < 0) {
+    if (add_capabilities(&mask, role_capabilities, roles, NULL) < 0 ||
+        add_capabilities(&mask, permission_capabilities, permissions, NULL) < 0) {
         Py_DECREF(mask);
         return NULL;
     }

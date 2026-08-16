@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger("wreath")
 
@@ -176,6 +176,13 @@ class Component:
         actually are, and a move is a later, staged concern.
         """
         return self.schema != ""
+
+
+@runtime_checkable
+class SchemaContributor(Protocol):
+    """A registered subsystem that declares one wreath-owned schema component."""
+
+    def component(self) -> Component: ...
 
 
 def _quote(identifier: str) -> str:
@@ -528,6 +535,7 @@ __all__ = [
     "DEFAULT_SCHEMA",
     "HISTORY_SCHEMA",
     "Component",
+    "SchemaContributor",
     "SchemaError",
     "SchemaNotManaged",
     "Step",

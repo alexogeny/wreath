@@ -37,6 +37,13 @@ from .request_id import RequestIdPolicy, request_id
 from .security import SecurityHeadersPolicy, TrustedHostPolicy, WebSocketOriginPolicy
 from .sessions import SessionPolicy, rotate_session
 from .timing import ServerTimingPolicy, elapsed
+from .traffic import (
+    AI_SCRAPERS,
+    AIScrapingPolicy,
+    TrafficClass,
+    TrafficPolicy,
+    traffic_class,
+)
 
 _PROXY = 1 << 0
 _TRUSTED_HOST = 1 << 1
@@ -51,10 +58,11 @@ _SECURITY = 1 << 7
 class HttpPolicy:
     """The complete, fixed-order HTTP policy for one application.
 
-    Standard policy components are immutable after construction.  At startup
-    Wreath freezes them into a descriptor consumed by the native policy engine.
-    The readable executor below is the independent reference used by pure builds
-    and by differential tests; it is not a middleware tape.
+    Standard policy components are immutable after construction. At startup,
+    Wreath freezes every natively representable combination into a descriptor
+    consumed by the native policy engine. The readable executor below is the
+    independent reference used by pure builds, differential tests, and policy
+    combinations awaiting a native opcode; it is not a middleware tape.
     """
 
     __slots__ = (
@@ -62,7 +70,9 @@ class HttpPolicy:
         "_dynamic_always",
         "_has_activation",
         "_has_post_auth",
+        "_native_ingress_only",
         "_native_descriptor",
+        "ai_scraping",
         "cors",
         "csrf",
         "cache_control",
@@ -74,6 +84,7 @@ class HttpPolicy:
         "request_id",
         "security_headers",
         "server_timing",
+        "traffic",
         "session",
         "trusted_host",
         "websocket_origin",
@@ -84,10 +95,12 @@ class HttpPolicy:
         *,
         proxy: ProxyPolicy | None = None,
         trusted_host: TrustedHostPolicy | None = None,
+        ai_scraping: AIScrapingPolicy | None = None,
         rate_limit: RateLimitPolicy | None = None,
         principal_rate_limit: RateLimitPolicy | TieredRateLimitPolicy | None = None,
         request_id: RequestIdPolicy | None = None,
         server_timing: ServerTimingPolicy | None = None,
+        traffic: TrafficPolicy | None = None,
         cors: CorsPolicy | None = None,
         csrf: CsrfPolicy | None = None,
         security_headers: SecurityHeadersPolicy | None = None,
@@ -100,6 +113,8 @@ class HttpPolicy:
         values = (
             ("proxy", proxy, ProxyPolicy),
             ("trusted_host", trusted_host, TrustedHostPolicy),
+            ("ai_scraping", ai_scraping, AIScrapingPolicy),
+            ("traffic", traffic, TrafficPolicy),
             ("rate_limit", rate_limit, RateLimitPolicy),
             (
                 "principal_rate_limit",
@@ -127,10 +142,12 @@ class HttpPolicy:
                 )
         self.proxy = proxy
         self.trusted_host = trusted_host
+        self.ai_scraping = ai_scraping
         self.rate_limit = rate_limit
         self.principal_rate_limit = principal_rate_limit
         self.request_id = request_id
         self.server_timing = server_timing
+        self.traffic = traffic
         self.cors = cors
         self.csrf = csrf
         self.security_headers = security_headers
@@ -148,22 +165,44 @@ class HttpPolicy:
         )
         self._components = tuple(value for _name, value, _expected in values if value is not None)
         self._native_descriptor = self._freeze_native()
+        self._native_ingress_only = (
+            ai_scraping is not None
+            and self._native_descriptor is not None
+            and all(
+                value is None
+                for name, value, _expected in values
+                if name != "ai_scraping"
+            )
+        )
 
     @property
     def components(self) -> tuple[Any, ...]:
         """Configured components in their canonical ingress order."""
         return self._components
 
+    @property
+    def counter_sources(self) -> tuple[Any, ...]:
+        """Policy components that may contribute to the canonical metrics walk."""
+        return self._components
+
     def merged(self, other: HttpPolicy) -> HttpPolicy:
         """Return one policy containing two disjoint feature declarations."""
+        return self._merged(other, replace_default_ai=False)
+
+    def _merged(
+        self, other: HttpPolicy, *, replace_default_ai: bool
+    ) -> HttpPolicy:
+        """Merge application declarations, optionally replacing Wreath's default."""
         values: dict[str, Any] = {}
         for name in (
             "proxy",
             "trusted_host",
+            "ai_scraping",
             "rate_limit",
             "principal_rate_limit",
             "request_id",
             "server_timing",
+            "traffic",
             "cors",
             "csrf",
             "security_headers",
@@ -175,9 +214,14 @@ class HttpPolicy:
         ):
             current = getattr(self, name)
             incoming = getattr(other, name)
-            if current is not None and incoming is not None:
+            replacing = (
+                name == "ai_scraping"
+                and replace_default_ai
+                and incoming is not None
+            )
+            if current is not None and incoming is not None and not replacing:
                 raise ValueError(f"HTTP policy feature {name!r} is already configured")
-            values[name] = current if current is not None else incoming
+            values[name] = incoming if replacing or current is None else current
         return HttpPolicy(**values)
 
     @property
@@ -201,6 +245,14 @@ class HttpPolicy:
             candidate = self.trusted_host._ingress_sync(request)
             mask |= _TRUSTED_HOST
             request._policy_mask = mask
+            if candidate is not None:
+                return candidate
+        if self.ai_scraping is not None:
+            candidate = self.ai_scraping._ingress_sync(request)
+            if candidate is not None:
+                return candidate
+        if self.traffic is not None:
+            candidate = self.traffic._ingress_sync(request)
             if candidate is not None:
                 return candidate
         rate_limit = self.rate_limit
@@ -237,6 +289,14 @@ class HttpPolicy:
             if candidate is not None:
                 return candidate
         return None
+
+    def _reference_ingress_scope(
+        self, scope: Any, method: str, path: str
+    ) -> Any | None:
+        """Execute the sole scope-safe ingress component before activation."""
+        if not self._native_ingress_only or self.ai_scraping is None:
+            raise RuntimeError("HTTP policy is not scope-only ingress")
+        return self.ai_scraping._ingress_scope(scope, method, path)
 
     async def _reference_post_auth(self, request: Any) -> Any | None:
         """Apply the principal-aware limiter after identity is available."""
@@ -319,12 +379,20 @@ class HttpPolicy:
             candidate = self.trusted_host._ingress_sync(request)
             if candidate is not None:
                 return candidate
+        if self.ai_scraping is not None:
+            candidate = self.ai_scraping._ingress_sync(request)
+            if candidate is not None:
+                return candidate
+        if self.traffic is not None:
+            candidate = self.traffic._ingress_sync(request)
+            if candidate is not None:
+                return candidate
         if self.websocket_origin is not None:
             return await self.websocket_origin._ingress(request)
         return None
 
     def _freeze_native(self) -> tuple[Any, ...] | None:
-        """Return the immutable v1 C descriptor, or None for a non-native option.
+        """Return the immutable v3 C descriptor, or None for a non-native option.
 
         All-or-nothing is load-bearing: a policy never splits into independently
         ordered Python and C halves.  Callback keys/exemptions, remote rate
@@ -332,6 +400,9 @@ class HttpPolicy:
         The native engine gains an opcode before one of those options can enter
         this descriptor.
         """
+        if self.traffic is not None:
+            return None
+
         proxy = self.proxy
         if proxy is not None:
             proxy = (proxy._networks, proxy._trust_proto, proxy._trust_host)
@@ -339,6 +410,10 @@ class HttpPolicy:
         trusted = self.trusted_host
         if trusted is not None:
             trusted = tuple(value.encode("ascii") for value in trusted.allowed_hosts)
+
+        ai_scraping = self.ai_scraping
+        if ai_scraping is not None:
+            ai_scraping = ai_scraping._native()
 
         rate = self.rate_limit
         if rate is not None:
@@ -428,9 +503,10 @@ class HttpPolicy:
             )
 
         return (
-            "wreath.http-policy.v2",
+            "wreath.http-policy.v3",
             proxy,
             trusted,
+            ai_scraping,
             rate,
             request_id,
             timing,
@@ -446,6 +522,7 @@ class HttpPolicy:
 _POLICY_TYPES = frozenset(
     {
         CorsPolicy,
+        AIScrapingPolicy,
         CachePolicy,
         CompressionPolicy,
         CsrfPolicy,
@@ -458,6 +535,7 @@ _POLICY_TYPES = frozenset(
         ServerTimingPolicy,
         SessionPolicy,
         TieredRateLimitPolicy,
+        TrafficPolicy,
         TrustedHostPolicy,
         WebSocketOriginPolicy,
     }
@@ -470,6 +548,8 @@ def is_policy_component(value: Any) -> bool:
 
 
 __all__ = [
+    "AI_SCRAPERS",
+    "AIScrapingPolicy",
     "CachePolicy",
     "CompressionPolicy",
     "CorsPolicy",
@@ -489,6 +569,8 @@ __all__ = [
     "ServerTimingPolicy",
     "SessionPolicy",
     "TieredRateLimitPolicy",
+    "TrafficClass",
+    "TrafficPolicy",
     "TrustedHostPolicy",
     "WebSocketOriginPolicy",
     "csrf_token",
@@ -496,4 +578,5 @@ __all__ = [
     "principal_key",
     "rotate_session",
     "request_id",
+    "traffic_class",
 ]

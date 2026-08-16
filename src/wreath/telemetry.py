@@ -62,6 +62,7 @@ __all__ = [
     "propagates",
     "trace_id_of",
     "activate_otel",
+    "annotate_otel",
     "activate_prometheus",
     "activate_openmetrics",
     "activate_statsd",
@@ -662,6 +663,23 @@ def activate_otel(request: object) -> object:
     return otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(context))
 
 
+def annotate_otel(span: object, facts: object) -> None:
+    """Attach privacy-conscious client facts to an OTel recording span.
+
+    `span` is structural: any OpenTelemetry span implementing
+    `set_attributes` works, and importing this helper never imports the OTel
+    SDK. The original User-Agent and IP address are deliberately absent.
+    """
+    from .client_facts import ClientFacts, client_fact_attributes
+
+    if not isinstance(facts, ClientFacts):
+        raise TypeError("OTel client facts must be a ClientFacts value")
+    setter = getattr(span, "set_attributes", None)
+    if not callable(setter):
+        raise TypeError("OTel span must expose set_attributes(attributes)")
+    setter(client_fact_attributes(facts))
+
+
 # --- Prometheus exposition bridge -------------------------------------------
 #
 # Where the OTLP path (`wreath._otlp`/`wreath._export`) pushes the projector's
@@ -677,6 +695,8 @@ def activate_prometheus(
     *,
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
+    app: object = None,
+    counter_sources: tuple[object, ...] = (),
 ) -> object:
     """Wrap a metrics snapshot source in a Prometheus exposition bridge.
 
@@ -694,7 +714,13 @@ def activate_prometheus(
     """
     from ._prometheus import PrometheusBridge
 
-    return PrometheusBridge(source, namespace=namespace, route_labels=route_labels)
+    return PrometheusBridge(
+        source,
+        namespace=namespace,
+        route_labels=route_labels,
+        app=app,
+        counter_sources=counter_sources,
+    )
 
 
 def activate_openmetrics(
@@ -702,6 +728,8 @@ def activate_openmetrics(
     *,
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
+    app: object = None,
+    counter_sources: tuple[object, ...] = (),
 ) -> object:
     """Like `activate_prometheus`, but the bridge renders OpenMetrics 1.0.0.
 
@@ -712,7 +740,12 @@ def activate_openmetrics(
     from ._prometheus import PrometheusBridge
 
     return PrometheusBridge(
-        source, namespace=namespace, route_labels=route_labels, openmetrics=True,
+        source,
+        namespace=namespace,
+        route_labels=route_labels,
+        openmetrics=True,
+        app=app,
+        counter_sources=counter_sources,
     )
 
 
@@ -725,6 +758,8 @@ def activate_statsd(
     dogstatsd: bool = False,
     tags: dict | None = None,
     route_labels: RouteLabels = None,
+    app: object = None,
+    counter_sources: tuple[object, ...] = (),
 ) -> object:
     """Wrap a snapshot source in a StatsD/DogStatsD UDP push bridge.
 
@@ -740,6 +775,7 @@ def activate_statsd(
     return StatsDBridge(
         source, host=host, port=port, prefix=prefix,
         dogstatsd=dogstatsd, tags=tags, route_labels=route_labels,
+        app=app, counter_sources=counter_sources,
     )
 
 
@@ -750,11 +786,13 @@ def activate_cloudwatch_emf(
     dimensions: dict | None = None,
     route_labels: RouteLabels = None,
     cumulative: bool = False,
+    app: object = None,
+    counter_sources: tuple[object, ...] = (),
 ) -> object:
     """Wrap a snapshot source in a CloudWatch EMF bridge.
 
-    Renders the same `Projector.snapshot()` aggregates as EMF structured-JSON
-    log lines (one blob per route + a global blob); written to stdout, CloudWatch
+    Renders the same `Projector.snapshot()` aggregates and canonical subsystem
+    counters as EMF structured-JSON log lines; written to stdout, CloudWatch
     Logs turns them into metrics with no agent. Counters are per-period deltas
     (CloudWatch SUMs) unless `cumulative=True`. Call `bridge.emit()` on a
     cadence (or `bridge.render()` for the text).
@@ -763,5 +801,6 @@ def activate_cloudwatch_emf(
 
     return EmfBridge(
         source, namespace=namespace, dimensions=dimensions,
-        route_labels=route_labels, cumulative=cumulative,
+        route_labels=route_labels, cumulative=cumulative, app=app,
+        counter_sources=counter_sources,
     )

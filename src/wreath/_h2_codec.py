@@ -336,6 +336,7 @@ def decode_response(data: bytes) -> dict[int, H2StreamResponse]:
     decoder = HpackDecoder()
     streams: dict[int, H2StreamResponse] = {}
     pending: dict[int, bytearray] = {}  # stream_id -> partial header block
+    bodies: dict[int, bytearray] = {}  # stream_id -> DATA, frozen once below
 
     def _stream(sid: int) -> H2StreamResponse:
         got = streams.get(sid)
@@ -377,10 +378,12 @@ def decode_response(data: bytes) -> dict[int, H2StreamResponse]:
                     del pending[frame.stream_id]
         elif frame.type == DATA:
             stream = _stream(frame.stream_id)
-            stream.body += frame.payload
+            bodies.setdefault(frame.stream_id, bytearray()).extend(frame.payload)
             if frame.flags & FLAG_END_STREAM:
                 stream.ended = True
         elif frame.type == RST_STREAM:
             stream = _stream(frame.stream_id)
             stream.reset = int.from_bytes(frame.payload[:4], "big") if frame.payload else 0
+    for stream_id, body in bodies.items():
+        streams[stream_id].body = bytes(body)
     return streams

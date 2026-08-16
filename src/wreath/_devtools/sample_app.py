@@ -29,7 +29,7 @@ from wreath.orm import Mapped, Model, column, relationship
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
 from wreath.orm.types import Int64, Text, Timestamp
-from wreath.policy import HttpPolicy
+from wreath.policy import AIScrapingPolicy, HttpPolicy
 from wreath.policy.cors import CorsPolicy
 from wreath.policy.csrf import CsrfPolicy
 from wreath.policy.proxy import ProxyPolicy
@@ -145,6 +145,7 @@ class _Authorizer:
 # independent policies (`wreath-policy-decomp`) build a fresh one per arm.
 POLICY_FACTORIES: tuple[Any, ...] = (
     lambda: ProxyPolicy(trusted=["127.0.0.1"]),
+    AIScrapingPolicy,
     # Deliberately unreachable: a benchmark drives millions of requests through
     # one bucket, and a limit it can exhaust turns the arm into a 429 path.
     lambda: RateLimitPolicy(limit=1_000_000_000),
@@ -165,6 +166,8 @@ def policy_from_components(components: list[Any] | tuple[Any, ...]) -> HttpPolic
     for component in components:
         if type(component) is ProxyPolicy:
             fields["proxy"] = component
+        elif type(component) is AIScrapingPolicy:
+            fields["ai_scraping"] = component
         elif type(component) is RateLimitPolicy:
             fields["rate_limit"] = component
         elif type(component) is CorsPolicy:

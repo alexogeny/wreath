@@ -25,6 +25,50 @@
 /* ASCII folding and case-insensitive compare, shared for the same reason. */
 #include "ascii.h"
 
+/* Read one integer configuration attribute with the CPython error protocol
+ * preserved. HTTP/2 and HTTP/3 consume the same ServerConfig surface; keeping
+ * this here prevents the protocol modules from growing independent decoders. */
+static inline int
+wreath_read_ssize_attr(PyObject *config, const char *name, Py_ssize_t *out)
+{
+    PyObject *value = PyObject_GetAttrString(config, name);
+    Py_ssize_t parsed;
+    if (value == NULL) return -1;
+    parsed = PyLong_AsSsize_t(value);
+    Py_DECREF(value);
+    if (parsed == -1 && PyErr_Occurred()) return -1;
+    *out = parsed;
+    return 0;
+}
+
+/* Parse an HTTP qvalue into thousandths. Both the public web-policy selector
+ * and the server policy executor consume this grammar. */
+static inline int
+wreath_parse_quality(const char *data, Py_ssize_t length)
+{
+    while (length > 0 && (*data == ' ' || *data == '\t')) {
+        data++;
+        length--;
+    }
+    while (length > 0 && (data[length - 1] == ' ' || data[length - 1] == '\t'))
+        length--;
+    if (length == 1 && data[0] == '0') return 0;
+    if (length == 1 && data[0] == '1') return 1000;
+    if (length < 3 || length > 5 || data[1] != '.' ||
+        (data[0] != '0' && data[0] != '1')) return 0;
+    int value = data[0] == '1' ? 1000 : 0;
+    int scale = 100;
+    for (Py_ssize_t i = 2; i < length; i++, scale /= 10) {
+        if (data[i] < '0' || data[i] > '9' ||
+            (data[0] == '1' && data[i] != '0')) return 0;
+        if (data[0] == '0') value += (data[i] - '0') * scale;
+    }
+    return value;
+}
+
+/* client_facts.c */
+int wreath_register_client_facts(PyObject *module);
+
 /* authz.c */
 PyObject *wreath_build_capability_mask(PyObject *self, PyObject *args);
 PyObject *wreath_build_compiled_capability_mask(PyObject *self, PyObject *args);
@@ -74,8 +118,13 @@ PyObject *wreath_attempt_decode(PyObject *self, PyObject *args);
 int wreath_register_zip_builder(PyObject *module);
 PyObject *wreath_sigv4_headers(PyObject *self, PyObject *headers);
 PyObject *wreath_sigv4_canonical(PyObject *self, PyObject *args);
+PyObject *wreath_zip_entry_count(PyObject *self, PyObject *args);
+PyObject *wreath_http_exchange_encode(PyObject *self, PyObject *args);
+PyObject *wreath_http_exchange_decode(PyObject *self, PyObject *args);
 
 /* data_kernels.c */
+PyObject *wreath_first_duplicate(PyObject *self, PyObject *arg);
+PyObject *wreath_minimal_prefixes(PyObject *self, PyObject *arg);
 PyObject *wreath_fused_order(PyObject *self, PyObject *args);
 PyObject *wreath_rank_indices(PyObject *self, PyObject *args);
 PyObject *wreath_normalise_argument(PyObject *self, PyObject *args);
@@ -102,6 +151,11 @@ PyObject *wreath_sync_state_diff(PyObject *self, PyObject *args);
 PyObject *wreath_sync_state_keys(PyObject *self, PyObject *arg);
 PyObject *wreath_sync_state_size(PyObject *self, PyObject *arg);
 int wreath_register_data_kernels(PyObject *module);
+
+/* recording.c */
+PyObject *wreath_ring_file_records(PyObject *self, PyObject *args);
+PyObject *wreath_ring_in_flight(PyObject *self, PyObject *args);
+PyObject *wreath_ring_logs_for(PyObject *self, PyObject *args);
 
 /* security.c */
 PyObject *wreath_host_allowed(PyObject *self, PyObject *args);
@@ -184,7 +238,13 @@ PyObject *wreath_prometheus_global_block(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_counter_block(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_document(PyObject *self, PyObject *args);
 PyObject *wreath_statsd_lines(PyObject *self, PyObject *args);
+PyObject *wreath_statsd_packets(PyObject *self, PyObject *args);
 PyObject *wreath_emf_render(PyObject *self, PyObject *args);
+
+/* client_facts.c -- native policy boundary, no Python result materialization. */
+int wreath_user_agent_blocked(PyObject *database, PyObject *value,
+                              PyObject *table, int *blocked);
+int wreath_user_agent_database_check(PyObject *database);
 PyObject *wreath_metric_delta_state(PyObject *self, PyObject *arg);
 
 /* series.c */
@@ -297,6 +357,12 @@ typedef struct {
      * The returned dict is the public Python boundary; scanning and joining
      * stay in the sibling extension that owns its native header block. */
     PyObject *(*parse_cookie_data)(const uint8_t *data, Py_ssize_t len);
+    /* Scan every product token and report whether any stable rule id occurs in
+     * the operation-owned packed table. No classification tuple crosses the
+     * sibling-extension boundary. */
+    int (*user_agent_blocked)(PyObject *database, PyObject *value,
+                              PyObject *table, int *blocked);
+    int (*user_agent_database_check)(PyObject *database);
 } WreathCoreCAPI;
 
 #define WREATH_CORE_CAPI_NAME "wreath._native._core._C_API"

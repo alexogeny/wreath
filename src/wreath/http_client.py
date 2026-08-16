@@ -37,6 +37,7 @@ import asyncio
 import ipaddress
 import socket
 import ssl
+import threading
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +57,9 @@ from ._flight_markers import (
 )
 from ._flight_markers import (
     CAP_OUTBOUND_RESPONSE as _CAP_OUTBOUND_RESPONSE,
+)
+from ._flight_markers import (
+    CAP_OUTBOUND_HTTP_EXCHANGE as _CAP_OUTBOUND_HTTP_EXCHANGE,
 )
 from ._flight_markers import (
     COV_EXTERNAL as _COV_EXTERNAL,
@@ -935,6 +939,8 @@ class HTTPClient:
         #: partially-read response leaves the socket mid-message.
         "_framed_cleanly",
         "_condition",
+        "_capture_lock",
+        "_capture_sequence",
         "_destination",
         "_dns_addresses",
         "_dns_expires_at",
@@ -1007,6 +1013,8 @@ class HTTPClient:
             else None
         )
         self._condition = asyncio.Condition()
+        self._capture_lock = threading.Lock()
+        self._capture_sequence = 0
         self._dns_lock = asyncio.Lock()
         # Metadata-image ID for phase attribution; stamped by the app when the
         # flight recorder joins live objects to the image (0 = unattributed).
@@ -1119,6 +1127,7 @@ class HTTPClient:
                 "requests": reading.requests,
                 "reused": reading.reused,
             },
+            gauges=frozenset({"active", "idle", "waiters"}),
         )
 
     def snapshot(self) -> ClientSnapshot:
@@ -1271,6 +1280,15 @@ class HTTPClient:
         # body in the finally, so a failed/timed-out call still records what it
         # sent. Both are redacted natively per the arm's dependency disposition.
         capture = _capture_marker.get(None)
+        sequence = 0
+        if capture is not None:
+            with self._capture_lock:
+                sequence = self._capture_sequence
+                if sequence > 0xFFFFFFFFFFFFFFFF:
+                    raise OverflowError(
+                        f"HTTP client {self._name!r} forensic sequence exceeds uint64"
+                    )
+                self._capture_sequence += 1
         if capture is not None and body:
             capture(_CAP_OUTBOUND_REQUEST, bytes(body))
         start = _monotonic_ns()
@@ -1286,6 +1304,28 @@ class HTTPClient:
                    _monotonic_ns() - start)
             if capture is not None and response is not None and response.body:
                 capture(_CAP_OUTBOUND_RESPONSE, response.body)
+            if capture is not None and response is not None:
+                from ._http_replay import RecordedHttpExchange, encode_exchange
+
+                capture(
+                    _CAP_OUTBOUND_HTTP_EXCHANGE,
+                    encode_exchange(
+                        RecordedHttpExchange(
+                            dependency_id=self._flight_dep_id,
+                            method=method,
+                            target=target,
+                            request_headers=tuple(headers),
+                            request_body=bytes(body),
+                            idempotency_key=idempotency_key,
+                            response_status=response.status,
+                            response_headers=response.headers,
+                            response_body=response.body,
+                            http_version=response.http_version,
+                            reason=response.reason,
+                            sequence=sequence,
+                        )
+                    ),
+                )
 
     async def _request_timed(
         self,

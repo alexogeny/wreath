@@ -217,6 +217,28 @@ class OtlpHttpExporter:
         if request.get("resourceSpans"):
             self._post(self._traces_url, request, "traces")
 
+    def _export_projected(
+        self,
+        value: Any,
+        *,
+        present: bool,
+        url: str,
+        signal: str,
+        encoder_name: str,
+        builder: Callable[..., dict[str, Any]],
+        options: dict[str, Any],
+    ) -> None:
+        """Export one projected signal through its selected OTLP encoding."""
+        if not present:
+            return
+        if self._encoding == "protobuf":
+            from . import _otlp_proto
+
+            encoder = getattr(_otlp_proto, encoder_name)
+            self._post_body(url, encoder(value, **options))
+            return
+        self._post(url, builder(value, **options), signal)
+
     def export_projected_traces(
         self,
         traces: list[ProjectedTrace],
@@ -225,24 +247,14 @@ class OtlpHttpExporter:
         resource_attributes: dict[str, str] | None,
     ) -> None:
         """Export projected traces without a request tree for protobuf."""
-        if not traces:
-            return
-        if self._encoding == "protobuf":
-            from ._otlp_proto import encode_projected_traces
-
-            body = encode_projected_traces(
-                traces,
-                image=image,
-                resource_attributes=resource_attributes,
-            )
-            self._post_body(self._traces_url, body)
-            return
-        self.export_traces(
-            build_trace_request(
-                traces,
-                image=image,
-                resource_attributes=resource_attributes,
-            )
+        self._export_projected(
+            traces,
+            present=bool(traces),
+            url=self._traces_url,
+            signal="traces",
+            encoder_name="encode_projected_traces",
+            builder=build_trace_request,
+            options={"image": image, "resource_attributes": resource_attributes},
         )
 
     def export_logs(self, request: dict[str, Any]) -> None:
@@ -257,24 +269,14 @@ class OtlpHttpExporter:
         resource_attributes: dict[str, str] | None,
     ) -> None:
         """Export projected logs without a request tree for protobuf."""
-        if not records:
-            return
-        if self._encoding == "protobuf":
-            from ._otlp_proto import encode_projected_logs
-
-            body = encode_projected_logs(
-                records,
-                registry=registry,
-                resource_attributes=resource_attributes,
-            )
-            self._post_body(self._logs_url, body)
-            return
-        self.export_logs(
-            build_logs_request(
-                records,
-                registry=registry,
-                resource_attributes=resource_attributes,
-            )
+        self._export_projected(
+            records,
+            present=bool(records),
+            url=self._logs_url,
+            signal="logs",
+            encoder_name="encode_projected_logs",
+            builder=build_logs_request,
+            options={"registry": registry, "resource_attributes": resource_attributes},
         )
 
     def export_metrics(self, request: dict[str, Any]) -> None:
@@ -291,28 +293,19 @@ class OtlpHttpExporter:
         resource_attributes: dict[str, str] | None,
     ) -> None:
         """Export a snapshot without a request tree on the protobuf transport."""
-        if not snapshot.routes:
-            return
-        if self._encoding == "protobuf":
-            from ._otlp_proto import encode_projected_metrics
-
-            body = encode_projected_metrics(
-                snapshot,
-                image=image,
-                start_unix_nano=start_unix_nano,
-                now_unix_nano=now_unix_nano,
-                resource_attributes=resource_attributes,
-            )
-            self._post_body(self._metrics_url, body)
-            return
-        self.export_metrics(
-            build_metrics_request(
-                snapshot,
-                image=image,
-                start_unix_nano=start_unix_nano,
-                now_unix_nano=now_unix_nano,
-                resource_attributes=resource_attributes,
-            )
+        self._export_projected(
+            snapshot,
+            present=bool(snapshot.routes),
+            url=self._metrics_url,
+            signal="metrics",
+            encoder_name="encode_projected_metrics",
+            builder=build_metrics_request,
+            options={
+                "image": image,
+                "start_unix_nano": start_unix_nano,
+                "now_unix_nano": now_unix_nano,
+                "resource_attributes": resource_attributes,
+            },
         )
 
 

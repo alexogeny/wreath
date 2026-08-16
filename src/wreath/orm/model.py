@@ -12,10 +12,10 @@ request validation share one type rule.
 
 from __future__ import annotations
 
-import re
 from typing import Any, ClassVar
 
 from .._native import _postgres as _storage
+from .._pgname import validate_unquoted_identifier
 from .constraints import (
     CheckViolation,
     Narrow,
@@ -55,23 +55,9 @@ STATE_NAMES = {
     DETACHED: "detached",
 }
 
-# Unquoted PostgreSQL identifiers fold to lower case, so an upper-case name in
-# a declaration would silently disagree with the catalog. Matched with
-# `fullmatch`, never `match`: `$` also matches immediately before a trailing
-# newline, so `^...$` accepted `table="users\n"` into the emitted DDL.
-_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
-
-
 def validate_identifier(value: str, kind: str) -> str:
-    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
-        raise DeclarationError(
-            f"{kind} {value!r} is not a valid unquoted PostgreSQL identifier: "
-            "use lower-case letters, digits, and underscores, starting with a "
-            "letter or underscore"
-        )
-    if len(value.encode("utf-8")) > 63:
-        raise DeclarationError(f"{kind} {value!r} exceeds PostgreSQL's 63-byte limit")
-    return value
+    """Validate ORM's unquoted form through the PostgreSQL name authority."""
+    return validate_unquoted_identifier(value, kind, error=DeclarationError)
 
 
 #: ModelMeta derives from the storage metatype, so every

@@ -538,9 +538,10 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
 
     expressions: list[str] = []
     for path in paths:
-        expression = "select"
+        fragments = ["select"]
         for step in path:
-            expression += f"[{step}]" if isinstance(step, int) else f".{step}"
+            fragments.append(f"[{step}]" if isinstance(step, int) else f".{step}")
+        expression = "".join(fragments)
         expressions.append(f"{expression}.pg_type.to_wire({expression}.value)")
     if select.limit_ is not None:
         expressions.append("select.limit_")

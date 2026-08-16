@@ -1523,20 +1523,20 @@ as_decimal(PyObject *value)
 
 /* Pack a Decimal into PostgreSQL's base-10000 numeric wire form:
    ndigits, weight, sign, dscale, then ndigits groups most significant first.
-   The value is sum(digit[i] * 10000 ** (weight - i)); dscale rides alongside as
-   the display scale, which is why Decimal("1.10") survives as 1.10, not 1.1.
-
-   The digit arithmetic runs through Python ints rather than a C bignum: numeric
-   is arbitrary precision, so a C implementation would mean a second bignum in
-   the tree and a standing parity risk, for a type that is not on any hot path. */
+   Decimal.as_tuple() is the input boundary and the result bytes are the output
+   boundary. Between them the coefficient stays in an unboxed C digit buffer:
+   rebuilding it as a Python bigint made both the per-digit multiply and the
+   repeated base-10000 division quadratic in precision. */
 static PyObject *
 encode_numeric(PyObject *value)
 {
     PyObject *number = NULL, *parts = NULL, *digits = NULL, *exponent = NULL;
-    PyObject *unscaled = NULL, *ten = NULL, *scratch = NULL, *result = NULL;
-    PyObject *groups = NULL;
-    long sign_flag = 0, dscale = 0, exp_value = 0, padding = 0;
-    Py_ssize_t ndigits, fraction_groups, count, i;
+    PyObject *result = NULL;
+    unsigned char *coefficient = NULL;
+    unsigned short *groups = NULL;
+    long sign_flag = 0, dscale = 0, exp_value = 0;
+    Py_ssize_t count, appended, padding, total_digits, group_count;
+    Py_ssize_t fraction_groups, lead, tail, ndigits, weight, i;
     unsigned char header[8];
     char *out;
 
@@ -1567,111 +1567,111 @@ encode_numeric(PyObject *value)
     }
     exp_value = PyLong_AsLong(exponent);
     if (exp_value == -1 && PyErr_Occurred()) goto done;
-
-    /* unscaled = the coefficient digits as one integer. */
-    count = PyTuple_Check(digits) ? PyTuple_GET_SIZE(digits) : 0;
-    unscaled = PyLong_FromLong(0);
-    ten = PyLong_FromLong(10);
-    if (unscaled == NULL || ten == NULL) goto done;
+    if (!PyTuple_Check(digits)) {
+        PyErr_SetString(PyExc_TypeError, "invalid Decimal digits");
+        goto done;
+    }
+    count = PyTuple_GET_SIZE(digits);
+    coefficient = PyMem_Malloc((size_t)(count > 0 ? count : 1));
+    if (coefficient == NULL) {
+        PyErr_NoMemory();
+        goto done;
+    }
     for (i = 0; i < count; i++) {
-        PyObject *scaled = PyNumber_Multiply(unscaled, ten);
-        if (scaled == NULL) goto done;
-        Py_SETREF(unscaled, PyNumber_Add(scaled, PyTuple_GET_ITEM(digits, i)));
-        Py_DECREF(scaled);
-        if (unscaled == NULL) goto done;
+        long digit = PyLong_AsLong(PyTuple_GET_ITEM(digits, i));
+        if ((digit == -1 && PyErr_Occurred()) || digit < 0 || digit > 9) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError,
+                             "invalid Decimal digit %ld at position %zd", digit, i);
+            goto done;
+        }
+        coefficient[i] = (unsigned char)digit;
     }
 
+    appended = 0;
     if (exp_value > 0) {
-        /* A positive exponent is whole-number magnitude. Multiply it out so the
-           group split below always works against a plain integer -- which is
-           also what PostgreSQL itself stores: '1E+100'::numeric has scale 0. */
-        scratch = PyLong_FromLong(exp_value);
-        if (scratch == NULL) goto done;
-        Py_SETREF(scratch, PyNumber_Power(ten, scratch, Py_None));
-        if (scratch == NULL) goto done;
-        Py_SETREF(unscaled, PyNumber_Multiply(unscaled, scratch));
-        Py_CLEAR(scratch);
-        if (unscaled == NULL) goto done;
+        if ((unsigned long)exp_value > (unsigned long)PY_SSIZE_T_MAX) {
+            PyErr_SetString(PyExc_ValueError,
+                            "numeric exponent exceeds the PostgreSQL wire format");
+            goto done;
+        }
+        appended = (Py_ssize_t)exp_value;
         exp_value = 0;
     }
+    else if (exp_value == LONG_MIN) {
+        PyErr_SetString(PyExc_ValueError,
+                        "numeric exponent exceeds the PostgreSQL wire format");
+        goto done;
+    }
     dscale = -exp_value;
-
-    /* Pad the fraction out to a whole number of base-10000 groups so the split
-       lands on a group boundary. */
-    padding = ((-dscale) % 4 + 4) % 4;
-    if (padding) {
-        scratch = PyLong_FromLong(padding);
-        if (scratch == NULL) goto done;
-        Py_SETREF(scratch, PyNumber_Power(ten, scratch, Py_None));
-        if (scratch == NULL) goto done;
-        Py_SETREF(unscaled, PyNumber_Multiply(unscaled, scratch));
-        Py_CLEAR(scratch);
-        if (unscaled == NULL) goto done;
+    if (dscale > 0xFFFF) {
+        PyErr_Format(PyExc_ValueError,
+                     "numeric display scale %ld exceeds PostgreSQL's 65535 limit",
+                     dscale);
+        goto done;
     }
-    fraction_groups = (Py_ssize_t)((dscale + padding) / 4);
-
-    groups = PyList_New(0);
-    if (groups == NULL) goto done;
-    {
-        PyObject *base = PyLong_FromLong(10000);
-        if (base == NULL) goto done;
-        while (PyObject_IsTrue(unscaled)) {
-            PyObject *pair = PyNumber_Divmod(unscaled, base);
-            if (pair == NULL) { Py_DECREF(base); goto done; }
-            if (PyList_Append(groups, PyTuple_GET_ITEM(pair, 1)) < 0) {
-                Py_DECREF(pair); Py_DECREF(base); goto done;
-            }
-            Py_SETREF(unscaled, Py_NewRef(PyTuple_GET_ITEM(pair, 0)));
-            Py_DECREF(pair);
-        }
-        Py_DECREF(base);
+    padding = (Py_ssize_t)((4 - (dscale & 3)) & 3);
+    if (count > PY_SSIZE_T_MAX - appended - padding) {
+        PyErr_NoMemory();
+        goto done;
     }
-    if (PyList_Reverse(groups) < 0) goto done;
-
-    ndigits = PyList_GET_SIZE(groups);
+    total_digits = count + appended + padding;
+    group_count = total_digits / 4 + (total_digits % 4 != 0);
+    if (group_count > 32767) {
+        PyErr_Format(PyExc_ValueError,
+                     "numeric needs %zd base-10000 groups; PostgreSQL permits 32767",
+                     group_count);
+        goto done;
+    }
+    groups = PyMem_Calloc((size_t)(group_count > 0 ? group_count : 1),
+                          sizeof(*groups));
+    if (groups == NULL) {
+        PyErr_NoMemory();
+        goto done;
+    }
     {
-        long weight = (long)(ndigits - 1 - fraction_groups);
-        Py_ssize_t lead = 0, tail;
-        /* PostgreSQL sends no leading or trailing zero groups; dscale still
-           records the display scale, so stripping cannot lose precision. */
-        while (lead < PyList_GET_SIZE(groups) &&
-               PyLong_AsLong(PyList_GET_ITEM(groups, lead)) == 0) {
-            lead++; weight--;
+        static const unsigned short places[] = {1000, 100, 10, 1};
+        Py_ssize_t prefix = group_count * 4 - total_digits;
+        for (i = 0; i < count; i++) {
+            Py_ssize_t position = prefix + i;
+            groups[position / 4] = (unsigned short)(groups[position / 4] +
+                coefficient[i] * places[position & 3]);
         }
-        if (lead && PyList_SetSlice(groups, 0, lead, NULL) < 0) goto done;
-        tail = PyList_GET_SIZE(groups);
-        while (tail > 0 && PyLong_AsLong(PyList_GET_ITEM(groups, tail - 1)) == 0) tail--;
-        if (tail < PyList_GET_SIZE(groups) &&
-            PyList_SetSlice(groups, tail, PyList_GET_SIZE(groups), NULL) < 0) goto done;
-        ndigits = PyList_GET_SIZE(groups);
-        if (ndigits == 0) {
-            /* PostgreSQL has no signed zero -- '-0'::numeric is 0 -- so a
-               negative zero goes on the wire positive rather than as a sign the
-               server would never produce. */
-            weight = 0;
-            sign_flag = 0;
-        }
-        result = PyBytes_FromStringAndSize(NULL, 8 + ndigits * 2);
-        if (result == NULL) goto done;
-        out = PyBytes_AS_STRING(result);
-        out[0] = (char)((ndigits >> 8) & 0xFF); out[1] = (char)(ndigits & 0xFF);
-        out[2] = (char)((weight >> 8) & 0xFF);  out[3] = (char)(weight & 0xFF);
-        {
-            unsigned int sign_word = sign_flag ? PG_NUMERIC_NEG : PG_NUMERIC_POS;
-            out[4] = (char)(sign_word >> 8); out[5] = (char)sign_word;
-        }
-        out[6] = (char)((dscale >> 8) & 0xFF); out[7] = (char)(dscale & 0xFF);
-        for (i = 0; i < ndigits; i++) {
-            long group = PyLong_AsLong(PyList_GET_ITEM(groups, i));
-            if (group == -1 && PyErr_Occurred()) { Py_CLEAR(result); goto done; }
-            out[8 + i * 2] = (char)((group >> 8) & 0xFF);
-            out[9 + i * 2] = (char)(group & 0xFF);
-        }
+    }
+    fraction_groups = (Py_ssize_t)(dscale + padding) / 4;
+    lead = 0;
+    while (lead < group_count && groups[lead] == 0) lead++;
+    tail = group_count;
+    while (tail > lead && groups[tail - 1] == 0) tail--;
+    ndigits = tail - lead;
+    weight = ndigits == 0 ? 0 : group_count - 1 - fraction_groups - lead;
+    if (weight < -32768 || weight > 32767) {
+        PyErr_Format(PyExc_ValueError,
+                     "numeric weight %zd exceeds PostgreSQL's signed 16-bit limit",
+                     weight);
+        goto done;
+    }
+    if (ndigits == 0) sign_flag = 0;
+
+    result = PyBytes_FromStringAndSize(NULL, 8 + ndigits * 2);
+    if (result == NULL) goto done;
+    out = PyBytes_AS_STRING(result);
+    out[0] = (char)((ndigits >> 8) & 0xFF); out[1] = (char)(ndigits & 0xFF);
+    out[2] = (char)((weight >> 8) & 0xFF); out[3] = (char)(weight & 0xFF);
+    {
+        unsigned int sign_word = sign_flag ? PG_NUMERIC_NEG : PG_NUMERIC_POS;
+        out[4] = (char)(sign_word >> 8); out[5] = (char)sign_word;
+    }
+    out[6] = (char)((dscale >> 8) & 0xFF); out[7] = (char)(dscale & 0xFF);
+    for (i = 0; i < ndigits; i++) {
+        unsigned short group = groups[lead + i];
+        out[8 + i * 2] = (char)(group >> 8);
+        out[9 + i * 2] = (char)(group & 0xFF);
     }
 
 done:
     Py_XDECREF(number); Py_XDECREF(parts); Py_XDECREF(digits); Py_XDECREF(exponent);
-    Py_XDECREF(unscaled); Py_XDECREF(ten); Py_XDECREF(scratch); Py_XDECREF(groups);
+    PyMem_Free(coefficient); PyMem_Free(groups);
     return result;
 }
 

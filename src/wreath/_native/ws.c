@@ -169,11 +169,19 @@ PyObject *
 wreath_ws_parse_frame(PyObject *Py_UNUSED(self), PyObject *args)
 {
     Py_buffer view;
-    if (!PyArg_ParseTuple(args, "y*:ws_parse_frame", &view)) {
+    Py_ssize_t offset = 0;
+    if (!PyArg_ParseTuple(args, "y*|n:ws_parse_frame", &view, &offset)) {
         return NULL;
     }
-    const uint8_t *buf = view.buf;
-    Py_ssize_t len = view.len;
+    if (offset < 0 || offset > view.len) {
+        PyBuffer_Release(&view);
+        PyErr_Format(PyExc_ValueError,
+                     "WebSocket frame offset must be between 0 and %zd, got %zd",
+                     view.len, offset);
+        return NULL;
+    }
+    const uint8_t *buf = (const uint8_t *)view.buf + offset;
+    Py_ssize_t len = view.len - offset;
     WreathWsFrameHeader header;
     int rc = wreath_ws_parse_header_raw(buf, len, &header);
 

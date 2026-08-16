@@ -402,8 +402,9 @@ class QueryDeclaration:
             if name not in values:
                 raise TypeError(f"{self.name}() is missing parameter {name!r}")
         if len(values) != len(names):
+            known = frozenset(names)
             for name in values:
-                if name not in names:
+                if name not in known:
                     raise TypeError(f"{self.name}() got an unexpected parameter {name!r}")
 
     def _bind_validated(self, values: dict[str, Any]) -> Select:
@@ -655,8 +656,9 @@ class Fusion:
             if name not in values:
                 raise TypeError(f"{self.name}() is missing parameter {name!r}")
         if len(values) != len(names):
+            known = frozenset(names)
             for name in values:
-                if name not in names:
+                if name not in known:
                     raise TypeError(f"{self.name}() got an unexpected parameter {name!r}")
 
     def __get__(self, instance: Any, owner: type | None = None) -> Any:

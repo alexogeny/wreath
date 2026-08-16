@@ -29,6 +29,7 @@ from typing import Any, Final
 from ._flight_schema import (
     CELL_SIZE,
     RING_FILE_HEADER_BYTES,
+    ClientFactsCell,
     CompletionCell,
     CorrelationCell,
     EventKind,
@@ -38,6 +39,7 @@ from ._flight_schema import (
     RingFileHeader,
     SchemaError,
 )
+from ._native import _core
 
 __all__ = [
     "DecodedRing",
@@ -55,6 +57,7 @@ _DECODERS: Final[dict[int, Any]] = {
     int(EventKind.CORRELATION): CorrelationCell,
     int(EventKind.PHASE): PhaseBatchCell,
     int(EventKind.LOG): LogCell,
+    int(EventKind.CLIENT_FACTS): ClientFactsCell,
 }
 
 
@@ -152,19 +155,31 @@ class DecodedRing:
         one that never completed -- which is why `ring_full_drops` is worth
         checking before believing this.
         """
+        return _core.ring_in_flight(
+            self.records, int(EventKind.COMPLETION), int(EventKind.LOG)
+        )
+
+    def _in_flight_reference(self) -> tuple[int, ...]:
+        """Independent Python definition retained for kernel parity tests."""
         completed = {
             record.decode().request_id
             for record in self.of_kind(EventKind.COMPLETION)
         }
         logged: list[int] = []
+        seen: set[int] = set()
         for record in self.of_kind(EventKind.LOG):
             request_id = record.decode().request_id
-            if request_id and request_id not in completed and request_id not in logged:
+            if request_id and request_id not in completed and request_id not in seen:
+                seen.add(request_id)
                 logged.append(request_id)
         return tuple(logged)
 
     def logs_for(self, request_id: int) -> tuple[RingRecord, ...]:
         """One request's log records, in the order the ring published them."""
+        return _core.ring_logs_for(self.records, request_id, int(EventKind.LOG))
+
+    def _logs_for_reference(self, request_id: int) -> tuple[RingRecord, ...]:
+        """Independent Python definition retained for kernel parity tests."""
         return tuple(
             record
             for record in self.of_kind(EventKind.LOG)
@@ -209,48 +224,30 @@ def read_ring_file(path: str | os.PathLike[str]) -> DecodedRing:
             f"a ring file is at least {RING_FILE_HEADER_BYTES} bytes, got {len(blob)}"
         )
     header = RingFileHeader.decode(blob)
-    cells = memoryview(blob)[RING_FILE_HEADER_BYTES:]
+    cell_bytes = len(blob) - RING_FILE_HEADER_BYTES
     expected = header.ring_records * CELL_SIZE
-    if len(cells) < expected:
+    if cell_bytes < expected:
         raise SchemaError(
             f"ring file declares {header.ring_records} records "
-            f"({expected} bytes of cells) but holds {len(cells)}"
+            f"({expected} bytes of cells) but holds {cell_bytes}"
         )
 
-    # The two cursors are mirrored independently, and a crash can land between
-    # them. Neither a tail past the head nor a window wider than the ring is a
-    # state this writer produces -- it refuses when full rather than
-    # overwriting -- so both mean a header torn mid-update. Clamp to what the
-    # geometry allows and say so, rather than inventing a negative window or
-    # reading a lap that was never written.
-    head, tail = header.head, header.tail
-    inconsistent = tail > head or head - tail > header.ring_records
-    if tail > head:
-        tail = head
-    span = min(head - tail, header.ring_records)
-    first = head - span
-
-    records: list[RingRecord] = []
-    undecodable = 0
-    for sequence in range(first, head):
-        slot = sequence % header.ring_records
-        raw = bytes(cells[slot * CELL_SIZE : (slot + 1) * CELL_SIZE])
-        try:
-            decoded = decode_cell(raw)
-        except SchemaError:
-            undecodable += 1
-            continue
-        if decoded is None:
-            # A kind no reader assembles (CONTROL), or a slot never written --
-            # an INVALID kind byte of 0 in a ring that has not yet wrapped.
-            # Neither is a defect, and neither is a record.
-            continue
-        records.append(RingRecord(sequence=sequence, kind=raw[1], raw=raw))
+    # Cursor clamping, slot traversal and cell validation stay inside one native
+    # operation. Only the final RingRecord objects cross back into Python; the
+    # typed cells remain lazy behind RingRecord.decode().
+    records, undecodable, drained, inconsistent = _core.ring_file_records(
+        blob,
+        RING_FILE_HEADER_BYTES,
+        header.ring_records,
+        header.head,
+        header.tail,
+        RingRecord,
+    )
 
     return DecodedRing(
         header=header,
-        records=tuple(records),
+        records=records,
         undecodable=undecodable,
-        drained=tail,
+        drained=drained,
         cursors_inconsistent=inconsistent,
     )

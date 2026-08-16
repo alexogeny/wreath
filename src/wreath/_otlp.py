@@ -32,6 +32,9 @@ from typing import Any, Final
 from typing import Protocol as _Protocol
 
 from ._flight_schema import (
+    FLAG_AI_SCRAPING_REFUSED,
+    FLAG_POLICY_REFUSED,
+    ClientFactFlag,
     MetadataImage,
     PhaseKind,
     Protocol,
@@ -91,6 +94,10 @@ def _str(key: str, value: str) -> dict[str, Any]:
 
 def _int(key: str, value: int) -> dict[str, Any]:
     return {"key": key, "value": {"intValue": str(value)}}
+
+
+def _bool(key: str, value: bool) -> dict[str, Any]:
+    return {"key": key, "value": {"boolValue": value}}
 
 
 def _hex_trace(trace_id: int) -> str:
@@ -175,6 +182,58 @@ def _server_span(trace: ProjectedTrace, routes: _Routes) -> dict[str, Any]:
         attributes.append(_str("http.route", route.path))
     if trace.error_class:
         attributes.append(_str("error.type", f"class:{trace.error_class}"))
+    if trace.flags & FLAG_POLICY_REFUSED:
+        attributes.append(_bool("wreath.policy.refused", True))
+        attributes.append(
+            _str(
+                "wreath.policy.disposition",
+                "ai_scraping"
+                if trace.flags & FLAG_AI_SCRAPING_REFUSED
+                else "refused",
+            )
+        )
+    client = trace.client_facts
+    if client is not None:
+        facts = ClientFactFlag(client.flags)
+        attributes.append(
+            _bool("wreath.client.agent.claimed", bool(facts & ClientFactFlag.BOT_CLAIMED))
+        )
+        attributes.append(
+            _bool(
+                "wreath.client.agent.verified",
+                bool(facts & ClientFactFlag.AGENT_VERIFIED),
+            )
+        )
+        attributes.append(
+            _bool("wreath.user_agent.classified", bool(facts & ClientFactFlag.UA_KNOWN))
+        )
+        if client.user_agent_rule_id:
+            attributes.append(
+                _int("wreath.user_agent.rule_id", client.user_agent_rule_id)
+            )
+        if facts & ClientFactFlag.BOT_CLAIMED:
+            attributes.append(_str("user_agent.synthetic.type", "bot"))
+        if facts & ClientFactFlag.MOBILE_KNOWN:
+            attributes.append(
+                _bool("browser.mobile", bool(facts & ClientFactFlag.MOBILE))
+            )
+        if facts & ClientFactFlag.IP_KNOWN:
+            attributes.append(
+                _str(
+                    "network.type",
+                    "ipv6" if facts & ClientFactFlag.IPV6 else "ipv4",
+                )
+            )
+            attributes.append(
+                _str(
+                    "wreath.client.address_source",
+                    "forwarded"
+                    if facts & ClientFactFlag.IP_FORWARDED
+                    else "socket",
+                )
+            )
+        if client.country is not None:
+            attributes.append(_str("geo.country.iso_code", client.country))
 
     span: dict[str, Any] = {
         "traceId": _hex_trace(trace_id),

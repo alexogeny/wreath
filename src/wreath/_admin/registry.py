@@ -282,25 +282,27 @@ class Admin:
                     f"`{role}` names them"
                 )
 
-        withheld = sensitive_fields(model) | retrieval_fields(model)
+        sensitive = sensitive_fields(model)
+        withheld = sensitive | retrieval_fields(model)
         shown = tuple(
             name for name in columns
             if name not in excluded and (name not in withheld or name in exposed)
         )
+        shown_names = frozenset(shown)
         generated = frozenset(name for name, item in columns.items() if item.generated)
         editable = tuple(
             name for name in shown
             if name != primary_key
             and name not in readonly_set
             and name not in generated
-            and name not in sensitive_fields(model)
+            and name not in sensitive
         )
 
         if list_columns is None:
             listed = shown
         else:
             listed = tuple(list_columns)
-            missing = sorted(name for name in listed if name not in shown)
+            missing = sorted(name for name in listed if name not in shown_names)
             if missing:
                 raise AdminError(
                     f"`list_columns` names {', '.join(missing)}, which this "
@@ -325,7 +327,7 @@ class Admin:
             columns=shown,
             list_columns=listed,
             editable=editable,
-            sortable=frozenset(sortable_fields(model)) & frozenset(shown),
+            sortable=frozenset(sortable_fields(model)) & shown_names,
             python_types=_python_types(model, editable),
             field_access=access,
             operations=frozenset(operations),
@@ -831,26 +833,14 @@ def _page_params(request: Any, entry: ModelAdmin) -> PageParams:
     defaulting `size` per registration, so the bounds and the parse come from
     there rather than being written again.
     """
-    from ..pagination import MAX_PAGE, parse_sort
+    from ..pagination import _page_params as parse_page_params
 
-    values = _query_of(request)
-    page = _bounded(values.get("page"), 1, MAX_PAGE)
-    size = _bounded(values.get("size"), entry.page_size, MAX_SIZE)
+    parsed = parse_page_params(request, default_size=entry.page_size)
     sort = tuple(
-        token for token in parse_sort(values.get("sort") or "")
+        token for token in parsed.sort
         if token.lstrip("-") in entry.sortable
     )
-    return PageParams(page=page, size=size, sort=sort)
-
-
-def _bounded(raw: str | None, default: int, ceiling: int) -> int:
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(1, min(value, ceiling))
+    return PageParams(page=parsed.page, size=parsed.size, sort=sort)
 
 
 def _page_url(root: str, query: dict[str, str], page: int) -> str:

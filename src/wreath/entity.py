@@ -605,6 +605,7 @@ class EntityRegistry:
                 "unrouted": self._unrouted,
                 "outstanding": self.outstanding,
             },
+            gauges=frozenset({"held", "outstanding"}),
         )
 
     async def start(self, supervisor: Any) -> None:

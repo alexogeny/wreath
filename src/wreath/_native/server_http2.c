@@ -331,22 +331,6 @@ body_queue_pop(Http2Stream *self, Py_ssize_t *flow_bytes)
     return body;
 }
 
-static int
-read_ssize(PyObject *config, const char *name, Py_ssize_t *out)
-{
-    PyObject *v = PyObject_GetAttrString(config, name);
-    if (v == NULL) {
-        return -1;
-    }
-    Py_ssize_t val = PyLong_AsSsize_t(v);
-    Py_DECREF(v);
-    if (val == -1 && PyErr_Occurred()) {
-        return -1;
-    }
-    *out = val;
-    return 0;
-}
-
 static void
 put_u32(uint8_t *p, uint32_t v)
 {
@@ -1986,6 +1970,13 @@ static int
 start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
               int end_stream)
 {
+    /* HEADERS opened this client stream even when admission or policy refuses
+     * it below. Remember that fact before any early stream-level response so
+     * DATA already in flight is never misclassified as DATA on an idle stream
+     * and escalated to a connection-level PROTOCOL_ERROR. */
+    if (sid > self->last_stream_id) {
+        self->last_stream_id = sid;
+    }
     /* concurrency limit */
     if (self->active_requests >= self->max_concurrent) {
         return h2_stream_error((PyObject *)self, sid, H2_REFUSED_STREAM);
@@ -2082,23 +2073,26 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         PyObject *policy_headers = wreath_request_context_headers(scope);
         Py_XINCREF(policy_headers);
         PyObject *policy_method = PyObject_GetAttrString(scope, "method");
+        PyObject *policy_path = PyObject_GetAttrString(scope, "path");
         PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
         PyObject *policy_client = PyObject_GetAttrString(scope, "client");
         WreathPolicyReply reply = {0};
-        if (policy_headers == NULL || policy_method == NULL ||
+        if (policy_headers == NULL || policy_method == NULL || policy_path == NULL ||
             policy_scheme == NULL || policy_client == NULL) {
             Py_XDECREF(policy_headers);
             Py_XDECREF(policy_method);
+            Py_XDECREF(policy_path);
             Py_XDECREF(policy_scheme);
             Py_XDECREF(policy_client);
             Py_DECREF(st);
             return -1;
         }
         int policy_result = wreath_policy_ingress(
-            &self->policy, &st->policy_state, policy_method, policy_scheme,
-            policy_client, policy_headers, &reply);
+            &self->policy, &st->policy_state, policy_method, policy_path,
+            policy_scheme, policy_client, policy_headers, &reply);
         Py_DECREF(policy_headers);
         Py_DECREF(policy_method);
+        Py_DECREF(policy_path);
         Py_DECREF(policy_scheme);
         Py_DECREF(policy_client);
         if (policy_result < 0) {
@@ -2108,6 +2102,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         }
         wreath_request_context_set_policy(scope, &st->policy_state);
         if (policy_result > 0) {
+            uint64_t refusal_started_ns = wreath_flight_now_ns();
             PyObject *status = PyLong_FromLong(reply.status);
             PyObject *started = status != NULL
                 ? h2_response_start(st, status, reply.headers, 0, 0) : NULL;
@@ -2115,9 +2110,21 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
             PyObject *finished = started != NULL
                 ? h2_response_body(st, reply.body, 0, 1) : NULL;
             Py_XDECREF(started);
+            if (finished != NULL) {
+                wreath_policy_record_completion(
+                    flight_capi, self->nfr_worker, self->nfr_connection_id,
+                    WREATH_NFR_PROTO_HTTP2, refusal_started_ns,
+                    wreath_flight_now_ns(), header_list, &reply, 0,
+                    (uint64_t)PyBytes_GET_SIZE(reply.body));
+            }
             Py_XDECREF(finished);
             wreath_policy_reply_clear(&reply);
             if (finished == NULL) {
+                Py_DECREF(st);
+                return -1;
+            }
+            if (!end_stream &&
+                h2_stream_error((PyObject *)self, sid, H2_NO_ERROR) < 0) {
                 Py_DECREF(st);
                 return -1;
             }
@@ -2164,9 +2171,6 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     }
     Py_DECREF(key);
     self->active_requests++;
-    if (sid > self->last_stream_id) {
-        self->last_stream_id = sid;
-    }
 
     /* Begin the recorder context for this stream's request. */
     st->nfr_status = 200;
@@ -3427,12 +3431,12 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->write_paused = 0;
 
     Py_ssize_t v;
-    if (read_ssize(config, "max_concurrent_streams", &self->max_concurrent) < 0 ||
-        read_ssize(config, "initial_stream_window", &v) < 0) {
+    if (wreath_read_ssize_attr(config, "max_concurrent_streams", &self->max_concurrent) < 0 ||
+        wreath_read_ssize_attr(config, "initial_stream_window", &v) < 0) {
         return -1;
     }
     self->our_initial_window = v;
-    if (read_ssize(config, "initial_connection_window", &v) < 0) {
+    if (wreath_read_ssize_attr(config, "initial_connection_window", &v) < 0) {
         return -1;
     }
     self->conn_recv_window = v;
@@ -3442,11 +3446,11 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         self->conn_credit_threshold = 64 * 1024;
     }
     if (self->conn_credit_threshold < 1) self->conn_credit_threshold = 1;
-    if (read_ssize(config, "max_header_list_bytes", &self->max_header_list) < 0 ||
-        read_ssize(config, "max_header_count", &self->max_header_count) < 0 ||
-        read_ssize(config, "max_body_bytes", &self->max_body_bytes) < 0 ||
-        read_ssize(config, "max_body_chunks", &self->max_body_chunks) < 0 ||
-        read_ssize(config, "hpack_table_bytes", &self->hpack_max) < 0) {
+    if (wreath_read_ssize_attr(config, "max_header_list_bytes", &self->max_header_list) < 0 ||
+        wreath_read_ssize_attr(config, "max_header_count", &self->max_header_count) < 0 ||
+        wreath_read_ssize_attr(config, "max_body_bytes", &self->max_body_bytes) < 0 ||
+        wreath_read_ssize_attr(config, "max_body_chunks", &self->max_body_chunks) < 0 ||
+        wreath_read_ssize_attr(config, "hpack_table_bytes", &self->hpack_max) < 0) {
         return -1;
     }
     self->peer_initial_window = 65535;   /* RFC default until peer SETTINGS */

@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .._pgname import validate_unquoted_identifier
 from ..postgres import PostgresError
 from .keyset import PassDeclarationError
 
@@ -182,12 +183,9 @@ class Constraint:
     check_: str
 
     def __post_init__(self) -> None:
-        from .keyset import _IDENTIFIER  # one shared identifier rule
-
-        if not _IDENTIFIER.fullmatch(self.name or ""):
-            raise PassDeclarationError(
-                f"Constraint(name={self.name!r}) must be a plain SQL identifier"
-            )
+        validate_unquoted_identifier(
+            self.name, "constraint name", error=PassDeclarationError
+        )
         if not isinstance(self.check_, str) or not self.check_.strip():
             raise PassDeclarationError("Constraint(...) needs a CHECK expression")
 

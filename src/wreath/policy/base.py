@@ -1,34 +1,19 @@
-"""Configuration and execution records shared by first-class HTTP policy."""
+"""Compatibility names for the one configured-HTTP contract vocabulary.
+
+Middleware and first-class policy both contribute headers and responses to the
+same OpenAPI operation.  They therefore use the same value types; keeping a
+second pair here let the two vocabularies drift while consumers had to accept
+either class.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from ..middleware.base import BEHAVIOURS, HeaderSpec, MiddlewareContract
 
-BEHAVIOURS: frozenset[str] = frozenset(
-    {"idempotency-key", "retry-after", "etag", "csrf-token"}
-)
-
-
-@dataclass(frozen=True, slots=True)
-class HeaderSpec:
-    """One request or response header declared by configured policy."""
-
-    name: str
-    description: str = ""
-    required: bool = False
-    const: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PolicyContract:
-    """The HTTP surface one configured policy component contributes."""
-
-    request_headers: tuple[HeaderSpec, ...] = ()
-    response_headers: tuple[tuple[int | None, HeaderSpec], ...] = ()
-    responses: tuple[tuple[int, Any], ...] = ()
-    methods: frozenset[str] | None = None
-    behaviours: frozenset[str] = frozenset()
+# Public compatibility name.  An alias, not a subclass: a contract produced by
+# either configuration layer is the same value and must pass one exact type
+# check in OpenAPI/typegen consumers.
+PolicyContract = MiddlewareContract
 
 
 __all__ = ["BEHAVIOURS", "HeaderSpec", "PolicyContract"]

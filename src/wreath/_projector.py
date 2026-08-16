@@ -41,6 +41,7 @@ from ._drainthread import DrainThread
 from ._flight_schema import (
     FLAG_ERROR_PROMOTED,
     FLAG_SLOW_PROMOTED,
+    ClientFactsCell,
     CompletionCell,
     CorrelationCell,
     LogArg,
@@ -90,6 +91,7 @@ class ProjectorLoss:
 
     orphan_phase: int = 0
     orphan_correlation: int = 0
+    orphan_client_facts: int = 0
     orphan_log: int = 0
     pending_evicted: int = 0
     decode_error: int = 0
@@ -152,6 +154,7 @@ class ProjectedTrace:
     trace_id: int = 0
     span_id: int = 0
     parent_span_id: int = 0
+    client_facts: ClientFactsCell | None = None
     phases: tuple[PhaseRecord, ...] = ()
     #: Log records emitted during this request, joined by request id. Ordered as
     #: the ring published them.
@@ -314,6 +317,7 @@ class Projector:
             LogArg,
             LogArgType,
             Severity,
+            ClientFactsCell,
         )
         self._drain = DrainThread(
             "wreath-flight-projector", interval, self.poll, self._flush
@@ -410,6 +414,7 @@ class Projector:
             trace_id=corr.trace_id if corr is not None else 0,
             span_id=corr.span_id if corr is not None else 0,
             parent_span_id=corr.parent_span_id if corr is not None else 0,
+            client_facts=entry.client_facts,
             phases=phases,
             logs=tuple(entry.logs),
             # Precise, drift-free wall time from the recorder's calibration and
@@ -483,19 +488,7 @@ class Projector:
                 self._loss.export_error += 1
 
     def _export(self, trace: ProjectedTrace) -> None:
-        hook = self._on_trace
-        if hook is None:
-            return
-        try:
-            hook(trace)
-        except Exception:  # noqa: BLE001 - user exporter; counted in loss.export_error
-            # `hook` is an application-supplied exporter and may raise anything.
-            # This is a *publish* site: the trace it describes has already
-            # happened, so a failing exporter must not stall the drain that
-            # feeds every other consumer. Counted rather than logged, so a
-            # permanently broken exporter is a rising number rather than
-            # silence -- the `MessageBus` shape.
-            self._loss.export_error += 1
+        self._publish(self._on_trace, trace)
 
     def _export_logs(self, trace: ProjectedTrace) -> None:
         """Offer each of a settled request's records with its correlation.
@@ -522,15 +515,18 @@ class Projector:
             )
 
     def _emit_log(self, record: ProjectedLog) -> None:
-        hook = self._on_log
+        self._publish(self._on_log, record)
+
+    def _publish(self, hook: Callable[[Any], None] | None, value: Any) -> None:
+        """Publish settled telemetry without letting one sink stop the drain."""
         if hook is None:
             return
         try:
-            hook(record)
+            hook(value)
         except Exception:  # noqa: BLE001 - user sink; counted in loss.export_error
-            # Same shape and same reasoning as `_export`: the record already
-            # happened, and a sink that raises must not stop the drain that
-            # feeds the trace pipeline alongside it.
+            # This is a publish site: the telemetry already happened, so a
+            # user-supplied sink may fail without stalling the drain feeding the
+            # other consumers. A permanently broken sink is a rising counter.
             self._loss.export_error += 1
 
     # --- snapshots ---------------------------------------------------------

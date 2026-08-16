@@ -41,20 +41,22 @@ two services that subscribe to each other from generating traffic forever.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import heapq
 import hmac
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from ._jobcore import compute_backoff
 from ._json import dumps, loads
+from ._pgname import validate_unquoted_identifier
 from .binding import _body_validator
 from .http_client import ClientError
 from .request import Request
@@ -70,6 +72,20 @@ _HEADER_CORRELATION = b"wreath-correlation-id"
 _HEADER_CAUSATION = b"wreath-causation-id"
 _HEADER_RELAY_PATH = b"wreath-webhook-relay-path"
 _RELAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _schema_component(
+    name: str, table: str, statements: tuple[str, ...]
+) -> Any:
+    """Build the one schema-claim shape shared by inbox and outbox."""
+    from .schema import Component, Step
+
+    return Component(
+        name=name,
+        schema="",
+        relations=(table,),
+        steps=(Step(version=1, statements=statements),),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,7 +320,51 @@ class HMACWebhookSigner:
         return tuple(headers)
 
 
-class HMACWebhookVerifier:
+@runtime_checkable
+class WebhookVerifier(Protocol):
+    """A provider signature profile consumed by `WebhookSource`.
+
+    The hub has already lower-cased and bounded the headers before calling the
+    verifier. A verifier returns a complete trusted envelope or
+    raises `ValueError`; boolean and partially verified results are not part of
+    the contract. `max_age` also sizes the default in-process replay ledger.
+    """
+
+    max_age: float
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[bytes, bytes],
+        now: datetime | None = None,
+    ) -> WebhookEnvelope: ...
+
+
+class _NormalizedWebhookVerifier:
+    """One public verifier entry point; profiles implement normalized checks."""
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[bytes, bytes],
+        now: datetime | None = None,
+    ) -> WebhookEnvelope:
+        normalized = {name.lower(): value for name, value in headers.items()}
+        return self._verify_normalized(body=body, headers=normalized, now=now)
+
+    def _verify_normalized(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[bytes, bytes],
+        now: datetime | None = None,
+    ) -> WebhookEnvelope:
+        raise NotImplementedError
+
+
+class HMACWebhookVerifier(_NormalizedWebhookVerifier):
     """Verify Wreath's HMAC profile with a bounded timestamp window.
 
     Holding several keys is how rotation works: a sender switches key id when it
@@ -335,37 +395,6 @@ class HMACWebhookVerifier:
             raise ValueError("webhook max_age must be positive")
         self._keys = dict(keys)
         self.max_age = max_age
-
-    def verify(
-        self,
-        *,
-        body: bytes,
-        headers: Mapping[bytes, bytes],
-        now: datetime | None = None,
-    ) -> WebhookEnvelope:
-        """Verify `body` against `headers` and return the envelope they describe.
-
-        Returning is the success signal: there is no boolean, and no partially
-        trusted result. Every rejection is a `ValueError`, deliberately without
-        distinguishing which check failed, so the exception cannot be used as an
-        oracle. The MAC comparison itself is constant-time.
-
-        The signature covers the timestamp, id, type, relay path and the exact
-        body bytes -- so pass the raw body, never a re-serialization of a parsed
-        payload.
-
-        Args:
-            headers: Header names in any case; lowercased before lookup.
-            now: Reference time for the age window. Defaults to the current UTC time.
-
-        Returns:
-            The verified envelope, with `content_type` taken from the request headers.
-
-        Raises:
-            ValueError: Any failed check: missing header, unknown key id, bad timestamp, bad MAC.
-        """
-        normalized = {key.lower(): value for key, value in headers.items()}
-        return self._verify_normalized(body=body, headers=normalized, now=now)
 
     def _verify_normalized(
         self,
@@ -428,6 +457,228 @@ class HMACWebhookVerifier:
             correlation_id=_optional_text(headers, _HEADER_CORRELATION),
             causation_id=_optional_text(headers, _HEADER_CAUSATION),
             relay_path=relay_path,
+        )
+
+
+def _provider_event(body: bytes) -> tuple[str, str, str]:
+    try:
+        value = loads(body)
+    except ValueError as exc:
+        raise ValueError("verified webhook body is not JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("verified webhook body must be a JSON object")
+    event_id = value.get("id")
+    event_type = value.get("type")
+    version = value.get("api_version", value.get("version", "1"))
+    if not isinstance(event_id, str) or not event_id:
+        raise ValueError("verified webhook body has no string id")
+    if not isinstance(event_type, str) or not event_type:
+        raise ValueError("verified webhook body has no string type")
+    if not isinstance(version, str):
+        version = str(version)
+    return event_id, event_type, version
+
+
+def _unix_timestamp(value: bytes, now: datetime | None, max_age: float) -> datetime:
+    try:
+        seconds = int(value.decode("ascii"))
+        timestamp = datetime.fromtimestamp(seconds, UTC)
+    except (UnicodeDecodeError, ValueError, OverflowError, OSError) as exc:
+        raise ValueError("invalid webhook Unix timestamp") from exc
+    current = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    if abs((current - timestamp).total_seconds()) > max_age:
+        raise ValueError("webhook timestamp is outside the accepted window")
+    return timestamp
+
+
+def _constant_time_signature_match(
+    expected: Iterable[bytes], supplied: Iterable[bytes]
+) -> bool:
+    """Match two signature collections without their Cartesian product.
+
+    SHA-256 is only an index: a hit is still authenticated with
+    ``compare_digest``. Buckets preserve correctness even under a digest
+    collision, while ordinary distinct signatures cost one fixed-width hash
+    and one dictionary operation apiece.
+    """
+    indexed: dict[bytes, list[bytes]] = {}
+    for candidate in supplied:
+        indexed.setdefault(hashlib.sha256(candidate).digest(), []).append(candidate)
+    for wanted in expected:
+        for candidate in indexed.get(hashlib.sha256(wanted).digest(), ()):
+            if hmac.compare_digest(wanted, candidate):
+                return True
+    return False
+
+
+class StandardWebhookVerifier(_NormalizedWebhookVerifier):
+    """Verify the Standard Webhooks HMAC-SHA256 profile.
+
+    `whsec_` secrets are decoded as their standard base64 payload; raw bytes
+    are accepted for secret stores that already decoded them. Multiple secrets
+    permit rotation, and multiple `v1` signatures in the header are checked.
+    Event type/version come from the verified JSON body because the standard
+    header set carries only id, timestamp, and signature.
+    """
+
+    __slots__ = ("_secrets", "max_age")
+
+    def __init__(
+        self, secrets: bytes | str | tuple[bytes | str, ...], *, max_age: float = 300.0
+    ) -> None:
+        supplied = secrets if isinstance(secrets, tuple) else (secrets,)
+        if not supplied:
+            raise ValueError(
+                "at least one non-empty Standard Webhooks secret is required"
+            )
+        decoded: list[bytes] = []
+        for secret in supplied:
+            if isinstance(secret, str):
+                token = secret.removeprefix("whsec_")
+                try:
+                    value = base64.b64decode(token, validate=True)
+                except ValueError as exc:
+                    raise ValueError("Standard Webhooks secret is not base64") from exc
+            else:
+                value = bytes(secret)
+            if not value:
+                raise ValueError("Standard Webhooks secret cannot be empty")
+            decoded.append(value)
+        if max_age <= 0:
+            raise ValueError("webhook max_age must be positive")
+        self._secrets = tuple(decoded)
+        self.max_age = max_age
+
+    def _verify_normalized(
+        self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
+    ) -> WebhookEnvelope:
+        event_id_data = _required_header(headers, b"webhook-id")
+        timestamp_data = _required_header(headers, b"webhook-timestamp")
+        signatures = _required_header(headers, b"webhook-signature").split()
+        timestamp = _unix_timestamp(timestamp_data, now, self.max_age)
+        signed = event_id_data + b"." + timestamp_data + b"." + body
+        supplied: list[bytes] = []
+        for item in signatures:
+            if not item.startswith(b"v1,"):
+                continue
+            try:
+                supplied.append(base64.b64decode(item[3:], validate=True))
+            except ValueError as exc:
+                raise ValueError("invalid Standard Webhooks signature") from exc
+        if not supplied or not _constant_time_signature_match(
+            (hmac.digest(secret, signed, "sha256") for secret in self._secrets),
+            supplied,
+        ):
+            raise ValueError("invalid Standard Webhooks signature")
+        event_id, event_type, version = _provider_event(body)
+        if event_id.encode("utf-8") != event_id_data:
+            raise ValueError("Standard Webhooks body id differs from webhook-id")
+        return WebhookEnvelope(
+            event_id,
+            event_type,
+            version,
+            timestamp,
+            headers.get(b"content-type", b"application/json").decode("latin-1"),
+            body,
+        )
+
+
+class StripeWebhookVerifier(_NormalizedWebhookVerifier):
+    """Verify Stripe's `Stripe-Signature` `t=...,v1=...` profile."""
+
+    __slots__ = ("_secrets", "max_age")
+
+    def __init__(
+        self,
+        secrets: bytes | str | tuple[bytes | str, ...],
+        *,
+        max_age: float = 300.0,
+    ) -> None:
+        supplied = secrets if isinstance(secrets, tuple) else (secrets,)
+        if not supplied or any(not secret for secret in supplied):
+            raise ValueError("at least one non-empty Stripe webhook secret is required")
+        if max_age <= 0:
+            raise ValueError("webhook max_age must be positive")
+        self._secrets = tuple(
+            secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+            for secret in supplied
+        )
+        self.max_age = max_age
+
+    def _verify_normalized(
+        self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
+    ) -> WebhookEnvelope:
+        parts: dict[bytes, list[bytes]] = {}
+        for item in _required_header(headers, b"stripe-signature").split(b","):
+            key, separator, value = item.strip().partition(b"=")
+            if not separator:
+                raise ValueError("invalid Stripe-Signature field")
+            parts.setdefault(key, []).append(value)
+        timestamps = parts.get(b"t", [])
+        signatures = parts.get(b"v1", [])
+        if len(timestamps) != 1 or not signatures:
+            raise ValueError("Stripe-Signature needs one t and at least one v1")
+        timestamp = _unix_timestamp(timestamps[0], now, self.max_age)
+        signed = timestamps[0] + b"." + body
+        expected = (
+            hmac.new(secret, signed, hashlib.sha256).hexdigest().encode("ascii")
+            for secret in self._secrets
+        )
+        if not _constant_time_signature_match(expected, signatures):
+            raise ValueError("invalid Stripe webhook signature")
+        event_id, event_type, version = _provider_event(body)
+        return WebhookEnvelope(
+            event_id,
+            event_type,
+            version,
+            timestamp,
+            headers.get(b"content-type", b"application/json").decode("latin-1"),
+            body,
+        )
+
+
+class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
+    """Verify GitHub's SHA-256 webhook signature and delivery identity.
+
+    GitHub signs no timestamp, so freshness comes from the replay ledger keyed by
+    `X-GitHub-Delivery`. `max_age` is therefore the retention time for that
+    ledger rather than a signature check.
+    """
+
+    __slots__ = ("_secret", "max_age")
+
+    def __init__(
+        self, secret: bytes | str, *, replay_ttl: float = 86_400.0
+    ) -> None:
+        if not secret:
+            raise ValueError("GitHub webhook secret cannot be empty")
+        if replay_ttl <= 0:
+            raise ValueError("GitHub webhook replay_ttl must be positive")
+        self._secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+        self.max_age = replay_ttl
+
+    def _verify_normalized(
+        self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
+    ) -> WebhookEnvelope:
+        supplied = _required_header(headers, b"x-hub-signature-256")
+        expected = b"sha256=" + hmac.new(
+            self._secret, body, hashlib.sha256
+        ).hexdigest().encode("ascii")
+        if not hmac.compare_digest(expected, supplied):
+            raise ValueError("invalid GitHub webhook signature")
+        try:
+            event_id = _required_header(headers, b"x-github-delivery").decode("ascii")
+            event_type = _required_header(headers, b"x-github-event").decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("invalid GitHub webhook identity header") from exc
+        timestamp = datetime.now(UTC) if now is None else now.astimezone(UTC)
+        return WebhookEnvelope(
+            event_id,
+            event_type,
+            "1",
+            timestamp,
+            headers.get(b"content-type", b"application/json").decode("latin-1"),
+            body,
         )
 
 
@@ -614,8 +865,6 @@ class LocalReplayStore:
         self._entries.clear()
 
 
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-
 #: A delivery nobody is waiting on any more. Written once because the bounded
 #: purge and the chunked purge pass must agree about it exactly: a row that is
 #: still going to be retried is not rubbish.
@@ -736,9 +985,7 @@ class PostgresWebhookInbox:
     __slots__ = ("table",)
 
     def __init__(self, table: str = "wreath_webhook_inbox") -> None:
-        if not _IDENTIFIER.fullmatch(table):
-            raise ValueError("webhook inbox table must be a plain SQL identifier")
-        self.table = table
+        self.table = validate_unquoted_identifier(table, "webhook inbox table")
 
     def statements(self) -> tuple[str, ...]:
         """DDL creating the inbox table and its retention index. Idempotent.
@@ -787,13 +1034,8 @@ class PostgresWebhookInbox:
 
     def component(self) -> Any:
         """The inbox's claim on the wreath schema."""
-        from .schema import Component, Step
-
-        return Component(
-            name="webhook-inbox",
-            schema="",
-            relations=(self.table,),
-            steps=(Step(version=1, statements=self.statements()),),
+        return _schema_component(
+            "webhook-inbox", self.table, self.statements()
         )
 
     def schema_sql(self) -> str:
@@ -1022,9 +1264,7 @@ class PostgresWebhookOutbox:
     __slots__ = ("table",)
 
     def __init__(self, table: str = "wreath_webhook_outbox") -> None:
-        if not _IDENTIFIER.fullmatch(table):
-            raise ValueError("webhook outbox table must be a plain SQL identifier")
-        self.table = table
+        self.table = validate_unquoted_identifier(table, "webhook outbox table")
 
     def statements(self) -> tuple[str, ...]:
         """DDL creating the outbox table and its two indexes. Idempotent.
@@ -1091,13 +1331,8 @@ class PostgresWebhookOutbox:
 
     def component(self) -> Any:
         """The outbox's claim on the wreath schema."""
-        from .schema import Component, Step
-
-        return Component(
-            name="webhook-outbox",
-            schema="",
-            relations=(self.table,),
-            steps=(Step(version=1, statements=self.statements()),),
+        return _schema_component(
+            "webhook-outbox", self.table, self.statements()
         )
 
     def schema_sql(self) -> str:
@@ -1612,7 +1847,7 @@ class WebhookSource:
         name: str,
         *,
         path: str,
-        verifier: HMACWebhookVerifier,
+        verifier: WebhookVerifier,
         replay: LocalReplayStore | None,
         limits: WebhookLimits,
         inbox: PostgresWebhookInbox | None,
@@ -1689,7 +1924,7 @@ class WebhookSource:
         if len(body) > self._limits.max_body_bytes:
             return Response(status=413)
         try:
-            envelope = self._verifier._verify_normalized(body=body, headers=headers)
+            envelope = self._verifier.verify(body=body, headers=headers)
         except (UnicodeDecodeError, ValueError):
             return Response(status=401)
         if len(envelope.id.encode("utf-8")) > self._limits.max_event_id_bytes:
@@ -2486,7 +2721,7 @@ class WebhookHub:
         name: str,
         *,
         path: str,
-        verifier: HMACWebhookVerifier,
+        verifier: WebhookVerifier,
         replay: LocalReplayStore | None = None,
         limits: WebhookLimits = _DEFAULT_WEBHOOK_LIMITS,
         inbox: PostgresWebhookInbox | None = None,
@@ -2583,6 +2818,7 @@ class WebhookHub:
 
 __all__ = [
     "DispatcherReadiness",
+    "GitHubWebhookVerifier",
     "HMACWebhookSigner",
     "HMACWebhookVerifier",
     "InboxClaim",
@@ -2590,6 +2826,8 @@ __all__ = [
     "OutboxDelivery",
     "PostgresWebhookInbox",
     "PostgresWebhookOutbox",
+    "StandardWebhookVerifier",
+    "StripeWebhookVerifier",
     "WebhookContext",
     "WebhookDeliveryResult",
     "WebhookDestination",
@@ -2598,4 +2836,5 @@ __all__ = [
     "WebhookHub",
     "WebhookLimits",
     "WebhookSource",
+    "WebhookVerifier",
 ]

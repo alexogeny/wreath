@@ -402,7 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     port_parser = commands.add_parser(
         "port", help="port an existing FastAPI app to Wreath (report or emit)"
     )
-    port_parser.add_argument("source", nargs="+", help="one or more app roots")
+    port_parser.add_argument(
+        "source",
+        nargs="*",
+        help="one or more app roots (omitted with --verify)",
+    )
     port_parser.add_argument(
         "--report-only",
         action="store_true",
@@ -495,6 +499,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="make the changes that reach past one file, instead of leaving a note: "
         "give a function that runs queries the session parameter it needs "
         "(its callers then have to pass one)",
+    )
+    port_parser.add_argument(
+        "--verify",
+        nargs=2,
+        metavar=("SOURCE_APP", "CANDIDATE_APP"),
+        help="run source and candidate module:attribute ASGI apps against one corpus",
+    )
+    port_parser.add_argument(
+        "--cases",
+        metavar="PATH",
+        help="JSON request corpus for --verify",
+    )
+    port_parser.add_argument(
+        "--ignore-header",
+        action="append",
+        default=["date", "server"],
+        metavar="NAME",
+        help="response header excluded from --verify (repeatable; Date and Server by default)",
     )
     mutant_parser = commands.add_parser(
         "mutant",
@@ -1058,7 +1080,7 @@ def _add_flight_parser(commands: Any) -> None:
     read.add_argument(
         "--kind",
         default=None,
-        choices=("completion", "correlation", "phase", "log"),
+        choices=("completion", "correlation", "phase", "log", "client-facts"),
         help="show only records of one kind (ring files only)",
     )
     read.add_argument("--limit", type=int, default=50, help="records to print (0 = all)")
@@ -1736,20 +1758,13 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
 
 
 def _split_target(target: str) -> tuple[str, str]:
-    if target.count(":") > 1:
-        raise CliError("application target must use module:attribute syntax")
-    module_name, separator, attribute = target.partition(":")
-    if not separator:
-        attribute = "app"
-    if (
-        not module_name
-        or module_name.startswith(".")
-        or any(not part.isidentifier() for part in module_name.split("."))
-        or not attribute
-        or not attribute.isidentifier()
-    ):
-        raise CliError("application target must use module:attribute syntax")
-    return module_name, attribute
+    from ._target import parse_target
+
+    try:
+        parsed = parse_target(target, label="application", default_attribute="app")
+    except ValueError as error:
+        raise CliError("application target must use module:attribute syntax") from error
+    return parsed.module, parsed.attribute
 
 
 def _ensure_cwd_importable() -> None:
@@ -1775,18 +1790,19 @@ def _ensure_cwd_importable() -> None:
 
 def load_application(target: str, *, factory: bool = False) -> ASGIApplication:
     """Import one ASGI application or explicit zero-argument factory."""
-    module_name, attribute = _split_target(target)
+    from ._target import load_target
+
+    _split_target(target)
     _ensure_cwd_importable()
     try:
-        module = importlib.import_module(module_name)
-    except Exception as error:  # target imports can fail arbitrarily
-        raise CliError(f"could not import application module {module_name!r}: {error}") from error
-    try:
-        selected = getattr(module, attribute)
-    except AttributeError as error:
-        raise CliError(
-            f"application module {module_name!r} has no attribute {attribute!r}"
-        ) from error
+        selected = load_target(
+            target,
+            label="application",
+            default_attribute="app",
+            catch_all_import_errors=True,
+        )
+    except ValueError as error:
+        raise CliError(str(error)) from error
     if factory:
         if not callable(selected):
             raise CliError(f"application factory {target!r} is not callable")
@@ -2304,38 +2320,40 @@ def _pass_ledgers(application: Any, namespace: argparse.Namespace) -> list[tuple
                 exit_code=2,
             )
         return [(database, namespace.schema or "wreath")]
-    seen: list[tuple[Any, str]] = []
+    seen: set[tuple[Any, str]] = set()
+    targets: list[tuple[Any, str]] = []
     for runner in getattr(application, "_job_runners", {}).values():
         pair = (runner._db, namespace.schema or runner._schema)
         if pair not in seen:
-            seen.append(pair)
-    return seen
+            seen.add(pair)
+            targets.append(pair)
+    return targets
 
 
 async def _read_pass_ledgers(targets: list[tuple[Any, str]], *, name: str | None) -> list[Any]:
     from .passes import read_status
 
-    rows: list[Any] = []
-    for database, schema in targets:
-        await database.start()
-        try:
-            rows.extend(await read_status(database, schema=schema, name=name))
-        finally:
-            await database.stop()
-    return rows
+    return await _read_pass_rows(targets, name=name, read=read_status)
 
 
 async def _read_pass_holes(targets: list[tuple[Any, str]], *, name: str | None) -> list[Any]:
     from .passes import read_holes
 
-    holes: list[Any] = []
+    return await _read_pass_rows(targets, name=name, read=read_holes)
+
+
+async def _read_pass_rows(
+    targets: list[tuple[Any, str]], *, name: str | None, read: Any
+) -> list[Any]:
+    """Read one pass-ledger view with the shared database lifecycle."""
+    rows: list[Any] = []
     for database, schema in targets:
         await database.start()
         try:
-            holes.extend(await read_holes(database, schema=schema, name=name))
+            rows.extend(await read(database, schema=schema, name=name))
         finally:
             await database.stop()
-    return holes
+    return rows
 
 
 async def _retry_pass_holes(
@@ -2772,6 +2790,7 @@ async def _read_traced_work(
 
     work: list[Any] = []
     omitted: list[str] = []
+    seen_omitted: set[str] = set()
     for database, schema in targets:
         await database.start()
         try:
@@ -2790,7 +2809,8 @@ async def _read_traced_work(
             await database.stop()
         work.extend(found.work)
         for note in found.omitted:
-            if note not in omitted:
+            if note not in seen_omitted:
+                seen_omitted.add(note)
                 omitted.append(note)
     return TraceLookup(trace_id=trace_id, work=tuple(work), omitted=tuple(omitted))
 
@@ -3349,6 +3369,7 @@ def execute_flight(namespace: argparse.Namespace) -> int:
         "correlation": EventKind.CORRELATION,
         "phase": EventKind.PHASE,
         "log": EventKind.LOG,
+        "client-facts": EventKind.CLIENT_FACTS,
     }
     records = ring.records if namespace.kind is None else ring.of_kind(kinds[namespace.kind])
     shown = records if namespace.limit == 0 else records[: namespace.limit]
@@ -3430,16 +3451,15 @@ def _execute_to_test(namespace: argparse.Namespace) -> int:
     `load_application`.
     """
     import asyncio
-    import importlib
 
     from . import replay as rp
+    from ._target import load_target
 
     if rp.recording_kind(namespace.recording) == rp.KIND_ATTEMPT:
-        module_name, attribute = _split_target(namespace.target)
         _ensure_cwd_importable()
         try:
-            runner = getattr(importlib.import_module(module_name), attribute)
-        except (ImportError, AttributeError) as error:
+            runner = load_target(namespace.target, label="job runner")
+        except ValueError as error:
             raise CliError(
                 f"could not load the job runner {namespace.target!r}: {error}. An "
                 "attempt recording replays against the runner its task is "

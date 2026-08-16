@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 import threading
+from asyncio import CancelledError as _CancelledError
+from asyncio import gather as _gather
 
 # Imported by name, like `monotonic_ns` below: one global lookup, and it is only
 # reached by a response that carries background tasks.
@@ -24,7 +26,7 @@ from inspect import signature as _signature
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
 from types import CoroutineType as _COROUTINE
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote
 
 from . import telemetry as _telemetry
@@ -97,6 +99,9 @@ from .response import (
 from .router import RouteDefinition, Router
 from .state import State
 from .websocket import WebSocket, WebSocketDisconnect
+
+if TYPE_CHECKING:
+    from .client_facts import ClientFactsProvider, GeoIPProvider, UserAgentDatabase
 
 _build_capability_mask = _core.build_capability_mask
 _build_compiled_capability_mask = _core.build_compiled_capability_mask
@@ -560,6 +565,8 @@ class Wreath:
         limits: Body, form and cookie ceilings applied to every request built here.
         background_timeout: Seconds a response's background tasks may run before
             they are cancelled, or `None` for no limit. Default 30.
+        ai_scraping: `deny` (default) refuses known autonomous AI crawlers at
+            ingress. `allow` explicitly opts the application into that traffic.
         require_access_declarations: Refuse route compilation unless every HTTP
             and WebSocket endpoint explicitly declares `public`, optional
             identity, authentication, or authorization. Default False for
@@ -586,13 +593,17 @@ class Wreath:
         "background_timeouts",
         "_background_timeout",
         "exception_handler_errors",
+        "error_reporter_errors",
         "lifespan_teardown_errors",
+        "metrics_collection_errors",
+        "metrics_invalid_sources",
         "_dirty",
         "_dynamic_matcher",
         "_databases",
         "_declared_databases",
         "_manage_schema",
         "_exception_handlers",
+        "_error_reporters",
         "_dispatch_http",
         "_flight_route_ids",
         "_flight_route_keys",
@@ -608,11 +619,15 @@ class Wreath:
         "_global_middleware",
         "_route_programs",
         "_http_policy",
+        "_ai_scraping_defaulted",
         "_auth_handlers",
         "_handler_requirements",
         "_requestless_handlers",
         "_hardening",
         "_http_clients",
+        "_client_fact_providers",
+        "_counter_sources",
+        "_user_agent_database",
         "_job_runners",
         "_match",
         "_message_buses",
@@ -630,6 +645,8 @@ class Wreath:
         "_resolve",
         "_resolve_identity",
         "_route_methods",
+        "_route_names",
+        "_dynamic_route_keys",
         "_routes",
         "_routing",
         "_entity_registries",
@@ -659,6 +676,7 @@ class Wreath:
         limits: RequestLimits = DEFAULT_LIMITS,
         background_timeout: float | None = 30.0,
         http_policy: Any = None,
+        ai_scraping: Literal["deny", "allow"] = "deny",
         signatures: Any = None,
         hardening: str = "warn",
         require_access_declarations: bool = False,
@@ -674,15 +692,36 @@ class Wreath:
 
         self._hardening = _resolve_hardening(hardening)
         self._routing = routing
-        if http_policy is not None:
-            from .policy import HttpPolicy
+        from .policy import AIScrapingPolicy, HttpPolicy
 
+        if http_policy is not None:
             if type(http_policy) is not HttpPolicy:
                 raise TypeError("http_policy must be an exact HttpPolicy instance")
+        if ai_scraping not in {"deny", "allow"}:
+            raise ValueError("ai_scraping must be 'deny' or 'allow'")
+        ai_scraping_defaulted = ai_scraping == "deny" and (
+            http_policy is None or http_policy.ai_scraping is None
+        )
+        self._user_agent_database: Any = None
+        if ai_scraping_defaulted:
+            from .client_facts import UserAgentDatabase
+
+            self._user_agent_database = UserAgentDatabase()
+            default_ai_policy = HttpPolicy(
+                ai_scraping=AIScrapingPolicy(_database=self._user_agent_database)
+            )
+            http_policy = (
+                default_ai_policy
+                if http_policy is None
+                else default_ai_policy.merged(http_policy)
+            )
+        elif http_policy is not None and http_policy.ai_scraping is not None:
+            self._user_agent_database = http_policy.ai_scraping._database
         # First-class policy is compiled independently of the custom middleware
         # tape. The native server reads its frozen descriptor once per protocol;
         # a generic ASGI server runs the independent reference executor.
         self._http_policy = http_policy
+        self._ai_scraping_defaulted = ai_scraping_defaulted
         self._limits = limits
         if background_timeout is not None and background_timeout <= 0:
             raise ValueError("background_timeout must be positive, or None for no limit")
@@ -743,6 +782,8 @@ class Wreath:
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
         self._routes: list[RouteDefinition] = []
+        self._route_names: set[str] = set()
+        self._dynamic_route_keys: set[tuple[str, str, str | None]] = set()
         self._openapi_security_schemes: dict[str, dict[str, Any]] = {}
         #: Every distinct HTTP method any route declares, recomputed on compile.
         #: Read only when a request misses, to tell a 404 from a 405.
@@ -788,6 +829,7 @@ class Wreath:
         self._stage_hooks: dict[str, tuple[Any, ...]] = {}
         self._middleware_order = 0
         self._exception_handlers: dict[type[Exception], ExceptionHandler] = {}
+        self._error_reporters: list[Any] = []
         self._status_handlers: dict[int, ExceptionHandler] = {}
         self._dirty = False
         self._compile_lock = threading.Lock()
@@ -802,6 +844,9 @@ class Wreath:
         #: The client still gets a 500, so the failure is invisible to it; this
         #: counter and the logged traceback are where it shows up.
         self.exception_handler_errors = 0
+        #: Reporter callbacks that failed. Reporting is observability and never
+        #: changes the response or masks the application error it was observing.
+        self.error_reporter_errors = 0
         #: Teardown steps -- app-scoped dependencies, object stores, HTTP
         #: clients, databases -- that raised while a lifespan failure path was
         #: releasing them. Teardown continues past a failure so the resources
@@ -809,6 +854,8 @@ class Wreath:
         #: original error, so this counter and the logged traceback are the only
         #: record that a close refused.
         self.lifespan_teardown_errors = 0
+        self.metrics_collection_errors = 0
+        self.metrics_invalid_sources = 0
         self._databases: dict[str, Any] = {}
         #: `id(holder) -> (holder, database)` for every subsystem whose
         #: declaration named a database: `app.jobs(database=)`,
@@ -824,6 +871,8 @@ class Wreath:
         #: rather than a runtime error at the first enqueue.
         self._manage_schema = True
         self._http_clients: dict[str, Any] = {}
+        self._client_fact_providers: dict[str, Any] = {}
+        self._counter_sources: list[Any] = []
         self._orm_registries: dict[str, Any] = {}
         self._oidc_providers: dict[str, Any] = {}
         self._webhook_hubs: dict[str, Any] = {}
@@ -889,6 +938,10 @@ class Wreath:
         is how `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
         came to be emitted by `wreath schema sql` and applied by nothing.
         """
+        return self._registered_holders()
+
+    def _registered_holders(self) -> tuple[Any, ...]:
+        """Every application-owned resource, for structural capability walks."""
         return (
             *((self._http_policy,) if self._http_policy is not None else ()),
             *self._job_runners.values(),
@@ -902,6 +955,36 @@ class Wreath:
             # middleware-owned table was silently never collected.
             *(item[2] for item in self._global_middleware),
             *(item[2] for item in self._middleware),
+            *self._http_clients.values(),
+            *self._databases.values(),
+            *self._client_fact_providers.values(),
+            *self._counter_sources,
+            self,
+        )
+
+    def _register_counter_source(self, source: Any) -> None:
+        """Retain one structurally typed source mounted on this application."""
+        if not callable(getattr(source, "counters", None)):
+            raise TypeError("application counter source must expose counters()")
+        if not any(candidate is source for candidate in self._counter_sources):
+            self._counter_sources.append(source)
+
+    def counters(self) -> Any:
+        """Application-owned framework and metrics-collection failures."""
+        from .metrics import Counters
+
+        return Counters(
+            subsystem="application",
+            instance="application",
+            values={
+                "background_errors": self.background_errors,
+                "background_timeouts": self.background_timeouts,
+                "exception_handler_errors": self.exception_handler_errors,
+                "error_reporter_errors": self.error_reporter_errors,
+                "lifespan_teardown_errors": self.lifespan_teardown_errors,
+                "metrics_collection_errors": self.metrics_collection_errors,
+                "metrics_invalid_sources": self.metrics_invalid_sources,
+            },
         )
 
     def manage_schema(self, manage: bool) -> None:
@@ -1045,6 +1128,54 @@ class Wreath:
         self._http_clients[name] = client
         self.state.__setattr__(f"http_{name}", client)
         return client
+
+    def client_facts(
+        self,
+        name: str = "default",
+        *,
+        geoip: GeoIPProvider | Literal["wreath"] | None = "wreath",
+        user_agents: UserAgentDatabase | None = None,
+    ) -> ClientFactsProvider:
+        """Register one application-owned client-facts provider.
+
+        `geoip="wreath"` selects the bundled country database. Pass `None`
+        to disable geographic classification or a structural `GeoIPProvider`
+        for richer application-owned data. The provider is directly usable as
+        a dependency and is discovered automatically by metrics mounted on this
+        application.
+        """
+        from .client_facts import ClientFactsProvider, UserAgentDatabase, WreathGeoIP
+
+        if name in self._client_fact_providers:
+            raise ValueError(f"duplicate client-facts provider: {name}")
+        if isinstance(geoip, str):
+            if geoip != "wreath":
+                raise ValueError(
+                    f"unknown client-facts geoip {geoip!r}; use 'wreath', None, "
+                    "or an object exposing lookup(address)"
+                )
+            geo_provider = WreathGeoIP()
+        elif geoip is not None and not callable(getattr(geoip, "lookup", None)):
+            raise TypeError(
+                "client-facts geoip must be 'wreath', None, or expose lookup(address)"
+            )
+        else:
+            geo_provider = geoip
+        if user_agents is not None and not isinstance(user_agents, UserAgentDatabase):
+            raise TypeError("client-facts user_agents must be a UserAgentDatabase")
+        if user_agents is None:
+            if self._user_agent_database is None:
+                self._user_agent_database = UserAgentDatabase()
+            user_agents = self._user_agent_database
+        provider = ClientFactsProvider(
+            geoip=geo_provider,
+            user_agents=user_agents,
+            name=name,
+            signatures=self.signatures,
+        )
+        self._client_fact_providers[name] = provider
+        self.state.__setattr__(f"client_facts_{name}", provider)
+        return provider
 
     def objects(self, name: str, *, backend: str = "local", **options: Any) -> Any:
         """Register a lifespan-managed object-storage backend (`local` or `s3`).
@@ -1425,8 +1556,9 @@ class Wreath:
     def flags(self, provider: Any = None, **values: str) -> Any:
         """Register a feature-flag provider on `app.state.flags`, and return it.
 
-        Pass a `FlagProvider` (e.g. `FeatureFlags(...)`), keyword flag values, or
-        nothing to build one from `WREATH_FLAG_<NAME>` in the environment.
+        Pass a `TypedFlagProvider` (e.g. `FeatureFlags(...)`), an original
+        boolean `FlagProvider`, keyword flag values, or nothing to build one
+        from `WREATH_FLAG_<NAME>` in the environment.
 
         The provider is returned because that is how it reaches a handler.
         `wreath.flags.flags_dependency` captures the provider it is given once,
@@ -1435,8 +1567,42 @@ class Wreath:
         """
         from .flags import FeatureFlags
 
+        if self.state.get("flags") is not None:
+            raise ValueError(
+                "duplicate feature-flag provider; configure app.flags exactly once"
+            )
+        if provider is not None and values:
+            raise TypeError("app.flags accepts a provider or keyword values, not both")
         if provider is None:
             provider = FeatureFlags(values) if values else FeatureFlags.from_env()
+        if not (
+            callable(getattr(provider, "resolve", None))
+            or callable(getattr(provider, "enabled", None))
+        ):
+            raise TypeError(
+                "feature-flag provider must expose resolve(flag, context), or "
+                "the legacy enabled(name, context) boolean operation"
+            )
+        start = getattr(provider, "start", None)
+        close = getattr(provider, "close", None)
+        if start is not None and not callable(start):
+            raise TypeError("feature-flag provider start must be callable")
+        if close is not None and not callable(close):
+            raise TypeError("feature-flag provider close must be callable")
+        if start is not None:
+            async def start_flags(_app: Wreath) -> None:
+                result = start()
+                if isawaitable(result):
+                    await result
+
+            self._startup_handlers.append(start_flags)
+        if close is not None:
+            async def close_flags(_app: Wreath) -> None:
+                result = close()
+                if isawaitable(result):
+                    await result
+
+            self._shutdown_handlers.append(close_flags)
         self.state.__setattr__("flags", provider)
         return provider
 
@@ -1475,11 +1641,19 @@ class Wreath:
         path: str = "/metrics",
         namespace: str = "wreath",
         route_labels: Any = None,
+        counter_sources: Iterable[Any] = (),
     ) -> Any:
         """Mount a Prometheus scrape endpoint rendering `source.snapshot()`."""
         from ._prometheus import metrics_router
 
-        router = metrics_router(source, path=path, namespace=namespace, route_labels=route_labels)
+        router = metrics_router(
+            source,
+            path=path,
+            namespace=namespace,
+            route_labels=route_labels,
+            counter_sources=tuple(counter_sources),
+            app=self,
+        )
         self.include_router(router)
         return router
 
@@ -1623,20 +1797,23 @@ class Wreath:
 
         def register(handler: Handler) -> Handler:
             check_placeholders(path)
-            if name is not None and any(route.name == name for route in self._routes):
+            if name is not None and name in self._route_names:
                 raise ValueError(f"route name {name!r} is already registered")
             dynamic = host is not None or ":path}" in path
             for method in route_methods:
                 if dynamic:
-                    if any(
-                        method in route.methods and route.path == path and route.host == host
-                        for route in self._routes
-                    ):
+                    if (method, path, host) in self._dynamic_route_keys:
                         raise ValueError(
                             f"route {method} {path!r} for host {host!r} is already registered"
                         )
                 else:
                     self.router.add(path, method, handler)
+            if name is not None:
+                self._route_names.add(name)
+            if dynamic:
+                self._dynamic_route_keys.update(
+                    (method, path, host) for method in route_methods
+                )
             self._routes.append(
                 RouteDefinition(
                     path,
@@ -1809,14 +1986,24 @@ class Wreath:
         )
         for definition in router.routes:
             path = prefix + definition.path if prefix else definition.path
-            if definition.name is not None and any(
-                route.name == definition.name for route in self._routes
-            ):
+            if definition.name is not None and definition.name in self._route_names:
                 raise ValueError(f"route name {definition.name!r} is already registered")
             dynamic = definition.host is not None or ":path}" in path
             for method in definition.methods:
-                if not dynamic:
+                if dynamic:
+                    if (method, path, definition.host) in self._dynamic_route_keys:
+                        raise ValueError(
+                            f"route {method} {path!r} for host {definition.host!r} "
+                            "is already registered"
+                        )
+                else:
                     self.router.add(path, method, definition.endpoint)
+            if definition.name is not None:
+                self._route_names.add(definition.name)
+            if dynamic:
+                self._dynamic_route_keys.update(
+                    (method, path, definition.host) for method in definition.methods
+                )
             self._routes.append(
                 RouteDefinition(
                     path,
@@ -1961,9 +2148,17 @@ class Wreath:
 
         if type(policy) is not HttpPolicy:
             raise TypeError("policy must be an exact HttpPolicy")
-        self._http_policy = (
-            policy if self._http_policy is None else self._http_policy.merged(policy)
-        )
+        if self._http_policy is None:
+            self._http_policy = policy
+        else:
+            self._http_policy = self._http_policy._merged(
+                policy,
+                replace_default_ai=(
+                    self._ai_scraping_defaulted and policy.ai_scraping is not None
+                ),
+            )
+        if policy.ai_scraping is not None:
+            self._ai_scraping_defaulted = False
         self._dirty = True
 
     def add_global_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
@@ -2051,7 +2246,7 @@ class Wreath:
         mount_root = "/" + prefix.strip("/")
         normalized = mount_root + "/"
         if name is not None:
-            if name in self._mount_names or any(route.name == name for route in self._routes):
+            if name in self._mount_names or name in self._route_names:
                 raise ValueError(f"route name {name!r} is already registered")
             self._mount_names[name] = mount_root
 
@@ -2159,6 +2354,61 @@ class Wreath:
         application meant to shape something.
         """
         self._exception_handlers[error_type] = handler
+
+    def add_error_reporter(self, reporter: Any) -> None:
+        """Register an async application-wide error reporter.
+
+        Reporters see unhandled request failures, broken exception renderers,
+        WebSocket handler failures, and background-task failures. Expected
+        `HTTPException` and validation responses are not errors and are not
+        reported. A reporter that raises is counted on `error_reporter_errors`
+        and cannot replace the original response or exception.
+        """
+        from .errors import OtlpErrorReporter
+
+        if isinstance(reporter, OtlpErrorReporter):
+            raise ValueError(
+                "OtlpErrorReporter is automatic for Wreath applications; "
+                "do not register it with add_error_reporter"
+            )
+        report = getattr(reporter, "report", None)
+        if report is None or not _iscoroutinefunction(report):
+            raise TypeError(
+                "an error reporter needs 'async def report(self, ErrorEvent) -> None'"
+            )
+        self._error_reporters.append(reporter)
+
+    async def _report_error(
+        self, request: Request | None, error: Exception, *, phase: str
+    ) -> None:
+        from .errors import ErrorEvent, record_error
+
+        event = ErrorEvent(error=error, request=request, phase=phase)
+        record_error(event)
+        if not self._error_reporters:
+            return
+        results = await _gather(
+            *(reporter.report(event) for reporter in self._error_reporters),
+            return_exceptions=True,
+        )
+        cancellation = next(
+            (result for result in results if isinstance(result, _CancelledError)),
+            None,
+        )
+        if cancellation is not None:
+            raise cancellation
+        failures = tuple(result for result in results if isinstance(result, Exception))
+        if failures:
+            import logging
+
+            self.error_reporter_errors += len(failures)
+            logger = logging.getLogger("wreath")
+            for failure in failures:
+                logger.error(
+                    "error reporter raised while observing %s",
+                    type(error).__name__,
+                    exc_info=(type(failure), failure, failure.__traceback__),
+                )
 
     def exception_handler(
         self, error_type: type[Exception]
@@ -2279,12 +2529,13 @@ class Wreath:
         measured (2026-08-08), not speculative cloning.
         """
         policy = self._http_policy
+        native_ingress_only = policy is not None and policy._native_ingress_only
         fast_policy = policy is not None and not (
             policy._dynamic_always or policy._has_activation or policy._has_post_auth
         )
         frozen = self._frozen_responses
         if (
-            policy is None
+            (policy is None or native_ingress_only)
             and not self._has_global_http_hooks
             and self._dynamic_matcher is None
             and not self._auth_handlers
@@ -2300,7 +2551,7 @@ class Wreath:
             if self._auth_handlers:
                 self._dispatch_http = (
                     self._handle_http_plain_auth_sync
-                    if policy is None
+                    if (policy is None or native_ingress_only)
                     and self._bearer_verifier is not None
                     and not self._bearer_verifier_is_async
                     and self._classify is not None
@@ -2319,7 +2570,7 @@ class Wreath:
             else:
                 self._dispatch_http = (
                     self._handle_http_plain_sync
-                    if policy is None
+                    if (policy is None or native_ingress_only)
                     and all(
                         not _iscoroutinefunction(handler) for handler in self._handler_requirements
                     )
@@ -2330,7 +2581,7 @@ class Wreath:
             and self._dynamic_matcher is None
             and self._classify is not None
             and not self._stage_hooks
-            and self._http_policy is None
+            and (policy is None or native_ingress_only)
         ):
             # Some route runs fewer global middleware than the stack declares,
             # and this application's shape lets the route be known before the
@@ -2350,6 +2601,17 @@ class Wreath:
         native_response: bool,
     ) -> Awaitable[None]:
         """Resolve and emit a startup-fixed response without a request lifecycle."""
+        policy = self._http_policy
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        if policy is not None:
+            if policy._native_ingress_only and not policy_native:
+                candidate = policy._reference_ingress_scope(scope, method, path)
+                if candidate is not None:
+                    return self._finish_http_plain(
+                        candidate, send, method, scope, native_response
+                    )
+            elif not policy_native:
+                return self._handle_http(scope, receive, send, method, path, native_response)
         if not native_response and _ambiguous_request_path(scope, path):
             return self._handle_http(scope, receive, send, method, path, native_response)
         matched = self._match(method, path)
@@ -2637,8 +2899,22 @@ class Wreath:
         cost more than a lookup elsewhere.
         """
         policy = self._http_policy
-        if policy is not None and (
-            not native_response or not getattr(scope, "policy_native", False)
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        ingress_only_admitted = bool(
+            policy is not None
+            and policy._native_ingress_only
+            and policy_native
+        )
+        if policy is not None and policy._native_ingress_only and not policy_native:
+            candidate = policy._reference_ingress_scope(scope, method, path)
+            if candidate is not None:
+                await self._finish_http_plain(
+                    candidate, send, method, scope, native_response
+                )
+                return
+            ingress_only_admitted = True
+        if policy is not None and not ingress_only_admitted and (
+            not policy_native
         ):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
@@ -2673,7 +2949,7 @@ class Wreath:
             None
             if handler in self._requestless_handlers
             and not _telemetry.PROPAGATING
-            and policy is None
+            and (policy is None or ingress_only_admitted)
             else Request(scope, receive, path_params, self._limits, app=self)
         )
         if _telemetry.PROPAGATING and request is not None:
@@ -2688,11 +2964,16 @@ class Wreath:
             # the wrappers.
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
-            if native_response and policy is None and method != "HEAD" and value.__class__ is dict:
+            if (
+                native_response
+                and (policy is None or ingress_only_admitted)
+                and method != "HEAD"
+                and value.__class__ is dict
+            ):
                 json_body = _json_dumps(value)
             elif (
                 native_response
-                and policy is None
+                and (policy is None or ingress_only_admitted)
                 and method != "HEAD"
                 and value.__class__ is _EncodedJSON
             ):
@@ -2710,7 +2991,7 @@ class Wreath:
         # `active_global` is 0 rather than omitted: this application has no
         # global after hooks to unwind, so `_finish_http` skips its loop and
         # both dispatchers keep one response-emission path between them.
-        if policy is None:
+        if policy is None or ingress_only_admitted:
             if json_body is not None:
                 protocol = cast(Any, send).__self__
                 size = len(json_body)
@@ -2742,6 +3023,17 @@ class Wreath:
         coroutine, and failures still use the ordinary exception boundary; the
         uncommon continuation below owns those two cases.
         """
+        policy = self._http_policy
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        if policy is not None:
+            if policy._native_ingress_only and not policy_native:
+                candidate = policy._reference_ingress_scope(scope, method, path)
+                if candidate is not None:
+                    return self._finish_http_plain(
+                        candidate, send, method, scope, native_response
+                    )
+            elif not policy_native:
+                return self._handle_http(scope, receive, send, method, path, native_response)
         if not native_response and _ambiguous_request_path(scope, path):
             return self._handle_http(scope, receive, send, method, path, native_response)
         matched = self._match(method, path)
@@ -2853,8 +3145,22 @@ class Wreath:
         portable ASGI retain their request-based authentication definition.
         """
         policy = self._http_policy
-        if policy is not None and (
-            not native_response or not getattr(scope, "policy_native", False)
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        native_ingress_only = bool(
+            policy is not None
+            and policy._native_ingress_only
+            and policy_native
+        )
+        if policy is not None and policy._native_ingress_only and not policy_native:
+            candidate = policy._reference_ingress_scope(scope, method, path)
+            if candidate is not None:
+                await self._finish_http_plain(
+                    candidate, send, method, scope, native_response
+                )
+                return
+            native_ingress_only = True
+        if policy is not None and not native_ingress_only and (
+            not policy_native
         ):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
@@ -3006,11 +3312,16 @@ class Wreath:
         try:
             value = handler(request)
             value = await value if value.__class__ is _COROUTINE else value
-            if native_response and policy is None and method != "HEAD" and value.__class__ is dict:
+            if (
+                native_response
+                and (policy is None or native_ingress_only)
+                and method != "HEAD"
+                and value.__class__ is dict
+            ):
                 json_body = _json_dumps(value)
             elif (
                 native_response
-                and policy is None
+                and (policy is None or native_ingress_only)
                 and method != "HEAD"
                 and value.__class__ is _EncodedJSON
             ):
@@ -3023,7 +3334,7 @@ class Wreath:
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
-        if policy is None:
+        if policy is None or native_ingress_only:
             if json_body is not None:
                 protocol = cast(Any, send).__self__
                 size = len(json_body)
@@ -3075,6 +3386,15 @@ class Wreath:
         hook has run. That is the same invariant `_handle_http_plain` documents,
         and the same one to preserve if a condition is ever added here.
         """
+        policy = self._http_policy
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        if policy is not None and policy._native_ingress_only and not policy_native:
+            candidate = policy._reference_ingress_scope(scope, method, path)
+            if candidate is not None:
+                await self._finish_http_plain(
+                    candidate, send, method, scope, native_response
+                )
+                return
         if not native_response and _ambiguous_request_path(scope, path):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
@@ -3745,7 +4065,7 @@ class Wreath:
         )
         if policy is not None:
             native_one_shot = type(response).__call__ is _RESPONSE_CALL
-            if not policy_native:
+            if not policy_native and not policy._native_ingress_only:
                 response = _coerce_response(await policy._reference_egress(request, response))
             elif policy._dynamic_always or (policy.compression is not None and not native_one_shot):
                 response = _coerce_response(
@@ -3770,7 +4090,7 @@ class Wreath:
             protocol = cast(Any, send).__self__
             headers = (
                 _HTML_HEADERS[len(plain.body)]
-                if policy is None
+                if (policy is None or policy._native_ingress_only)
                 and plain.__class__ is HTMLResponse
                 and plain._headers is None
                 and len(plain.body) < len(_HTML_HEADERS)
@@ -3788,7 +4108,11 @@ class Wreath:
         elif response.__class__ is PreparedResponse and native_response:
             prepared = response
             protocol = cast(Any, send).__self__
-            headers = prepared.headers if policy is None else list(prepared.headers)
+            headers = (
+                prepared.headers
+                if policy is None or policy._native_ingress_only
+                else list(prepared.headers)
+            )
             await protocol._wreath_response(prepared.status, headers, prepared.body)
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
@@ -3819,7 +4143,7 @@ class Wreath:
                 # not belong after a response.
                 self.background_timeouts += 1
                 raise
-            except Exception:
+            except Exception as error:
                 # Counted, then re-raised. Propagating is the shipped contract
                 # (tests/test_background.py asserts it) and it is the right one:
                 # the response has already gone, so the *server* is the only
@@ -3827,6 +4151,7 @@ class Wreath:
                 # take that away. What was missing is that the application had
                 # no way to know it had happened at all.
                 self.background_errors += 1
+                await self._report_error(request, error, phase="background")
                 raise
 
     def _finish_http_plain(
@@ -3920,8 +4245,9 @@ class Wreath:
         except TimeoutError:
             self.background_timeouts += 1
             raise
-        except Exception:
+        except Exception as error:
             self.background_errors += 1
+            await self._report_error(None, error, phase="background")
             raise
 
     async def _handle_websocket(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -3963,7 +4289,21 @@ class Wreath:
         request: Request | None = None
         policy = self._http_policy
         policy_native = bool(scope.get("_wreath_policy_native", False))
-        if websocket_hooks or needs_auth or (policy is not None and not policy_native):
+        if (
+            policy is not None
+            and policy._native_ingress_only
+            and not policy_native
+            and policy._reference_ingress_scope(scope, "GET", scope["path"])
+            is not None
+        ):
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        policy_needs_request = bool(
+            policy is not None
+            and not policy_native
+            and not policy._native_ingress_only
+        )
+        if websocket_hooks or needs_auth or policy_needs_request:
             # The handshake is a GET. Keep one Request for ingress and auth so
             # session state published by middleware reaches the backend.
             request = Request(
@@ -3974,7 +4314,11 @@ class Wreath:
                 app=self,
             )
         if request is not None:
-            if policy is not None and not policy_native:
+            if (
+                policy is not None
+                and not policy_native
+                and not policy._native_ingress_only
+            ):
                 candidate = await policy._reference_websocket(request)
                 if candidate is not None:
                     await send({"type": "websocket.close", "code": 1008})
@@ -4020,12 +4364,14 @@ class Wreath:
             # session's buffered records are discarded like a healthy request's.
             _log_finish_session(promoted=False)
             return
-        except BaseException:
+        except BaseException as error:
             # Anything else ended the session badly -- a handler that raised, or
             # a cancellation tearing the task down. Publish the verbose records
             # for exactly this session, then let it propagate: the promotion is
             # a side effect of the failure, never a substitute for reporting it.
             _log_finish_session(promoted=True)
+            if isinstance(error, Exception):
+                await self._report_error(request, error, phase="websocket")
             raise
         _log_finish_session(promoted=False)
 
@@ -4058,6 +4404,8 @@ class Wreath:
         `CancelledError` still unwinds a request that is being torn down and
         `KeyboardInterrupt`/`SystemExit` still end the process.
         """
+        if not isinstance(error, (HTTPException, ValidationError)):
+            await self._report_error(request, error, phase="request")
         try:
             return await self._render_exception(request, error)
         except Exception as failure:  # the handler is the caller's
@@ -4069,6 +4417,7 @@ class Wreath:
             import logging
 
             self.exception_handler_errors += 1
+            await self._report_error(request, failure, phase="exception_handler")
             logging.getLogger("wreath").exception(
                 "exception handler for %s raised; answering 500",
                 type(error).__name__,

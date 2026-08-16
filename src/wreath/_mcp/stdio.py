@@ -52,6 +52,11 @@ from typing import Any
 _DATA = "data: "
 
 
+def _sse_line_text(pending: bytearray, start: int, end: int) -> str:
+    """Materialize one complete, disjoint SSE line at the output boundary."""
+    return pending[start:end].decode("utf-8", "replace")
+
+
 async def serve(
     app: Any,
     *,
@@ -144,26 +149,36 @@ async def _pump(
         path,
         headers={**_headers(session), "accept": "text/event-stream"},
     )
-    pending = b""
+    pending = bytearray()
+    searched = 0
 
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: dict[str, Any]) -> None:
-        nonlocal pending
+        nonlocal searched
         if message["type"] == "wreath.response":
             body = message.get("body", b"")
         elif message["type"] == "http.response.body":
             body = message.get("body", b"")
         else:
             return
-        pending += body
-        while b"\n" in pending:
-            raw, _, pending = pending.partition(b"\n")
-            text = raw.decode("utf-8", "replace")
+        pending.extend(body)
+        consumed = 0
+        while True:
+            newline = pending.find(b"\n", searched)
+            if newline < 0:
+                searched = len(pending)
+                break
+            text = _sse_line_text(pending, consumed, newline)
+            consumed = newline + 1
+            searched = consumed
             if text.startswith(_DATA):
                 async with lock:
                     write(text[len(_DATA) :].encode("utf-8"))
+        if consumed:
+            del pending[:consumed]
+            searched -= consumed
 
     await client.app(scope, receive, send)
 

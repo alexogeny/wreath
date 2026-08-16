@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -16,6 +16,7 @@ from ._migrations.scan import (
     waive_transitional,
 )
 from ._native import _postgres
+from ._pgname import validate_unquoted_identifier
 from .orm.fields import _IMPLICIT_OPCLASS_METHODS
 from .orm.types import BIT_OID, ExtensionType
 
@@ -29,11 +30,6 @@ from .orm.types import BIT_OID, ExtensionType
 #: unparameterised (`Numeric` takes no precision, `Varchar` no length), which is
 #: why `oid >= 16384` was a sufficient test until `Bit(length)` existed.
 _MODIFIER_BEARING_OIDS = frozenset({BIT_OID})
-
-#: A tenant schema is interpolated into the lock key and reaches the catalog
-#: query as a parameter; the identifier rule is the same one the rest of the
-#: tree applies, spelled here because migrations imports no store.
-_SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SINGLE_CATALOG_SQL = """
 
@@ -1634,8 +1630,7 @@ async def apply_fleet(
     for schema in targets:
         # Interpolated into the catalog query and the lock key, so the same
         # rule the rest of the tree applies to an identifier applies here.
-        if not _SCHEMA_NAME.fullmatch(schema):
-            raise ValueError(f"tenant schema {schema!r} is not a plain SQL identifier")
+        validate_unquoted_identifier(schema, "tenant schema")
 
     artifact = _load_native_artifact(artifact_data)
     connection = await database.acquire(workload)
@@ -1759,6 +1754,52 @@ def _narrowed_columns(named_plan: bytes) -> tuple[tuple[str, str, str, str], ...
     return tuple(out)
 
 
+async def _pass_hazard_facts(
+    connection: Any,
+    candidates: tuple[tuple[str, str, str, str], ...],
+    ledger_schema: str,
+) -> tuple[Any, dict[str, tuple[str, str, str, str]]] | None:
+    """Resolve column candidates against an existing pass ledger."""
+    from ._passes import ledger as _pass_ledger
+
+    if not candidates:
+        return None
+    table = _pass_ledger.table_name(ledger_schema)
+    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
+    if not exists:
+        return None
+    facts = {
+        _column_fact(schema, tbl, column): (schema, tbl, column, action)
+        for schema, tbl, column, action in candidates
+    }
+    return _pass_ledger, facts
+
+
+def _column_hazards[T](
+    entries: Any,
+    facts: dict[str, tuple[str, str, str, str]],
+    hazard_type: Callable[..., T],
+    extras: Callable[[Any], dict[str, object]],
+) -> tuple[T, ...]:
+    """Project pass-ledger entries onto their typed migration hazards."""
+    hazards: list[T] = []
+    for entry in entries:
+        schema, table, column, action = facts[entry.fact]
+        hazards.append(
+            hazard_type(
+                schema=schema,
+                table=table,
+                column=column,
+                action=action,
+                pass_name=entry.name,
+                tenant=entry.tenant,
+                phase=entry.phase,
+                **extras(entry),
+            )
+        )
+    return tuple(hazards)
+
+
 async def _pending_pass_hazards(
     connection: Any, named_plan: bytes, *, ledger_schema: str = "wreath"
 ) -> tuple[PendingPassHazard, ...]:
@@ -1774,36 +1815,19 @@ async def _pending_pass_hazards(
     `to_regclass` rather than by catching a failure, so a real error from the
     read is still a real error.
     """
-    from ._passes import ledger as _pass_ledger
-
-    candidates = _narrowed_columns(named_plan)
-    if not candidates:
+    resolved = await _pass_hazard_facts(
+        connection, _narrowed_columns(named_plan), ledger_schema
+    )
+    if resolved is None:
         return ()
-    table = _pass_ledger.table_name(ledger_schema)
-    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
-    if not exists:
-        return ()
-    facts = {
-        _column_fact(schema, tbl, column): (schema, tbl, column, action)
-        for schema, tbl, column, action in candidates
-    }
+    _pass_ledger, facts = resolved
     pending = await _pass_ledger.pending_facts(connection, schema=ledger_schema, facts=tuple(facts))
-    hazards: list[PendingPassHazard] = []
-    for entry in pending:
-        schema, tbl, column, action = facts[entry.fact]
-        hazards.append(
-            PendingPassHazard(
-                schema=schema,
-                table=tbl,
-                column=column,
-                action=action,
-                pass_name=entry.name,
-                tenant=entry.tenant,
-                phase=entry.phase,
-                holes_open=entry.holes_open,
-            )
-        )
-    return tuple(hazards)
+    return _column_hazards(
+        pending,
+        facts,
+        PendingPassHazard,
+        lambda entry: {"holes_open": entry.holes_open},
+    )
 
 
 def _column_fact(schema: str, table: str, column: str) -> str:
@@ -1845,39 +1869,24 @@ async def _recoded_column_hazards(
     original value survives, so it is the more dangerous state rather than the
     settled one.
     """
-    from ._passes import ledger as _pass_ledger
-
-    candidates = _touched_columns(reverse_plan)
-    if not candidates:
+    resolved = await _pass_hazard_facts(
+        connection, _touched_columns(reverse_plan), ledger_schema
+    )
+    if resolved is None:
         return ()
-    table = _pass_ledger.table_name(ledger_schema)
-    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
-    if not exists:
-        return ()
-    facts = {
-        _column_fact(schema, tbl, column): (schema, tbl, column, action)
-        for schema, tbl, column, action in candidates
-    }
+    _pass_ledger, facts = resolved
     rewritten = await _pass_ledger.rewritten_columns(
         connection, schema=ledger_schema, facts=tuple(facts)
     )
-    hazards: list[RecodedColumnHazard] = []
-    for entry in rewritten:
-        schema, tbl, column, action = facts[entry.fact]
-        hazards.append(
-            RecodedColumnHazard(
-                schema=schema,
-                table=tbl,
-                column=column,
-                action=action,
-                pass_name=entry.name,
-                tenant=entry.tenant,
-                phase=entry.phase,
-                finished=entry.finished,
-                ledger_row_present=entry.ledger_row_present,
-            )
-        )
-    return tuple(hazards)
+    return _column_hazards(
+        rewritten,
+        facts,
+        RecodedColumnHazard,
+        lambda entry: {
+            "finished": entry.finished,
+            "ledger_row_present": entry.ledger_row_present,
+        },
+    )
 
 
 def _downgrade_hazards(registry: Any, reverse_plan: bytes) -> tuple[DowngradeHazard, ...]:
