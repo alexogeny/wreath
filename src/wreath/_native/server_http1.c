@@ -1655,6 +1655,24 @@ http_wreath_response(
     return result;
 }
 
+/* The application dispatcher is already a coroutine, but a one-shot HTTP/1
+ * write normally completes synchronously.  Returning the shared completed
+ * awaitable only to have Python execute GET_AWAITABLE/SEND and unwind its
+ * StopIteration is boundary glue, not backpressure.  Preserve the uncommon
+ * drain awaitable and spell synchronous completion as None. */
+static PyObject *
+http_wreath_response_nowait(
+    WreathHttpProtocol *self, PyObject *const *args, Py_ssize_t nargs
+)
+{
+    PyObject *result = http_wreath_response(self, args, nargs);
+    if (result == immediate_none) {
+        Py_DECREF(result);
+        Py_RETURN_NONE;
+    }
+    return result;
+}
+
 static PyObject *
 http_wreath_stream_start(
     WreathHttpProtocol *self, PyObject *const *args, Py_ssize_t nargs)
@@ -4507,6 +4525,9 @@ static PyMethodDef http_protocol_methods[] = {
      "ASGI send callable (returns an awaitable)."},
     {"_wreath_response", (PyCFunction)(void (*)(void))http_wreath_response,
      METH_FASTCALL, "Emit one complete Wreath response without an ASGI message dict."},
+    {"_wreath_response_nowait",
+     (PyCFunction)(void (*)(void))http_wreath_response_nowait, METH_FASTCALL,
+     "Emit one response, returning an awaitable only when backpressure suspends."},
     {"_wreath_stream_start",
      (PyCFunction)(void (*)(void))http_wreath_stream_start, METH_FASTCALL,
      "Start a Wreath stream without an ASGI message dict."},

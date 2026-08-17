@@ -44,6 +44,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .._pgname import quote_identifier as _quote_identifier
 from .errors import DeclarationError
 from .table import AllOf, Eq, InValues, IsNull
 
@@ -85,9 +86,7 @@ _LITERAL = {
 
 def quote_identifier(name: str) -> str:
     """Quote *name* exactly when PostgreSQL's `quote_ident` would."""
-    if _BARE.fullmatch(name) and name not in RESERVED_WORDS:
-        return name
-    return '"' + name.replace('"', '""') + '"'
+    return _quote_identifier(name, bare=_BARE, reserved=RESERVED_WORDS)
 
 
 def _literal(value: object, kind: str, column: str, model: str) -> str:

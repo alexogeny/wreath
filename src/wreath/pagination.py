@@ -21,11 +21,17 @@ async def list_llamas(request, params: PageParams = Depends(page_params)):
 
 from __future__ import annotations
 
+import datetime
+import json
+import uuid
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote_plus
 
+from ._b64 import b64url_decode, b64url_encode
 from ._native import _core
+from .exceptions import BadRequest
 from .orm.query import Select
 
 if TYPE_CHECKING:
@@ -37,6 +43,7 @@ def _as_model(model: type) -> type[Model]:
     checker, so the ORM-injected `__wreath_*__` class attributes resolve."""
     return cast("type[Model]", model)
 
+
 DEFAULT_SIZE = 20
 MAX_SIZE = 100
 
@@ -45,6 +52,11 @@ MAX_SIZE = 100
 #: a full scan an anonymous caller can ask for repeatedly. Past this, use a
 #: keyset filter -- which is what a page this deep should have been doing.
 MAX_PAGE = 10_000
+MAX_CURSOR_COLUMNS = 8
+
+
+class InvalidPagination(BadRequest, ValueError):
+    """A client-supplied page, sort, filter, or cursor that is not accepted."""
 
 
 def _rank_indices(
@@ -53,16 +65,23 @@ def _rank_indices(
     """Select a numeric page while the sort workspace remains native-owned."""
     return _core.rank_indices(scores, (page - 1) * size, size, descending)
 
+
 __all__ = [
     "DEFAULT_SIZE",
     "MAX_PAGE",
+    "MAX_CURSOR_COLUMNS",
     "MAX_SIZE",
+    "InvalidPagination",
     "Page",
     "PageParams",
+    "CursorPage",
+    "CursorParams",
     "apply_filters",
     "apply_sort",
     "page_params",
+    "cursor_params",
     "paginate",
+    "paginate_cursor",
     "parse_sort",
     "sortable_fields",
 ]
@@ -132,6 +151,36 @@ class PageParams:
     sort: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class CursorParams:
+    """A bounded keyset request: an opaque position, size, and stable order."""
+
+    after: str | None = None
+    size: int = DEFAULT_SIZE
+    sort: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CursorPage[T]:
+    """One keyset page and the opaque position for the next page."""
+
+    items: Sequence[T]
+    size: int
+    next: str | None
+
+    @property
+    def has_next(self) -> bool:
+        return self.next is not None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "items": list(self.items),
+            "size": self.size,
+            "next": self.next,
+            "has_next": self.has_next,
+        }
+
+
 def parse_sort(raw: str) -> tuple[str, ...]:
     """`"name,-created_at"` -> `("name", "-created_at")`; blank -> `()`."""
     return tuple(token.strip() for token in raw.split(",") if token.strip())
@@ -175,6 +224,28 @@ def page_params(request: Any) -> PageParams:
     return _page_params(request, default_size=DEFAULT_SIZE)
 
 
+def cursor_params(request: Any) -> CursorParams:
+    """Bind `?after=&size=&sort=` for keyset pagination.
+
+    The existing native query kernel owns size and sort parsing. Only the
+    opaque `after` value is selected here; cursor decoding happens once in
+    `paginate_cursor`, where the expected columns are known.
+    """
+    parsed = _page_params(request, default_size=DEFAULT_SIZE)
+    after = None
+    for field in request.query_string.split(b"&"):
+        name, separator, value = field.partition(b"=")
+        if separator and name == b"after":
+            if len(value) > 4096:
+                raise InvalidPagination("pagination cursor is longer than 4096 bytes")
+            try:
+                after = unquote_plus(value.decode("ascii")) or None
+            except UnicodeError as error:
+                raise InvalidPagination("pagination cursor must be ASCII base64url") from error
+            break
+    return CursorParams(after=after, size=parsed.size, sort=parsed.sort)
+
+
 def _page_params(
     request: Any,
     *,
@@ -183,9 +254,7 @@ def _page_params(
     max_size: int = MAX_SIZE,
 ) -> PageParams:
     """The shared bounded query parser, with a caller-selected default size."""
-    page, size, sort = _core.page_params(
-        request.query_string, default_size, max_page, max_size
-    )
+    page, size, sort = _core.page_params(request.query_string, default_size, max_page, max_size)
     return PageParams(page=page, size=size, sort=sort)
 
 
@@ -218,7 +287,10 @@ def sortable_fields(model: type) -> tuple[str, ...]:
 
 def _column(model: type, name: str, allowed: frozenset[str], what: str) -> Any:
     if name not in allowed:
-        raise ValueError(f"cannot {what} by {name!r}; not in the allow-list")
+        allowed_names = ", ".join(sorted(allowed)) or "(none)"
+        raise InvalidPagination(
+            f"cannot {what} by {name!r}; not in the allow-list. Use one of: {allowed_names}"
+        )
     return getattr(model, name)
 
 
@@ -300,6 +372,139 @@ async def paginate(
         resolved_total = await total
     items = await session.fetch(query.paginate(params.page, params.size))
     return Page(items=items, total=resolved_total, page=params.page, size=params.size)
+
+
+def _cursor_value(value: Any) -> list[Any]:
+    if value is None or type(value) in (str, int, float, bool):
+        return ["scalar", value]
+    if isinstance(value, uuid.UUID):
+        return ["uuid", str(value)]
+    if isinstance(value, datetime.datetime):
+        return ["datetime", value.isoformat()]
+    if isinstance(value, datetime.date):
+        return ["date", value.isoformat()]
+    raise TypeError(
+        f"cursor column value must be a JSON scalar, UUID, date, or datetime, "
+        f"not {type(value).__name__}"
+    )
+
+
+def _restore_cursor_value(value: Any) -> Any:
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError("cursor value has the wrong shape")
+    kind, raw = value
+    if kind == "scalar" and (raw is None or type(raw) in (str, int, float, bool)):
+        return raw
+    if kind == "uuid" and isinstance(raw, str):
+        return uuid.UUID(raw)
+    if kind == "datetime" and isinstance(raw, str):
+        return datetime.datetime.fromisoformat(raw)
+    if kind == "date" and isinstance(raw, str):
+        return datetime.date.fromisoformat(raw)
+    raise ValueError(f"cursor value kind is not supported: {kind!r}")
+
+
+def _encode_cursor(order: tuple[str, ...], values: tuple[Any, ...]) -> str:
+    payload = json.dumps(
+        [list(order), [_cursor_value(value) for value in values]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return b64url_encode(payload)
+
+
+def _decode_cursor(token: str, order: tuple[str, ...]) -> tuple[Any, ...]:
+    try:
+        payload = json.loads(b64url_decode(token))
+        encoded_order, encoded_values = payload
+        if encoded_order != list(order) or len(encoded_values) != len(order):
+            raise ValueError("cursor was issued for a different ordering")
+        return tuple(_restore_cursor_value(value) for value in encoded_values)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise InvalidPagination(
+            "invalid pagination cursor; use the unmodified next value from the previous page"
+        ) from error
+
+
+def _item_value(item: Any, name: str) -> Any:
+    if isinstance(item, Mapping):
+        try:
+            return item[name]
+        except KeyError:
+            pass
+    else:
+        try:
+            return getattr(item, name)
+        except AttributeError:
+            pass
+    raise TypeError(
+        f"cursor field {name!r} is absent from returned {type(item).__name__}; "
+        "include every cursor field in the query projection"
+    )
+
+
+async def paginate_cursor(
+    session: Any,
+    query: Select,
+    params: CursorParams,
+    *,
+    allow_sort: Iterable[str] | None = None,
+) -> CursorPage[Any]:
+    """Fetch a stable keyset page without `OFFSET` or a count query.
+
+    Caller-selected sorts are followed by every primary-key column as a stable
+    tie-breaker. The cursor carries all order values and is bound to that exact
+    order, preventing a token from one listing being silently reused for
+    another.
+    """
+    model = _as_model(query.model)
+    allowed = frozenset(allow_sort) if allow_sort is not None else frozenset(sortable_fields(model))
+    requested = params.sort or tuple(column.python_name for column in model.__wreath_primary_key__)
+    order = list(requested)
+    descending = order[0].startswith("-") if order else False
+    primary = tuple(column.python_name for column in model.__wreath_primary_key__)
+    present = {token.removeprefix("-") for token in order}
+    order.extend(("-" if descending else "") + name for name in primary if name not in present)
+    normalized = tuple(order)
+    if len(normalized) > MAX_CURSOR_COLUMNS:
+        raise InvalidPagination(
+            f"cursor pagination supports at most {MAX_CURSOR_COLUMNS} order columns, "
+            f"got {len(normalized)}; use fewer sort fields"
+        )
+
+    columns: list[tuple[str, Any, bool]] = []
+    cursor_allowed = allowed | frozenset(primary)
+    for token in normalized:
+        desc = token.startswith("-")
+        name = token.removeprefix("-")
+        columns.append((name, _column(model, name, cursor_allowed, "sort"), desc))
+    query = query.order_by(
+        *(column.desc() if desc else column.asc() for _, column, desc in columns)
+    )
+
+    if params.after is not None:
+        values = _decode_cursor(params.after, normalized)
+        predicate = None
+        equal = None
+        for (_, column, desc), value in zip(columns, values, strict=True):
+            comparison = column < value if desc else column > value
+            branch = comparison if equal is None else equal & comparison
+            predicate = branch if predicate is None else predicate | branch
+            equality = column == value
+            equal = equality if equal is None else equal & equality
+        if predicate is not None:
+            query = query.where(predicate)
+
+    fetched = list(await session.fetch(query.limit(params.size + 1)))
+    more = len(fetched) > params.size
+    items = fetched[: params.size]
+    next_cursor = None
+    if more and items:
+        last = items[-1]
+        next_cursor = _encode_cursor(
+            normalized, tuple(_item_value(last, name) for name, _, _ in columns)
+        )
+    return CursorPage(items=items, size=params.size, next=next_cursor)
 
 
 async def _count(session: Any, query: Select) -> int:

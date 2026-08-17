@@ -54,6 +54,7 @@ from string.templatelib import Interpolation, Template
 from typing import Any
 
 from ._native import _core
+from ._pgname import quote_qualified
 
 __all__ = ["Fragment", "Identifier", "Statement"]
 
@@ -95,7 +96,7 @@ class Identifier:
     @property
     def text(self) -> str:
         """The quoted SQL for this name."""
-        return ".".join('"' + part.replace('"', '""') + '"' for part in self.parts)
+        return quote_qualified(self.parts)
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Identifier) and other.parts == self.parts

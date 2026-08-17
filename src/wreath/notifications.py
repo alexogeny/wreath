@@ -271,9 +271,7 @@ class Notifications:
             )
         return spec
 
-    async def send(
-        self, note: Any, *, to: Recipient, now: float | None = None
-    ) -> SendResult:
+    async def send(self, note: Any, *, to: Recipient, now: float | None = None) -> SendResult:
         """Deliver `note` to one recipient on every channel they allow."""
         spec = self._spec_and_clock(note)
         moment = time.time() if now is None else now
@@ -492,7 +490,7 @@ class InApp:
 
     async def deliver(self, recipient: Recipient, note: Any, kind: KindSpec) -> None:
         """Publish to the room named for this recipient."""
-        await self.rooms.publish(
+        await self.rooms.broadcast(
             f"notifications:{recipient.key}",
             _text(note, "body") or _text(note, "title") or repr(note),
         )

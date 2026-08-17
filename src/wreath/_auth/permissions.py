@@ -137,15 +137,22 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
     with no policy does.
     """
     found: dict[str, set[str]] = {}
-    for definition in getattr(app, "_routes", ()):
+    image = getattr(app, "_application_image", None)
+    routes = image.routes() if image is not None else getattr(app, "_routes", ())
+    requirements = image.requirements() if image is not None else None
+    for index, definition in enumerate(routes):
         endpoint = getattr(definition, "endpoint", None)
         if endpoint is None:
             continue
         # `@authorize` records on the endpoint; a router can add its own. The
         # effective requirement is the merge, which is what dispatch enforces.
-        requirement = merge_requirements(
-            getattr(definition, "requirement", AuthRequirement()),
-            requirement_for(endpoint),
+        requirement = (
+            requirements[index]
+            if requirements is not None
+            else merge_requirements(
+                getattr(definition, "requirement", AuthRequirement()),
+                requirement_for(endpoint),
+            )
         )
         for policy in requirement.policies:
             resource_type, separator, _verb = policy.action.partition(_SEPARATOR)

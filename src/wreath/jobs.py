@@ -42,6 +42,7 @@ from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import compute_backoff, dedup_key, validate_identifier
+from ._leased import claim_sql, fenced_update_sql
 from ._nplusone import NPlusOneDetected as _NPlusOneDetected
 from ._pgcatalog import column_exists
 from .postgres import PostgresError
@@ -1505,8 +1506,7 @@ class JobRunner:
         # Fenced: a stale worker whose lease expired (fence bumped by the sweeper)
         # cannot mark someone else's re-claim done.
         await self._exec(
-            f"UPDATE {self._table} SET state='done', updated_at=now() "
-            "WHERE id=$1 AND fence=$2",
+            fenced_update_sql(self._table, "state='done', updated_at=now()"),
             job.id, job.fence,
         )
         self._report_terminal(job, "done", None)
@@ -1547,15 +1547,22 @@ class JobRunner:
         order = (
             "priority DESC, run_at" if self._columns.get("priority") else "run_at"
         )
-        sql = (
-            f"WITH claimable AS ( SELECT id FROM {self._table} "
-            "WHERE queue=$1 AND state='ready' AND run_at <= now() "
-            f"ORDER BY {order} FOR UPDATE SKIP LOCKED LIMIT $2 ) "
-            f"UPDATE {self._table} j SET state='leased', owner=$3, "
-            "lease_expiry = now() + ($4 || ' seconds')::interval, "
-            "fence = j.fence + 1, updated_at=now() FROM claimable c WHERE j.id=c.id "
-            "RETURNING j.id, j.task, j.args, j.tenant, "
-            f"j.attempts, j.max_attempts, j.fence, j.dedup_key{trace}"
+        sql = claim_sql(
+            self._table,
+            key="id",
+            alias="j",
+            predicate="queue=$1 AND state='ready' AND run_at <= now()",
+            order=order,
+            limit="$2",
+            assignments=(
+                "state='leased', owner=$3, "
+                "lease_expiry = now() + ($4 || ' seconds')::interval, "
+                "fence = j.fence + 1, updated_at=now()"
+            ),
+            returning=(
+                "j.id, j.task, j.args, j.tenant, "
+                f"j.attempts, j.max_attempts, j.fence, j.dedup_key{trace}"
+            ),
         )
         connection = await self._db.acquire(self._workload)
         try:
@@ -1885,4 +1892,3 @@ async def _has_trace_column(connection: Any, *, schema: str) -> bool:
     return await column_exists(
         connection, schema=schema, table="jobs", column="trace_context"
     )
-

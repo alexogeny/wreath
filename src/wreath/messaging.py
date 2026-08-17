@@ -53,6 +53,7 @@ from ._jobcore import (
     dedup_key,
     validate_identifier,
 )
+from ._leased import claim_sql, fenced_update_sql
 from .temporal import Duration
 
 MessageHandler = Callable[["Message"], Awaitable[None]]
@@ -995,16 +996,20 @@ class MessageBus:
             # catalog read for the life of the bus rather than one per message
             # -- the steady state issues no extra query at all.
             trace = ", m.trace_context" if await self._carries_trace(connection) else ""
-            sql = (
-                f"WITH claimable AS ( SELECT id FROM {self._table} "
-                'WHERE channel=$1 AND "group"=$2 AND state=\'ready\' '
-                "AND run_at <= now() "
-                "ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1 ) "
-                f"UPDATE {self._table} m SET state='leased', owner=$3, "
-                "lease_expiry = now() + ($4 || ' seconds')::interval, "
-                "fence = m.fence + 1, "
-                "updated_at=now() FROM claimable c WHERE m.id=c.id "
-                f"RETURNING m.id, m.payload, m.tenant, m.fence, m.attempts{trace}"
+            sql = claim_sql(
+                self._table,
+                key="id",
+                alias="m",
+                predicate='channel=$1 AND "group"=$2 AND state=\'ready\' '
+                "AND run_at <= now()",
+                order="run_at",
+                limit="1",
+                assignments=(
+                    "state='leased', owner=$3, "
+                    "lease_expiry = now() + ($4 || ' seconds')::interval, "
+                    "fence = m.fence + 1, updated_at=now()"
+                ),
+                returning=f"m.id, m.payload, m.tenant, m.fence, m.attempts{trace}",
             )
             row = await connection.fetchrow(
                 sql, sub.channel, sub.group, self._name, f"{self._lease:.3f}"
@@ -1023,8 +1028,7 @@ class MessageBus:
 
     async def _complete(self, message: Message) -> None:
         await self._exec(
-            f"UPDATE {self._table} SET state='done', updated_at=now() "
-            "WHERE id=$1 AND fence=$2",
+            fenced_update_sql(self._table, "state='done', updated_at=now()"),
             message.id, message.fence,
         )
 

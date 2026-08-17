@@ -21,12 +21,10 @@ An error carries a machine-readable `type` (`"missing"`, `"int"`,
 `_native/validate.c`. That is the catalogue key -- translate on `type`, never
 on the English `msg`, which is a developer-facing default and may change.
 
-**No C here, deliberately.** Formatting and language negotiation happen only on
-a 422, which is an error path by construction. `AGENTS.md` says to measure
-before building an accelerator; nothing here has been measured as hot, and an
-error response is the last place to expect it. `select_language` is written to
-be movable to `webpolicy.c` beside `select_content_encoding` (it is the same
-q-value shape) if it ever lands on a hot path for another reason.
+Formatting remains Python because it happens only on a 422. Language
+negotiation is the reusable exception: one native selector owns the q-value
+scan and returns the chosen offered object, so Python is materialized only at
+the header and catalogue boundaries.
 """
 
 from __future__ import annotations
@@ -34,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ._native import _core
 from .response import ProblemDetail
 
 if TYPE_CHECKING:
@@ -66,17 +65,6 @@ def default_validation_problem(
 # --- language negotiation ----------------------------------------------------
 
 
-def _quality(parameters: Sequence[str]) -> float:
-    for parameter in parameters:
-        name, _, value = parameter.partition("=")
-        if name.strip().lower() == "q":
-            try:
-                return float(value.strip())
-            except ValueError:
-                return 0.0
-    return 1.0
-
-
 def select_language(accept_language: str | bytes | None, offered: Sequence[str]) -> str:
     """Pick the best of `offered` for an `Accept-Language` header.
 
@@ -99,42 +87,7 @@ def select_language(accept_language: str | bytes | None, offered: Sequence[str])
         except UnicodeDecodeError:
             return fallback
 
-    available = {language.lower(): language for language in offered}
-    best_language: str | None = None
-    best_quality = 0.0
-    wildcard_quality = 0.0
-    refused: set[str] = set()
-
-    for item in accept_language.split(","):
-        pieces = item.split(";")
-        tag = pieces[0].strip().lower()
-        quality = _quality(pieces[1:])
-        if tag == "*":
-            wildcard_quality = max(wildcard_quality, quality)
-            continue
-        # `en-GB` matches an offered `en`; an offered `en-GB` also matches a
-        # requested `en`. Exact match wins, then the prefix relationship.
-        match = available.get(tag)
-        if match is None:
-            for lowered, original in available.items():
-                if lowered.partition("-")[0] == tag.partition("-")[0]:
-                    match = original
-                    break
-        if match is None:
-            continue
-        if quality <= 0.0:
-            refused.add(match)
-            continue
-        if quality > best_quality:
-            best_language, best_quality = match, quality
-
-    if best_language is not None:
-        return best_language
-    if wildcard_quality > 0.0:
-        for language in offered:
-            if language not in refused:
-                return language
-    return fallback
+    return _core.select_language(accept_language, offered)
 
 
 # --- catalogue ---------------------------------------------------------------

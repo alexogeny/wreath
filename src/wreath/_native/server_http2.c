@@ -1234,6 +1234,18 @@ stream_wreath_response(Http2Stream *self, PyObject *const *args, Py_ssize_t narg
 }
 
 static PyObject *
+stream_wreath_response_nowait(
+    Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *result = stream_wreath_response(self, args, nargs);
+    if (result == immediate_none) {
+        Py_DECREF(result);
+        Py_RETURN_NONE;
+    }
+    return result;
+}
+
+static PyObject *
 stream_wreath_start(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
 {
     if (nargs != 2) {
@@ -1435,6 +1447,9 @@ static PyMethodDef stream_methods[] = {
     {"_receive", stream_receive, METH_NOARGS, NULL},
     {"_send", stream_send, METH_O, NULL},
     {"_wreath_response", (PyCFunction)(void (*)(void))stream_wreath_response,
+     METH_FASTCALL, NULL},
+    {"_wreath_response_nowait",
+     (PyCFunction)(void (*)(void))stream_wreath_response_nowait,
      METH_FASTCALL, NULL},
     {"_wreath_stream_start", (PyCFunction)(void (*)(void))stream_wreath_start,
      METH_FASTCALL, NULL},

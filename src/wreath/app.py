@@ -50,7 +50,7 @@ from ._flight_schema import PhaseCoverage as _PhaseCoverage
 from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
 from ._native import _core
-from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
+from ._routing import Handler, RoutingMode
 from ._routing import Router as CompiledRouter
 from .binding import (
     AppScope,
@@ -77,7 +77,7 @@ from .logging import begin_request_seeded as _log_begin_seeded
 from .logging import finish_request_for as _log_finish_request
 from .logging import finish_session as _log_finish_session
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
-from .request import DEFAULT_LIMITS, Request, RequestLimits
+from .request import _REQUEST_LAYOUT, DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
     _CONTENT_LENGTHS,
     _HTML_HEADERS,
@@ -96,7 +96,14 @@ from .response import (
     coerce_json,
     coerce_text,
 )
-from .router import RouteDefinition, Router
+from .router import (
+    RouteDefinition,
+    Router,
+    _permission_requirement,
+    _route_definition,
+    _validate_route_path,
+    _validate_status_code,
+)
 from .state import State
 from .websocket import WebSocket, WebSocketDisconnect
 
@@ -105,6 +112,7 @@ if TYPE_CHECKING:
 
 _build_capability_mask = _core.build_capability_mask
 _build_compiled_capability_mask = _core.build_compiled_capability_mask
+_request_new = _core.request_new
 
 # Baseline Response.__call__ used to detect subclasses that override sending;
 # only unmodified responses ride the one-shot "wreath.response" server extension.
@@ -294,15 +302,45 @@ WebSocketHandler = Callable[[WebSocket], Awaitable[None]]
 LifespanHandler = Callable[["Wreath"], Awaitable[None]]
 
 
+def _ordered_middleware(
+    entries: list[tuple[int, int, Middleware]],
+) -> tuple[Middleware, ...]:
+    ordered = list(entries)
+    ordered.sort(key=lambda item: (item[0], item[1]))
+    return tuple(item[2] for item in ordered)
+
+
 class _ApplicationImage:
     """Immutable-route analysis shared by runtime and control-plane consumers."""
 
-    __slots__ = ("_analyzed", "_binding_specs", "_owner", "_routes")
+    __slots__ = (
+        "_analyzed",
+        "_binding_specs",
+        "_contract_middleware_source",
+        "_global_contract_components",
+        "_operation_ids",
+        "_operation_ids_analyzed",
+        "_operation_diagnostics",
+        "_owner",
+        "_requirements",
+        "_route_contract_components",
+        "_routes",
+    )
 
     def __init__(self, owner: Wreath) -> None:
         self._owner = owner
         self._routes: tuple[RouteDefinition, ...] = ()
         self._binding_specs: tuple[BindingSpec | None, ...] = ()
+        self._contract_middleware_source: tuple[
+            tuple[tuple[int, int, int], ...],
+            tuple[tuple[int, int, int], ...],
+        ] = ((), ())
+        self._global_contract_components: tuple[Any, ...] = ()
+        self._requirements: tuple[AuthRequirement, ...] = ()
+        self._route_contract_components: tuple[Any, ...] = ()
+        self._operation_ids: dict[tuple[int, str], str] = {}
+        self._operation_ids_analyzed = False
+        self._operation_diagnostics: tuple[Any, ...] = ()
         self._analyzed = False
 
     def routes(self) -> tuple[RouteDefinition, ...]:
@@ -310,6 +348,10 @@ class _ApplicationImage:
         if current != self._routes:
             self._routes = current
             self._binding_specs = ()
+            self._requirements = ()
+            self._operation_ids = {}
+            self._operation_ids_analyzed = False
+            self._operation_diagnostics = ()
             self._analyzed = False
         return self._routes
 
@@ -320,8 +362,79 @@ class _ApplicationImage:
                 inspect_handler(definition.endpoint, definition.path, definition.host)
                 for definition in routes
             )
+            self._requirements = tuple(
+                merge_requirements(definition.requirement, requirement_for(definition.endpoint))
+                for definition in routes
+            )
             self._analyzed = True
         return self._binding_specs
+
+    def requirements(self) -> tuple[AuthRequirement, ...]:
+        """Effective route requirements, aligned with `routes()`."""
+        self.binding_specs()
+        return self._requirements
+
+    def operation_id(self, definition: RouteDefinition, method: str) -> str:
+        """The canonical operation id for one method of a registered route."""
+        routes = self.routes()
+        operation_ids, _diagnostics = self.operation_ids()
+        for index, candidate in enumerate(routes):
+            if candidate is definition:
+                return operation_ids[index, method]
+        raise ValueError("operation id requested for a route outside this application")
+
+    def operation_ids(self) -> tuple[dict[tuple[int, str], str], tuple[Any, ...]]:
+        """All canonical operation ids and their declaration diagnostics."""
+        self.routes()
+        if not self._operation_ids_analyzed:
+            from .typegen.inspect import resolve_operation_ids
+
+            (
+                self._operation_ids,
+                self._operation_diagnostics,
+            ) = resolve_operation_ids(list(self._routes))
+            self._operation_ids_analyzed = True
+        return self._operation_ids, self._operation_diagnostics
+
+    def contract_candidates(self, definition: RouteDefinition, method: str) -> tuple[Any, ...]:
+        """Policy and middleware declarations covering one operation.
+
+        This is the control-plane projection of the same applicability rules
+        startup compiles into the route tape. It intentionally returns
+        declarations, not compiled hooks, so OpenAPI can ask them for contracts.
+        """
+        source = (
+            tuple(
+                (priority, order, id(item))
+                for priority, order, item in self._owner._global_middleware
+            ),
+            tuple((priority, order, id(item)) for priority, order, item in self._owner._middleware),
+        )
+        if source != self._contract_middleware_source:
+            self._global_contract_components = _ordered_middleware(self._owner._global_middleware)
+            self._route_contract_components = _ordered_middleware(self._owner._middleware)
+            self._contract_middleware_source = source
+        routes = self.routes()
+        requirements = self.requirements()
+        requirement = next(
+            requirement
+            for candidate, requirement in zip(routes, requirements, strict=True)
+            if candidate is definition
+        )
+        route = MiddlewareRoute(
+            definition.path,
+            method,
+            definition.endpoint,
+            authenticated=requirement.authenticated,
+        )
+        policy = self._owner._http_policy
+        applicable = list(policy.components if policy is not None else ())
+        applicable.extend(self._global_contract_components)
+        for item in (*self._route_contract_components, *definition.middleware):
+            predicate = getattr(item, "applies_to", None)
+            if predicate is None or predicate(route):
+                applicable.append(item)
+        return tuple(applicable)
 
 
 class _StaticMatcher:
@@ -365,33 +478,6 @@ class _StaticMatcher:
             if path.startswith(prefix):
                 return handler, {"path": path[len(prefix) :]}
         return None
-
-
-def _dynamic_path_pattern(path: str) -> re.Pattern[str]:
-    pieces: list[str] = []
-    for segment in path.split("/"):
-        if segment.startswith("{") and segment.endswith("}"):
-            declaration = segment[1:-1]
-            name, separator, converter = declaration.partition(":")
-            expression = ".*" if separator and converter == "path" else "[^/]+"
-            pieces.append(f"(?P<{name}>{expression})")
-        else:
-            pieces.append(re.escape(segment))
-    return re.compile("^" + "/".join(pieces) + "$")
-
-
-def _dynamic_host_pattern(host: str | None) -> re.Pattern[str] | None:
-    if host is None:
-        return None
-    pieces: list[str] = []
-    for segment in host.lower().split("."):
-        if segment == "*":
-            pieces.append("[^.]+")
-        elif segment.startswith("{") and segment.endswith("}"):
-            pieces.append(f"(?P<{segment[1:-1]}>[^.]+)")
-        else:
-            pieces.append(re.escape(segment))
-    return re.compile("^" + r"\.".join(pieces) + "$")
 
 
 def _host_name(value: str) -> str:
@@ -450,45 +536,6 @@ def _render_route_template(template: str, values: Mapping[str, Any]) -> str:
         return quote(str(values[name]), safe="/" if converter == "path" else "")
 
     return _ROUTE_PARAMETER.sub(replace, template)
-
-
-class _DynamicMatcher:
-    """Ordered fallback for host routes and trailing `{name:path}` routes."""
-
-    __slots__ = ("_routes",)
-
-    def __init__(self) -> None:
-        self._routes: list[tuple[str, re.Pattern[str], re.Pattern[str] | None, Handler]] = []
-
-    def add(self, path: str, method: str, host: str | None, handler: Handler) -> None:
-        self._routes.append(
-            (method, _dynamic_path_pattern(path), _dynamic_host_pattern(host), handler)
-        )
-
-    def match(
-        self,
-        method: str,
-        path: str,
-        host: str,
-        *,
-        host_routes: bool | None = None,
-    ) -> tuple[Handler, dict[str, str]] | None:
-        for route_method, path_pattern, host_pattern, handler in self._routes:
-            if route_method != method and not (method == "HEAD" and route_method == "GET"):
-                continue
-            if host_routes is not None and (host_pattern is not None) != host_routes:
-                continue
-            host_match = host_pattern.fullmatch(host) if host_pattern is not None else None
-            if host_pattern is not None and host_match is None:
-                continue
-            path_match = path_pattern.fullmatch(path)
-            if path_match is None:
-                continue
-            params = path_match.groupdict()
-            if host_match is not None:
-                params.update(host_match.groupdict())
-            return handler, params
-        return None
 
 
 class _MountedResponse(Response):
@@ -553,15 +600,11 @@ class Wreath:
     rendering, and `lifespan_teardown_errors` for a resource that refused to
     close while a lifespan failure path was releasing it.
 
-    The three routing backends are behaviourally identical and the tests assert
-    parity across them; they differ in how the table compiles. `bitset` and
-    `decision` classify a protected route before selecting it, so authentication
-    runs once and route selection is filtered by the caller's capabilities; `trie`
-    selects first and the same requirement is enforced by the authorization stage.
+    One native policy table performs route selection and capability classification.
 
     Args:
         debug: Put the exception type and message in the body of an unhandled 500.
-        routing: Route-table backend -- `bitset` (default), `decision`, or `trie`.
+        routing: `policy`, the sole routing implementation.
         limits: Body, form and cookie ceilings applied to every request built here.
         background_timeout: Seconds a response's background tasks may run before
             they are cancelled, or `None` for no limit. Default 30.
@@ -587,6 +630,7 @@ class Wreath:
         "_capabilities",
         "_capability_descriptor",
         "_classify",
+        "_classify_request",
         "_compile_lock",
         "_crud_enabled",
         "background_errors",
@@ -598,7 +642,7 @@ class Wreath:
         "metrics_collection_errors",
         "metrics_invalid_sources",
         "_dirty",
-        "_dynamic_matcher",
+        "_has_dynamic_routes",
         "_databases",
         "_declared_databases",
         "_manage_schema",
@@ -672,7 +716,7 @@ class Wreath:
         self,
         *,
         debug: bool = False,
-        routing: RoutingMode = "bitset",
+        routing: RoutingMode = "policy",
         limits: RequestLimits = DEFAULT_LIMITS,
         background_timeout: float | None = 30.0,
         http_policy: Any = None,
@@ -711,9 +755,7 @@ class Wreath:
                 ai_scraping=AIScrapingPolicy(_database=self._user_agent_database)
             )
             http_policy = (
-                default_ai_policy
-                if http_policy is None
-                else default_ai_policy.merged(http_policy)
+                default_ai_policy if http_policy is None else default_ai_policy.merged(http_policy)
             )
         elif http_policy is not None and http_policy.ai_scraping is not None:
             self._user_agent_database = http_policy.ai_scraping._database
@@ -740,6 +782,7 @@ class Wreath:
         # identity, so the binding stays valid as routes are added.
         self._match = self.router._table.match
         self._classify = getattr(self.router._table, "classify", None)
+        self._classify_request = getattr(self.router._table, "classify_request", None)
         self._resolve = getattr(self.router._table, "resolve", None)
         self._resolve_identity = getattr(self.router._table, "resolve_identity", None)
         self._probe = getattr(self.router._table, "probe", None)
@@ -777,7 +820,7 @@ class Wreath:
         #: join matched handlers to their route IDs.
         self._ws_routes: list[tuple[str, WebSocketHandler]] = []
         self._static_matcher = _StaticMatcher()
-        self._dynamic_matcher: _DynamicMatcher | None = None
+        self._has_dynamic_routes = False
         self._mount_names: dict[str, str] = {}
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
@@ -1156,9 +1199,7 @@ class Wreath:
                 )
             geo_provider = WreathGeoIP()
         elif geoip is not None and not callable(getattr(geoip, "lookup", None)):
-            raise TypeError(
-                "client-facts geoip must be 'wreath', None, or expose lookup(address)"
-            )
+            raise TypeError("client-facts geoip must be 'wreath', None, or expose lookup(address)")
         else:
             geo_provider = geoip
         if user_agents is not None and not isinstance(user_agents, UserAgentDatabase):
@@ -1178,7 +1219,7 @@ class Wreath:
         return provider
 
     def objects(self, name: str, *, backend: str = "local", **options: Any) -> Any:
-        """Register a lifespan-managed object-storage backend (`local` or `s3`).
+        """Register an object-storage backend (`memory`, `local`, or `s3`).
 
         Exposed on `app.state.objects_<name>`. An `s3` backend owns a pinned
         outbound `HTTPClient` started/stopped with the app; `local` opens its root
@@ -1186,11 +1227,19 @@ class Wreath:
         `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` unless
         given explicitly.
         """
-        from .objects import LocalObjectStore, S3ObjectStore
+        from .objects import LocalObjectStore, MemoryObjectStore, S3ObjectStore
 
         if name in self._object_stores:
             raise ValueError(f"duplicate object store: {name}")
-        if backend == "local":
+        if backend == "memory":
+            unknown = set(options) - {"url_secret"}
+            if unknown:
+                raise TypeError(
+                    f"memory object storage does not accept {sorted(unknown)!r}; "
+                    "use url_secret= or no options"
+                )
+            store = MemoryObjectStore(url_secret=options.get("url_secret"))
+        elif backend == "local":
             store: Any = LocalObjectStore(options["root"], url_secret=options.get("url_secret"))
         elif backend == "s3":
             import os
@@ -1568,9 +1617,7 @@ class Wreath:
         from .flags import FeatureFlags
 
         if self.state.get("flags") is not None:
-            raise ValueError(
-                "duplicate feature-flag provider; configure app.flags exactly once"
-            )
+            raise ValueError("duplicate feature-flag provider; configure app.flags exactly once")
         if provider is not None and values:
             raise TypeError("app.flags accepts a provider or keyword values, not both")
         if provider is None:
@@ -1590,6 +1637,7 @@ class Wreath:
         if close is not None and not callable(close):
             raise TypeError("feature-flag provider close must be callable")
         if start is not None:
+
             async def start_flags(_app: Wreath) -> None:
                 result = start()
                 if isawaitable(result):
@@ -1597,6 +1645,7 @@ class Wreath:
 
             self._startup_handlers.append(start_flags)
         if close is not None:
+
             async def close_flags(_app: Wreath) -> None:
                 result = close()
                 if isawaitable(result):
@@ -1777,67 +1826,51 @@ class Wreath:
         Raises:
             ValueError: This method and path are already registered.
         """
-        route_methods = tuple(method.upper() for method in methods)
-        route_middleware = tuple(middleware)
-        route_tags = tuple(tags)
-        route_dependencies = tuple(dependencies)
-        permission_values = frozenset(permissions)
-        requirement = (
-            AuthRequirement(
-                authenticated=True,
-                permission_checks=(SetRequirement(permission_values, "all"),),
-            )
-            if permission_values
-            else AuthRequirement()
-        )
-        if not 100 <= status_code <= 599:
-            raise ValueError("status_code must be between 100 and 599")
-        response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
-        route_security = tuple((name, tuple(scopes)) for name, scopes in (security or {}).items())
+        _validate_route_path(path)
+        _validate_status_code(status_code)
 
         def register(handler: Handler) -> Handler:
-            check_placeholders(path)
-            if name is not None and name in self._route_names:
+            definition = _route_definition(
+                path,
+                handler,
+                methods=methods,
+                middleware=middleware,
+                tags=tags,
+                summary=summary,
+                dependencies=dependencies,
+                permissions=permissions,
+                operation_id=operation_id,
+                response_only=response_only,
+                status_code=status_code,
+                response_description=response_description,
+                response_media_type=response_media_type,
+                responses=responses,
+                deprecated=deprecated,
+                include_in_schema=include_in_schema,
+                security=security,
+                name=name,
+                host=host,
+                cancel_on_disconnect=cancel_on_disconnect,
+            )
+            if definition.name is not None and definition.name in self._route_names:
                 raise ValueError(f"route name {name!r} is already registered")
-            dynamic = host is not None or ":path}" in path
-            for method in route_methods:
+            dynamic = definition.host is not None or ":path}" in definition.path
+            for method in definition.methods:
                 if dynamic:
-                    if (method, path, host) in self._dynamic_route_keys:
+                    if (method, definition.path, definition.host) in self._dynamic_route_keys:
                         raise ValueError(
-                            f"route {method} {path!r} for host {host!r} is already registered"
+                            f"route {method} {definition.path!r} for host "
+                            f"{definition.host!r} is already registered"
                         )
                 else:
-                    self.router.add(path, method, handler)
-            if name is not None:
-                self._route_names.add(name)
+                    self.router.add(definition.path, method, handler)
+            if definition.name is not None:
+                self._route_names.add(definition.name)
             if dynamic:
                 self._dynamic_route_keys.update(
-                    (method, path, host) for method in route_methods
+                    (method, definition.path, definition.host) for method in definition.methods
                 )
-            self._routes.append(
-                RouteDefinition(
-                    path,
-                    route_methods,
-                    handler,
-                    route_middleware,
-                    route_tags,
-                    summary,
-                    route_dependencies,
-                    requirement,
-                    operation_id,
-                    response_only,
-                    status_code,
-                    response_description,
-                    response_media_type,
-                    response_specs,
-                    deprecated,
-                    include_in_schema,
-                    route_security,
-                    name,
-                    host,
-                    cancel_on_disconnect,
-                )
-            )
+            self._routes.append(definition)
             self._dirty = True
             return handler
 
@@ -1975,15 +2008,7 @@ class Wreath:
         include_tags = tuple(tags)
         include_middleware = tuple(middleware)
         include_dependencies = tuple(dependencies)
-        permission_values = frozenset(permissions)
-        include_requirement = (
-            AuthRequirement(
-                authenticated=True,
-                permission_checks=(SetRequirement(permission_values, "all"),),
-            )
-            if permission_values
-            else AuthRequirement()
-        )
+        include_requirement = _permission_requirement(permissions)
         for definition in router.routes:
             path = prefix + definition.path if prefix else definition.path
             if definition.name is not None and definition.name in self._route_names:
@@ -2005,27 +2030,13 @@ class Wreath:
                     (method, path, definition.host) for method in definition.methods
                 )
             self._routes.append(
-                RouteDefinition(
-                    path,
-                    definition.methods,
-                    definition.endpoint,
-                    include_middleware + definition.middleware,
-                    include_tags + definition.tags,
-                    definition.summary,
-                    include_dependencies + definition.dependencies,
-                    merge_requirements(include_requirement, definition.requirement),
-                    definition.operation_id,
-                    definition.response_only,
-                    definition.status_code,
-                    definition.response_description,
-                    definition.response_media_type,
-                    definition.responses,
-                    definition.deprecated,
-                    definition.include_in_schema,
-                    definition.security,
-                    definition.name,
-                    definition.host,
-                    definition.cancel_on_disconnect,
+                _dc_replace(
+                    definition,
+                    path=path,
+                    middleware=include_middleware + definition.middleware,
+                    tags=include_tags + definition.tags,
+                    dependencies=include_dependencies + definition.dependencies,
+                    requirement=merge_requirements(include_requirement, definition.requirement),
                 )
             )
         for definition in router.websockets:
@@ -2153,9 +2164,7 @@ class Wreath:
         else:
             self._http_policy = self._http_policy._merged(
                 policy,
-                replace_default_ai=(
-                    self._ai_scraping_defaulted and policy.ai_scraping is not None
-                ),
+                replace_default_ai=(self._ai_scraping_defaulted and policy.ai_scraping is not None),
             )
         if policy.ai_scraping is not None:
             self._ai_scraping_defaulted = False
@@ -2373,14 +2382,10 @@ class Wreath:
             )
         report = getattr(reporter, "report", None)
         if report is None or not _iscoroutinefunction(report):
-            raise TypeError(
-                "an error reporter needs 'async def report(self, ErrorEvent) -> None'"
-            )
+            raise TypeError("an error reporter needs 'async def report(self, ErrorEvent) -> None'")
         self._error_reporters.append(reporter)
 
-    async def _report_error(
-        self, request: Request | None, error: Exception, *, phase: str
-    ) -> None:
+    async def _report_error(self, request: Request | None, error: Exception, *, phase: str) -> None:
         from .errors import ErrorEvent, record_error
 
         event = ErrorEvent(error=error, request=request, phase=phase)
@@ -2537,7 +2542,7 @@ class Wreath:
         if (
             (policy is None or native_ingress_only)
             and not self._has_global_http_hooks
-            and self._dynamic_matcher is None
+            and not self._has_dynamic_routes
             and not self._auth_handlers
             and len(frozen) == len(self._handler_requirements)
         ):
@@ -2546,7 +2551,7 @@ class Wreath:
         if (
             (policy is None or fast_policy)
             and not self._has_global_http_hooks
-            and self._dynamic_matcher is None
+            and not self._has_dynamic_routes
         ):
             if self._auth_handlers:
                 self._dispatch_http = (
@@ -2578,7 +2583,7 @@ class Wreath:
                 )
         elif (
             self._route_programs is not None
-            and self._dynamic_matcher is None
+            and not self._has_dynamic_routes
             and self._classify is not None
             and not self._stage_hooks
             and (policy is None or native_ingress_only)
@@ -2607,9 +2612,7 @@ class Wreath:
             if policy._native_ingress_only and not policy_native:
                 candidate = policy._reference_ingress_scope(scope, method, path)
                 if candidate is not None:
-                    return self._finish_http_plain(
-                        candidate, send, method, scope, native_response
-                    )
+                    return self._finish_http_plain(candidate, send, method, scope, native_response)
             elif not policy_native:
                 return self._handle_http(scope, receive, send, method, path, native_response)
         if not native_response and _ambiguous_request_path(scope, path):
@@ -2780,10 +2783,11 @@ class Wreath:
             declared = overrides.get(handler)
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
-        request = Request(scope, receive, path_params, self._limits, app=self)
+        request = _request_new(
+            _REQUEST_LAYOUT, scope, receive, path_params, self._limits, self, identity
+        )
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
-        request._set_identity(identity)
         if needs_auth:
             requirement = self._handler_requirements[handler]
             if identity is None and requirement.access_level > 0:
@@ -2837,7 +2841,7 @@ class Wreath:
         error: Exception,
     ) -> None:
         """Put verifier failures through the ordinary application boundary."""
-        request = Request(scope, receive, limits=self._limits, app=self)
+        request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
         response = await self._handle_exception(request, error)
         await self._finish_http_plain(response, send, method, scope, native_response)
 
@@ -2854,8 +2858,9 @@ class Wreath:
     ) -> None:
         """Materialize a request only for an authenticated route's refusal."""
         if request is None:
-            request = Request(scope, receive, limits=self._limits, app=self)
-            request._set_identity(identity)
+            request = _request_new(
+                _REQUEST_LAYOUT, scope, receive, None, self._limits, self, identity
+            )
         try:
             error: HTTPException = (
                 Unauthorized(challenge=None if backend is None else backend.challenge(request))
@@ -2901,21 +2906,15 @@ class Wreath:
         policy = self._http_policy
         policy_native = native_response and getattr(scope, "policy_native", True)
         ingress_only_admitted = bool(
-            policy is not None
-            and policy._native_ingress_only
-            and policy_native
+            policy is not None and policy._native_ingress_only and policy_native
         )
         if policy is not None and policy._native_ingress_only and not policy_native:
             candidate = policy._reference_ingress_scope(scope, method, path)
             if candidate is not None:
-                await self._finish_http_plain(
-                    candidate, send, method, scope, native_response
-                )
+                await self._finish_http_plain(candidate, send, method, scope, native_response)
                 return
             ingress_only_admitted = True
-        if policy is not None and not ingress_only_admitted and (
-            not policy_native
-        ):
+        if policy is not None and not ingress_only_admitted and (not policy_native):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
         if not native_response and _ambiguous_request_path(scope, path):
@@ -2950,7 +2949,7 @@ class Wreath:
             if handler in self._requestless_handlers
             and not _telemetry.PROPAGATING
             and (policy is None or ingress_only_admitted)
-            else Request(scope, receive, path_params, self._limits, app=self)
+            else _request_new(_REQUEST_LAYOUT, scope, receive, path_params, self._limits, self)
         )
         if _telemetry.PROPAGATING and request is not None:
             _telemetry.bind_propagation(request)
@@ -2986,7 +2985,9 @@ class Wreath:
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             if request is None:
-                request = Request(scope, receive, path_params, self._limits, app=self)
+                request = _request_new(
+                    _REQUEST_LAYOUT, scope, receive, path_params, self._limits, self
+                )
             response = await self._handle_exception(request, error)
         # `active_global` is 0 rather than omitted: this application has no
         # global after hooks to unwind, so `_finish_http` skips its loop and
@@ -2997,7 +2998,9 @@ class Wreath:
                 size = len(json_body)
                 length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
                 headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
-                await protocol._wreath_response(200, headers, json_body)
+                pending = protocol._wreath_response_nowait(200, headers, json_body)
+                if pending is not None:
+                    await pending
                 return
             await self._finish_http_plain(response, send, method, scope, native_response)
         else:
@@ -3029,9 +3032,7 @@ class Wreath:
             if policy._native_ingress_only and not policy_native:
                 candidate = policy._reference_ingress_scope(scope, method, path)
                 if candidate is not None:
-                    return self._finish_http_plain(
-                        candidate, send, method, scope, native_response
-                    )
+                    return self._finish_http_plain(candidate, send, method, scope, native_response)
             elif not policy_native:
                 return self._handle_http(scope, receive, send, method, path, native_response)
         if not native_response and _ambiguous_request_path(scope, path):
@@ -3050,7 +3051,7 @@ class Wreath:
         request = (
             None
             if handler in self._requestless_handlers and not _telemetry.PROPAGATING
-            else Request(scope, receive, path_params, self._limits, app=self)
+            else _request_new(_REQUEST_LAYOUT, scope, receive, path_params, self._limits, self)
         )
         if _telemetry.PROPAGATING and request is not None:
             _telemetry.bind_propagation(request)
@@ -3060,7 +3061,9 @@ class Wreath:
             value = handler(request)
             if value.__class__ is _COROUTINE:
                 if request is None:
-                    request = Request(scope, receive, path_params, self._limits, app=self)
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, path_params, self._limits, self
+                    )
                 return self._finish_http_plain_await_value(
                     request, value, send, method, scope, native_response
                 )
@@ -3076,7 +3079,9 @@ class Wreath:
                 )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             if request is None:
-                request = Request(scope, receive, path_params, self._limits, app=self)
+                request = _request_new(
+                    _REQUEST_LAYOUT, scope, receive, path_params, self._limits, self
+                )
             return self._finish_http_plain_error(
                 request, error, send, method, scope, native_response
             )
@@ -3147,21 +3152,15 @@ class Wreath:
         policy = self._http_policy
         policy_native = native_response and getattr(scope, "policy_native", True)
         native_ingress_only = bool(
-            policy is not None
-            and policy._native_ingress_only
-            and policy_native
+            policy is not None and policy._native_ingress_only and policy_native
         )
         if policy is not None and policy._native_ingress_only and not policy_native:
             candidate = policy._reference_ingress_scope(scope, method, path)
             if candidate is not None:
-                await self._finish_http_plain(
-                    candidate, send, method, scope, native_response
-                )
+                await self._finish_http_plain(candidate, send, method, scope, native_response)
                 return
             native_ingress_only = True
-        if policy is not None and not native_ingress_only and (
-            not policy_native
-        ):
+        if policy is not None and not native_ingress_only and (not policy_native):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
         if not native_response and _ambiguous_request_path(scope, path):
@@ -3198,7 +3197,9 @@ class Wreath:
                     else:
                         identity = cast(Identity | None, verified)
                 else:
-                    request = Request(scope, receive, limits=self._limits, app=self)
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
+                    )
                     if _telemetry.PROPAGATING:
                         _telemetry.bind_propagation(request)
                     if verifier is None:
@@ -3217,7 +3218,9 @@ class Wreath:
                             identity = cast(Identity | None, verified)
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 if request is None:
-                    request = Request(scope, receive, limits=self._limits, app=self)
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
+                    )
                 response = await self._handle_exception(request, error)
                 await self._finish_http(request, response, send, method, scope, native_response, 0)
                 return
@@ -3236,8 +3239,11 @@ class Wreath:
             )
             if matched is None:
                 if request is None:
-                    request = Request(scope, receive, limits=self._limits, app=self)
-                request._set_identity(identity)
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self, identity
+                    )
+                else:
+                    request._set_identity(identity)
                 try:
                     error: HTTPException = (
                         Unauthorized(
@@ -3262,12 +3268,20 @@ class Wreath:
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
         if request is None:
-            request = Request(scope, receive, path_params, self._limits, app=self)
+            request = _request_new(
+                _REQUEST_LAYOUT,
+                scope,
+                receive,
+                path_params,
+                self._limits,
+                self,
+                identity,
+            )
             if _telemetry.PROPAGATING:
                 _telemetry.bind_propagation(request)
         else:
             request.path_params = path_params or {}
-        request._set_identity(identity)
+            request._set_identity(identity)
 
         if needs_auth:
             requirement = self._handler_requirements[handler]
@@ -3340,7 +3354,9 @@ class Wreath:
                 size = len(json_body)
                 length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
                 headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
-                await protocol._wreath_response(200, headers, json_body)
+                pending = protocol._wreath_response_nowait(200, headers, json_body)
+                if pending is not None:
+                    await pending
                 return
             await self._finish_http_plain(response, send, method, scope, native_response)
         else:
@@ -3391,9 +3407,7 @@ class Wreath:
         if policy is not None and policy._native_ingress_only and not policy_native:
             candidate = policy._reference_ingress_scope(scope, method, path)
             if candidate is not None:
-                await self._finish_http_plain(
-                    candidate, send, method, scope, native_response
-                )
+                await self._finish_http_plain(candidate, send, method, scope, native_response)
                 return
         if not native_response and _ambiguous_request_path(scope, path):
             await self._handle_http(scope, receive, send, method, path, native_response)
@@ -3424,7 +3438,7 @@ class Wreath:
         before_hooks, after_hooks = programs.get(
             (method, handler), (self._global_before_hooks, self._global_after_hooks)
         )
-        request = Request(scope, receive, limits=self._limits, app=self)
+        request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
         request._route_outcome = "ingress"
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
@@ -3502,7 +3516,7 @@ class Wreath:
             policy is not None and native_response and getattr(scope, "policy_native", False)
         )
         if policy is not None and not policy_native:
-            request = Request(scope, receive, limits=self._limits, app=self)
+            request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
             request._route_outcome = "ingress"
             if _telemetry.PROPAGATING:
                 _telemetry.bind_propagation(request)
@@ -3524,7 +3538,7 @@ class Wreath:
         active_global = len(after_hooks)
         if global_hooks:
             if request is None:
-                request = Request(scope, receive, limits=self._limits, app=self)
+                request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
                 request._route_outcome = "ingress"
             # Bind before the first `before` hook: a global middleware may itself
             # call out (an auth introspection, a feature-flag fetch), and that
@@ -3565,7 +3579,7 @@ class Wreath:
 
         if not native_response and _ambiguous_request_path(scope, path):
             if request is None:
-                request = Request(scope, receive, limits=self._limits, app=self)
+                request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
             response = await self._handle_exception(
                 request,
                 BadRequest("ambiguous encoded path separator or dot segment"),
@@ -3576,27 +3590,35 @@ class Wreath:
             return
 
         matched = None
-        dynamic_matcher = self._dynamic_matcher
-        if dynamic_matcher is not None:
-            if request is None:
-                request = Request(scope, receive, limits=self._limits, app=self)
-            matched = dynamic_matcher.match(
-                method,
-                path,
-                _host_name(request.header("host", "") or ""),
-                host_routes=True,
-            )
-        if matched is None and self._routing in _CLASSIFYING:
+        if self._routing == "policy":
             classify = self._classify
             resolve = self._resolve
             if classify is None or resolve is None:
                 raise RuntimeError("classifying router did not expose classify/resolve")
-            classification, payload = classify(method, path)
+            if self._has_dynamic_routes:
+                classify_request = self._classify_request
+                if classify_request is None:
+                    raise RuntimeError(
+                        "policy router did not expose host and greedy classification"
+                    )
+                if request is None:
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
+                    )
+                classification, payload = classify_request(
+                    method,
+                    path,
+                    _host_name(request.header("host", "") or ""),
+                )
+            else:
+                classification, payload = classify(method, path)
             matched = payload if classification == 1 else None
             if classification == 2:
                 ticket = payload
                 if request is None:
-                    request = Request(scope, receive, limits=self._limits, app=self)
+                    request = _request_new(
+                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
+                    )
                 # A classifying router authenticates before it resolves the
                 # route.  First-class activation policy (notably sessions) must
                 # therefore run here, before the backend reads request state;
@@ -3665,24 +3687,6 @@ class Wreath:
                             identity = cast(Identity | None, verified)
                     authentication_attempted = True
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    # On a classifying table authentication runs *here*, before
-                    # the route is resolved, and this is the error boundary it
-                    # was missing. Without it an exception from a backend left
-                    # `__call__` with no response started at all: the ASGI
-                    # server, not wreath, decided what the caller saw,
-                    # `_handle_exception` never ran, and every global `after`
-                    # hook was skipped -- so the security headers, the access
-                    # log and the recorder's finish went missing for exactly the
-                    # requests that failed inside authentication. The `trie`
-                    # path answered 500 for the same backend through
-                    # `_authorize_request`, which made the difference a routing
-                    # mode nobody connected to error handling.
-                    #
-                    # A backend is documented to refuse with `None` rather than
-                    # raise, so this is misuse -- but it is also reachable
-                    # without any application mistake: `OidcProvider`'s verifier
-                    # awaits a JWKS fetch in here, so an identity provider that
-                    # is merely unreachable raises straight through.
                     if global_hooks:
                         request._set_route_outcome("protected")
                     response = await self._handle_exception(request, error)
@@ -3725,12 +3729,6 @@ class Wreath:
                         try:
                             error = Unauthorized(challenge=backend.challenge(request))
                         except Exception as raised:  # noqa: BLE001 -- as above
-                            # The other half of the same boundary. `challenge`
-                            # is backend code too, and it is only ever called on
-                            # a path that is already refusing, so a raise here
-                            # replaced a 401 with an escaped exception.
-                            # `_authorize_request` calls it inside its caller's
-                            # try; this call had nothing around it.
                             if global_hooks:
                                 request._set_route_outcome("protected")
                             response = await self._handle_exception(request, raised)
@@ -3754,22 +3752,9 @@ class Wreath:
                     )
                     return
                 access_resolved = True
-        elif matched is None:
-            # Trie routes are selected without capability filtering; the common
-            # authorization stage below checks the compiled route requirement.
-            matched = self._route_match(method, path, 0)
-        if matched is None and dynamic_matcher is not None:
-            if request is None:
-                request = Request(scope, receive, limits=self._limits, app=self)
-            matched = dynamic_matcher.match(
-                method,
-                path,
-                _host_name(request.header("host", "") or ""),
-                host_routes=False,
-            )
         if matched is None:
             if request is None:
-                request = Request(scope, receive, limits=self._limits, app=self)
+                request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
             if global_hooks:
                 request._set_route_outcome("miss")
             stage_response = (
@@ -3890,7 +3875,7 @@ class Wreath:
             if attribution is not None:
                 scope["_wreath_flight"] = attribution
         if request is None:
-            request = Request(scope, receive, path_params, self._limits, app=self)
+            request = _request_new(_REQUEST_LAYOUT, scope, receive, path_params, self._limits, self)
             # The no-global-middleware path: the branch above never ran, so this
             # is where the request first exists and where it gets bound. When
             # global hooks *did* run, `request` is not None and is already bound
@@ -4097,14 +4082,18 @@ class Wreath:
                 else plain.headers
             )
             if policy is not None and policy.compression is not None:
-                await protocol._wreath_response(
+                pending = protocol._wreath_response_nowait(
                     plain.status,
                     headers,
                     plain.body,
                     request.identity is not None,
                 )
+                if pending is not None:
+                    await pending
             else:
-                await protocol._wreath_response(plain.status, headers, plain.body)
+                pending = protocol._wreath_response_nowait(plain.status, headers, plain.body)
+                if pending is not None:
+                    await pending
         elif response.__class__ is PreparedResponse and native_response:
             prepared = response
             protocol = cast(Any, send).__self__
@@ -4113,7 +4102,9 @@ class Wreath:
                 if policy is None or policy._native_ingress_only
                 else list(prepared.headers)
             )
-            await protocol._wreath_response(prepared.status, headers, prepared.body)
+            pending = protocol._wreath_response_nowait(prepared.status, headers, prepared.body)
+            if pending is not None:
+                await pending
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -4224,7 +4215,9 @@ class Wreath:
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
             plain = cast(Response, response)
             protocol = cast(Any, send).__self__
-            await protocol._wreath_response(plain.status, plain.headers, plain.body)
+            pending = protocol._wreath_response_nowait(plain.status, plain.headers, plain.body)
+            if pending is not None:
+                await pending
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
@@ -4293,15 +4286,12 @@ class Wreath:
             policy is not None
             and policy._native_ingress_only
             and not policy_native
-            and policy._reference_ingress_scope(scope, "GET", scope["path"])
-            is not None
+            and policy._reference_ingress_scope(scope, "GET", scope["path"]) is not None
         ):
             await send({"type": "websocket.close", "code": 1008})
             return
         policy_needs_request = bool(
-            policy is not None
-            and not policy_native
-            and not policy._native_ingress_only
+            policy is not None and not policy_native and not policy._native_ingress_only
         )
         if websocket_hooks or needs_auth or policy_needs_request:
             # The handshake is a GET. Keep one Request for ingress and auth so
@@ -4314,11 +4304,7 @@ class Wreath:
                 app=self,
             )
         if request is not None:
-            if (
-                policy is not None
-                and not policy_native
-                and not policy._native_ingress_only
-            ):
+            if policy is not None and not policy_native and not policy._native_ingress_only:
                 candidate = await policy._reference_websocket(request)
                 if candidate is not None:
                     await send({"type": "websocket.close", "code": 1008})
@@ -4445,18 +4431,15 @@ class Wreath:
         404. A `GET` route also answers `HEAD` (dispatch sends the headers with
         no body), so `HEAD` is listed with it even though nothing registered it.
         """
-        classify = self.router.classify
         allowed = []
         for candidate in self._route_methods:
             if candidate == method:
                 continue
-            dynamic_matcher = self._dynamic_matcher
-            if (
-                dynamic_matcher is not None
-                and dynamic_matcher.match(candidate, path, host) is not None
-            ):
-                allowed.append(candidate)
-            elif classify(candidate, path)[0] != 0:
+            if self._has_dynamic_routes:
+                classification = self.router.classify_request(candidate, path, host)[0]
+            else:
+                classification = self.router.classify(candidate, path)[0]
+            if classification != 0:
                 allowed.append(candidate)
         if "GET" in allowed and "HEAD" not in allowed and method != "HEAD":
             allowed.append("HEAD")
@@ -4523,7 +4506,7 @@ class Wreath:
     def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
         router = CompiledRouter(self._routing)
-        dynamic_matcher = _DynamicMatcher()
+        has_dynamic_routes = False
         app_middleware = tuple(
             item[2] for item in sorted(self._middleware, key=lambda item: (item[0], item[1]))
         )
@@ -4560,10 +4543,7 @@ class Wreath:
         self._has_global_http_hooks = bool(
             compiled_before_hooks or compiled_after_hooks or self._stage_hooks
         )
-        requirements = [
-            merge_requirements(route.requirement, requirement_for(route.endpoint))
-            for route in self._routes
-        ]
+        requirements = list(self._application_image.requirements())
         compile_policy = getattr(self._authorizer, "_compile_route_requirement", None)
         if callable(compile_policy):
             requirements = [
@@ -4699,10 +4679,15 @@ class Wreath:
                         ),
                     )
                 )
-                if definition.host is not None or ":path}" in definition.path:
-                    dynamic_matcher.add(definition.path, method, definition.host, compiled)
-                else:
-                    router.add(definition.path, method, compiled, access_clauses)
+                dynamic = definition.host is not None or ":path}" in definition.path
+                router.add(
+                    definition.path,
+                    method,
+                    compiled,
+                    access_clauses,
+                    host=definition.host,
+                )
+                has_dynamic_routes |= dynamic
                 handler_requirements[compiled] = requirement
                 if requestless and not definition.dependencies:
                     requestless_handlers.add(compiled)
@@ -4757,10 +4742,12 @@ class Wreath:
         self._cancel_on_disconnect = cancel_on_disconnect or None
         self._flight_route_ids = None  # rebuilt lazily against the new routes
         self.router = router
-        self._dynamic_matcher = dynamic_matcher if dynamic_matcher._routes else None
+        self._has_dynamic_routes = has_dynamic_routes
         self._match = router._table.match
         self._classify = getattr(router._table, "classify", None)
+        self._classify_request = getattr(router._table, "classify_request", None)
         self._resolve = getattr(router._table, "resolve", None)
+        self._resolve_identity = getattr(router._table, "resolve_identity", None)
         self._probe = getattr(router._table, "probe", None)
         # Last, so it sees the hooks, the matcher and the routing protocol this
         # compile just settled.
@@ -4915,9 +4902,7 @@ class Wreath:
 
     def _route_match(self, method: str, path: str, caller_mask: int) -> Any:
         match: Any = self._match
-        if self._routing in _CLASSIFYING:
-            return match(method, path, caller_mask)
-        return match(method, path)
+        return match(method, path, caller_mask)
 
     def _compile_capabilities(self, requirements: list[AuthRequirement]) -> None:
         names = {"authenticated"}

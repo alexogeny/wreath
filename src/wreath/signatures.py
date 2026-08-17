@@ -115,10 +115,10 @@ from typing import Any, Final
 from urllib.parse import parse_qsl, quote
 
 from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
+from ._capability_map import CapabilityMap
 from ._native import _core
 from ._reqcache import resolve_once
 from .exceptions import HTTPException
-from .kv import KV
 from .state import BODY_CHECK_SLOT
 from .temporal import Duration
 
@@ -454,7 +454,9 @@ class NonceLedger:
             raise ValueError("nonce ledger max_entries must be positive")
         if ttl <= 0:
             raise ValueError("nonce ledger ttl must be positive")
-        self._table = KV(max_entries, ttl)
+        self._table = CapabilityMap(
+            max_entries=max_entries, ttl=ttl, overflow="refuse"
+        )
         #: Requests refused because the ledger was full. A rising number is a
         #: flood or an undersized ledger, and both want a human.
         self.refusals = 0
@@ -475,7 +477,7 @@ class NonceLedger:
         fullness is `claim`'s job, and doing it in the lookup would restore the
         exhaustion this split exists to remove.
         """
-        if self._table.peek(nonce, None, now) is None:
+        if self._table.peek(nonce, now=now) is None:
             return False
         self.replays += 1
         return True
@@ -489,15 +491,14 @@ class NonceLedger:
             because both mean "this request is not verified".
         """
         table = self._table
-        if table.peek(nonce, None, now) is not None:
+        if table.peek(nonce, now=now) is not None:
             self.replays += 1
             return False
-        if len(table) >= table.max_entries:
-            # Fail closed. `KV` would evict the least recently used entry to
-            # make room, which is right for a cache and wrong for this.
+        if not table.claim(nonce, now=now):
+            # Fail closed. The capability table's refusal policy prevents the
+            # native KV from evicting a spent nonce to make room.
             self.refusals += 1
             return False
-        table.set(nonce, True, None, now)
         return True
 
 
@@ -1164,11 +1165,13 @@ def crawler_policy(app: Any) -> CrawlerPolicy:
     """
     allow: set[str] = set()
     disallow: set[str] = set()
-    for route in _routes(app):
+    for route, requirement in zip(
+        _routes(app), app._application_image.requirements(), strict=True
+    ):
         if not getattr(route, "include_in_schema", True):
             continue
         target = _crawlable_path(route.path)
-        if _requirement(route).access_level == 0:
+        if requirement.access_level == 0:
             allow.add(target)
         else:
             disallow.add(target)
@@ -1186,21 +1189,6 @@ def _routes(app: Any) -> tuple[Any, ...]:
     one call site to follow rather than two.
     """
     return app._application_image.routes()
-
-
-def _requirement(route: Any) -> Any:
-    """What `route` actually asks of a caller, decorators included.
-
-    `RouteDefinition.requirement` holds only what the *router* contributed;
-    `@authenticated()`, `@roles(...)` and `@authorize(...)` mark the endpoint
-    and are merged in at compile time. Reading the field alone would report
-    every decorator-protected route as public -- which in this module would
-    publish it in `robots.txt` as open. `wreath.openapi` merges the same two
-    the same way, and it is the same call for the same reason.
-    """
-    from ._auth.requirements import merge_requirements, requirement_for
-
-    return merge_requirements(route.requirement, requirement_for(route.endpoint))
 
 
 def _crawlable_path(path: str) -> str:
@@ -1256,8 +1244,14 @@ def llms_txt(app: Any, *, title: str, summary: str | None = None) -> str:
         lines += [f"> {summary}", ""]
     lines.append("## Endpoints")
     lines.append("")
+    requirements = {
+        id(route): requirement
+        for route, requirement in zip(
+            _routes(app), app._application_image.requirements(), strict=True
+        )
+    }
     for route in sorted(_routes(app), key=lambda item: item.path):
-        if _requirement(route).access_level != 0:
+        if requirements[id(route)].access_level != 0:
             continue
         if not getattr(route, "include_in_schema", True):
             continue

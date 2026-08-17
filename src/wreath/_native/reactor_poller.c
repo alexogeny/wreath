@@ -1455,6 +1455,34 @@ rp_handle_object_member(PyObject *handle, const PyMemberDef *member)
     return Py_NewRef(value);
 }
 
+/* Run a callback inside its already-captured Context without redispatching
+ * through Context.run.  Context still owns recursion refusal and enter/exit;
+ * this removes only the bound-method lookup and wrapper vectorcall. */
+static PyObject *
+rp_call_in_context(PyObject *context, PyObject *callback,
+                   PyObject *const *args, Py_ssize_t nargs)
+{
+    if (PyContext_Enter(context) < 0) {
+        return NULL;
+    }
+    PyObject *result = PyObject_Vectorcall(
+        callback, args, (size_t)nargs, NULL);
+    if (result == NULL) {
+        PyObject *error = PyErr_GetRaisedException();
+        if (PyContext_Exit(context) < 0) {
+            Py_XDECREF(error);
+            return NULL;
+        }
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
+    if (PyContext_Exit(context) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
 /* asyncio's C Task schedules no-argument TaskStepMethWrapper callbacks. Going
  * through Handle._run adds a Python frame around every suspension/resume. For
  * that exact CPython 3.14 callback shape, enter the captured Context and invoke
@@ -1497,7 +1525,7 @@ rp_run_task_step(ReactorPoller *p, PyObject *handle)
         return -1;
     }
 
-    PyObject *result = PyObject_CallMethodOneArg(context, g_s_context_run, callback);
+    PyObject *result = rp_call_in_context(context, callback, NULL, 0);
     int status;
     if (result != NULL) {
         Py_DECREF(result);
@@ -1605,26 +1633,24 @@ rp_run_ready_handle(ReactorPoller *p, WreathReadyHandle *handle)
     }
     PyObject *result;
     if (handle->args == NULL) {
-        result = PyObject_CallMethodOneArg(
-            handle->context, g_s_context_run, handle->callback);
+        result = rp_call_in_context(
+            handle->context, handle->callback, NULL, 0);
     } else {
         Py_ssize_t extra = PyTuple_GET_SIZE(handle->args);
         PyObject *stack_small[8];
         PyObject **stack = stack_small;
-        if (extra + 2 > 8) {
-            stack = PyMem_Malloc((size_t)(extra + 2) * sizeof(PyObject *));
+        if (extra > 8) {
+            stack = PyMem_Malloc((size_t)extra * sizeof(PyObject *));
             if (stack == NULL) {
                 PyErr_NoMemory();
                 return -1;
             }
         }
-        stack[0] = handle->context;
-        stack[1] = handle->callback;
         for (Py_ssize_t i = 0; i < extra; i++) {
-            stack[2 + i] = PyTuple_GET_ITEM(handle->args, i);
+            stack[i] = PyTuple_GET_ITEM(handle->args, i);
         }
-        result = PyObject_VectorcallMethod(
-            g_s_context_run, stack, (size_t)(extra + 2), NULL);
+        result = rp_call_in_context(
+            handle->context, handle->callback, stack, extra);
         if (stack != stack_small) {
             PyMem_Free(stack);
         }
@@ -3101,4 +3127,5 @@ static WreathTransportCAPI transport_capi = {
     transport_capi_check,
     transport_capi_write,
     transport_capi_writelines,
+    transport_capi_is_closing,
 };

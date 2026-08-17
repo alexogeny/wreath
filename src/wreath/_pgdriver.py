@@ -1526,6 +1526,7 @@ class Connection:
     _record_type = Record
     _plan_type = Plan
     _operation_type = Operation
+    _operation_queue_type: Any = deque
     _decode = staticmethod(_decode_value)
     _build_cold = staticmethod(_build_cold_query_packet)
     _build_cached = staticmethod(_build_cached_query_packet)
@@ -1560,6 +1561,7 @@ class Connection:
         "_info",
         "_listen_channels",
         "_loop",
+        "_call_soon",
         "_notifications",
         "_notifications_dropped",
         "_notify_event",
@@ -1596,11 +1598,18 @@ class Connection:
         self._reader = reader
         self._writer = writer
         self._register_operations = getattr(reader, "register_operations", None)
+        attach_connection = getattr(reader, "attach_connection", None)
+        if attach_connection is not None:
+            attach_connection(self)
         self._write_with_backpressure = getattr(writer, "write_with_backpressure", None)
         self._info = info
         self._backend_pid = backend_pid
         self._backend_key = backend_key
         self._loop = asyncio.get_running_loop()
+        # Retain the loop's ready-queue entry once per connection. Native query
+        # completions otherwise rematerialize this bound method for every row
+        # flight merely to resume the waiting Task.
+        self._call_soon = self._loop.call_soon
         # Access-ordered so the least-recently-used automatic plan is evicted
         # first; bounded by statement_cache_size to cap per-connection (and,
         # via the Close on eviction, backend) prepared-statement memory.
@@ -1624,7 +1633,7 @@ class Connection:
         self._pending_closes: list[bytes] = []
         self._statement_id = 0
         self._sequence = 0
-        self._waiting: deque[Operation] = deque()
+        self._waiting: deque[Operation] = self._operation_queue_type()
         #: Entries in `_waiting` still in state "waiting". A cancelled operation
         #: is tombstoned in place rather than removed, because `deque.remove`
         #: scans from the left: cancelling the *newest* of k queued operations
@@ -1634,8 +1643,8 @@ class Connection:
         #: "is there work" must read this and not `len(self._waiting)`, or a
         #: queue of pure tombstones reschedules the flush forever.
         self._waiting_live = 0
-        self._emitted: deque[Operation] = deque()
-        self._completed: deque[Operation] = deque()
+        self._emitted: deque[Operation] = self._operation_queue_type()
+        self._completed: deque[Operation] = self._operation_queue_type()
         self._current: Operation | None = None
         self._idle_event = asyncio.Event()
         self._idle_event.set()

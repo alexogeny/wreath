@@ -7,5 +7,10 @@
 PyMethodDef *wreath_pg_pipeline_methods(void);
 int wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type);
 void wreath_pg_pipeline_fini(void);
+int wreath_pg_pipeline_complete_fetchval(PyObject *connection,
+                                         PyObject *operation,
+                                         PyObject *tape,
+                                         PyObject *plan,
+                                         char transaction_status);
 
 #endif

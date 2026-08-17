@@ -484,6 +484,33 @@ decode_ref(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape,
     return decoder->decoder(data, field->length, decoder->format, decoder->oid);
 }
 
+PyObject *
+wreath_pg_decode_fetchval(PyObject *plan_object, PyObject *tape_object)
+{
+    if (!PyObject_TypeCheck(plan_object, WreathPgDecoderPlanType) ||
+        !PyObject_TypeCheck(tape_object, WreathPgFieldTapeType)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "fetchval decode requires a decoder plan and field tape");
+        return NULL;
+    }
+    WreathPgDecoderPlan *plan = (WreathPgDecoderPlan *)plan_object;
+    WreathPgFieldTape *tape = (WreathPgFieldTape *)tape_object;
+    if (tape->stored_columns == 0 || tape->stored_columns > plan->column_count) {
+        PyErr_SetString(PyExc_ValueError, "invalid fetchval field tape");
+        return NULL;
+    }
+    if (tape->row_count == 0) return Py_NewRef(Py_None);
+    Py_ssize_t owner_limit = 0;
+    Py_buffer *buffers = wreath_pg_acquire_owner_buffers(
+        tape, 1, &owner_limit);
+    if (buffers == NULL) return NULL;
+    PyObject *result = decode_ref(plan, tape, 0, 0, buffers);
+    wreath_pg_release_owner_buffers(buffers, owner_limit);
+    if (result != NULL && wreath_pg_tape_consume(tape, tape->row_count) < 0)
+        Py_CLEAR(result);
+    return result;
+}
+
 Py_buffer *
 wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
                              Py_ssize_t *owner_limit_out)

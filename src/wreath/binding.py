@@ -78,6 +78,7 @@ from ._flight_markers import COV_PYTHON as _COV_PYTHON
 from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
 from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
+from ._model_fields import dataclass_field_image
 from ._native import _core
 from .exceptions import BadRequest
 from .geospatial import Coordinate
@@ -664,14 +665,38 @@ def _jsonable_hook(value: Any, convert: Callable[[Any], Any]) -> Any:
         return value
     rendered = hook(value)
     if rendered is value:
-        raise TypeError(
-            f"object of type {type(value).__name__} returned itself from __jsonable__"
-        )
+        raise TypeError(f"object of type {type(value).__name__} returned itself from __jsonable__")
     return convert(rendered)
+
+
+def _response_union_match(annotation: Any, value: Any) -> bool:
+    """Whether a validated response value belongs to this union arm.
+
+    Validation has already resolved mapping-shaped dataclass inputs into their
+    declared class, so the hot case is one exact runtime type check per arm.
+    ``Any`` remains the final catch-all and is intentionally not allowed to
+    claim a value before a concrete arm.
+    """
+    annotation, _field = _field_annotation(annotation)
+    if annotation is Any or annotation is object:
+        return True
+    if annotation is _NONE_TYPE:
+        return value is None
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        return value in typing.get_args(annotation)
+    target = origin or annotation
+    return isinstance(target, type) and isinstance(value, target)
 
 
 def _jsonable(annotation: Any, value: Any) -> Any:
     annotation, _field = _field_annotation(annotation)
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if origin in (types.UnionType, typing.Union):
+        for option in args:
+            if _response_union_match(option, value):
+                return _jsonable(option, value)
     if dataclasses.is_dataclass(annotation) and isinstance(value, annotation):
         return {
             wire_name: _jsonable(field_annotation, getattr(value, name))
@@ -689,8 +714,6 @@ def _jsonable(annotation: Any, value: Any) -> Any:
         return _b64encode_str(bytes(value))
     if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
         return value.isoformat()
-    origin = typing.get_origin(annotation)
-    args = typing.get_args(annotation)
     if isinstance(value, (list, tuple, set, frozenset)):
         item_type = args[0] if args else Any
         return [_jsonable(item_type, item) for item in value]
@@ -917,6 +940,47 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
     annotation, _field = _field_annotation(annotation)
     if annotation is Any or annotation is object or annotation is inspect.Parameter.empty:
         return _jsonable_any
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if origin in (types.UnionType, typing.Union):
+        exact: dict[type, Callable[[Any], Any]] = {}
+        subclasses: list[tuple[type, Callable[[Any], Any]]] = []
+        literals: list[tuple[tuple[Any, ...], Callable[[Any], Any]]] = []
+        fallback = _jsonable_any
+        for option in args:
+            option, _option_field = _field_annotation(option)
+            convert = _compile_jsonable(option, seen | {annotation})
+            if option is Any or option is object:
+                fallback = convert
+                continue
+            option_origin = typing.get_origin(option)
+            if option_origin is typing.Literal:
+                literals.append((typing.get_args(option), convert))
+                continue
+            target = option_origin or option
+            if isinstance(target, type):
+                exact[target] = convert
+                subclasses.append((target, convert))
+
+        def jsonable_union(
+            value: Any,
+            _exact: Any = exact,
+            _subclasses: Any = tuple(subclasses),
+            _literals: Any = tuple(literals),
+            _fallback: Any = fallback,
+        ) -> Any:
+            convert = _exact.get(type(value))
+            if convert is not None:
+                return convert(value)
+            for target, convert in _subclasses:
+                if isinstance(value, target):
+                    return convert(value)
+            for choices, convert in _literals:
+                if value in choices:
+                    return convert(value)
+            return _fallback(value)
+
+        return jsonable_union
     if dataclasses.is_dataclass(annotation):
         if annotation in seen:
             return lambda value, _a=annotation: _jsonable(_a, value)
@@ -1074,9 +1138,8 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
     except _PlanUnsupported:
         pass
     else:
-        if (
-            response_plan[0] in (_OP_LIST, _OP_DICT)
-            and _response_plan_is_wire_preserving(response_plan)
+        if response_plan[0] in (_OP_LIST, _OP_DICT) and _response_plan_is_wire_preserving(
+            response_plan
         ):
             run_validation_json = _core.run_validation_json
 
@@ -1216,12 +1279,8 @@ def _dataclass_spec(cls: type) -> tuple[tuple[str, Any, bool], ...]:
         label = f"body model {getattr(cls, '__qualname__', cls)!s}"
         hints = _resolve_hints(cls, label, extras=False)
         spec = tuple(
-            (
-                field.name,
-                hints.get(field.name, Any),
-                field.default is _MISSING and field.default_factory is _MISSING,
-            )
-            for field in dataclasses.fields(cls)
+            (field.python_name, field.annotation, field.required)
+            for field in dataclass_field_image(cls, hints, fallback=Any)
         )
         _DATACLASS_SPECS[cls] = spec
     return spec
@@ -1234,19 +1293,21 @@ def _dataclass_wire_spec(cls: type) -> tuple[tuple[str, str, Any, bool], ...]:
         hints = _resolve_hints(cls, label, extras=True)
         entries: list[tuple[str, str, Any, bool]] = []
         wire_names: set[str] = set()
-        for field in dataclasses.fields(cls):
-            annotation = hints.get(field.name, Any)
+        for field in dataclass_field_image(cls, hints, fallback=Any):
+            annotation = field.annotation
             _base, metadata = _field_annotation(annotation)
-            wire_name = metadata.alias if metadata is not None and metadata.alias else field.name
+            wire_name = (
+                metadata.alias if metadata is not None and metadata.alias else field.python_name
+            )
             if wire_name in wire_names:
                 raise TypeError(f"body model {cls.__qualname__} maps two fields to {wire_name!r}")
             wire_names.add(wire_name)
             entries.append(
                 (
-                    field.name,
+                    field.python_name,
                     wire_name,
                     annotation,
-                    field.default is _MISSING and field.default_factory is _MISSING,
+                    field.required,
                 )
             )
         spec = tuple(entries)
@@ -2052,12 +2113,9 @@ def _form_model_fields(annotation: Any) -> tuple[tuple[str, Any, bool], ...]:
             model_fields.append((name, ptype, required))
         return tuple(model_fields)
     result: list[tuple[str, Any, bool]] = []
-    for field in dataclasses.fields(annotation):
-        ptype = _unwrap_form_type(hints.get(field.name, field.type))
-        required = (
-            field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
-        )
-        result.append((field.name, ptype, required))
+    for field in dataclass_field_image(annotation, hints):
+        ptype = _unwrap_form_type(field.annotation)
+        result.append((field.python_name, ptype, field.required))
     return tuple(result)
 
 
@@ -2569,7 +2627,7 @@ def compile_binder(
     if spec is None and not dependencies:
         try:
             requestless = len(inspect.signature(handler).parameters) == 0
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             requestless = False
         if requestless:
             if inspect.iscoroutinefunction(handler):
@@ -2583,9 +2641,7 @@ def compile_binder(
                     return handler()
 
             without_request.__name__ = getattr(handler, "__name__", "without_request")
-            without_request.__qualname__ = getattr(
-                handler, "__qualname__", "without_request"
-            )
+            without_request.__qualname__ = getattr(handler, "__qualname__", "without_request")
             return without_request
         return handler
     path_specs = () if spec is None else spec.path_params

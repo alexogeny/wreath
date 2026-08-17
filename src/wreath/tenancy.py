@@ -110,6 +110,7 @@ from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from ._jobcore import validate_identifier
+from ._pgname import quote_identifier
 from .orm.session import TenantContext
 
 __all__ = [
@@ -822,7 +823,7 @@ def _tenant_ddl(schema: str, role: str, central: str, login_role: str) -> tuple[
 
 def _q(identifier: str) -> str:
     """Quote an identifier that has already been validated."""
-    return '"' + identifier.replace('"', '""') + '"'
+    return quote_identifier(identifier)
 
 
 def _lit(value: str) -> str:

@@ -43,7 +43,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import heapq
 import hmac
 import re
 import time
@@ -54,8 +53,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from ._capability_map import CapabilityMap
 from ._jobcore import compute_backoff
 from ._json import dumps, loads
+from ._leased import claim_sql
 from ._pgname import validate_unquoted_identifier
 from .binding import _body_validator
 from .http_client import ClientError
@@ -785,22 +786,26 @@ class LocalReplayStore:
         ValueError: Either bound is non-positive.
     """
 
-    __slots__ = ("_entries", "_heap", "_lock", "_sequence", "max_entries", "ttl")
+    __slots__ = ("_last_now", "_lock", "_table", "max_entries", "ttl")
 
     def __init__(self, *, max_entries: int, ttl: float) -> None:
         if max_entries <= 0 or ttl <= 0:
             raise ValueError("replay store bounds must be positive")
         self.max_entries = max_entries
         self.ttl = ttl
-        self._entries: dict[tuple[str, str], tuple[float, str]] = {}
-        self._heap: list[tuple[float, int, tuple[str, str]]] = []
-        self._sequence = 0
+        self._last_now = time.monotonic()
+        self._table = CapabilityMap(
+            max_entries=max_entries,
+            ttl=ttl,
+            clock=time.monotonic,
+            overflow="earliest",
+        )
         self._lock = asyncio.Lock()
 
     @property
     def size(self) -> int:
         """Live claims held right now, expired ones included until they are swept."""
-        return len(self._entries)
+        return len(self._table)
 
     async def claim(self, source: str, event_id: str, *, now: float | None = None) -> bool:
         """Claim `(source, event_id)`, returning whether this caller won it.
@@ -817,18 +822,10 @@ class LocalReplayStore:
             True if this caller claimed it; False if it was already claimed.
         """
         current = time.monotonic() if now is None else now
+        self._last_now = current
         key = (source, event_id)
         async with self._lock:
-            self._expire(current)
-            if key in self._entries:
-                return False
-            while len(self._entries) >= self.max_entries:
-                self._evict_one()
-            expires = current + self.ttl
-            self._sequence += 1
-            self._entries[key] = (expires, "claimed")
-            heapq.heappush(self._heap, (expires, self._sequence, key))
-            return True
+            return self._table.claim(key, "claimed", now=current)
 
     async def complete(self, source: str, event_id: str, outcome: str) -> None:
         """Record how a claimed event turned out. Does not extend or release the claim.
@@ -844,25 +841,7 @@ class LocalReplayStore:
         """
         key = (source, event_id)
         async with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self._entries[key] = (entry[0], outcome)
-
-    def _expire(self, now: float) -> None:
-        while self._heap and self._heap[0][0] <= now:
-            expires, _sequence, key = heapq.heappop(self._heap)
-            entry = self._entries.get(key)
-            if entry is not None and entry[0] == expires:
-                del self._entries[key]
-
-    def _evict_one(self) -> None:
-        while self._heap:
-            expires, _sequence, key = heapq.heappop(self._heap)
-            entry = self._entries.get(key)
-            if entry is not None and entry[0] == expires:
-                del self._entries[key]
-                return
-        self._entries.clear()
+            self._table.complete(key, outcome, now=self._last_now)
 
 
 #: A delivery nobody is waiting on any more. Written once because the bounded
@@ -1493,23 +1472,30 @@ class PostgresWebhookOutbox:
         if lease_seconds <= 0:
             raise ValueError("webhook outbox lease_seconds must be positive")
         table = self.table
-        sql = (
-            "WITH candidate AS ("
-            f"SELECT delivery_id FROM {table} WHERE "
-            "((state IN ('pending','retry_wait') "
-            "AND next_attempt_at <= clock_timestamp()) OR "
-            "(state IN ('leased','sending') "
-            "AND lease_expires_at < clock_timestamp())) "
-            "ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1"
-            ") "
-            f"UPDATE {table} AS o SET state='leased', attempts=o.attempts+1, "
-            "lease_owner=$1, lease_expires_at=clock_timestamp() + "
-            "$2::float8 * interval '1 second', fencing_token=o.fencing_token+1 "
-            "FROM candidate WHERE o.delivery_id=candidate.delivery_id "
-            "RETURNING o.delivery_id,o.event_id,o.destination,o.event_type,"
-            "o.event_timestamp,o.payload_version,o.payload_bytes,o.content_type,"
-            "o.key_id,o.attempts,o.fencing_token,o.ordering_key,"
-            "o.correlation_id,o.causation_id,o.relay_path"
+        sql = claim_sql(
+            table,
+            key="delivery_id",
+            alias="AS o",
+            candidate="candidate",
+            predicate=(
+                "((state IN ('pending','retry_wait') "
+                "AND next_attempt_at <= clock_timestamp()) OR "
+                "(state IN ('leased','sending') "
+                "AND lease_expires_at < clock_timestamp()))"
+            ),
+            order="next_attempt_at, created_at",
+            limit="1",
+            assignments=(
+                "state='leased', attempts=o.attempts+1, lease_owner=$1, "
+                "lease_expires_at=clock_timestamp() + "
+                "$2::float8 * interval '1 second', fencing_token=o.fencing_token+1"
+            ),
+            returning=(
+                "o.delivery_id,o.event_id,o.destination,o.event_type,"
+                "o.event_timestamp,o.payload_version,o.payload_bytes,o.content_type,"
+                "o.key_id,o.attempts,o.fencing_token,o.ordering_key,"
+                "o.correlation_id,o.causation_id,o.relay_path"
+            ),
         )
         row = await session.raw(sql, lease_owner, lease_seconds).fetchrow()
         return None if row is None else _outbox_delivery(row)
@@ -2300,6 +2286,48 @@ class DispatcherReadiness:
     last_error: str | None
 
 
+class _WebhookDispatcherService:
+    """Supervisor adapter kept private so `WebhookDispatcher`'s API stays put."""
+
+    __slots__ = ("_dispatcher", "_idle_delay", "_session_factory")
+
+    def __init__(
+        self,
+        dispatcher: WebhookDispatcher,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+        idle_delay: float,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._session_factory = session_factory
+        self._idle_delay = idle_delay
+
+    async def start(self, supervisor: Any) -> None:
+        dispatcher = self._dispatcher
+        dispatcher._stopping = supervisor.stopping
+        dispatcher._task = supervisor.spawn(
+            f"wreath-webhook-{dispatcher._worker_id}",
+            dispatcher.run(
+                self._session_factory,
+                supervisor.stopping,
+                idle_delay=self._idle_delay,
+            ),
+        )
+        await asyncio.sleep(0)
+        if dispatcher._task.done():
+            await dispatcher._task
+
+    async def drain(self, deadline: float) -> None:
+        dispatcher = self._dispatcher
+        task = dispatcher._task
+        if task is not None and not task.done():
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            await asyncio.wait((task,), timeout=remaining)
+        if task is not None and task.done():
+            await task
+        dispatcher._task = None
+        dispatcher._stopping = None
+
+
 class WebhookDispatcher:
     """Fenced delivery loop with lease renewal and lifespan supervision hooks.
 
@@ -2410,20 +2438,18 @@ class WebhookDispatcher:
     ) -> None:
         """Attach the delivery loop to the application's lifespan.
 
-        Registers a startup hook that spawns `run` and a shutdown hook that
-        signals it and awaits it, so shutdown does not return until the current
-        delivery has settled. A loop that fails immediately at startup is
-        re-awaited on the spot, which turns "the dispatcher never started" into a
-        failed boot instead of a quiet absence.
+        Registers the loop with the application's ordinary service supervisor,
+        so startup, bounded drain, task ownership, and failure accounting use
+        the same lifecycle as jobs, messaging, entities, and WebSockets. A loop
+        that fails immediately is re-awaited during startup, turning "never
+        started" into a failed boot instead of a quiet absence.
 
         The dispatcher is also published on `app.state` as
         `webhook_dispatcher_<worker_id>` (non-identifier characters replaced
         with `_`), so a health endpoint can find it without a global.
 
-        This is a lifespan attachment, not supervision: it does not use
-        `wreath.services.Supervisor` and there is no restart or drain
-        budget. A delivery loop that dies stays dead until the process restarts,
-        with `readiness` reporting it. Call it once per dispatcher.
+        A delivery loop that dies stays dead until the process restarts, with
+        `readiness` reporting it. Call this once per dispatcher.
 
         Args:
             app: The application whose lifespan and state this binds to.
@@ -2439,26 +2465,11 @@ class WebhookDispatcher:
         state_name = re.sub(r"[^A-Za-z0-9_]", "_", self._worker_id)
         app.state.__setattr__(f"webhook_dispatcher_{state_name}", self)
 
-        async def startup(_app: Any) -> None:
-            self._stopping = asyncio.Event()
-            self._task = asyncio.create_task(
-                self.run(session_factory, self._stopping, idle_delay=idle_delay),
-                name=f"wreath-webhook-{self._worker_id}",
-            )
-            await asyncio.sleep(0)
-            if self._task.done():
-                await self._task
-
-        async def shutdown(_app: Any) -> None:
-            if self._stopping is not None:
-                self._stopping.set()
-            if self._task is not None:
-                await self._task
-            self._task = None
-            self._stopping = None
-
-        app.on_startup(startup)
-        app.on_shutdown(shutdown)
+        service = _WebhookDispatcherService(self, session_factory, idle_delay)
+        # The adapter is an implementation detail, so do not publish a second
+        # state attribute through `app.service()`. The application supervisor
+        # consumes this same private registry during lifespan startup.
+        app._services[f"__webhook_dispatcher_{id(self):x}"] = service
 
     async def run(
         self,

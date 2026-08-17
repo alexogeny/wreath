@@ -38,6 +38,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from ._pgname import quote_identifier
+
 logger = logging.getLogger("wreath")
 
 #: The schema wreath's own tables live in. Every subsystem already defaults to
@@ -192,9 +194,7 @@ def _quote(identifier: str) -> str:
     no parameter form for an identifier. Guarding the precondition is both the
     correct answer and the cheap one -- there is nothing to catch afterwards.
     """
-    if not identifier or '"' in identifier or "\x00" in identifier:
-        raise ValueError(f"unusable SQL identifier: {identifier!r}")
-    return f'"{identifier}"'
+    return quote_identifier(identifier, reject_quote=True)
 
 
 def marker_statements(schema: str = DEFAULT_SCHEMA) -> tuple[str, ...]:

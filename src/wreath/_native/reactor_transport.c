@@ -441,6 +441,17 @@ st_async_send_available(SocketTransport *t)
 static int
 st_enqueue_send(SocketTransport *t, PyObject *bytes_obj)
 {
+    /* The common queue contains one payload which the caller pumps
+     * immediately. Transfer its retained reference directly into the send
+     * slot; the list remains the ordered overflow path behind an active send. */
+    if (t->send_op_token == 0 && t->send_obj == NULL &&
+        (t->send_queue == NULL ||
+         t->send_queue_head >= PyList_GET_SIZE(t->send_queue))) {
+        t->send_obj = Py_NewRef(bytes_obj);
+        t->send_obj_off = 0;
+        t->send_queued_bytes += PyBytes_GET_SIZE(bytes_obj);
+        return 0;
+    }
     if (t->send_queue == NULL) {
         t->send_queue = PyList_New(0);
         if (t->send_queue == NULL) {
@@ -2162,6 +2173,12 @@ static int
 transport_capi_writelines(PyObject *op, PyObject *parts)
 {
     return transport_capi_finish_write(op, st_writelines(op, parts));
+}
+
+static int
+transport_capi_is_closing(PyObject *op)
+{
+    return ((SocketTransport *)op)->closing;
 }
 
 static PyObject *

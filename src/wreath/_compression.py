@@ -1,7 +1,7 @@
 """Response compression: a thin facade over the stdlib's C `zlib` and `zstd`.
 
 **Do not write a `compression.c`.** Every byte of compression below already
-runs in C -- `zlib` and `compression.zstd` are CPython extensions -- so a
+runs in C -- `zlib` and, when built, `compression.zstd` are CPython extensions -- so a
 hand-written one would replace a mature, fuzzed, widely-deployed implementation
 with one of ours and be strictly worse at it. What this module adds is Wreath's
 policy: a mandatory output bound on decompression, a level range asked of
@@ -11,15 +11,46 @@ a second empty frame.
 
 from __future__ import annotations
 
+import importlib
 import zlib
-from compression import zstd
+from typing import Any
+
+_zstd: Any = None
+try:
+    _zstd = importlib.import_module("compression.zstd")
+except ImportError:
+    # ``compression.zstd`` is part of Python 3.14, but the extension itself is
+    # optional at interpreter build time.  In particular, the CPython 3.14
+    # manylinux images used by cibuildwheel currently omit ``_zstd``.  Gzip and
+    # the rest of Wreath must remain importable in such a build; selecting zstd
+    # is the boundary where the missing capability becomes an error.
+    pass
 
 # The valid range is asked of the stdlib rather than written down, because it is
 # libzstd's range and not ours; a build linked against a different libzstd would
 # otherwise have Wreath refusing a level that library accepts. Currently
 # (-131072, 22): the negatives are libzstd's "fast" modes.
-ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = zstd.CompressionParameter.compression_level.bounds()
-ZSTD_DEFAULT_LEVEL = zstd.COMPRESSION_LEVEL_DEFAULT
+if _zstd is None:
+    # Public defaults remain introspectable even when the optional codec is not
+    # present.  These are the ranges defined by the Python 3.14 API; a build
+    # with the extension asks its linked libzstd below instead.
+    ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = -131072, 22
+    ZSTD_DEFAULT_LEVEL = 3
+else:
+    ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = (
+        _zstd.CompressionParameter.compression_level.bounds()
+    )
+    ZSTD_DEFAULT_LEVEL = _zstd.COMPRESSION_LEVEL_DEFAULT
+
+
+def require_zstd() -> Any:
+    """Return the codec or refuse when this CPython build omitted ``_zstd``."""
+    if _zstd is None:
+        raise RuntimeError(
+            "zstd compression requires a CPython build with the optional "
+            "_zstd module; use gzip or install Python 3.14 with libzstd support"
+        )
+    return _zstd
 
 
 def gzip_compress(data: bytes, level: int = 5) -> bytes:
@@ -204,15 +235,16 @@ def zstd_compress(data: bytes, level: int = ZSTD_DEFAULT_LEVEL) -> bytes:
     that stores without compressing.**
 
     Compression itself is `compression.zstd`, which Python 3.14 added in PEP 784
-    and which is a C extension in every build that has it, so this needs no
-    third-party dependency.
+    and which is a C extension when the interpreter was built with libzstd.
 
     Raises:
+        RuntimeError: this CPython build omitted the optional `_zstd` module.
         ValueError: `level` is outside `ZSTD_MIN_LEVEL`-`ZSTD_MAX_LEVEL`.
     """
+    codec = require_zstd()
     if not ZSTD_MIN_LEVEL <= level <= ZSTD_MAX_LEVEL:
         raise ValueError(f"zstd level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
-    return zstd.compress(data, level=level)
+    return codec.compress(data, level=level)
 
 
 class ZstdCompressor:
@@ -248,15 +280,17 @@ class ZstdCompressor:
             default.
 
     Raises:
+        RuntimeError: this CPython build omitted the optional `_zstd` module.
         ValueError: `level` is outside `ZSTD_MIN_LEVEL`-`ZSTD_MAX_LEVEL`.
     """
 
     __slots__ = ("_compressor", "_state")
 
     def __init__(self, level: int = ZSTD_DEFAULT_LEVEL) -> None:
+        codec = require_zstd()
         if not ZSTD_MIN_LEVEL <= level <= ZSTD_MAX_LEVEL:
             raise ValueError(f"zstd level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
-        self._compressor = zstd.ZstdCompressor(level=level)
+        self._compressor = codec.ZstdCompressor(level=level)
         self._state = "open"
 
     def compress(self, data: bytes) -> bytes:
@@ -294,7 +328,8 @@ class ZstdCompressor:
         self._state = "finished"
         compressor = self._compressor
         assert compressor is not None
-        return compressor.flush(zstd.ZstdCompressor.FLUSH_FRAME)
+        codec = require_zstd()
+        return compressor.flush(codec.ZstdCompressor.FLUSH_FRAME)
 
     def close(self) -> None:
         """Abandon a still-open compressor without closing its frame.
@@ -321,5 +356,6 @@ __all__ = [
     "ZstdCompressor",
     "gzip_compress",
     "gzip_decompress",
+    "require_zstd",
     "zstd_compress",
 ]

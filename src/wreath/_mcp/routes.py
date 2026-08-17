@@ -148,6 +148,17 @@ def expose_routes(
         )
 
     declared: list[Tool] = []
+    image = getattr(source, "_application_image", None)
+    effective = (
+        {
+            id(definition): requirement
+            for definition, requirement in zip(
+                image.routes(), image.requirements(), strict=True
+            )
+        }
+        if image is not None
+        else {}
+    )
     for definition in selected:
         _check_carryable(definition)
         tool = build_tool(
@@ -159,7 +170,8 @@ def expose_routes(
             # endpoint's own decorators with the definition's inherited ones is
             # exactly what the application does before it enforces them, so the
             # two cannot come to different conclusions.
-            requirement=merge_requirements(
+            requirement=effective.get(id(definition))
+            or merge_requirements(
                 definition.requirement, requirement_for(definition.endpoint)
             ),
             route=definition.path,

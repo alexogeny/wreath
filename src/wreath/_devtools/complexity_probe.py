@@ -405,7 +405,7 @@ def _bitset_uniform_literal_table(r: int):
     from wreath._native import _core
 
     positions = 11
-    table = _core.BitsetRouteTable()
+    table = _core.PolicyRouteTable()
     for i in range(r):
         mask = i + 1
         segments = ["api"]
@@ -1177,7 +1177,7 @@ def _bitset_router_static_scale(n: int):
     many shapes) actually rely on."""
     from wreath._native import _core
 
-    table = _core.BitsetRouteTable()
+    table = _core.PolicyRouteTable()
     for i in range(n):
         table.add(f"/route{i}", "GET", object())
     table.compile()
@@ -1208,28 +1208,10 @@ def _bitset_router_same_group_scale(n: int):
     static paths are O(1); see bitset-router-static-scale."""
     from wreath._native import _core
 
-    table = _core.BitsetRouteTable()
+    table = _core.PolicyRouteTable()
     for i in range(n):
         table.add(f"/seg{i}/{{id}}", "GET", object())   # one (GET, nseg=2) group
     table.compile()
-    path = f"/seg{n // 2}/42"
-    start = time.perf_counter()
-    for _ in range(_MATCH_LOOPS):
-        table.match("GET", path)
-    return time.perf_counter() - start
-
-
-@probe("trie-router-match-scale", expect=0.0, sizes=(500, 1000, 2000, 4000))
-def _trie_router_match_scale(n: int):
-    """Trie match cost is independent of route count: O(1) in N.
-
-    Descent is O(path segments) with an O(1) hashed child lookup per segment,
-    so registering more sibling routes must not slow a match."""
-    from wreath._native import _core
-
-    table = _core.RouteTable()
-    for i in range(n):
-        table.add(f"/seg{i}/{{id}}", "GET", object())
     path = f"/seg{n // 2}/42"
     start = time.perf_counter()
     for _ in range(_MATCH_LOOPS):

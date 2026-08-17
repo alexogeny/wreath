@@ -81,6 +81,7 @@ PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args
 
 /* cedar.c */
 PyObject *wreath_cedar_is_authorized(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_compile_plan(PyObject *self, PyObject *policies);
 PyObject *wreath_cedar_route_denial(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_is_authorized_many(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_is_authorized_many_native(PyObject *self, PyObject *args);
@@ -140,6 +141,7 @@ PyObject *wreath_step_encode(PyObject *self, PyObject *args);
 PyObject *wreath_step_decode(PyObject *self, PyObject *args);
 PyObject *wreath_metrics_flatten(PyObject *self, PyObject *args);
 PyObject *wreath_locale_preference(PyObject *self, PyObject *args);
+PyObject *wreath_select_language(PyObject *self, PyObject *args);
 PyObject *wreath_normalize_host(PyObject *self, PyObject *args);
 PyObject *wreath_parse_accept(PyObject *self, PyObject *arg);
 PyObject *wreath_negotiate_media(PyObject *self, PyObject *args);
@@ -450,12 +452,39 @@ int wreath_http_parse_request_parts(
     WreathHttpRequestMeta *request_meta
 );
 PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
+
+/* One parsed outbound response head.  The request-owned HTTP client consumes
+ * this directly so framing and connection policy remain scalars in C; the
+ * standalone Python codec materializes its historical five-tuple only at its
+ * public boundary.  `headers` is the final tuple of raw byte pairs and
+ * `reason` is the final bytes object. */
+typedef struct {
+    PyObject *headers;
+    PyObject *reason;
+    Py_ssize_t consumed;
+    Py_ssize_t content_length;
+    int minor;
+    int status;
+    int framing;   /* 0 none, 1 chunked, 2 content-length, 3 close-delimited */
+    int reusable;
+} WreathHttpResponseHead;
+
+int wreath_http_parse_response_parts(
+    const uint8_t *data, Py_ssize_t size, PyObject *method,
+    WreathHttpResponseHead *head
+);
+void wreath_http_response_head_clear(WreathHttpResponseHead *head);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
 PyObject *wreath_http_response_framing(PyObject *self, PyObject *args);
 PyObject *wreath_http_response_keeps_alive(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_chunk_size(PyObject *self, PyObject *arg);
 PyObject *wreath_http_serialize_request(PyObject *self, PyObject *args);
 int wreath_register_http_client_protocol(PyObject *module);
+PyObject *wreath_http_client_configure_fast_path(PyObject *self, PyObject *args);
+PyObject *wreath_http_client_request_once(PyObject *self, PyObject *args);
+PyObject *wreath_http_client_request_default(PyObject *self, PyObject *args);
+PyObject *wreath_http_client_counters_new(PyObject *self, PyObject *ignored);
+PyObject *wreath_http_client_counters_snapshot(PyObject *self, PyObject *capsule);
 
 /* webpolicy.c */
 PyObject *wreath_select_content_encoding(PyObject *self, PyObject *arg);
@@ -471,12 +500,8 @@ PyObject *wreath_replace_server_timing(PyObject *self, PyObject *args);
 PyObject *wreath_find_response_header(PyObject *self, PyObject *args);
 int wreath_register_webpolicy(PyObject *module);
 
-/* router.c: adds the RouteTable type to the module; returns -1 on failure. */
-int wreath_register_router(PyObject *module);
-
-/* dtrouter.c: adds the DecisionRouteTable type; returns -1 on failure. */
-int wreath_register_dtrouter(PyObject *module);
-int wreath_register_dtbitset(PyObject *module);
+/* policy_router.c: adds the canonical PolicyRouteTable; returns -1 on failure. */
+int wreath_register_policy_router(PyObject *module);
 
 /* Substring search.
  *

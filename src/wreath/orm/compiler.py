@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from .._native import _core
+from .._pgname import quote_identifier
 from .errors import DeclarationError, ORMError
 from .expressions import (
     AND,
@@ -327,7 +328,7 @@ def quote(identifier: str) -> str:
     Identifiers reach this function only after `validate_identifier`, so the
     embedded-quote escape is belt-and-braces rather than the actual defense.
     """
-    return '"' + identifier.replace('"', '""') + '"'
+    return quote_identifier(identifier)
 
 
 def qualified(spec: ModelSpec) -> str:

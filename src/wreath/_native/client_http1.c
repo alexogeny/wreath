@@ -12,6 +12,9 @@
 #include "wreath_stream.h"
 
 #include <string.h>
+#include <stdatomic.h>
+#include <structmember.h>
+#include <time.h>
 
 typedef struct {
     PyObject_HEAD
@@ -186,11 +189,15 @@ typedef struct {
     Py_ssize_t limit;           /* readuntil overrun limit */
     int eof;
     int connected;
+    int over_ssl;              /* cached once from transport extra info */
     int offer_live;             /* fused offer outstanding: no realloc/move */
     int write_paused;
     PyObject *exc;              /* stored connection exception, or NULL */
     PyObject *transport;
+    const WreathTransportCAPI *transport_capi;
+    PyObject *loop;
     PyObject *create_future;    /* bound loop.create_future */
+    PyObject *call_soon;        /* bound metal/asyncio ready enqueue */
     PyObject *call_later;       /* bound loop.call_later */
     PyObject *drain_waiter;
     PyObject *closed_future;
@@ -210,19 +217,40 @@ typedef struct {
     PyObject *response_protocol_error;
     PyObject *response_too_large;
     PyObject *response_timeout_error;
-    PyObject *response_head;
+    PyObject *response_request_timeout_error;
+    PyObject *response_headers;
+    PyObject *response_reason;
     PyObject *response_body;
     PyObject *response_header_timeout;
     PyObject *response_body_timeout;
     PyObject *response_timer;
+    PyObject *response_timeout_callback;
+    PyObject *response_layout_type;
+    PyObject *response_version_10;
+    PyObject *response_version_11;
+    Py_ssize_t response_status_offset;
+    Py_ssize_t response_headers_offset;
+    Py_ssize_t response_body_offset;
+    Py_ssize_t response_version_offset;
+    Py_ssize_t response_reason_offset;
     Py_ssize_t response_max_header;
     Py_ssize_t response_max_body;
     Py_ssize_t response_length;
     Py_ssize_t response_trailers;
+    int response_minor;
+    int response_status;
+    int response_reusable;
+    int response_layout_fast;
+    int response_direct_completion;
+    int response_total_enabled;
+    int response_timer_is_total;
+    double response_total_deadline;
     int response_phase;
     int response_timer_phase;
     int response_framed;
 } WreathClientStream;
+
+static const WreathTransportCAPI *cs_transport_capi_resolve(void);
 
 static PyTypeObject *client_stream_type = NULL;
 static PyObject *cs_incomplete_read_error = NULL;  /* asyncio classes */
@@ -231,6 +259,115 @@ static PyObject *cs_str_done = NULL;
 static PyObject *cs_str_set_result = NULL;
 static PyObject *cs_str_set_exception = NULL;
 static PyObject *cs_str_cancel = NULL;
+
+static int fast_resolve_offset(
+    PyObject *type, const char *name, Py_ssize_t *offset);
+
+typedef struct {
+    Py_ssize_t active;
+    Py_ssize_t authority_bytes;
+    Py_ssize_t base_path;
+    Py_ssize_t condition;
+    Py_ssize_t idle;
+    Py_ssize_t limits;
+    Py_ssize_t native_counters;
+    Py_ssize_t open;
+    Py_ssize_t request_plans;
+    Py_ssize_t request_last_plan;
+    Py_ssize_t started;
+    Py_ssize_t timeout;
+    Py_ssize_t waiters;
+} ClientOffsets;
+
+typedef struct {
+    Py_ssize_t reader;
+} ConnectionOffsets;
+
+typedef struct {
+    Py_ssize_t max_keepalive_connections;
+    Py_ssize_t max_request_header_bytes;
+    Py_ssize_t max_response_header_bytes;
+    Py_ssize_t max_response_bytes;
+} LimitOffsets;
+
+typedef struct {
+    Py_ssize_t response_body;
+    Py_ssize_t response_headers;
+    Py_ssize_t total;
+} TimeoutOffsets;
+
+static ClientOffsets fast_client_off;
+static ConnectionOffsets fast_connection_off;
+static LimitOffsets fast_limit_off;
+static TimeoutOffsets fast_timeout_off;
+static PyTypeObject *fast_client_type = NULL;
+static PyTypeObject *fast_connection_type = NULL;
+static PyTypeObject *fast_limit_type = NULL;
+static PyTypeObject *fast_timeout_type = NULL;
+
+#define FAST_SLOT(obj, offset) (*(PyObject **)((char *)(obj) + (offset)))
+
+#define HTTP_CLIENT_COUNTERS_CAPSULE "wreath.http_client.counters"
+
+typedef struct {
+    _Atomic uint64_t requests;
+    _Atomic uint64_t reused;
+} HttpClientCounters;
+
+static void
+http_client_counters_destroy(PyObject *capsule)
+{
+    void *pointer = PyCapsule_GetPointer(
+        capsule, HTTP_CLIENT_COUNTERS_CAPSULE);
+    if (pointer == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    PyMem_Free(pointer);
+}
+
+PyObject *
+wreath_http_client_counters_new(PyObject *Py_UNUSED(self),
+                                PyObject *Py_UNUSED(ignored))
+{
+    HttpClientCounters *counters = PyMem_Calloc(1, sizeof(*counters));
+    if (counters == NULL) return PyErr_NoMemory();
+    PyObject *capsule = PyCapsule_New(
+        counters, HTTP_CLIENT_COUNTERS_CAPSULE,
+        http_client_counters_destroy);
+    if (capsule == NULL) PyMem_Free(counters);
+    return capsule;
+}
+
+PyObject *
+wreath_http_client_counters_snapshot(PyObject *Py_UNUSED(self),
+                                     PyObject *capsule)
+{
+    HttpClientCounters *counters = PyCapsule_GetPointer(
+        capsule, HTTP_CLIENT_COUNTERS_CAPSULE);
+    if (counters == NULL) return NULL;
+    PyObject *requests = PyLong_FromUnsignedLongLong(atomic_load_explicit(
+        &counters->requests, memory_order_relaxed));
+    PyObject *reused = PyLong_FromUnsignedLongLong(atomic_load_explicit(
+        &counters->reused, memory_order_relaxed));
+    if (requests == NULL || reused == NULL) {
+        Py_XDECREF(requests);
+        Py_XDECREF(reused);
+        return NULL;
+    }
+    PyObject *result = PyTuple_Pack(2, requests, reused);
+    Py_DECREF(requests);
+    Py_DECREF(reused);
+    return result;
+}
+
+static HttpClientCounters *
+fast_client_counters(PyObject *client)
+{
+    return PyCapsule_GetPointer(
+        FAST_SLOT(client, fast_client_off.native_counters),
+        HTTP_CLIENT_COUNTERS_CAPSULE);
+}
 
 static Py_ssize_t
 cs_avail(WreathClientStream *self)
@@ -341,6 +478,17 @@ cs_cancel_response_timer(WreathClientStream *self)
     self->response_timer_phase = -1;
 }
 
+static double
+cs_monotonic(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1.0;
+    }
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
+
 static void
 cs_clear_response(WreathClientStream *self)
 {
@@ -350,7 +498,9 @@ cs_clear_response(WreathClientStream *self)
     Py_CLEAR(self->response_protocol_error);
     Py_CLEAR(self->response_too_large);
     Py_CLEAR(self->response_timeout_error);
-    Py_CLEAR(self->response_head);
+    Py_CLEAR(self->response_request_timeout_error);
+    Py_CLEAR(self->response_headers);
+    Py_CLEAR(self->response_reason);
     Py_CLEAR(self->response_body);
     Py_CLEAR(self->response_header_timeout);
     Py_CLEAR(self->response_body_timeout);
@@ -358,8 +508,13 @@ cs_clear_response(WreathClientStream *self)
     self->response_max_body = 0;
     self->response_length = 0;
     self->response_trailers = 0;
+    self->response_minor = 0;
+    self->response_status = 0;
     self->response_phase = CS_RESPONSE_HEAD;
     self->response_framed = 0;
+    self->response_total_enabled = 0;
+    self->response_timer_is_total = 0;
+    self->response_total_deadline = 0.0;
 }
 
 static void
@@ -430,41 +585,39 @@ cs_response_append(WreathClientStream *self, const char *data, Py_ssize_t size)
 static PyObject *
 cs_finish_response(WreathClientStream *self, PyObject *body)
 {
-    PyObject *minor = PyTuple_GET_ITEM(self->response_head, 0);
-    PyObject *status = PyTuple_GET_ITEM(self->response_head, 1);
-    PyObject *reason = PyTuple_GET_ITEM(self->response_head, 2);
-    PyObject *headers_list = PyTuple_GET_ITEM(self->response_head, 3);
-    PyObject *headers = PySequence_Tuple(headers_list);
-    PyObject *version = NULL;
+    PyObject *status = PyLong_FromLong(self->response_status);
+    PyObject *version = self->response_minor == 0
+        ? self->response_version_10 : self->response_version_11;
     PyObject *response = NULL;
-    PyObject *framed = NULL;
-    PyObject *keep_args = NULL;
-    PyObject *reusable = NULL;
     PyObject *result = NULL;
-    long minor_value;
 
-    if (headers == NULL) goto done;
-    minor_value = PyLong_AsLong(minor);
-    if (minor_value == -1 && PyErr_Occurred()) goto done;
-    version = PyUnicode_FromFormat("1.%ld", minor_value);
-    if (version == NULL) goto done;
-    response = PyObject_CallFunctionObjArgs(
-        self->response_type, status, headers, body, version, reason, NULL);
+    if (status == NULL) goto done;
+    if (self->response_layout_fast) {
+        PyTypeObject *type = (PyTypeObject *)self->response_type;
+        response = type->tp_alloc(type, 0);
+        if (response != NULL) {
+            FAST_SLOT(response, self->response_status_offset) = Py_NewRef(status);
+            FAST_SLOT(response, self->response_headers_offset) =
+                Py_NewRef(self->response_headers);
+            FAST_SLOT(response, self->response_body_offset) = Py_NewRef(body);
+            FAST_SLOT(response, self->response_version_offset) = Py_NewRef(version);
+            FAST_SLOT(response, self->response_reason_offset) =
+                Py_NewRef(self->response_reason);
+        }
+    } else {
+        response = PyObject_CallFunctionObjArgs(
+            self->response_type, status, self->response_headers, body, version,
+            self->response_reason, NULL);
+    }
     if (response == NULL) goto done;
-    framed = PyBool_FromLong(self->response_framed);
-    keep_args = framed != NULL ? PyTuple_Pack(3, minor, headers_list, framed) : NULL;
-    if (keep_args == NULL) goto done;
-    reusable = wreath_http_response_keeps_alive(NULL, keep_args);
-    if (reusable == NULL) goto done;
-    result = PyTuple_Pack(2, response, reusable);
+    result = self->response_direct_completion
+        ? Py_NewRef(response)
+        : PyTuple_Pack(
+            2, response, self->response_reusable ? Py_True : Py_False);
 
 done:
-    Py_XDECREF(headers);
-    Py_XDECREF(version);
+    Py_XDECREF(status);
     Py_XDECREF(response);
-    Py_XDECREF(framed);
-    Py_XDECREF(keep_args);
-    Py_XDECREF(reusable);
     return result;
 }
 
@@ -502,61 +655,41 @@ cs_take_response(WreathClientStream *self, int *would_block)
                     "response headers exceed configured limit");
                 return NULL;
             }
-            PyObject *head = PyBytes_FromStringAndSize(
-                self->data + self->head, end);
-            PyObject *parsed = head != NULL
-                ? wreath_http_parse_response(NULL, head) : NULL;
-            Py_XDECREF(head);
-            if (parsed == NULL) return NULL;
-            if (parsed == Py_None) {
-                Py_DECREF(parsed);
+            WreathHttpResponseHead parsed;
+            int parsed_status = wreath_http_parse_response_parts(
+                (const uint8_t *)self->data + self->head, end,
+                self->response_method, &parsed);
+            if (parsed_status < 0) return NULL;
+            if (parsed_status == 0) {
                 cs_raise_response(
                     self->response_protocol_error,
                     "complete response head was not parsed");
                 return NULL;
             }
-            long status = PyLong_AsLong(PyTuple_GET_ITEM(parsed, 1));
-            if (status == -1 && PyErr_Occurred()) {
-                Py_DECREF(parsed);
+            if (cs_response_consume(self, parsed.consumed) < 0) {
+                wreath_http_response_head_clear(&parsed);
                 return NULL;
             }
-            if (cs_response_consume(self, end) < 0) {
-                Py_DECREF(parsed);
-                return NULL;
-            }
-            if (status == 101) {
-                Py_DECREF(parsed);
+            if (parsed.status == 101) {
+                wreath_http_response_head_clear(&parsed);
                 cs_raise_response(
                     self->response_protocol_error,
                     "protocol switching is not supported");
                 return NULL;
             }
-            if (status < 200) {
-                Py_DECREF(parsed);
+            if (parsed.status < 200) {
+                wreath_http_response_head_clear(&parsed);
                 continue;
             }
-            self->response_head = parsed;
-            PyObject *frame_args = PyTuple_Pack(
-                3, self->response_method, PyTuple_GET_ITEM(parsed, 1),
-                PyTuple_GET_ITEM(parsed, 3));
-            PyObject *framing = frame_args != NULL
-                ? wreath_http_response_framing(NULL, frame_args) : NULL;
-            Py_XDECREF(frame_args);
-            if (framing == NULL) return NULL;
-            PyObject *mode = PyTuple_GET_ITEM(framing, 0);
-            PyObject *length = PyTuple_GET_ITEM(framing, 1);
-            int is_none = PyUnicode_CompareWithASCIIString(mode, "none") == 0;
-            int is_chunked = !is_none &&
-                PyUnicode_CompareWithASCIIString(mode, "chunked") == 0;
-            int is_length = !is_none && !is_chunked &&
-                PyUnicode_CompareWithASCIIString(mode, "length") == 0;
-            if (PyErr_Occurred()) {
-                Py_DECREF(framing);
-                return NULL;
-            }
-            if (is_none) {
+            self->response_headers = parsed.headers;
+            self->response_reason = parsed.reason;
+            parsed.headers = NULL;
+            parsed.reason = NULL;
+            self->response_minor = parsed.minor;
+            self->response_status = parsed.status;
+            self->response_reusable = parsed.reusable;
+            if (parsed.framing == 0) {
                 self->response_framed = 1;
-                Py_DECREF(framing);
                 if (cs_avail(self) != 0) {
                     cs_raise_response(
                         self->response_protocol_error,
@@ -569,14 +702,9 @@ cs_take_response(WreathClientStream *self, int *would_block)
                 Py_XDECREF(empty);
                 return result;
             }
-            if (is_length) {
-                self->response_length = PyLong_AsSsize_t(length);
-                if (self->response_length == -1 && PyErr_Occurred()) {
-                    Py_DECREF(framing);
-                    return NULL;
-                }
+            if (parsed.framing == 2) {
+                self->response_length = parsed.content_length;
                 if (self->response_length > self->response_max_body) {
-                    Py_DECREF(framing);
                     cs_raise_response(
                         self->response_too_large,
                         "response body exceeds configured limit");
@@ -584,19 +712,17 @@ cs_take_response(WreathClientStream *self, int *would_block)
                 }
                 self->response_phase = CS_RESPONSE_LENGTH;
                 self->response_framed = 1;
-            } else if (is_chunked) {
+            } else if (parsed.framing == 1) {
                 self->response_phase = CS_RESPONSE_CHUNK_SIZE;
                 self->response_framed = 1;
                 self->response_body = PyByteArray_FromStringAndSize(NULL, 0);
                 if (self->response_body == NULL) {
-                    Py_DECREF(framing);
                     return NULL;
                 }
             } else {
                 self->response_phase = CS_RESPONSE_CLOSE;
                 self->response_framed = 0;
             }
-            Py_DECREF(framing);
             continue;
         }
         if (self->response_phase == CS_RESPONSE_LENGTH) {
@@ -961,15 +1087,30 @@ cs_try_satisfy(WreathClientStream *self)
         if (self->pending_kind == CS_READ_RESPONSE &&
             self->response_timer_phase != self->response_phase) {
             cs_cancel_response_timer(self);
-            PyObject *callback = PyObject_GetAttrString(
-                (PyObject *)self, "_response_timeout");
             PyObject *delay = self->response_phase == CS_RESPONSE_HEAD
                 ? self->response_header_timeout : self->response_body_timeout;
-            self->response_timer = callback != NULL
+            PyObject *scheduled_delay = Py_NewRef(delay);
+            self->response_timer_is_total = 0;
+            if (scheduled_delay != NULL && self->response_total_enabled) {
+                double remaining = self->response_total_deadline - cs_monotonic();
+                double phase = PyFloat_AsDouble(delay);
+                if (remaining < 0.0 && PyErr_Occurred()) {
+                    Py_CLEAR(scheduled_delay);
+                } else if (phase == -1.0 && PyErr_Occurred()) {
+                    Py_CLEAR(scheduled_delay);
+                } else if (remaining <= phase) {
+                    Py_SETREF(
+                        scheduled_delay,
+                        PyFloat_FromDouble(remaining > 0.0 ? remaining : 0.0));
+                    self->response_timer_is_total = 1;
+                }
+            }
+            self->response_timer = scheduled_delay != NULL
                 ? PyObject_CallFunctionObjArgs(
-                      self->call_later, delay, callback, NULL)
+                      self->call_later, scheduled_delay,
+                      self->response_timeout_callback, NULL)
                 : NULL;
-            Py_XDECREF(callback);
+            Py_XDECREF(scheduled_delay);
             if (self->response_timer == NULL) return -1;
             self->response_timer_phase = self->response_phase;
         }
@@ -1006,8 +1147,13 @@ cs_response_timeout(WreathClientStream *self, PyObject *Py_UNUSED(ignored))
     const char *message = self->response_phase == CS_RESPONSE_HEAD
         ? "timed out reading response headers"
         : "timed out reading response body";
+    PyObject *error_type = self->response_timeout_error;
+    if (self->response_timer_is_total) {
+        message = "outbound request exceeded total timeout";
+        error_type = self->response_request_timeout_error;
+    }
     PyObject *exc = PyObject_CallFunction(
-        self->response_timeout_error, "s", message);
+        error_type, "s", message);
     if (exc == NULL) return NULL;
     int status = cs_resolve(self->pending_future, exc, 1);
     Py_DECREF(exc);
@@ -1063,23 +1209,14 @@ cs_begin_read(WreathClientStream *self, int kind, const char *sep,
 }
 
 static PyObject *
-cs_read_response(WreathClientStream *self, PyObject *args)
+cs_start_response(WreathClientStream *self, PyObject *method,
+                  Py_ssize_t max_header, Py_ssize_t max_body,
+                  PyObject *response_type, PyObject *protocol_error,
+                  PyObject *too_large, PyObject *timeout_error,
+                  PyObject *header_timeout, PyObject *body_timeout,
+                  PyObject *completion, PyObject *request_timeout,
+                  PyObject *total_timeout)
 {
-    PyObject *method;
-    PyObject *response_type;
-    PyObject *protocol_error;
-    PyObject *too_large;
-    PyObject *timeout_error;
-    PyObject *header_timeout;
-    PyObject *body_timeout;
-    Py_ssize_t max_header;
-    Py_ssize_t max_body;
-    if (!PyArg_ParseTuple(
-            args, "OnnOOOOOO:read_response", &method, &max_header, &max_body,
-            &response_type, &protocol_error, &too_large, &timeout_error,
-            &header_timeout, &body_timeout)) {
-        return NULL;
-    }
     if (!PyUnicode_Check(method)) {
         PyErr_SetString(PyExc_TypeError, "response method must be str");
         return NULL;
@@ -1102,18 +1239,56 @@ cs_read_response(WreathClientStream *self, PyObject *args)
         PyErr_SetRaisedException(Py_NewRef(self->exc));
         return NULL;
     }
+    if (self->response_layout_type != response_type) {
+        Py_CLEAR(self->response_layout_type);
+        self->response_layout_fast = 0;
+        if (PyType_Check(response_type) &&
+            fast_resolve_offset(
+                response_type, "status", &self->response_status_offset) == 0 &&
+            fast_resolve_offset(
+                response_type, "headers", &self->response_headers_offset) == 0 &&
+            fast_resolve_offset(
+                response_type, "body", &self->response_body_offset) == 0 &&
+            fast_resolve_offset(
+                response_type, "http_version", &self->response_version_offset) == 0 &&
+            fast_resolve_offset(
+                response_type, "reason", &self->response_reason_offset) == 0) {
+            self->response_layout_type = Py_NewRef(response_type);
+            self->response_layout_fast = 1;
+        } else {
+            /* A caller-supplied response class remains supported through its
+             * constructor.  Only the exact slotted boundary earns direct fill. */
+            PyErr_Clear();
+        }
+    }
     self->pending_kind = CS_READ_RESPONSE;
+    self->response_direct_completion = completion != NULL;
     self->response_method = Py_NewRef(method);
     self->response_type = Py_NewRef(response_type);
     self->response_protocol_error = Py_NewRef(protocol_error);
     self->response_too_large = Py_NewRef(too_large);
     self->response_timeout_error = Py_NewRef(timeout_error);
+    self->response_request_timeout_error = Py_NewRef(request_timeout);
     self->response_header_timeout = Py_NewRef(header_timeout);
     self->response_body_timeout = Py_NewRef(body_timeout);
     self->response_max_header = max_header;
     self->response_max_body = max_body;
     self->response_phase = CS_RESPONSE_HEAD;
     self->response_timer_phase = -1;
+    if (total_timeout != Py_None) {
+        double total = PyFloat_AsDouble(total_timeout);
+        if (total == -1.0 && PyErr_Occurred()) {
+            cs_clear_pending(self);
+            return NULL;
+        }
+        double now = cs_monotonic();
+        if (now < 0.0 && PyErr_Occurred()) {
+            cs_clear_pending(self);
+            return NULL;
+        }
+        self->response_total_enabled = 1;
+        self->response_total_deadline = now + total;
+    }
 
     int would_block = 0;
     PyObject *ready = cs_take_response(self, &would_block);
@@ -1121,7 +1296,8 @@ cs_read_response(WreathClientStream *self, PyObject *args)
         cs_clear_pending(self);
         return ready;
     }
-    PyObject *future = PyObject_CallNoArgs(self->create_future);
+    PyObject *future = completion != NULL
+        ? Py_NewRef(completion) : PyObject_CallNoArgs(self->create_future);
     if (future == NULL) {
         cs_clear_pending(self);
         return NULL;
@@ -1135,6 +1311,1077 @@ cs_read_response(WreathClientStream *self, PyObject *args)
         return NULL;
     }
     return future;
+}
+
+static PyObject *
+cs_read_response(WreathClientStream *self, PyObject *args)
+{
+    PyObject *method;
+    PyObject *response_type;
+    PyObject *protocol_error;
+    PyObject *too_large;
+    PyObject *timeout_error;
+    PyObject *header_timeout;
+    PyObject *body_timeout;
+    Py_ssize_t max_header;
+    Py_ssize_t max_body;
+    if (!PyArg_ParseTuple(
+            args, "OnnOOOOOO:read_response", &method, &max_header, &max_body,
+            &response_type, &protocol_error, &too_large, &timeout_error,
+            &header_timeout, &body_timeout)) {
+        return NULL;
+    }
+    return cs_start_response(
+        self, method, max_header, max_body, response_type, protocol_error,
+        too_large, timeout_error, header_timeout, body_timeout, NULL,
+        Py_None, Py_None);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Steady-state buffered request transaction.                              */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *client;
+    PyObject *connection;
+    PyObject *stream;
+    PyObject *loop;
+    PyObject *result;
+    PyObject *error;
+    PyObject *callback;
+    PyObject *callback_context;
+    PyObject *callbacks;
+    PyObject *blocking;
+    PyObject *transport_error;
+    PyObject *request_timeout;
+    PyObject *total_timer;
+    int done;
+    int cancelled;
+    int yielded;
+    int released;
+} ClientRequestAwait;
+
+static PyTypeObject *client_request_await_type = NULL;
+static PyObject *client_cancelled_error = NULL;
+static PyObject *client_str_close = NULL;
+static PyObject *client_str_context = NULL;
+static PyObject *client_str_is_closing = NULL;
+static PyObject *client_str_write = NULL;
+static PyObject *client_context_names = NULL;
+
+static int
+fast_counter_add(PyObject *owner, Py_ssize_t offset, Py_ssize_t delta)
+{
+    PyObject *current = FAST_SLOT(owner, offset);
+    Py_ssize_t value = PyLong_AsSsize_t(current);
+    if (value == -1 && PyErr_Occurred()) return -1;
+    PyObject *updated = PyLong_FromSsize_t(value + delta);
+    if (updated == NULL) return -1;
+    FAST_SLOT(owner, offset) = updated;
+    Py_DECREF(current);
+    return 0;
+}
+
+static int
+fast_wake_condition(PyObject *condition, int wake_all)
+{
+    PyObject *waiters = PyObject_GetAttrString(condition, "_waiters");
+    PyObject *iterator = waiters != NULL ? PyObject_GetIter(waiters) : NULL;
+    Py_XDECREF(waiters);
+    if (iterator == NULL) return -1;
+    PyObject *waiter;
+    while ((waiter = PyIter_Next(iterator)) != NULL) {
+        int done = cs_future_done(waiter);
+        if (done < 0) {
+            Py_DECREF(waiter);
+            Py_DECREF(iterator);
+            return -1;
+        }
+        if (!done && cs_resolve(waiter, Py_None, 0) < 0) {
+            Py_DECREF(waiter);
+            Py_DECREF(iterator);
+            return -1;
+        }
+        Py_DECREF(waiter);
+        if (!done && !wake_all) break;
+    }
+    Py_DECREF(iterator);
+    return PyErr_Occurred() ? -1 : 0;
+}
+
+static int
+fast_release_connection(ClientRequestAwait *self, int reusable)
+{
+    if (self->released) return 0;
+    self->released = 1;
+    PyObject *client = self->client;
+    PyObject *connection = self->connection;
+    PyObject *active = FAST_SLOT(client, fast_client_off.active);
+    PyObject *idle = FAST_SLOT(client, fast_client_off.idle);
+    PyObject *limits = FAST_SLOT(client, fast_client_off.limits);
+    PyObject *started = FAST_SLOT(client, fast_client_off.started);
+    PyObject *waiters_obj = FAST_SLOT(client, fast_client_off.waiters);
+    Py_ssize_t waiters = PyLong_AsSsize_t(waiters_obj);
+    if (waiters == -1 && PyErr_Occurred()) return -1;
+    if (PySet_Discard(active, connection) < 0) return -1;
+
+    WreathClientStream *stream = (WreathClientStream *)self->stream;
+    Py_ssize_t max_idle = PyLong_AsSsize_t(
+        FAST_SLOT(limits, fast_limit_off.max_keepalive_connections));
+    if (max_idle == -1 && PyErr_Occurred()) return -1;
+    int keep = reusable && started == Py_True && waiters == 0 &&
+        stream->connected && !stream->eof &&
+        PyList_GET_SIZE(idle) < max_idle;
+    if (keep) {
+        if (PyList_Append(idle, connection) < 0) return -1;
+    } else {
+        if (fast_counter_add(client, fast_client_off.open, -1) < 0) return -1;
+        if (stream->transport != NULL) {
+            PyObject *closed = PyObject_CallMethodNoArgs(
+                stream->transport, client_str_close);
+            if (closed == NULL) return -1;
+            Py_DECREF(closed);
+        }
+    }
+    if (waiters > 0 || started != Py_True) {
+        if (fast_wake_condition(
+                FAST_SLOT(client, fast_client_off.condition),
+                started != Py_True) < 0) return -1;
+    }
+    return 0;
+}
+
+static int
+client_request_schedule_one(ClientRequestAwait *self, PyObject *callback,
+                            PyObject *context)
+{
+    WreathClientStream *stream = (WreathClientStream *)self->stream;
+    PyObject *values[3] = {callback, (PyObject *)self, context};
+    PyObject *scheduled = PyObject_Vectorcall(
+        stream->call_soon, values, 2,
+        context == Py_None ? NULL : client_context_names);
+    if (scheduled == NULL) return -1;
+    Py_DECREF(scheduled);
+    return 0;
+}
+
+static int
+client_request_schedule_callbacks(ClientRequestAwait *self)
+{
+    if (self->callback != NULL) {
+        if (client_request_schedule_one(
+                self, self->callback, self->callback_context) < 0) return -1;
+        Py_CLEAR(self->callback);
+        Py_CLEAR(self->callback_context);
+    }
+    if (self->callbacks == NULL) return 0;
+    Py_ssize_t count = PyList_GET_SIZE(self->callbacks);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *entry = PyList_GET_ITEM(self->callbacks, i);
+        if (client_request_schedule_one(
+                self, PyTuple_GET_ITEM(entry, 0),
+                PyTuple_GET_ITEM(entry, 1)) < 0) return -1;
+    }
+    return PyList_SetSlice(self->callbacks, 0, count, NULL);
+}
+
+static int
+client_request_store_error(ClientRequestAwait *self, PyObject *error)
+{
+    PyObject *stored = error;
+    if (self->transport_error != NULL &&
+        (PyErr_GivenExceptionMatches(error, PyExc_ConnectionError) ||
+         PyErr_GivenExceptionMatches(error, PyExc_OSError))) {
+        stored = PyObject_CallFunction(
+            self->transport_error, "s", "connection failed during HTTP exchange");
+        if (stored == NULL) return -1;
+        PyException_SetCause(stored, Py_NewRef(error));
+    } else {
+        Py_INCREF(stored);
+    }
+    Py_XSETREF(self->error, stored);
+    return 0;
+}
+
+static void
+client_request_cancel_total(ClientRequestAwait *self)
+{
+    if (self->total_timer == NULL) return;
+    PyObject *cancelled = PyObject_CallMethodNoArgs(
+        self->total_timer, cs_str_cancel);
+    if (cancelled == NULL) PyErr_Clear();
+    else Py_DECREF(cancelled);
+    Py_CLEAR(self->total_timer);
+}
+
+static void
+client_request_abort_response(ClientRequestAwait *self)
+{
+    WreathClientStream *stream = (WreathClientStream *)self->stream;
+    if (stream != NULL && stream->pending_future == (PyObject *)self) {
+        cs_clear_pending(stream);
+    }
+}
+
+static PyObject *
+client_request_set_result(ClientRequestAwait *self, PyObject *value)
+{
+    if (self->done) {
+        PyErr_SetString(PyExc_RuntimeError, "request result is already set");
+        return NULL;
+    }
+    PyObject *response;
+    int reusable;
+    if (PyTuple_CheckExact(value) && PyTuple_GET_SIZE(value) == 2) {
+        response = PyTuple_GET_ITEM(value, 0);
+        reusable = PyObject_IsTrue(PyTuple_GET_ITEM(value, 1));
+    } else {
+        WreathClientStream *stream = (WreathClientStream *)self->stream;
+        response = value;
+        reusable = stream->response_reusable;
+    }
+    if (reusable < 0 || fast_release_connection(self, reusable) < 0) return NULL;
+    client_request_cancel_total(self);
+    self->result = Py_NewRef(response);
+    self->done = 1;
+    if (client_request_schedule_callbacks(self) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+client_request_set_exception(ClientRequestAwait *self, PyObject *error)
+{
+    if (self->done) {
+        PyErr_SetString(PyExc_RuntimeError, "request result is already set");
+        return NULL;
+    }
+    PyObject *instance;
+    if (PyExceptionClass_Check(error)) {
+        instance = PyObject_CallNoArgs(error);
+        if (instance == NULL) return NULL;
+    } else if (PyExceptionInstance_Check(error)) {
+        instance = Py_NewRef(error);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "exception must derive from BaseException");
+        return NULL;
+    }
+    if (fast_release_connection(self, 0) < 0) {
+        Py_DECREF(instance);
+        return NULL;
+    }
+    client_request_cancel_total(self);
+    if (client_request_store_error(self, instance) < 0) {
+        Py_DECREF(instance);
+        return NULL;
+    }
+    Py_DECREF(instance);
+    self->done = 1;
+    if (client_request_schedule_callbacks(self) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+client_request_done(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    return PyBool_FromLong(self->done);
+}
+
+static PyObject *
+client_request_cancelled(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    return PyBool_FromLong(self->cancelled);
+}
+
+static PyObject *
+client_request_get_loop(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    return Py_NewRef(self->loop);
+}
+
+static PyObject *
+client_request_result(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (!self->done) {
+        PyErr_SetString(PyExc_RuntimeError, "request result is not ready");
+        return NULL;
+    }
+    if (self->error != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->error));
+        return NULL;
+    }
+    return Py_XNewRef(self->result != NULL ? self->result : Py_None);
+}
+
+static PyObject *
+client_request_exception(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (!self->done) {
+        PyErr_SetString(PyExc_RuntimeError, "request result is not ready");
+        return NULL;
+    }
+    if (self->cancelled && self->error != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->error));
+        return NULL;
+    }
+    return Py_XNewRef(self->error != NULL ? self->error : Py_None);
+}
+
+static PyObject *
+client_request_add_done_callback(
+    ClientRequestAwait *self, PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwnames)
+{
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "add_done_callback expects one callback");
+        return NULL;
+    }
+    PyObject *context = NULL;
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
+        if (PyTuple_GET_SIZE(kwnames) != 1 ||
+            PyUnicode_CompareWithASCIIString(
+                PyTuple_GET_ITEM(kwnames, 0), "context") != 0) {
+            PyErr_SetString(PyExc_TypeError, "unexpected callback keyword");
+            return NULL;
+        }
+        context = args[nargs];
+    }
+    if (context == NULL || context == Py_None) {
+        context = PyContext_CopyCurrent();
+        if (context == NULL) return NULL;
+    } else {
+        Py_INCREF(context);
+    }
+    if (self->done) {
+        int status = client_request_schedule_one(self, args[0], context);
+        Py_DECREF(context);
+        if (status < 0) return NULL;
+    } else if (self->callback == NULL) {
+        self->callback = Py_NewRef(args[0]);
+        self->callback_context = context;
+    } else {
+        if (self->callbacks == NULL) {
+            self->callbacks = PyList_New(0);
+            if (self->callbacks == NULL) {
+                Py_DECREF(context);
+                return NULL;
+            }
+        }
+        PyObject *entry = PyTuple_Pack(2, args[0], context);
+        Py_DECREF(context);
+        if (entry == NULL) return NULL;
+        int status = PyList_Append(self->callbacks, entry);
+        Py_DECREF(entry);
+        if (status < 0) return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+client_request_remove_done_callback(ClientRequestAwait *self, PyObject *callback)
+{
+    Py_ssize_t removed = 0;
+    if (self->callback != NULL) {
+        int same = PyObject_RichCompareBool(self->callback, callback, Py_EQ);
+        if (same < 0) return NULL;
+        if (same) {
+            Py_CLEAR(self->callback);
+            Py_CLEAR(self->callback_context);
+            removed++;
+        }
+    }
+    if (self->callbacks != NULL) {
+        for (Py_ssize_t i = PyList_GET_SIZE(self->callbacks); i > 0; i--) {
+            PyObject *entry = PyList_GET_ITEM(self->callbacks, i - 1);
+            int same = PyObject_RichCompareBool(
+                PyTuple_GET_ITEM(entry, 0), callback, Py_EQ);
+            if (same < 0) return NULL;
+            if (same && PySequence_DelItem(self->callbacks, i - 1) < 0)
+                return NULL;
+            removed += same;
+        }
+    }
+    return PyLong_FromSsize_t(removed);
+}
+
+static PyObject *
+client_request_cancel(
+    ClientRequestAwait *self, PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwnames)
+{
+    PyObject *message = Py_None;
+    Py_ssize_t nkw = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    if (nargs + nkw > 1) {
+        PyErr_SetString(PyExc_TypeError, "cancel accepts at most one message");
+        return NULL;
+    }
+    if (nargs == 1) message = args[0];
+    if (nkw == 1) {
+        if (PyUnicode_CompareWithASCIIString(
+                PyTuple_GET_ITEM(kwnames, 0), "msg") != 0) {
+            PyErr_SetString(PyExc_TypeError, "unexpected cancel keyword");
+            return NULL;
+        }
+        message = args[nargs];
+    }
+    if (self->done) Py_RETURN_FALSE;
+    PyObject *error = message == Py_None
+        ? PyObject_CallNoArgs(client_cancelled_error)
+        : PyObject_CallOneArg(client_cancelled_error, message);
+    if (error == NULL) return NULL;
+    client_request_abort_response(self);
+    if (fast_release_connection(self, 0) < 0) {
+        Py_DECREF(error);
+        return NULL;
+    }
+    self->error = error;
+    self->done = 1;
+    self->cancelled = 1;
+    client_request_cancel_total(self);
+    if (client_request_schedule_callbacks(self) < 0) return NULL;
+    Py_RETURN_TRUE;
+}
+
+static PyObject *
+client_request_await(ClientRequestAwait *self)
+{
+    return Py_NewRef((PyObject *)self);
+}
+
+static PyObject *
+client_request_iternext(ClientRequestAwait *self)
+{
+    if (!self->done) {
+        Py_SETREF(self->blocking, Py_NewRef(Py_True));
+        self->yielded = 1;
+        return Py_NewRef((PyObject *)self);
+    }
+    if (self->error != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->error));
+        return NULL;
+    }
+    PyObject *value = self->result != NULL ? self->result : Py_None;
+    PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, value);
+    if (stop == NULL) return NULL;
+    PyErr_SetRaisedException(stop);
+    return NULL;
+}
+
+static PyObject *
+client_request_send(ClientRequestAwait *self, PyObject *value)
+{
+    (void)value;
+    return client_request_iternext(self);
+}
+
+static PyObject *
+client_request_throw(ClientRequestAwait *self, PyObject *args)
+{
+    if (self->done) return client_request_iternext(self);
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    if (count < 1 || count > 3) {
+        PyErr_SetString(PyExc_TypeError, "throw expected 1 to 3 arguments");
+        return NULL;
+    }
+    PyObject *kind = PyTuple_GET_ITEM(args, 0);
+    PyObject *error;
+    if (PyExceptionInstance_Check(kind)) {
+        if (count != 1) {
+            PyErr_SetString(PyExc_TypeError, "instance exception takes no value");
+            return NULL;
+        }
+        error = Py_NewRef(kind);
+    } else if (PyExceptionClass_Check(kind)) {
+        PyObject *value = count >= 2 ? PyTuple_GET_ITEM(args, 1) : NULL;
+        error = value == NULL || value == Py_None
+            ? PyObject_CallNoArgs(kind) : PyObject_CallOneArg(kind, value);
+        if (error == NULL) return NULL;
+    } else {
+        PyErr_SetString(PyExc_TypeError, "exceptions must derive from BaseException");
+        return NULL;
+    }
+    if (count == 3 && PyTuple_GET_ITEM(args, 2) != Py_None &&
+        PyException_SetTraceback(error, PyTuple_GET_ITEM(args, 2)) < 0) {
+        Py_DECREF(error);
+        return NULL;
+    }
+    client_request_abort_response(self);
+    if (fast_release_connection(self, 0) < 0) {
+        Py_DECREF(error);
+        return NULL;
+    }
+    self->error = error;
+    self->done = 1;
+    self->cancelled = PyErr_GivenExceptionMatches(error, client_cancelled_error);
+    client_request_cancel_total(self);
+    PyErr_SetRaisedException(Py_NewRef(error));
+    return NULL;
+}
+
+static PyObject *
+client_request_close(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (!self->done) {
+        client_request_abort_response(self);
+        if (fast_release_connection(self, 0) < 0) return NULL;
+        self->done = 1;
+    }
+    client_request_cancel_total(self);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+client_request_total_timeout(ClientRequestAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (self->done) Py_RETURN_NONE;
+    PyObject *error = PyObject_CallFunction(
+        self->request_timeout, "s", "outbound request exceeded total timeout");
+    if (error == NULL) return NULL;
+    client_request_abort_response(self);
+    if (fast_release_connection(self, 0) < 0) {
+        Py_DECREF(error);
+        return NULL;
+    }
+    self->error = error;
+    self->done = 1;
+    Py_CLEAR(self->total_timer);
+    if (client_request_schedule_callbacks(self) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static int
+client_request_traverse(ClientRequestAwait *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(self->client);
+    Py_VISIT(self->connection);
+    Py_VISIT(self->stream);
+    Py_VISIT(self->loop);
+    Py_VISIT(self->result);
+    Py_VISIT(self->error);
+    Py_VISIT(self->callback);
+    Py_VISIT(self->callback_context);
+    Py_VISIT(self->callbacks);
+    Py_VISIT(self->blocking);
+    Py_VISIT(self->transport_error);
+    Py_VISIT(self->request_timeout);
+    Py_VISIT(self->total_timer);
+    return 0;
+}
+
+static void
+client_request_dealloc(ClientRequestAwait *self)
+{
+    PyTypeObject *type = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    if (!self->released && self->client != NULL && self->connection != NULL) {
+        if (fast_release_connection(self, 0) < 0) PyErr_Clear();
+    }
+    Py_CLEAR(self->client);
+    Py_CLEAR(self->connection);
+    Py_CLEAR(self->stream);
+    Py_CLEAR(self->loop);
+    Py_CLEAR(self->result);
+    Py_CLEAR(self->error);
+    Py_CLEAR(self->callback);
+    Py_CLEAR(self->callback_context);
+    Py_CLEAR(self->callbacks);
+    Py_CLEAR(self->blocking);
+    Py_CLEAR(self->transport_error);
+    Py_CLEAR(self->request_timeout);
+    Py_CLEAR(self->total_timer);
+    type->tp_free((PyObject *)self);
+    Py_DECREF(type);
+}
+
+static PyMethodDef client_request_methods[] = {
+    {"send", (PyCFunction)client_request_send, METH_O, NULL},
+    {"throw", (PyCFunction)client_request_throw, METH_VARARGS, NULL},
+    {"close", (PyCFunction)client_request_close, METH_NOARGS, NULL},
+    {"done", (PyCFunction)client_request_done, METH_NOARGS, NULL},
+    {"cancelled", (PyCFunction)client_request_cancelled, METH_NOARGS, NULL},
+    {"get_loop", (PyCFunction)client_request_get_loop, METH_NOARGS, NULL},
+    {"result", (PyCFunction)client_request_result, METH_NOARGS, NULL},
+    {"exception", (PyCFunction)client_request_exception, METH_NOARGS, NULL},
+    {"set_result", (PyCFunction)client_request_set_result, METH_O, NULL},
+    {"set_exception", (PyCFunction)client_request_set_exception, METH_O, NULL},
+    {"add_done_callback",
+     (PyCFunction)(void (*)(void))client_request_add_done_callback,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
+    {"remove_done_callback", (PyCFunction)client_request_remove_done_callback,
+     METH_O, NULL},
+    {"cancel", (PyCFunction)(void (*)(void))client_request_cancel,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
+    {"_total_timeout", (PyCFunction)client_request_total_timeout,
+     METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyMemberDef client_request_members[] = {
+    {"_asyncio_future_blocking", T_OBJECT,
+     offsetof(ClientRequestAwait, blocking), 0, NULL},
+    {NULL, 0, 0, 0, NULL},
+};
+
+static PyType_Slot client_request_slots[] = {
+    {Py_tp_dealloc, client_request_dealloc},
+    {Py_tp_traverse, client_request_traverse},
+    {Py_am_await, client_request_await},
+    {Py_tp_iter, PyObject_SelfIter},
+    {Py_tp_iternext, client_request_iternext},
+    {Py_tp_methods, client_request_methods},
+    {Py_tp_members, client_request_members},
+    {0, NULL},
+};
+
+static PyType_Spec client_request_spec = {
+    .name = "wreath._native._client._RequestAwait",
+    .basicsize = sizeof(ClientRequestAwait),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .slots = client_request_slots,
+};
+
+static int
+fast_resolve_offset(PyObject *type, const char *name, Py_ssize_t *offset)
+{
+    if (!PyType_Check(type)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "fast HTTP client configuration expects types");
+        return -1;
+    }
+    PyObject *dict = ((PyTypeObject *)type)->tp_dict;
+    PyObject *descriptor = dict == NULL
+        ? NULL : PyDict_GetItemString(dict, name);
+    if (descriptor == NULL ||
+        !PyObject_TypeCheck(descriptor, &PyMemberDescr_Type)) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "wreath._native._client: %s has no __slots__ member %s; "
+            "the client accelerator must be rebuilt",
+            ((PyTypeObject *)type)->tp_name, name);
+        return -1;
+    }
+    *offset = ((PyMemberDescrObject *)descriptor)->d_member->offset;
+    return 0;
+}
+
+PyObject *
+wreath_http_client_configure_fast_path(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *client_type;
+    PyObject *connection_type;
+    PyObject *limit_type;
+    PyObject *timeout_type;
+    if (!PyArg_ParseTuple(
+            args, "OOOO:_configure_fast_path", &client_type,
+            &connection_type, &limit_type, &timeout_type)) return NULL;
+    if (fast_resolve_offset(client_type, "_active", &fast_client_off.active) < 0 ||
+        fast_resolve_offset(
+            client_type, "_authority_bytes", &fast_client_off.authority_bytes) < 0 ||
+        fast_resolve_offset(
+            client_type, "_base_path", &fast_client_off.base_path) < 0 ||
+        fast_resolve_offset(
+            client_type, "_condition", &fast_client_off.condition) < 0 ||
+        fast_resolve_offset(client_type, "_idle", &fast_client_off.idle) < 0 ||
+        fast_resolve_offset(client_type, "_limits", &fast_client_off.limits) < 0 ||
+        fast_resolve_offset(
+            client_type, "_native_counters",
+            &fast_client_off.native_counters) < 0 ||
+        fast_resolve_offset(client_type, "_open", &fast_client_off.open) < 0 ||
+        fast_resolve_offset(
+            client_type, "_request_plans", &fast_client_off.request_plans) < 0 ||
+        fast_resolve_offset(
+            client_type, "_request_last_plan",
+            &fast_client_off.request_last_plan) < 0 ||
+        fast_resolve_offset(client_type, "_started", &fast_client_off.started) < 0 ||
+        fast_resolve_offset(client_type, "_timeout", &fast_client_off.timeout) < 0 ||
+        fast_resolve_offset(client_type, "_waiters", &fast_client_off.waiters) < 0 ||
+        fast_resolve_offset(
+            connection_type, "reader", &fast_connection_off.reader) < 0 ||
+        fast_resolve_offset(
+            limit_type, "max_keepalive_connections",
+            &fast_limit_off.max_keepalive_connections) < 0 ||
+        fast_resolve_offset(
+            limit_type, "max_response_header_bytes",
+            &fast_limit_off.max_response_header_bytes) < 0 ||
+        fast_resolve_offset(
+            limit_type, "max_request_header_bytes",
+            &fast_limit_off.max_request_header_bytes) < 0 ||
+        fast_resolve_offset(
+            limit_type, "max_response_bytes",
+            &fast_limit_off.max_response_bytes) < 0 ||
+        fast_resolve_offset(
+            timeout_type, "response_body", &fast_timeout_off.response_body) < 0 ||
+        fast_resolve_offset(
+            timeout_type, "response_headers",
+            &fast_timeout_off.response_headers) < 0 ||
+        fast_resolve_offset(
+            timeout_type, "total", &fast_timeout_off.total) < 0) return NULL;
+    Py_XSETREF(fast_client_type, (PyTypeObject *)Py_NewRef(client_type));
+    Py_XSETREF(
+        fast_connection_type, (PyTypeObject *)Py_NewRef(connection_type));
+    Py_XSETREF(fast_limit_type, (PyTypeObject *)Py_NewRef(limit_type));
+    Py_XSETREF(fast_timeout_type, (PyTypeObject *)Py_NewRef(timeout_type));
+    Py_RETURN_NONE;
+}
+
+static int
+fast_stream_is_open(WreathClientStream *stream)
+{
+    if (!stream->connected || stream->eof || stream->write_paused ||
+        stream->transport == NULL) return 0;
+    if (stream->transport_capi != NULL)
+        return !stream->transport_capi->is_closing(stream->transport);
+    PyObject *closing = PyObject_CallMethodNoArgs(
+        stream->transport, client_str_is_closing);
+    if (closing == NULL) return -1;
+    int open = !PyObject_IsTrue(closing);
+    Py_DECREF(closing);
+    return open;
+}
+
+static ClientRequestAwait *
+client_request_new(PyObject *client, PyObject *connection,
+                   WreathClientStream *stream, PyObject *transport_error,
+                   PyObject *request_timeout, PyObject *total)
+{
+    ClientRequestAwait *awaitable =
+        (ClientRequestAwait *)client_request_await_type->tp_alloc(
+            client_request_await_type, 0);
+    if (awaitable == NULL) return NULL;
+    awaitable->client = Py_NewRef(client);
+    awaitable->connection = Py_NewRef(connection);
+    awaitable->stream = Py_NewRef((PyObject *)stream);
+    awaitable->loop = Py_NewRef(stream->loop);
+    awaitable->result = NULL;
+    awaitable->error = NULL;
+    awaitable->callback = NULL;
+    awaitable->callback_context = NULL;
+    awaitable->callbacks = NULL;
+    awaitable->blocking = Py_NewRef(Py_None);
+    awaitable->transport_error = Py_NewRef(transport_error);
+    awaitable->request_timeout = Py_NewRef(request_timeout);
+    awaitable->total_timer = NULL;
+    awaitable->done = 0;
+    awaitable->cancelled = 0;
+    awaitable->yielded = 0;
+    awaitable->released = 0;
+    (void)total;  /* the response state machine owns the one fused deadline */
+    return awaitable;
+}
+
+static PyObject *
+http_client_request_once_parts(
+    PyObject *client, PyObject *method, PyObject *request,
+    PyObject *response_type, PyObject *protocol_error, PyObject *too_large,
+    PyObject *timeout_error, PyObject *transport_error,
+    PyObject *request_timeout, PyObject *total)
+{
+    if (fast_client_type == NULL || client_request_await_type == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "native HTTP client fast path is not configured");
+        return NULL;
+    }
+    if (!Py_IS_TYPE(client, fast_client_type) || !PyBytes_CheckExact(request)) {
+        Py_RETURN_NONE;
+    }
+    PyObject *idle = FAST_SLOT(client, fast_client_off.idle);
+    PyObject *active = FAST_SLOT(client, fast_client_off.active);
+    PyObject *limits = FAST_SLOT(client, fast_client_off.limits);
+    PyObject *timeouts = FAST_SLOT(client, fast_client_off.timeout);
+    PyObject *waiters_obj = FAST_SLOT(client, fast_client_off.waiters);
+    if (FAST_SLOT(client, fast_client_off.started) != Py_True ||
+        !PyList_CheckExact(idle) || !PySet_CheckExact(active) ||
+        !Py_IS_TYPE(limits, fast_limit_type) ||
+        !Py_IS_TYPE(timeouts, fast_timeout_type)) Py_RETURN_NONE;
+    Py_ssize_t waiters = PyLong_AsSsize_t(waiters_obj);
+    if (waiters == -1 && PyErr_Occurred()) return NULL;
+    if (waiters != 0) Py_RETURN_NONE;
+
+    PyObject *connection = NULL;
+    WreathClientStream *stream = NULL;
+    while (PyList_GET_SIZE(idle) > 0) {
+        Py_ssize_t index = PyList_GET_SIZE(idle) - 1;
+        connection = Py_NewRef(PyList_GET_ITEM(idle, index));
+        if (PyList_SetSlice(idle, index, index + 1, NULL) < 0) {
+            Py_DECREF(connection);
+            return NULL;
+        }
+        if (Py_IS_TYPE(connection, fast_connection_type)) {
+            PyObject *reader = FAST_SLOT(
+                connection, fast_connection_off.reader);
+            if (Py_IS_TYPE(reader, client_stream_type)) {
+                stream = (WreathClientStream *)reader;
+                int open = fast_stream_is_open(stream);
+                if (open < 0) {
+                    Py_DECREF(connection);
+                    return NULL;
+                }
+                if (open) break;
+            }
+        }
+        if (stream != NULL && stream->transport != NULL) {
+            PyObject *closed = PyObject_CallMethodNoArgs(
+                stream->transport, client_str_close);
+            if (closed == NULL) {
+                Py_DECREF(connection);
+                return NULL;
+            }
+            Py_DECREF(closed);
+        }
+        if (fast_counter_add(client, fast_client_off.open, -1) < 0) {
+            Py_DECREF(connection);
+            return NULL;
+        }
+        Py_CLEAR(connection);
+        stream = NULL;
+    }
+    if (connection == NULL) Py_RETURN_NONE;
+    HttpClientCounters *counters = fast_client_counters(client);
+    if (counters == NULL) {
+        Py_DECREF(connection);
+        return NULL;
+    }
+    if (PySet_Add(active, connection) < 0) {
+        Py_DECREF(connection);
+        return NULL;
+    }
+    atomic_fetch_add_explicit(&counters->reused, 1, memory_order_relaxed);
+    ClientRequestAwait *awaitable = client_request_new(
+        client, connection, stream, transport_error, request_timeout, total);
+    Py_DECREF(connection);
+    if (awaitable == NULL) return NULL;
+
+    if (stream->transport_capi != NULL) {
+        if (stream->transport_capi->write(stream->transport, request) < 0)
+            goto request_error;
+    } else {
+        PyObject *written = PyObject_CallMethodOneArg(
+            stream->transport, client_str_write, request);
+        if (written == NULL) goto request_error;
+        Py_DECREF(written);
+    }
+    atomic_fetch_add_explicit(&counters->requests, 1, memory_order_relaxed);
+    Py_ssize_t max_header = PyLong_AsSsize_t(
+        FAST_SLOT(limits, fast_limit_off.max_response_header_bytes));
+    Py_ssize_t max_body = PyLong_AsSsize_t(
+        FAST_SLOT(limits, fast_limit_off.max_response_bytes));
+    if ((max_header == -1 || max_body == -1) && PyErr_Occurred())
+        goto request_error;
+    PyObject *response = cs_start_response(
+        stream, method, max_header, max_body, response_type, protocol_error,
+        too_large, timeout_error,
+        FAST_SLOT(timeouts, fast_timeout_off.response_headers),
+        FAST_SLOT(timeouts, fast_timeout_off.response_body),
+        (PyObject *)awaitable, request_timeout, total);
+    if (response == NULL) goto request_error;
+    if (response != (PyObject *)awaitable) {
+        PyObject *set = client_request_set_result(awaitable, response);
+        Py_DECREF(response);
+        if (set == NULL) goto request_error;
+        Py_DECREF(set);
+    } else {
+        Py_DECREF(response);
+    }
+    return (PyObject *)awaitable;
+
+request_error:
+    if (!awaitable->released && fast_release_connection(awaitable, 0) < 0) {
+        PyErr_Clear();
+    }
+    Py_DECREF(awaitable);
+    return NULL;
+}
+
+PyObject *
+wreath_http_client_request_once(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *client;
+    PyObject *method;
+    PyObject *request;
+    PyObject *response_type;
+    PyObject *protocol_error;
+    PyObject *too_large;
+    PyObject *timeout_error;
+    PyObject *transport_error;
+    if (!PyArg_ParseTuple(
+            args, "OOOOOOOO:_request_once", &client, &method, &request,
+            &response_type, &protocol_error, &too_large, &timeout_error,
+            &transport_error)) return NULL;
+    return http_client_request_once_parts(
+        client, method, request, response_type, protocol_error, too_large,
+        timeout_error, transport_error, Py_None, Py_None);
+}
+
+PyObject *
+wreath_http_client_request_default(PyObject *self, PyObject *args)
+{
+    (void)self;
+    PyObject *client;
+    PyObject *method;
+    PyObject *target;
+    PyObject *response_type;
+    PyObject *protocol_error;
+    PyObject *too_large;
+    PyObject *response_timeout;
+    PyObject *transport_error;
+    PyObject *client_error;
+    PyObject *request_timeout;
+    if (!PyArg_ParseTuple(
+            args, "OOOOOOOOOO:_request_default", &client, &method, &target,
+            &response_type, &protocol_error, &too_large, &response_timeout,
+            &transport_error, &client_error, &request_timeout)) return NULL;
+    if (fast_client_type == NULL || !Py_IS_TYPE(client, fast_client_type) ||
+        !PyUnicode_Check(method) || !PyUnicode_Check(target)) Py_RETURN_NONE;
+    if (PyUnicode_GET_LENGTH(target) == 0 ||
+        PyUnicode_ReadChar(target, 0) != '/' ||
+        (PyUnicode_GET_LENGTH(target) > 1 &&
+         PyUnicode_ReadChar(target, 1) == '/')) {
+        PyErr_SetString(PyExc_ValueError,
+                        "request target must be origin-relative");
+        return NULL;
+    }
+    PyObject *plans = FAST_SLOT(client, fast_client_off.request_plans);
+    if (!PyDict_CheckExact(plans)) Py_RETURN_NONE;
+    PyObject *last = FAST_SLOT(client, fast_client_off.request_last_plan);
+    PyObject *key = NULL;
+    PyObject *plan = NULL;
+    PyObject *method_upper;
+    PyObject *request;
+    if (PyTuple_CheckExact(last) && PyTuple_GET_SIZE(last) == 4 &&
+        PyTuple_GET_ITEM(last, 0) == method &&
+        PyTuple_GET_ITEM(last, 1) == target) {
+        method_upper = Py_NewRef(PyTuple_GET_ITEM(last, 2));
+        request = Py_NewRef(PyTuple_GET_ITEM(last, 3));
+    } else {
+        key = PyTuple_Pack(2, method, target);
+        if (key == NULL) return NULL;
+        plan = PyDict_GetItemWithError(plans, key);
+    }
+    if (key != NULL && plan != NULL) {
+        if (!PyTuple_CheckExact(plan) || PyTuple_GET_SIZE(plan) != 2 ||
+            !PyUnicode_CheckExact(PyTuple_GET_ITEM(plan, 0)) ||
+            !PyBytes_CheckExact(PyTuple_GET_ITEM(plan, 1))) {
+            Py_DECREF(key);
+            PyErr_SetString(PyExc_RuntimeError,
+                            "native HTTP request plan is invalid");
+            return NULL;
+        }
+        method_upper = Py_NewRef(PyTuple_GET_ITEM(plan, 0));
+        request = Py_NewRef(PyTuple_GET_ITEM(plan, 1));
+    } else if (key != NULL && PyErr_Occurred()) {
+        Py_DECREF(key);
+        return NULL;
+    } else if (key != NULL) {
+        method_upper = PyObject_CallMethod(method, "upper", NULL);
+        if (method_upper == NULL) {
+            Py_DECREF(key);
+            return NULL;
+        }
+        PyObject *base = FAST_SLOT(client, fast_client_off.base_path);
+        PyObject *combined = PyUnicode_GET_LENGTH(base) == 0
+            ? Py_NewRef(target) : PyUnicode_Concat(base, target);
+        if (combined == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        PyObject *target_bytes = PyUnicode_AsASCIIString(combined);
+        Py_DECREF(combined);
+        if (target_bytes == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(method_upper);
+            PyErr_Clear();
+            PyErr_SetString(PyExc_ValueError,
+                            "request target must be ASCII/percent-encoded");
+            return NULL;
+        }
+        PyObject *empty_headers = PyTuple_New(0);
+        PyObject *empty_body = PyBytes_FromStringAndSize(NULL, 0);
+        PyObject *serialize_args = empty_headers != NULL && empty_body != NULL
+            ? PyTuple_Pack(
+                5, method_upper, target_bytes,
+                FAST_SLOT(client, fast_client_off.authority_bytes),
+                empty_headers, empty_body)
+            : NULL;
+        Py_XDECREF(empty_headers);
+        Py_XDECREF(empty_body);
+        if (serialize_args == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(method_upper);
+            Py_DECREF(target_bytes);
+            return NULL;
+        }
+        request = wreath_http_serialize_request(NULL, serialize_args);
+        Py_DECREF(serialize_args);
+        Py_DECREF(target_bytes);
+        if (request == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        /* A plan cache belongs to one explicitly-owned client and is bounded:
+         * dynamic targets beyond the first 128 still use the fused operation,
+         * but cannot turn it into process-lifetime request retention. */
+        if (PyDict_GET_SIZE(plans) < 128) {
+            plan = PyTuple_Pack(2, method_upper, request);
+            if (plan == NULL || PyDict_SetItem(plans, key, plan) < 0) {
+                Py_XDECREF(plan);
+                Py_DECREF(request);
+                Py_DECREF(key);
+                Py_DECREF(method_upper);
+                return NULL;
+            }
+            Py_DECREF(plan);
+        }
+    }
+    if (key != NULL) {
+        PyObject *retained = PyTuple_Pack(
+            4, method, target, method_upper, request);
+        if (retained == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(method_upper);
+            Py_DECREF(request);
+            return NULL;
+        }
+        Py_SETREF(
+            FAST_SLOT(client, fast_client_off.request_last_plan), retained);
+        Py_DECREF(key);
+    }
+    /* With an empty body the serialized length is exactly the request head. */
+    PyObject *limits = FAST_SLOT(client, fast_client_off.limits);
+    Py_ssize_t request_limit = PyLong_AsSsize_t(
+        FAST_SLOT(limits, fast_limit_off.max_request_header_bytes));
+    if (request_limit == -1 && PyErr_Occurred()) {
+        Py_DECREF(method_upper);
+        Py_DECREF(request);
+        return NULL;
+    }
+    if (PyBytes_GET_SIZE(request) > request_limit) {
+        PyObject *error = PyObject_CallFunction(
+            client_error, "s", "request headers exceed configured limit");
+        Py_DECREF(method_upper);
+        Py_DECREF(request);
+        if (error == NULL) return NULL;
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
+    PyObject *total = FAST_SLOT(
+        FAST_SLOT(client, fast_client_off.timeout), fast_timeout_off.total);
+    PyObject *awaited = http_client_request_once_parts(
+        client, method_upper, request, response_type, protocol_error,
+        too_large, response_timeout, transport_error, request_timeout, total);
+    Py_DECREF(method_upper);
+    Py_DECREF(request);
+    return awaited;
 }
 
 /* --- reader API --------------------------------------------------------- */
@@ -1201,7 +2448,17 @@ cs_buffer_get(PyObject *op, void *Py_UNUSED(closure))
 static PyObject *
 cs_connection_made(WreathClientStream *self, PyObject *transport)
 {
+    PyObject *sslcontext = PyObject_CallMethod(
+        transport, "get_extra_info", "s", "sslcontext");
+    if (sslcontext == NULL) {
+        return NULL;
+    }
+    self->over_ssl = sslcontext != Py_None;
+    Py_DECREF(sslcontext);
     Py_XSETREF(self->transport, Py_NewRef(transport));
+    const WreathTransportCAPI *capi = cs_transport_capi_resolve();
+    self->transport_capi =
+        capi != NULL && capi->check(transport) ? capi : NULL;
     self->connected = 1;
     if (self->closed_future == NULL) {
         self->closed_future = PyObject_CallNoArgs(self->create_future);
@@ -1259,7 +2516,10 @@ cs_eof_received(WreathClientStream *self, PyObject *Py_UNUSED(ignored))
     if (cs_try_satisfy(self) < 0) {
         return NULL;
     }
-    Py_RETURN_TRUE;  /* keep the transport open, as asyncio streams do */
+    /* asyncio cannot honour a request to keep an SSL transport open after
+     * close_notify and warns whenever a protocol asks it to.  Match
+     * StreamReaderProtocol: plaintext may remain half-open; TLS may not. */
+    return PyBool_FromLong(!self->over_ssl);
 }
 
 static PyObject *
@@ -1461,6 +2721,30 @@ static const WreathStreamCAPI cs_stream_capi = {
     cs_stream_feed,
 };
 
+/* Resolve the immutable reactor ABI for this connection.  The stream retains
+   the pointer it uses; no process-global mutable cache is involved. */
+static const WreathTransportCAPI *
+cs_transport_capi_resolve(void)
+{
+    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
+    PyObject *module = modules == NULL
+        ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
+    if (module == NULL) return NULL;
+    PyObject *capsule = PyObject_GetAttrString(module, "_TRANSPORT_C_API");
+    if (capsule == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    const WreathTransportCAPI *capi = PyCapsule_GetPointer(
+        capsule, WREATH_TRANSPORT_CAPI_NAME);
+    Py_DECREF(capsule);
+    if (capi == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    return capi->version == WREATH_TRANSPORT_CAPI_VERSION ? capi : NULL;
+}
+
 /* --- lifecycle ---------------------------------------------------------- */
 
 static PyObject *
@@ -1486,21 +2770,36 @@ cs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     PyObject *create_future = PyObject_GetAttrString(loop, "create_future");
+    PyObject *call_soon = PyObject_GetAttrString(loop, "call_soon");
     PyObject *call_later = PyObject_GetAttrString(loop, "call_later");
-    Py_DECREF(loop);
-    if (create_future == NULL || call_later == NULL) {
+    if (create_future == NULL || call_soon == NULL || call_later == NULL) {
         Py_XDECREF(create_future);
+        Py_XDECREF(call_soon);
         Py_XDECREF(call_later);
+        Py_DECREF(loop);
         return NULL;
     }
     WreathClientStream *self = (WreathClientStream *)type->tp_alloc(type, 0);
     if (self == NULL) {
         Py_DECREF(create_future);
+        Py_DECREF(call_soon);
         Py_DECREF(call_later);
+        Py_DECREF(loop);
         return NULL;
     }
+    self->loop = loop;
     self->create_future = create_future;
+    self->call_soon = call_soon;
     self->call_later = call_later;
+    self->response_version_10 = PyUnicode_FromString("1.0");
+    self->response_version_11 = PyUnicode_FromString("1.1");
+    self->response_timeout_callback = PyObject_GetAttrString(
+        (PyObject *)self, "_response_timeout");
+    if (self->response_version_10 == NULL || self->response_version_11 == NULL ||
+        self->response_timeout_callback == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
     self->limit = limit;
     self->response_timer_phase = -1;
     return (PyObject *)self;
@@ -1513,7 +2812,9 @@ cs_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(op));
     Py_VISIT(self->exc);
     Py_VISIT(self->transport);
+    Py_VISIT(self->loop);
     Py_VISIT(self->create_future);
+    Py_VISIT(self->call_soon);
     Py_VISIT(self->call_later);
     Py_VISIT(self->drain_waiter);
     Py_VISIT(self->closed_future);
@@ -1524,11 +2825,17 @@ cs_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->response_protocol_error);
     Py_VISIT(self->response_too_large);
     Py_VISIT(self->response_timeout_error);
-    Py_VISIT(self->response_head);
+    Py_VISIT(self->response_request_timeout_error);
+    Py_VISIT(self->response_headers);
+    Py_VISIT(self->response_reason);
     Py_VISIT(self->response_body);
     Py_VISIT(self->response_header_timeout);
     Py_VISIT(self->response_body_timeout);
     Py_VISIT(self->response_timer);
+    Py_VISIT(self->response_layout_type);
+    Py_VISIT(self->response_version_10);
+    Py_VISIT(self->response_version_11);
+    Py_VISIT(self->response_timeout_callback);
     return 0;
 }
 
@@ -1538,13 +2845,19 @@ cs_clear(PyObject *op)
     WreathClientStream *self = (WreathClientStream *)op;
     Py_CLEAR(self->exc);
     Py_CLEAR(self->transport);
+    Py_CLEAR(self->loop);
     Py_CLEAR(self->create_future);
+    Py_CLEAR(self->call_soon);
     Py_CLEAR(self->call_later);
     Py_CLEAR(self->drain_waiter);
     Py_CLEAR(self->closed_future);
     Py_CLEAR(self->offer_obj);
     Py_CLEAR(self->pending_future);
     cs_clear_response(self);
+    Py_CLEAR(self->response_layout_type);
+    Py_CLEAR(self->response_version_10);
+    Py_CLEAR(self->response_version_11);
+    Py_CLEAR(self->response_timeout_callback);
     return 0;
 }
 
@@ -1618,6 +2931,8 @@ wreath_register_http_client_protocol(PyObject *module)
     PyObject *asyncio_module = PyImport_ImportModule("asyncio");
     if (asyncio_module == NULL) return -1;
     PyObject *base = PyObject_GetAttrString(asyncio_module, "BufferedProtocol");
+    client_cancelled_error = PyObject_GetAttrString(
+        asyncio_module, "CancelledError");
     cs_incomplete_read_error = PyObject_GetAttrString(
         asyncio_module, "IncompleteReadError");
     cs_limit_overrun_error = PyObject_GetAttrString(
@@ -1627,10 +2942,20 @@ wreath_register_http_client_protocol(PyObject *module)
     cs_str_set_result = PyUnicode_InternFromString("set_result");
     cs_str_set_exception = PyUnicode_InternFromString("set_exception");
     cs_str_cancel = PyUnicode_InternFromString("cancel");
+    client_str_close = PyUnicode_InternFromString("close");
+    client_str_context = PyUnicode_InternFromString("context");
+    client_str_is_closing = PyUnicode_InternFromString("is_closing");
+    client_str_write = PyUnicode_InternFromString("write");
+    client_context_names = client_str_context != NULL
+        ? PyTuple_Pack(1, client_str_context) : NULL;
     if (base == NULL || cs_incomplete_read_error == NULL ||
         cs_limit_overrun_error == NULL || cs_str_done == NULL ||
         cs_str_set_result == NULL || cs_str_set_exception == NULL ||
-        cs_str_cancel == NULL) {
+        cs_str_cancel == NULL || client_cancelled_error == NULL ||
+        client_str_close == NULL ||
+        client_str_context == NULL || client_str_is_closing == NULL ||
+        client_str_write == NULL ||
+        client_context_names == NULL) {
         Py_XDECREF(base);
         return -1;
     }
@@ -1645,6 +2970,9 @@ wreath_register_http_client_protocol(PyObject *module)
             module, "Http1ClientStream", (PyObject *)client_stream_type) < 0) {
         return -1;
     }
+    client_request_await_type = (PyTypeObject *)PyType_FromSpec(
+        &client_request_spec);
+    if (client_request_await_type == NULL) return -1;
     PyObject *capsule = PyCapsule_New(
         (void *)&cs_stream_capi,
         "wreath._native._client._STREAM_C_API", NULL);

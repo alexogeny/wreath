@@ -953,14 +953,13 @@ def _public_routes(app: Any) -> list[str]:
     public -- which here would be a preflight that says an application is wide
     open when it is not.
     """
-    from ._auth.requirements import merge_requirements, requirement_for
-
     image = getattr(app, "_application_image", None)
     if image is None:
         return []
     public: list[str] = []
-    for route in image.routes():
-        requirement = merge_requirements(route.requirement, requirement_for(route.endpoint))
+    for route, requirement in zip(
+        image.routes(), image.requirements(), strict=True
+    ):
         if requirement.access_level == 0:
             methods = "/".join(sorted(route.methods)) or "ANY"
             public.append(f"{methods} {route.path}")
@@ -1072,8 +1071,8 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
     `render_route_manifest`.
     """
     from ._auth.permissions import declared_actions
-    from ._auth.requirements import merge_requirements, requirement_for
-    from .typegen.inspect import build_api_model, resolve_operation_ids
+    from ._auth.requirements import requirement_for
+    from .typegen.inspect import build_api_model
     from .typegen.model import TypegenError
 
     compile_routes = getattr(app, "_compile_routes", None)
@@ -1081,7 +1080,7 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
         compile_routes()
     image = getattr(app, "_application_image", None)
     routes = list(image.routes()) if image is not None else []
-    operation_ids, diagnostics = resolve_operation_ids(routes)
+    operation_ids, diagnostics = image.operation_ids() if image is not None else ({}, ())
     if diagnostics:
         raise TypegenError(diagnostics)
     api = build_api_model(app, allow_unknown=True)
@@ -1101,10 +1100,10 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
         )
     )
     entries: list[dict[str, Any]] = []
-    for index, route in enumerate(routes):
-        requirement = merge_requirements(
-            route.requirement, requirement_for(route.endpoint)
-        )
+    requirements = image.requirements() if image is not None else ()
+    for index, (route, requirement) in enumerate(
+        zip(routes, requirements, strict=True)
+    ):
         security = {
             "access": _access(requirement),
             "declared": requirement.declares_access,

@@ -137,6 +137,7 @@ wreath_pg_connection_init(PyObject *module)
     if (set_backend_hook("_record_type", (PyObject *)WreathPgRecordType) < 0 ||
         set_backend_hook("_plan_type", (PyObject *)WreathPgPlanType) < 0 ||
         set_backend_hook("_operation_type", WreathPgOperationType) < 0 ||
+        set_backend_hook("_operation_queue_type", WreathPgOperationQueueType) < 0 ||
         set_backend_hook("_batch_decode", Py_True) < 0) goto error;
     value = PyObject_GetAttrString(module, "_FieldTape");
     if (value == NULL || set_backend_hook("_field_tape_type", value) < 0) goto error;

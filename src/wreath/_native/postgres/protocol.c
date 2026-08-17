@@ -6,6 +6,7 @@
 #include "codec.h"
 #include "decode.h"
 #include "migration_image.h"
+#include "pipeline.h"
 #include "plan.h"
 #include "slab.h"
 #include "tape.h"
@@ -28,22 +29,21 @@ static PyObject *str_rows = NULL;
 static PyObject *str_dest = NULL;
 static PyObject *str_mode = NULL;
 static PyObject *str_command = NULL;
-static PyObject *kind_cache[256];
-
-static PyObject *
-kind_object(unsigned char kind)
-{
-    PyObject *cached = kind_cache[kind];
-    if (cached == NULL) {
-        cached = PyBytes_FromStringAndSize((const char *)&kind, 1);
-        kind_cache[kind] = cached;
-    }
-    return cached;
-}
 
 /* Awaitable whose await completes immediately with a stored value, so a
    read_message() call that finds a pending message never suspends and
    allocates no future or coroutine machinery. */
+typedef struct {
+    PyObject *operation;
+    PyObject *tape;
+    PyObject *plan;
+    PyObject *rows;
+    PyObject *dest;
+    long mode;
+    int discarded;
+    int discarded_sampled;
+} WreathPgOperationContext;
+
 typedef struct {
     PyObject_HEAD
     PyObject *value;
@@ -364,6 +364,8 @@ typedef struct {
     PyObject_HEAD
     PyObject *transport;
     PyObject *transport_write;
+    PyObject *connection;  /* exact Connection, attached once after startup */
+    PyObject *kind_cache[256];  /* connection-owned one-byte control objects */
     /* Fused-egress fast path: when the transport is the native metal
      * transport, writes go through its C API instead of the bound method. */
     const WreathTransportCAPI *transport_capi;
@@ -389,28 +391,22 @@ typedef struct {
     Py_ssize_t retired_scan_steps;  /* entries inspected; test/benchmark only */
     Py_ssize_t retired_reclaims;    /* slabs removed; test/benchmark only */
     Py_ssize_t retired_move_steps;  /* unordered replacements; test/benchmark only */
-    /* In-flight pipelined operations, kept in lockstep and drained in order as
-       ReadyForQuery arrives. One head index serves both: deleting index 0 per
-       completion shifted every operation still in flight, which is quadratic in
-       the pipeline depth, and depth is whatever the caller submits at once. */
-    PyObject *operations;
-    PyObject *operation_contexts;
-    Py_ssize_t operations_head;   /* first in-flight operation */
-    /* Cache of the head operation context so per-DataRow dispatch avoids
-       tuple indexing and attribute lookups; cached_context is a strong
-       reference, the tape/plan/rows fields borrow from it. */
-    PyObject *cached_context;
-    PyObject *cached_tape;
-    PyObject *cached_plan;
-    PyObject *cached_rows;
-    PyObject *cached_dest;
-    long cached_mode;
-    int cached_discarded;
-    int cached_usable;
+    /* In-flight operations are protocol-owned C records.  The former shape
+       materialised each operation a second time as a six-element Python tuple
+       and kept two index-parallel Python lists merely so the native parser
+       could unpack them again.  This ring owns the necessary references and
+       enum directly; Python is materialised only at the query and result
+       boundaries. */
+    WreathPgOperationContext *operations;
+    Py_ssize_t operations_capacity;
+    Py_ssize_t operations_head;
+    Py_ssize_t operations_count;
+    int head_direct;              /* no Python-consumed control for this head */
     WreathPgSlab *current;
     Py_ssize_t slab_allocations;
     Py_ssize_t chained_messages;
     Py_ssize_t direct_data_rows;
+    Py_ssize_t direct_completions;
     Py_ssize_t queued_messages;
     Py_ssize_t write_calls;
     Py_ssize_t pause_writing_calls;
@@ -420,7 +416,75 @@ typedef struct {
     int connection_closed;
 } WreathPgBufferedProtocol;
 
+static PyObject *
+kind_object(WreathPgBufferedProtocol *self, unsigned char kind)
+{
+    PyObject *cached = self->kind_cache[kind];
+    if (cached == NULL) {
+        cached = PyBytes_FromStringAndSize((const char *)&kind, 1);
+        self->kind_cache[kind] = cached;
+    }
+    return cached;
+}
+
 static PyTypeObject *buffered_protocol_type = NULL;
+
+static void
+operation_context_clear(WreathPgOperationContext *context)
+{
+    Py_CLEAR(context->operation);
+    Py_CLEAR(context->tape);
+    Py_CLEAR(context->plan);
+    Py_CLEAR(context->rows);
+    Py_CLEAR(context->dest);
+    context->mode = 0;
+    context->discarded = 0;
+    context->discarded_sampled = 0;
+}
+
+static WreathPgOperationContext *
+operation_context_at(WreathPgBufferedProtocol *self, Py_ssize_t logical)
+{
+    Py_ssize_t index = (self->operations_head + logical) %
+        self->operations_capacity;
+    return &self->operations[index];
+}
+
+static WreathPgOperationContext *
+operation_context_head(WreathPgBufferedProtocol *self)
+{
+    return self->operations_count == 0
+        ? NULL : operation_context_at(self, 0);
+}
+
+static int
+operation_context_reserve(WreathPgBufferedProtocol *self, Py_ssize_t extra)
+{
+    if (extra <= self->operations_capacity - self->operations_count) return 0;
+    Py_ssize_t needed = self->operations_count + extra;
+    Py_ssize_t capacity = self->operations_capacity == 0
+        ? 8 : self->operations_capacity;
+    while (capacity < needed) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        capacity *= 2;
+    }
+    WreathPgOperationContext *contexts = PyMem_Calloc(
+        (size_t)capacity, sizeof(*contexts));
+    if (contexts == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < self->operations_count; i++)
+        contexts[i] = *operation_context_at(self, i);
+    PyMem_Free(self->operations);
+    self->operations = contexts;
+    self->operations_capacity = capacity;
+    self->operations_head = 0;
+    return 0;
+}
 
 /* --- indexed queue ------------------------------------------------------- */
 /* An owned list plus a head index. Taking the front is O(1) and the consumed
@@ -459,32 +523,19 @@ queue_pop(PyObject *list, Py_ssize_t *head)
     return item;
 }
 
-/* Retire the head operation and its context together.
- *
- * The two lists are index-parallel, so one head serves both. Like the control
- * queue, the consumed prefix is dropped in one slice rather than shifting the
- * whole in-flight pipeline on every completion. */
 static int
 operations_advance(WreathPgBufferedProtocol *self)
 {
-    self->operations_head++;
-    Py_ssize_t size = PyList_GET_SIZE(self->operations);
-    if (self->operations_head >= size) {
-        if (PyList_SetSlice(self->operations, 0, size, NULL) < 0 ||
-            PyList_SetSlice(self->operation_contexts, 0,
-                            PyList_GET_SIZE(self->operation_contexts), NULL) < 0) {
-            return -1;
-        }
-        self->operations_head = 0;
+    if (self->operations_count == 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "PostgreSQL operation ring is empty");
+        return -1;
     }
-    else if (self->operations_head >= 64 && self->operations_head * 2 >= size) {
-        Py_ssize_t drop = self->operations_head;
-        if (PyList_SetSlice(self->operations, 0, drop, NULL) < 0 ||
-            PyList_SetSlice(self->operation_contexts, 0, drop, NULL) < 0) {
-            return -1;
-        }
-        self->operations_head = 0;
-    }
+    operation_context_clear(&self->operations[self->operations_head]);
+    self->operations_count--;
+    self->operations_head = self->operations_count == 0
+        ? 0 : (self->operations_head + 1) % self->operations_capacity;
+    self->head_direct = 1;
     return 0;
 }
 
@@ -493,6 +544,8 @@ buffered_traverse(WreathPgBufferedProtocol *self, visitproc visit, void *arg)
 {
     Py_VISIT(self->transport);
     Py_VISIT(self->transport_write);
+    Py_VISIT(self->connection);
+    for (Py_ssize_t i = 0; i < 256; i++) Py_VISIT(self->kind_cache[i]);
     Py_VISIT(self->messages);
     Py_VISIT(self->read_waiter);
     Py_VISIT(self->create_future);
@@ -501,21 +554,21 @@ buffered_traverse(WreathPgBufferedProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->slabs);
     Py_VISIT(self->spares);
     Py_VISIT(self->retired);
-    Py_VISIT(self->operations);
-    Py_VISIT(self->operation_contexts);
-    Py_VISIT(self->cached_context);
+    for (Py_ssize_t i = 0; i < self->operations_count; i++) {
+        WreathPgOperationContext *context = operation_context_at(self, i);
+        Py_VISIT(context->operation);
+        Py_VISIT(context->tape);
+        Py_VISIT(context->plan);
+        Py_VISIT(context->rows);
+        Py_VISIT(context->dest);
+    }
     return 0;
 }
 
 static void
 invalidate_context_cache(WreathPgBufferedProtocol *self)
 {
-    Py_CLEAR(self->cached_context);
-    self->cached_tape = NULL;
-    self->cached_plan = NULL;
-    self->cached_rows = NULL;
-    self->cached_dest = NULL;
-    self->cached_usable = 0;
+    (void)self;
 }
 
 static int
@@ -523,6 +576,8 @@ buffered_clear(WreathPgBufferedProtocol *self)
 {
     Py_CLEAR(self->transport);
     Py_CLEAR(self->transport_write);
+    Py_CLEAR(self->connection);
+    for (Py_ssize_t i = 0; i < 256; i++) Py_CLEAR(self->kind_cache[i]);
     self->transport_capi = NULL;
     self->read_offer_live = 0;
     Py_CLEAR(self->messages);
@@ -535,9 +590,14 @@ buffered_clear(WreathPgBufferedProtocol *self)
     Py_CLEAR(self->spares);
     Py_CLEAR(self->retired);
     self->retired_scan = 0;
-    Py_CLEAR(self->operations);
-    Py_CLEAR(self->operation_contexts);
+    for (Py_ssize_t i = 0; i < self->operations_count; i++)
+        operation_context_clear(operation_context_at(self, i));
+    PyMem_Free(self->operations);
+    self->operations = NULL;
+    self->operations_capacity = 0;
+    self->operations_count = 0;
     self->operations_head = 0;
+    self->head_direct = 1;
     invalidate_context_cache(self);
     self->current = NULL;
     return 0;
@@ -695,9 +755,10 @@ buffered_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->retired_scan_steps = 0;
     self->retired_reclaims = 0;
     self->retired_move_steps = 0;
-    self->operations = PyList_New(0);
-    self->operation_contexts = PyList_New(0);
+    self->operations = NULL;
+    self->operations_capacity = 0;
     self->operations_head = 0;
+    self->operations_count = 0;
     self->messages = PyList_New(0);
     self->messages_head = 0;
     asyncio_module = PyImport_ImportModule("asyncio");
@@ -710,7 +771,6 @@ buffered_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     Py_XDECREF(loop);
     Py_XDECREF(asyncio_module);
     if (self->slabs == NULL || self->spares == NULL || self->retired == NULL ||
-        self->operations == NULL || self->operation_contexts == NULL ||
         self->messages == NULL || self->create_future == NULL ||
         self->closed_future == NULL || self->done_future == NULL) {
         Py_DECREF(self);
@@ -872,63 +932,51 @@ static int
 direct_data_row(WreathPgBufferedProtocol *self, Py_ssize_t payload_length,
                 WreathPgSlab *slab, Py_ssize_t absolute_offset)
 {
-    PyObject *context;
+    WreathPgOperationContext *context;
     WreathPgFieldTape *tape;
     unsigned int selected;
 
-    if (queue_len(self->operation_contexts, self->operations_head) == 0) return 0;
-    context = PyList_GET_ITEM(self->operation_contexts, self->operations_head);
-    if (context != self->cached_context) {
-        PyObject *operation = PyTuple_GET_ITEM(context, 0);
-        PyObject *tape_object = PyTuple_GET_ITEM(context, 1);
-        PyObject *plan_object = PyTuple_GET_ITEM(context, 2);
-        PyObject *discarded;
-        long mode = PyLong_AsLong(PyTuple_GET_ITEM(context, 4));
-        if (mode == -1 && PyErr_Occurred()) return -1;
-        discarded = PyObject_GetAttr(operation, str_discarded);
+    context = operation_context_head(self);
+    if (context == NULL) return 0;
+    if (!context->discarded_sampled) {
+        PyObject *discarded = PyObject_GetAttr(
+            context->operation, str_discarded);
         if (discarded == NULL) return -1;
-        invalidate_context_cache(self);
-        self->cached_context = Py_NewRef(context);
-        self->cached_mode = mode;
-        self->cached_discarded = discarded == Py_True;
+        context->discarded = discarded == Py_True;
+        context->discarded_sampled = 1;
         Py_DECREF(discarded);
-        self->cached_tape = tape_object;
-        self->cached_plan = plan_object;
-        self->cached_rows = PyTuple_GET_ITEM(context, 3);
-        self->cached_dest = PyTuple_GET_ITEM(context, 5);
-        self->cached_usable = tape_object != Py_None && plan_object != Py_None &&
-            PyObject_TypeCheck(tape_object, WreathPgFieldTapeType) &&
-            PyObject_TypeCheck(plan_object, WreathPgDecoderPlanType);
     }
     /* The discarded flag is sampled once per operation: rows accepted after
        a late cancellation are still dropped by the driver, which re-checks
        the flag before decoding batches and publishing results. */
-    if (self->cached_discarded) return 1;
-    if (!self->cached_usable) return 0;
-    if (self->cached_mode == 0) return 1;
-    if (self->cached_mode == 4) {
+    if (context->discarded) return 1;
+    if (context->tape == Py_None || context->plan == Py_None ||
+        !PyObject_TypeCheck(context->tape, WreathPgFieldTapeType) ||
+        !PyObject_TypeCheck(context->plan, WreathPgDecoderPlanType)) return 0;
+    if (context->mode == 0) return 1;
+    if (context->mode == 4) {
         int decoded;
         if (slab == NULL)
             slab = locate_contiguous(self, 5, payload_length, &absolute_offset);
         if (slab != NULL) {
             decoded = wreath_pg_decode_datarow_batch(
-                self->cached_plan, self->cached_rows,
+                context->plan, context->rows,
                 slab->data + absolute_offset, payload_length);
         } else {
             PyObject *payload = payload_object(self, 5, payload_length, 0);
             if (payload == NULL) return -1;
             decoded = wreath_pg_decode_datarow_batch(
-                self->cached_plan, self->cached_rows,
+                context->plan, context->rows,
                 (const unsigned char *)PyBytes_AS_STRING(payload),
                 PyBytes_GET_SIZE(payload));
             Py_DECREF(payload);
         }
         return decoded < 0 ? -1 : 1;
     }
-    tape = (WreathPgFieldTape *)self->cached_tape;
-    if ((self->cached_mode == 2 || self->cached_mode == 3) && tape->row_count > 0)
+    tape = (WreathPgFieldTape *)context->tape;
+    if ((context->mode == 2 || context->mode == 3) && tape->row_count > 0)
         return 1;
-    selected = self->cached_mode == 3 ? 1 : tape->source_columns;
+    selected = context->mode == 3 ? 1 : tape->source_columns;
     if (slab == NULL)
         slab = locate_contiguous(self, 5, payload_length, &absolute_offset);
     if (slab != NULL) {
@@ -943,15 +991,15 @@ direct_data_row(WreathPgBufferedProtocol *self, Py_ssize_t payload_length,
         Py_DECREF(payload);
         if (appended < 0) return -1;
     }
-    if (self->cached_mode == 1 && tape->row_count >= 256) {
-        if (self->cached_dest != NULL && self->cached_dest != Py_None) {
-            if (wreath_pg_migration_catalog_check(self->cached_dest)) {
+    if (context->mode == 1 && tape->row_count >= 256) {
+        if (context->dest != Py_None) {
+            if (wreath_pg_migration_catalog_check(context->dest)) {
                 if (wreath_pg_migration_catalog_decode(
-                        self->cached_plan, self->cached_tape,
-                        self->cached_dest, 256) < 0) return -1;
+                        context->plan, context->tape,
+                        context->dest, 256) < 0) return -1;
             } else {
-                if (!PyTuple_Check(self->cached_dest) ||
-                    PyTuple_GET_SIZE(self->cached_dest) != 3) {
+                if (!PyTuple_Check(context->dest) ||
+                    PyTuple_GET_SIZE(context->dest) != 3) {
                     PyErr_SetString(
                         PyExc_TypeError,
                         "a decode destination is a migration catalog or "
@@ -959,14 +1007,14 @@ direct_data_row(WreathPgBufferedProtocol *self, Py_ssize_t payload_length,
                     return -1;
                 }
                 if (wreath_pg_hydrate_models(
-                        self->cached_plan, self->cached_tape,
-                        PyTuple_GET_ITEM(self->cached_dest, 0), 256, self->cached_rows,
-                        PyTuple_GET_ITEM(self->cached_dest, 1),
-                        PyTuple_GET_ITEM(self->cached_dest, 2)) < 0) return -1;
+                        context->plan, context->tape,
+                        PyTuple_GET_ITEM(context->dest, 0), 256, context->rows,
+                        PyTuple_GET_ITEM(context->dest, 1),
+                        PyTuple_GET_ITEM(context->dest, 2)) < 0) return -1;
             }
         } else if (wreath_pg_decode_fetch_extend(
-                       self->cached_plan, self->cached_tape, 256,
-                       self->cached_rows) < 0) {
+                       context->plan, context->tape, 256,
+                       context->rows) < 0) {
             return -1;
         }
     }
@@ -1065,10 +1113,8 @@ parse_messages(WreathPgBufferedProtocol *self)
          * The mode is still read, because it is what the surrounding code uses
          * to tell a result set from a bare command, and it stays in the context
          * for `direct_data_row` above. It just no longer gates this. */
-        if (kind_byte == 'C' &&
-            queue_len(self->operation_contexts, self->operations_head) > 0) {
-            PyObject *context =
-                PyList_GET_ITEM(self->operation_contexts, self->operations_head);
+        if (kind_byte == 'C' && self->operations_count > 0) {
+            WreathPgOperationContext *context = operation_context_head(self);
             {
                 PyObject *payload_object_value = payload_object(
                     self, 5, (Py_ssize_t)length - 4, 0
@@ -1085,7 +1131,7 @@ parse_messages(WreathPgBufferedProtocol *self)
                 );
                 Py_DECREF(payload_object_value);
                 if (command == NULL || PyObject_SetAttr(
-                        PyTuple_GET_ITEM(context, 0), str_command, command) < 0) {
+                        context->operation, str_command, command) < 0) {
                     Py_XDECREF(command);
                     return -1;
                 }
@@ -1107,7 +1153,38 @@ parse_messages(WreathPgBufferedProtocol *self)
                 continue;
             }
         }
-        kind = kind_object(kind_byte);
+        if (kind_byte == 'Z' && length == 5 && self->connection != NULL &&
+            self->head_direct && self->operations_count > 0) {
+            WreathPgOperationContext *context = operation_context_head(self);
+            char status;
+            PyObject *status_payload = NULL;
+            int completed = 0;
+            if (context->mode == 3) {
+                if (contiguous) {
+                    status = (char)first->data[first->read_position + 5];
+                }
+                else {
+                    status_payload = payload_object(self, 5, 1, 0);
+                    if (status_payload == NULL) return -1;
+                    status = PyBytes_AS_STRING(status_payload)[0];
+                }
+                completed = wreath_pg_pipeline_complete_fetchval(
+                    self->connection, context->operation,
+                    context->tape, context->plan, status);
+                Py_XDECREF(status_payload);
+                if (completed < 0) return -1;
+            }
+            if (completed) {
+                self->direct_completions++;
+                if (consume_bytes(self, wire_length) < 0) return -1;
+                invalidate_context_cache(self);
+                if (operations_advance(self) < 0) return -1;
+                if (self->operations_count == 0 && trim_idle_spares(self) < 0)
+                    return -1;
+                continue;
+            }
+        }
+        kind = kind_object(self, kind_byte);
         payload = payload_object(self, 5, length - 4, kind_byte == 'D');
         if (kind == NULL || payload == NULL) {
             Py_XDECREF(payload);
@@ -1116,6 +1193,8 @@ parse_messages(WreathPgBufferedProtocol *self)
         item = PyTuple_Pack(2, kind, payload);
         Py_DECREF(payload);
         if (item == NULL) return -1;
+        if (kind_byte != 'A' && kind_byte != 'N' && kind_byte != 'S')
+            self->head_direct = 0;
         if (deliver_message(self, item) < 0) {
             Py_DECREF(item);
             return -1;
@@ -1123,12 +1202,10 @@ parse_messages(WreathPgBufferedProtocol *self)
         self->queued_messages++;
         Py_DECREF(item);
         if (consume_bytes(self, wire_length) < 0) return -1;
-        if (kind_byte == 'Z' &&
-            queue_len(self->operations, self->operations_head) > 0) {
+        if (kind_byte == 'Z' && self->operations_count > 0) {
             invalidate_context_cache(self);
             if (operations_advance(self) < 0) return -1;
-            if (queue_len(self->operations, self->operations_head) == 0 &&
-                trim_idle_spares(self) < 0) {
+            if (self->operations_count == 0 && trim_idle_spares(self) < 0) {
                 return -1;
             }
         }
@@ -1278,14 +1355,9 @@ static const WreathStreamCAPI stream_capi = {
     stream_feed_external,
 };
 
-/* Fused egress: resolved once per process from sys.modules (the reactor is
- * definitionally imported before it hands us a transport to check). */
-static const WreathTransportCAPI *g_transport_capi = NULL;
-
 static const WreathTransportCAPI *
 transport_capi_resolve(void)
 {
-    if (g_transport_capi != NULL) return g_transport_capi;
     PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
     PyObject *module = modules == NULL
         ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
@@ -1302,9 +1374,7 @@ transport_capi_resolve(void)
         PyErr_Clear();
         return NULL;
     }
-    if (capi->version != WREATH_TRANSPORT_CAPI_VERSION) return NULL;
-    g_transport_capi = capi;
-    return capi;
+    return capi->version == WREATH_TRANSPORT_CAPI_VERSION ? capi : NULL;
 }
 
 static PyObject *
@@ -1372,71 +1442,154 @@ buffered_connection_lost(WreathPgBufferedProtocol *self, PyObject *error)
     Py_RETURN_NONE;
 }
 
+static int
+operation_context_append_parts(WreathPgBufferedProtocol *self,
+                               PyObject *operation, PyObject *tape,
+                               PyObject *plan, PyObject *rows,
+                               PyObject *dest, long mode_code)
+{
+    if (operation_context_reserve(self, 1) < 0) return -1;
+    WreathPgOperationContext *context = operation_context_at(
+        self, self->operations_count);
+    context->operation = Py_NewRef(operation);
+    context->tape = Py_NewRef(tape);
+    context->plan = Py_NewRef(plan);
+    context->rows = Py_NewRef(rows);
+    context->dest = Py_NewRef(dest);
+    context->mode = mode_code;
+    context->discarded = 0;
+    context->discarded_sampled = 0;
+    if (self->operations_count == 0) self->head_direct = 1;
+    self->operations_count++;
+    return 0;
+}
+
+static int
+operation_context_append(WreathPgBufferedProtocol *self, PyObject *operation)
+{
+    PyObject *tape = PyObject_GetAttr(operation, str_field_tape);
+    PyObject *plan = PyObject_GetAttr(operation, str_decoder_plan);
+    PyObject *rows = PyObject_GetAttr(operation, str_rows);
+    PyObject *mode_object = PyObject_GetAttr(operation, str_mode);
+    PyObject *dest = PyObject_GetAttr(operation, str_dest);
+    const char *mode;
+    long mode_code;
+    if (tape == NULL || plan == NULL || rows == NULL || mode_object == NULL ||
+        dest == NULL) goto error;
+    mode = PyUnicode_AsUTF8(mode_object);
+    if (mode == NULL) goto error;
+    if (strcmp(mode, "execute") == 0) mode_code = 0;
+    else if (strcmp(mode, "fetch") == 0) mode_code = 1;
+    else if (strcmp(mode, "fetch_batch") == 0) mode_code = 4;
+    else if (strcmp(mode, "fetchrow") == 0) mode_code = 2;
+    else if (strcmp(mode, "fetchval") == 0) mode_code = 3;
+    else {
+        PyErr_SetString(PyExc_ValueError, "unknown PostgreSQL result mode");
+        goto error;
+    }
+    if (operation_context_append_parts(
+            self, operation, tape, plan, rows, dest, mode_code) < 0) goto error;
+    Py_DECREF(mode_object);
+    Py_DECREF(dest);
+    Py_DECREF(rows);
+    Py_DECREF(plan);
+    Py_DECREF(tape);
+    return 0;
+
+error:
+    Py_XDECREF(mode_object);
+    Py_XDECREF(dest);
+    Py_XDECREF(rows);
+    Py_XDECREF(plan);
+    Py_XDECREF(tape);
+    return -1;
+}
+
+static int
+register_operation_sequence(WreathPgBufferedProtocol *self,
+                            PyObject *operations)
+{
+    PyObject *fast = PySequence_Fast(
+        operations, "pipeline operations must be a sequence");
+    if (fast == NULL) return -1;
+    Py_ssize_t original_count = self->operations_count;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(fast);
+    PyObject **items = PySequence_Fast_ITEMS(fast);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        if (operation_context_append(self, items[i]) < 0) {
+            while (self->operations_count > original_count) {
+                Py_ssize_t tail = (self->operations_head +
+                    self->operations_count - 1) % self->operations_capacity;
+                operation_context_clear(&self->operations[tail]);
+                self->operations_count--;
+            }
+            Py_DECREF(fast);
+            return -1;
+        }
+    }
+    Py_DECREF(fast);
+    return 0;
+}
+
+int
+wreath_pg_protocol_register_operations(PyObject *protocol,
+                                       PyObject *operations)
+{
+    if (buffered_protocol_type == NULL ||
+        !Py_IS_TYPE(protocol, buffered_protocol_type)) return 0;
+    if (register_operation_sequence(
+            (WreathPgBufferedProtocol *)protocol, operations) < 0) return -1;
+    return 1;
+}
+
+int
+wreath_pg_protocol_register_operation(PyObject *protocol,
+                                      PyObject *operation)
+{
+    if (buffered_protocol_type == NULL ||
+        !Py_IS_TYPE(protocol, buffered_protocol_type)) return 0;
+    if (operation_context_append(
+            (WreathPgBufferedProtocol *)protocol, operation) < 0) return -1;
+    return 1;
+}
+
+int
+wreath_pg_protocol_register_operation_parts(
+    PyObject *protocol, PyObject *operation, PyObject *tape,
+    PyObject *plan, PyObject *rows, PyObject *dest, long mode)
+{
+    if (buffered_protocol_type == NULL ||
+        !Py_IS_TYPE(protocol, buffered_protocol_type)) return 0;
+    if (mode < 0 || mode > 4) {
+        PyErr_SetString(PyExc_ValueError, "unknown PostgreSQL result mode");
+        return -1;
+    }
+    if (operation_context_append_parts(
+            (WreathPgBufferedProtocol *)protocol, operation,
+            tape, plan, rows, dest, mode) < 0) return -1;
+    return 1;
+}
+
 static PyObject *
 buffered_register_operations(WreathPgBufferedProtocol *self, PyObject *operations)
 {
-    Py_ssize_t count;
     if (!PyTuple_Check(operations)) {
         PyErr_SetString(PyExc_TypeError, "pipeline operations must be a tuple");
         return NULL;
     }
-    count = PyTuple_GET_SIZE(operations);
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *operation = PyTuple_GET_ITEM(operations, i);
-        PyObject *tape = PyObject_GetAttr(operation, str_field_tape);
-        PyObject *plan = PyObject_GetAttr(operation, str_decoder_plan);
-        PyObject *rows = PyObject_GetAttr(operation, str_rows);
-        PyObject *mode_object = PyObject_GetAttr(operation, str_mode);
-        PyObject *dest = PyObject_GetAttr(operation, str_dest);
-        PyObject *mode_number = NULL;
-        PyObject *context = NULL;
-        const char *mode;
-        long mode_code;
-        if (tape == NULL || plan == NULL || rows == NULL || mode_object == NULL ||
-            dest == NULL)
-            goto context_error;
-        mode = PyUnicode_AsUTF8(mode_object);
-        if (mode == NULL) goto context_error;
-        if (strcmp(mode, "execute") == 0) mode_code = 0;
-        else if (strcmp(mode, "fetch") == 0) mode_code = 1;
-        else if (strcmp(mode, "fetch_batch") == 0) mode_code = 4;
-        else if (strcmp(mode, "fetchrow") == 0) mode_code = 2;
-        else if (strcmp(mode, "fetchval") == 0) mode_code = 3;
-        else {
-            PyErr_SetString(PyExc_ValueError, "unknown PostgreSQL result mode");
-            goto context_error;
-        }
-        mode_number = PyLong_FromLong(mode_code);
-        if (mode_number == NULL) goto context_error;
-        context = PyTuple_Pack(6, operation, tape, plan, rows, mode_number, dest);
-        if (context == NULL || PyList_Append(self->operations, operation) < 0 ||
-            PyList_Append(self->operation_contexts, context) < 0) {
-            if (PyList_GET_SIZE(self->operations) >
-                PyList_GET_SIZE(self->operation_contexts))
-                PySequence_DelItem(
-                    self->operations, PyList_GET_SIZE(self->operations) - 1
-                );
-            goto context_error;
-        }
-        Py_DECREF(context);
-        Py_DECREF(mode_number);
-        Py_DECREF(mode_object);
-        Py_DECREF(dest);
-        Py_DECREF(rows);
-        Py_DECREF(plan);
-        Py_DECREF(tape);
-        continue;
+    if (register_operation_sequence(self, operations) < 0) return NULL;
+    Py_RETURN_NONE;
+}
 
-context_error:
-        Py_XDECREF(context);
-        Py_XDECREF(mode_number);
-        Py_XDECREF(mode_object);
-        Py_XDECREF(dest);
-        Py_XDECREF(rows);
-        Py_XDECREF(plan);
-        Py_XDECREF(tape);
+static PyObject *
+buffered_attach_connection(WreathPgBufferedProtocol *self, PyObject *connection)
+{
+    if (self->connection != NULL && self->connection != connection) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "PostgreSQL protocol is already attached to a connection");
         return NULL;
     }
+    Py_XSETREF(self->connection, Py_NewRef(connection));
     Py_RETURN_NONE;
 }
 
@@ -1574,7 +1727,7 @@ buffered_stats(WreathPgBufferedProtocol *self, PyObject *unused)
 {
     (void)unused;
     return Py_BuildValue(
-        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
+        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
         "slab_allocations", self->slab_allocations,
         "active_slabs", PyList_GET_SIZE(self->slabs),
         "idle_slabs", PyList_GET_SIZE(self->spares),
@@ -1586,6 +1739,7 @@ buffered_stats(WreathPgBufferedProtocol *self, PyObject *unused)
         "retired_move_steps", self->retired_move_steps,
         "chained_messages", self->chained_messages,
         "direct_data_rows", self->direct_data_rows,
+        "direct_completions", self->direct_completions,
         "queued_messages", self->queued_messages,
         "write_calls", self->write_calls,
         "pause_writing_calls", self->pause_writing_calls,
@@ -1599,6 +1753,7 @@ static PyMethodDef buffered_methods[] = {
     {"buffer_updated", (PyCFunction)buffered_buffer_updated, METH_O, NULL},
     {"connection_made", (PyCFunction)buffered_connection_made, METH_O, NULL},
     {"connection_lost", (PyCFunction)buffered_connection_lost, METH_O, NULL},
+    {"attach_connection", (PyCFunction)buffered_attach_connection, METH_O, NULL},
     {"register_operations", (PyCFunction)buffered_register_operations, METH_O, NULL},
     {"read_message", (PyCFunction)buffered_read_message, METH_NOARGS, NULL},
     {"write", (PyCFunction)buffered_write, METH_O, NULL},
@@ -1705,6 +1860,5 @@ wreath_pg_protocol_fini(void)
     Py_CLEAR(str_mode);
     Py_CLEAR(str_command);
     Py_CLEAR(ready_message_type);
-    for (int i = 0; i < 256; i++) Py_CLEAR(kind_cache[i]);
     buffered_protocol_type = NULL;
 }

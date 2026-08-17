@@ -22,10 +22,11 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from typing import Any, get_args, get_origin, get_type_hints
 
 from .._auth.cedar_engine import CedarParseError, EntityUid
+from .._model_fields import dataclass_field_image
 
 __all__ = ["ObjectType", "Schema", "SchemaField", "build_schema", "policy_resource"]
 
@@ -336,16 +337,16 @@ def build_schema(
             raise ValueError(f"GraphQL type {model.__name__!r} is already registered")
         hints = get_type_hints(model)
         object_type = ObjectType(name=model.__name__, spec=None, fields={})
-        for item in fields(model):
-            annotation = hints.get(item.name, item.type)
+        for item in dataclass_field_image(model, hints):
+            annotation = item.annotation
             type_name, is_list, non_null = _dataclass_annotation(annotation)
-            object_type.fields[item.name] = SchemaField(
-                name=item.name,
+            object_type.fields[item.python_name] = SchemaField(
+                name=item.python_name,
                 type_name=type_name,
                 non_null=non_null,
                 is_list=is_list,
-                attribute=item.name,
-                policy=f"{model.__name__}.{item.name}",
+                attribute=item.python_name,
+                policy=f"{model.__name__}.{item.python_name}",
             )
         types[model.__name__] = object_type
     known_scalars = frozenset(

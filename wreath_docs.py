@@ -118,6 +118,7 @@ nav = Nav(
             Page("Calling another service", "guides/service-client.md"),
             Page("Serving MCP tools", "guides/mcp.md"),
             Page("Object storage", "guides/objects.md"),
+            Page("Stored-artifact provenance", "guides/provenance.md"),
             Page("The audit trail", "guides/audit-log.md"),
         ),
         Section(
@@ -274,6 +275,7 @@ nav = Nav(
         Page("Webhooks", "reference/webhooks.md"),
         Page("Bot challenges", "reference/bot.md"),
         Page("HTTP message signatures", "reference/signatures.md"),
+        Page("Stored-artifact provenance", "reference/provenance.md"),
         Page("Strict XML", "reference/xml.md"),
         Page("Templates", "reference/templates.md"),
         Page("Dates and times", "reference/temporal.md"),
@@ -363,6 +365,7 @@ nav = Nav(
         # dead link. The release-notes skill adds a line here as well as to
         # the index.
         Page("Overview", "release_notes/index.md"),
+        Page("v0.3.1", "release_notes/0.3.1.md"),
         Page("v0.3.0", "release_notes/0.3.0.md"),
         Page("v0.2.1", "release_notes/0.2.1.md"),
         Page("v0.2.0", "release_notes/0.2.0.md"),
