@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from ._auth.backends import AuthorizationProvider
 from ._auth.cedar import CedarAuthorizer, CedarEngine
-from ._auth.cedar_engine import CedarEntity, CedarParseError, CedarPolicies, EntityUid
+from ._auth.cedar_engine import CedarEntity, CedarParseError, CedarPolicies, CedarSchema, EntityUid
 from ._auth.decorators import authorize, permissions, roles
 from ._auth.geofence import PrecisionLadder, Regions, coarsen
 from ._auth.models import AuthorizationDecision
@@ -48,6 +48,7 @@ __all__ = [
     "CedarEntity",
     "CedarParseError",
     "CedarPolicies",
+    "CedarSchema",
     "EntityUid",
     "Limits",
     "LiveDocument",

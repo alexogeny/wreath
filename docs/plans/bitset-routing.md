@@ -1,11 +1,11 @@
 # Proposal: replace the decision tree with a survival-ordered bitset pass
 
-Status: **promoted**. `routing="bitset"` is a first-class backend alongside
-`"decision"` (still the default) and `"trie"`, with a native implementation
-(`src/neo/_native/dtbitset.c`) and a pure twin (`src/neo/_pure/dtbitset.py`),
-both enrolled in `tests/_routing_impls.py` so every parity test covers them.
-Not the default: it should carry production traffic behind an explicit opt-in
-first.
+Status: **promoted into the application policy router**. The measured bitset
+implementation in `src/wreath/_native/policy_router.c` is now exposed as
+`PolicyRouteTable`; `routing="policy"` is the only accepted spelling and this is
+the only compiled routing implementation. The former decision-tree and trie
+sources were removed after the measurements below selected the winner. These
+numbers remain historical evidence, not alternate shipped modes.
 
 Related: `docs/plans/profile-guided-hotspot-remediation.md` (section 2, which
 explicitly says *do not combine that work with a new routing algorithm* — hence
@@ -91,11 +91,11 @@ none; at 512 routes, 74.9 versus none.
 
 ## Measured, on the real prototype
 
-`BitsetRouteTable` in `src/neo/_native/dtbitset.c` implements this and is
-differential-tested against `DecisionRouteTable`: 25,000 probes over random
-tables mixing public and protected routes with random caller masks, zero
-mismatches. It is registered in `_core` for measurement and is not used by the
-request path.
+The prototype that became `PolicyRouteTable` was differential-tested against
+the former decision-tree table: 25,000 probes over random tables mixing public
+and protected routes with random caller masks, zero mismatches. The selected
+implementation now owns the request path; the comparison table is no longer
+shipped.
 
 Instructions per match (`perf stat -e instructions:u`, empty-loop baseline
 subtracted, pinned, 200k iterations, 5 segments) and resident memory of the
@@ -263,7 +263,7 @@ a true match. So it can key on the byte positions that actually discriminate the
 literals at that position and let the existing verify reject false positives.
 That removes both the full hash and the probe's memcmp.
 
-Built (`disc_key` / `disc_choose` in `src/neo/_native/dtbitset.c`). At compile
+Built (`disc_key` / `disc_choose` in `src/neo/_native/policy_router.c`). At compile
 time each position greedily picks the byte offsets that split its literals
 apart; the key is the segment length plus those bytes, packed into one integer
 and compared as one integer. Positions whose literals need more than four bytes,

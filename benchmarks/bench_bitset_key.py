@@ -1,4 +1,4 @@
-"""Measure BitsetRouteTable match cost, for the MaskMap key experiment.
+"""Measure PolicyRouteTable match cost, for the MaskMap key experiment.
 
 `docs/plans/bitset-routing.md` ("Discriminating bytes") argues the remaining
 per-lookup cost in the bitset matcher is not *finding* the bucket -- probe
@@ -180,24 +180,24 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    if _core is None or getattr(_core, "BitsetRouteTable", None) is None:
-        raise SystemExit("native _core with BitsetRouteTable is required")
+    if _core is None or getattr(_core, "PolicyRouteTable", None) is None:
+        raise SystemExit("native _core with PolicyRouteTable is required")
 
     rows = []
     for routes, segmax, param, vocab in SHAPES:
         paths, requests = build_routes(routes, segmax, param, vocab, args.seed)
         if not requests:
             continue
-        table = build_table(_core.BitsetRouteTable, paths)
+        table = build_table(_core.PolicyRouteTable, paths)
         # Warm every group into existence before timing: groups are built lazily
         # on first match, and that compile must not land inside a timed trial.
         for request in requests:
             table.match("GET", request, 0)
         hits = sum(table.match("GET", r, 0) is not None for r in requests)
-        _core.BitsetRouteTable.probe_stats()
+        _core.PolicyRouteTable.probe_stats()
         for request in requests:
             table.match("GET", request, 0)
-        probe = _core.BitsetRouteTable.probe_stats()
+        probe = _core.PolicyRouteTable.probe_stats()
 
         raw = sample(table, requests, args.iterations, args.trials)
         rows.append({

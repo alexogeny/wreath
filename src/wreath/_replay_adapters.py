@@ -130,9 +130,7 @@ class AdapterFault(StrEnum):
 #: Faults whose modeled outcome is "the call succeeds and yields nothing".
 #: They are not errors, and treating them as errors is the mistake this set
 #: exists to prevent.
-SILENT_FAULTS = frozenset(
-    {AdapterFault.CLAIM_LOST, AdapterFault.NOTIFY_STREAM_END}
-)
+SILENT_FAULTS = frozenset({AdapterFault.CLAIM_LOST, AdapterFault.NOTIFY_STREAM_END})
 
 
 def _db_error(fault: AdapterFault) -> Exception:
@@ -188,9 +186,17 @@ def _object_error(fault: AdapterFault, key: str) -> Exception:
 #: second execution of the same SQL text — the first is coerced, the second
 #: binds by the inferred OID. These have no binary encoder at all, so no Python
 #: value rescues them; `$1::regclass` was the one that shipped.
-_UNENCODABLE_CASTS = frozenset({
-    "regclass", "regtype", "regproc", "oid", "name", "inet", "xml",
-})
+_UNENCODABLE_CASTS = frozenset(
+    {
+        "regclass",
+        "regtype",
+        "regproc",
+        "oid",
+        "name",
+        "inet",
+        "xml",
+    }
+)
 
 #: These have an encoder that demands a particular Python type. `$1::uuid` with
 #: a string is the same trap wearing a friendlier name.
@@ -271,9 +277,7 @@ def refuse_parameter_arity(sql: str, args: tuple[Any, ...]) -> None:
     declared = len(args)
     unreferenced = sorted(set(range(1, declared + 1)) - referenced)
     if unreferenced:
-        raise PostgresError(
-            f"could not determine data type of parameter ${unreferenced[0]}"
-        )
+        raise PostgresError(f"could not determine data type of parameter ${unreferenced[0]}")
     if referenced and max(referenced) > declared:
         raise PostgresError(
             f"bind message supplies {declared} parameters, "
@@ -301,9 +305,7 @@ def refuse_uninferable_cast(sql: str, args: tuple[Any, ...], seen: set[str]) -> 
             raise TypeError(f"{lowered} codec requires {names}")
 
 
-def refuse_what_postgres_refuses(
-    sql: object, args: tuple[Any, ...], seen: set[str]
-) -> None:
+def refuse_what_postgres_refuses(sql: object, args: tuple[Any, ...], seen: set[str]) -> None:
     """Every check a real connection makes before it runs anything."""
     if not isinstance(sql, str):
         return
@@ -644,10 +646,9 @@ class _TransactionDouble:
 class ObjectStoreDouble:
     """An `ObjectStore` double that injects modeled storage failures.
 
-    Only the four methods a fault can meaningfully perturb are overridden;
-    everything else delegates to a real `MemoryObjectStore`, so a handler
-    exercising the store's ordinary behaviour runs against real code and only
-    the faulted operation is synthetic.
+    Every protocol operation owns a fault coordinate. Ordinary behaviour still
+    delegates to a real `MemoryObjectStore`; the double only owns observation
+    and the modeled failure.
 
     `OBJECT_READ_SHORT` is the interesting one: it returns *fewer bytes than
     `stat` reported*, without raising. A caller that trusts the length it was
@@ -686,6 +687,18 @@ class ObjectStoreDouble:
             return data[: len(data) // 2]
         return data
 
+    async def read_stream(self, key: str, *, range: tuple[int, int] | None = None):
+        self.reads += 1
+        fault = self._next_fault()
+        if fault is AdapterFault.OBJECT_UNREACHABLE:
+            raise _object_error(fault, key)
+        short = fault is AdapterFault.OBJECT_READ_SHORT
+        async for chunk in self._inner.read_stream(key, range=range):
+            if short:
+                yield chunk[: len(chunk) // 2]
+                return
+            yield chunk
+
     async def write(self, key: str, data: bytes, *, content_type: str | None = None) -> Any:
         self.writes += 1
         fault = self._next_fault()
@@ -697,17 +710,47 @@ class ObjectStoreDouble:
             raise _object_error(fault, key)
         return await self._inner.write(key, data, content_type=content_type)
 
+    async def write_stream(self, key: str, chunks: Any, *, content_type: str | None = None) -> Any:
+        self.writes += 1
+        fault = self._next_fault()
+        if fault is AdapterFault.OBJECT_UNREACHABLE:
+            raise _object_error(fault, key)
+        if fault is AdapterFault.OBJECT_WRITE_TORN:
+            first = await anext(aiter(chunks), b"")
+            await self._inner.write(key, first, content_type=content_type)
+            raise _object_error(fault, key)
+        return await self._inner.write_stream(key, chunks, content_type=content_type)
+
     async def stat(self, key: str) -> Any:
         fault = self._next_fault()
         if fault is AdapterFault.OBJECT_UNREACHABLE:
             raise _object_error(fault, key)
         return await self._inner.stat(key)
 
+    async def exists(self, key: str) -> bool:
+        fault = self._next_fault()
+        if fault is AdapterFault.OBJECT_UNREACHABLE:
+            raise _object_error(fault, key)
+        return await self._inner.exists(key)
+
+    async def list(self, prefix: str = "", *, delimiter: str | None = None):
+        fault = self._next_fault()
+        if fault is AdapterFault.OBJECT_UNREACHABLE:
+            raise _object_error(fault, prefix)
+        async for item in self._inner.list(prefix, delimiter=delimiter):
+            yield item
+
     async def delete(self, key: str) -> None:
         fault = self._next_fault()
         if fault is AdapterFault.OBJECT_UNREACHABLE:
             raise _object_error(fault, key)
         return await self._inner.delete(key)
+
+    def url(self, key: str, *, expires: int = 3600, method: str = "GET") -> str:
+        fault = self._next_fault()
+        if fault is AdapterFault.OBJECT_UNREACHABLE:
+            raise _object_error(fault, key)
+        return self._inner.url(key, expires=expires, method=method)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -721,11 +764,26 @@ class DatabaseDouble:
     """
 
     __slots__ = (
-        "name", "_results", "query_faults", "acquire_fault", "release_fault",
-        "acquired", "released", "_flight_dep_id",
-        "listen_faults", "stream_fault", "transaction_faults",
-        "notifications", "listened", "streams", "listens",
-        "connection_faults", "poisoned", "_statements", "hold_stream", "calls",
+        "name",
+        "_results",
+        "query_faults",
+        "acquire_fault",
+        "release_fault",
+        "acquired",
+        "released",
+        "_flight_dep_id",
+        "listen_faults",
+        "stream_fault",
+        "transaction_faults",
+        "notifications",
+        "listened",
+        "streams",
+        "listens",
+        "connection_faults",
+        "poisoned",
+        "_statements",
+        "hold_stream",
+        "calls",
     )
 
     def __init__(
@@ -916,9 +974,7 @@ class FaultyHttpClient(HTTPClient):
             raise TimeoutError("response read timed out")
         if index < len(self._replay_exchanges):
             exchange = self._replay_exchanges[index]
-            actual = (
-                method.upper(), target, tuple(headers), bytes(body), idempotency_key
-            )
+            actual = (method.upper(), target, tuple(headers), bytes(body), idempotency_key)
             expected = (
                 exchange.method.upper(),
                 exchange.target,
@@ -929,7 +985,8 @@ class FaultyHttpClient(HTTPClient):
             if actual != expected:
                 labels = ("method", "target", "headers", "body", "idempotency_key")
                 changed = ", ".join(
-                    label for label, got, wanted in zip(labels, actual, expected, strict=True)
+                    label
+                    for label, got, wanted in zip(labels, actual, expected, strict=True)
                     if got != wanted
                 )
                 raise HttpReplayError(
@@ -977,7 +1034,9 @@ class _ObservedConnection:
 
     async def _run(self, method: str, sql: object, args: tuple[Any, ...]) -> Any:
         return await _observe(
-            self._trace, _SEAM_DB_QUERY, self._target,
+            self._trace,
+            _SEAM_DB_QUERY,
+            self._target,
             getattr(self._inner, method)(sql, *args),
         )
 
@@ -1044,7 +1103,9 @@ class ObservedHttpClient:
 
     async def _request_timed(self, method, target, **kwargs):
         return await _observe(
-            self._trace, _SEAM_HTTP_REQUEST, self.name,
+            self._trace,
+            _SEAM_HTTP_REQUEST,
+            self.name,
             self._inner._request_timed(method, target, **kwargs),
         )
 
@@ -1063,25 +1124,62 @@ class ObservedObjectStore:
         self.name = name
 
     async def read(self, key: str) -> bytes:
-        return await _observe(
-            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.read(key)
-        )
+        return await _observe(self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.read(key))
+
+    async def read_stream(self, key: str, *, range: tuple[int, int] | None = None):
+        coordinate = self._trace.note(_SEAM_OBJECT_STORE, self.name)
+        try:
+            async for chunk in self._inner.read_stream(key, range=range):
+                yield chunk
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            self._trace.fail(coordinate, type(error).__name__)
+            raise
 
     async def write(self, key: str, data: bytes, **kwargs: Any) -> Any:
         return await _observe(
-            self._trace, _SEAM_OBJECT_STORE, self.name,
+            self._trace,
+            _SEAM_OBJECT_STORE,
+            self.name,
             self._inner.write(key, data, **kwargs),
         )
 
-    async def stat(self, key: str) -> Any:
+    async def write_stream(self, key: str, chunks: Any, **kwargs: Any) -> Any:
         return await _observe(
-            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.stat(key)
+            self._trace,
+            _SEAM_OBJECT_STORE,
+            self.name,
+            self._inner.write_stream(key, chunks, **kwargs),
         )
 
+    async def stat(self, key: str) -> Any:
+        return await _observe(self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.stat(key))
+
+    async def exists(self, key: str) -> bool:
+        return await _observe(self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.exists(key))
+
+    async def list(self, prefix: str = "", *, delimiter: str | None = None):
+        coordinate = self._trace.note(_SEAM_OBJECT_STORE, self.name)
+        try:
+            async for item in self._inner.list(prefix, delimiter=delimiter):
+                yield item
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            self._trace.fail(coordinate, type(error).__name__)
+            raise
+
     async def delete(self, key: str) -> None:
-        return await _observe(
-            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.delete(key)
-        )
+        return await _observe(self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.delete(key))
+
+    def url(self, key: str, *, expires: int = 3600, method: str = "GET") -> str:
+        coordinate = self._trace.note(_SEAM_OBJECT_STORE, self.name)
+        try:
+            return self._inner.url(key, expires=expires, method=method)
+        except BaseException as error:
+            self._trace.fail(coordinate, type(error).__name__)
+            raise
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -1143,10 +1241,20 @@ def observed_boundaries(
             registry[name] = factory(inner, trace, name)
 
     saved_slots: list[tuple[Any, str, Any]] = []
+    saved_state: list[tuple[Any, str, Any]] = []
     try:
         wrap(getattr(scope, "_databases", None), ObservedDatabase)
         wrap(getattr(scope, "_http_clients", None), ObservedHttpClient)
         wrap(getattr(scope, "_object_stores", None), ObservedObjectStore)
+        state = getattr(scope, "state", None)
+        stores = getattr(scope, "_object_stores", None)
+        if state is not None and stores is not None:
+            for name, observed in stores.items():
+                attribute = f"objects_{name}"
+                original = getattr(state, attribute, None)
+                if original is getattr(observed, "_inner", None):
+                    saved_state.append((state, attribute, original))
+                    setattr(state, attribute, observed)
         for holder, attribute, name in slots:
             inner = getattr(holder, attribute)
             saved_slots.append((holder, attribute, inner))
@@ -1159,6 +1267,8 @@ def observed_boundaries(
             registry[name] = inner
         for holder, attribute, inner in saved_slots:
             setattr(holder, attribute, inner)
+        for state, attribute, inner in saved_state:
+            setattr(state, attribute, inner)
         if saved and hasattr(scope, "_dirty"):
             scope._dirty = True
 
@@ -1172,9 +1282,7 @@ class ReplayAdapters:
     object_stores: dict[str, ObjectStoreDouble] = field(default_factory=dict)
 
     @classmethod
-    def from_recording(
-        cls, recording: Any, *, request_id: int | None = None
-    ) -> ReplayAdapters:
+    def from_recording(cls, recording: Any, *, request_id: int | None = None) -> ReplayAdapters:
         """Build HTTP doubles from exact exchanges retained in a WFR1 recording.
 
         A capture must be raw and complete.  Redacted or truncated dependency
@@ -1184,8 +1292,7 @@ class ReplayAdapters:
         from ._flight_schema import CaptureDisposition, CaptureFieldClass
 
         candidates = [
-            slab for slab in recording.slabs
-            if request_id is None or slab.request_id == request_id
+            slab for slab in recording.slabs if request_id is None or slab.request_id == request_id
         ]
         request_ids = {slab.request_id for slab in candidates}
         if request_id is None and len(request_ids) > 1:
@@ -1217,8 +1324,7 @@ class ReplayAdapters:
                 name = names.get(exchange.dependency_id)
                 if name is None:
                     raise HttpReplayError(
-                        f"outbound HTTP exchange names unknown client id "
-                        f"{exchange.dependency_id}"
+                        f"outbound HTTP exchange names unknown client id {exchange.dependency_id}"
                     )
                 grouped.setdefault(name, []).append(exchange)
         for exchanges in grouped.values():
@@ -1273,8 +1379,12 @@ class ReplayAdapters:
                 object_op.setdefault(fault.target, {})[fault.coordinate] = kind
         databases: dict[str, DatabaseDouble] = {}
         named = (
-            db_query.keys() | db_acquire.keys() | db_release.keys()
-            | db_listen.keys() | db_stream.keys() | db_txn.keys()
+            db_query.keys()
+            | db_acquire.keys()
+            | db_release.keys()
+            | db_listen.keys()
+            | db_stream.keys()
+            | db_txn.keys()
             | db_connection.keys()
         )
         for name in named:
@@ -1293,8 +1403,7 @@ class ReplayAdapters:
             for name, faults in http_request.items()
         }
         stores = {
-            name: ObjectStoreDouble(name, op_faults=faults)
-            for name, faults in object_op.items()
+            name: ObjectStoreDouble(name, op_faults=faults) for name, faults in object_op.items()
         }
         return cls(databases=databases, clients=clients, object_stores=stores)
 
@@ -1351,6 +1460,7 @@ def installed_boundaries(
     # double there too -- that alone makes ORM Session-based handlers replay
     # against the double, no separate Session double needed.
     saved_registry_dbs: dict[str, Any] = {}
+    saved_state: list[tuple[Any, str, Any]] = []
     try:
         if databases is not None:
             for name, double in adapters.databases.items():
@@ -1367,6 +1477,11 @@ def installed_boundaries(
         if stores is not None:
             for name, double in adapters.object_stores.items():
                 stores[name] = double
+                state = getattr(scope, "state", None)
+                attribute = f"objects_{name}"
+                if state is not None and getattr(state, attribute, None) is saved_stores.get(name):
+                    saved_state.append((state, attribute, saved_stores[name]))
+                    setattr(state, attribute, double)
         for holder, attribute, name in slots:
             setattr(holder, attribute, adapters.databases[name])
         if adapters.databases and hasattr(scope, "_dirty"):
@@ -1387,6 +1502,8 @@ def installed_boundaries(
             stores.update(saved_stores)
         for holder, attribute, original in saved_slots:
             setattr(holder, attribute, original)
+        for state, attribute, original in saved_state:
+            setattr(state, attribute, original)
         if adapters.databases and hasattr(scope, "_dirty"):
             scope._dirty = True
 

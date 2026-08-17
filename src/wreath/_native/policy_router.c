@@ -1,7 +1,7 @@
-/* BitsetRouteTable: the default one-pass matcher.
+/* PolicyRouteTable: Wreath's one-pass policy matcher.
  *
- * The bitset design was measured against DecisionRouteTable on CPU and
- * resident memory before becoming the request-path default. See
+ * The bitset design was measured against the former decision-tree router on
+ * CPU and resident memory before becoming the sole request path. See
  * docs/plans/bitset-routing.md for the design and evidence.
  *
  * The idea: inside one (method, segment-count) group, index the routes
@@ -87,6 +87,27 @@ typedef struct {
     int specificity;
     int order; /* registration order, for a stable tie-break */
 } BRoute;
+
+typedef struct {
+    char *bytes;       /* NULL for a parameter or wildcard */
+    Py_ssize_t len;
+    PyObject *name;    /* owned for a named parameter, else NULL */
+    int greedy;
+} BDynamicSegment;
+
+typedef struct {
+    PyObject *method;
+    PyObject *handler;
+    PyObject *access_clauses;
+    unsigned long long *cmasks;
+    Py_ssize_t ncmasks;
+    BDynamicSegment *path;
+    Py_ssize_t npath;
+    BDynamicSegment *host;
+    Py_ssize_t nhost;
+    int host_route;
+    int greedy;
+} BDynamicRoute;
 
 /* Open-addressed map: literal bytes -> mask word offset. Avoids building a
  * PyUnicode per segment on the match path, which the dict-keyed tree must do.
@@ -191,10 +212,14 @@ typedef struct {
     PyObject *cached_method;
     MethodGroups *cached_mg;
     PyObject *get_method; /* owned per table; avoids process-global Python state */
+    MethodGroups no_groups; /* built-empty unrouted-method sentinel */
+    BDynamicRoute *dynamic_routes;
+    Py_ssize_t ndynamic;
+    Py_ssize_t dynamic_cap;
     int dirty;
     int sealed;
     ProbeStats probe_stats; /* zeroed by tp_alloc; reset via probe_stats() */
-} BitsetRouteTable;
+} PolicyRouteTable;
 
 typedef struct {
     Py_ssize_t offset;
@@ -326,11 +351,6 @@ static PyTypeObject BPathParamsType = {
     .tp_repr = path_params_repr,
     .tp_hash = PyObject_HashNotImplemented,
 };
-
-/* What an unrouted method resolves to: no statics, every shape built-empty.
- * Shared and read-only; never inserted into the groups dict, so request
- * traffic with invented methods cannot grow the table. */
-static MethodGroups brt_no_groups;
 
 /* ------------------------------------------------------------------ */
 
@@ -956,11 +976,146 @@ brt_scan(const char *path, Py_ssize_t len, BSeg *out)
     }
 }
 
+static void
+dynamic_route_clear(BDynamicRoute *route)
+{
+    for (Py_ssize_t i = 0; i < route->npath; i++) {
+        PyMem_Free(route->path[i].bytes);
+        Py_XDECREF(route->path[i].name);
+    }
+    for (Py_ssize_t i = 0; i < route->nhost; i++) {
+        PyMem_Free(route->host[i].bytes);
+        Py_XDECREF(route->host[i].name);
+    }
+    PyMem_Free(route->path);
+    PyMem_Free(route->host);
+    PyMem_Free(route->cmasks);
+    Py_XDECREF(route->method);
+    Py_XDECREF(route->handler);
+    Py_XDECREF(route->access_clauses);
+    memset(route, 0, sizeof(*route));
+}
+
+static int
+dynamic_segment_compile(BDynamicSegment *target, const char *text,
+                        Py_ssize_t len, int host)
+{
+    memset(target, 0, sizeof(*target));
+    if (host && len == 1 && text[0] == '*') return 0;
+    if (len >= 2 && text[0] == '{' && text[len - 1] == '}') {
+        Py_ssize_t name_len = len - 2;
+        if (!host && name_len > 5 &&
+            memcmp(text + 1 + name_len - 5, ":path", 5) == 0) {
+            target->greedy = 1;
+            name_len -= 5;
+        }
+        target->name = PyUnicode_DecodeUTF8(text + 1, name_len, "strict");
+        return target->name == NULL ? -1 : 0;
+    }
+    target->bytes = PyMem_Malloc((size_t)(len == 0 ? 1 : len));
+    if (target->bytes == NULL) return -1;
+    memcpy(target->bytes, text, (size_t)len);
+    target->len = len;
+    return 0;
+}
+
+static int
+dynamic_path_compile(BDynamicRoute *route, const char *path, Py_ssize_t len)
+{
+    BSeg raw[BRT_MAX_SEGMENTS];
+    Py_ssize_t count = brt_scan(path, len, raw);
+    if (count < 0) {
+        PyErr_SetString(PyExc_ValueError, "dynamic route path has too many segments");
+        return -1;
+    }
+    route->path = PyMem_Calloc((size_t)count, sizeof(*route->path));
+    if (route->path == NULL) return -1;
+    route->npath = count;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        if (dynamic_segment_compile(
+                &route->path[i], raw[i].bytes, raw[i].len, 0) < 0) return -1;
+        if (route->path[i].greedy) {
+            if (i != count - 1) {
+                PyErr_SetString(
+                    PyExc_ValueError,
+                    "a dynamic {name:path} placeholder must be the final segment");
+                return -1;
+            }
+            route->greedy = 1;
+        }
+    }
+    return 0;
+}
+
+static int
+dynamic_host_compile(BDynamicRoute *route, const char *host, Py_ssize_t len)
+{
+    Py_ssize_t count = 1;
+    for (Py_ssize_t i = 0; i < len; i++) count += host[i] == '.';
+    route->host = PyMem_Calloc((size_t)count, sizeof(*route->host));
+    if (route->host == NULL) return -1;
+    route->nhost = count;
+    Py_ssize_t index = 0;
+    const char *start = host;
+    for (const char *cursor = host;; cursor++) {
+        if (cursor == host + len || *cursor == '.') {
+            if (dynamic_segment_compile(
+                    &route->host[index++], start, cursor - start, 1) < 0) return -1;
+            if (cursor == host + len) break;
+            start = cursor + 1;
+        }
+    }
+    return 0;
+}
+
+static int
+dynamic_compile_masks(BDynamicRoute *route)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(route->access_clauses);
+    if (count == 0) return 0;
+    route->cmasks = PyMem_Malloc((size_t)count * sizeof(*route->cmasks));
+    if (route->cmasks == NULL) return -1;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        route->cmasks[index] = PyLong_AsUnsignedLongLong(
+            PyTuple_GET_ITEM(route->access_clauses, index));
+        if (route->cmasks[index] == (unsigned long long)-1 && PyErr_Occurred()) {
+            if (!PyErr_ExceptionMatches(PyExc_OverflowError)) return -1;
+            PyErr_Clear();
+            PyMem_Free(route->cmasks);
+            route->cmasks = NULL;
+            route->ncmasks = 0;
+            return 0;
+        }
+    }
+    route->ncmasks = count;
+    return 0;
+}
+
+static int
+validate_access_clauses(PyObject *clauses)
+{
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(clauses); index++) {
+        PyObject *clause = PyTuple_GET_ITEM(clauses, index);
+        int sign = 0;
+        if (!PyLong_CheckExact(clause) ||
+            PyLong_GetSign(clause, &sign) < 0 || sign < 0) {
+            if (PyErr_Occurred()) return -1;
+            PyErr_Format(
+                PyExc_ValueError,
+                "access_clauses[%zd] must be a non-negative int",
+                index);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static PyObject *
 brt_new(PyTypeObject *type, PyObject *Py_UNUSED(a), PyObject *Py_UNUSED(k))
 {
-    BitsetRouteTable *self = (BitsetRouteTable *)type->tp_alloc(type, 0);
+    PolicyRouteTable *self = (PolicyRouteTable *)type->tp_alloc(type, 0);
     if (self == NULL) return NULL;
+    memset(self->no_groups.built, 1, sizeof(self->no_groups.built));
     self->groups = PyDict_New();
     self->statics = PyDict_New();
     self->get_method = PyUnicode_InternFromString("GET");
@@ -974,12 +1129,16 @@ brt_new(PyTypeObject *type, PyObject *Py_UNUSED(a), PyObject *Py_UNUSED(k))
 }
 
 static void
-brt_dealloc(BitsetRouteTable *self)
+brt_dealloc(PolicyRouteTable *self)
 {
     for (Py_ssize_t i = 0; i < self->nroutes; i++) {
         broute_clear(&self->routes[i]);
     }
     PyMem_Free(self->routes);
+    for (Py_ssize_t i = 0; i < self->ndynamic; i++) {
+        dynamic_route_clear(&self->dynamic_routes[i]);
+    }
+    PyMem_Free(self->dynamic_routes);
     Py_XDECREF(self->cached_method);
     Py_XDECREF(self->get_method);
     Py_XDECREF(self->groups);
@@ -988,7 +1147,7 @@ brt_dealloc(BitsetRouteTable *self)
 }
 
 static PyObject *
-brt_add(BitsetRouteTable *self, PyObject *args)
+brt_add(PolicyRouteTable *self, PyObject *args)
 {
     if (self->sealed) {
         PyErr_SetString(PyExc_RuntimeError, "compiled route tables are immutable");
@@ -1000,7 +1159,9 @@ brt_add(BitsetRouteTable *self, PyObject *args)
         return NULL;
     }
     if (clauses == NULL || clauses == Py_None) {
-        clauses = PyTuple_Pack(1, PyLong_FromLong(0));
+        PyObject *zero = PyLong_FromLong(0);
+        clauses = zero == NULL ? NULL : PyTuple_Pack(1, zero);
+        Py_XDECREF(zero);
         if (clauses == NULL) return NULL;
     }
     else if (!PyTuple_CheckExact(clauses)) {
@@ -1010,6 +1171,10 @@ brt_add(BitsetRouteTable *self, PyObject *args)
     }
     else {
         Py_INCREF(clauses);
+    }
+    if (validate_access_clauses(clauses) < 0) {
+        Py_DECREF(clauses);
+        return NULL;
     }
     Py_ssize_t path_len;
     const char *path = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
@@ -1084,7 +1249,7 @@ brt_add(BitsetRouteTable *self, PyObject *args)
         if (same) {
             Py_DECREF(clauses);
             /* Same literal/parameter shape is the same route: parameter names
-             * do not distinguish it. Matches DecisionRouteTable's wording --
+             * do not distinguish it. Keep the established wording --
              * "duplicate" is the static-path case. */
             PyErr_Format(PyExc_ValueError, "conflicting route: %U %U",
                          method_obj, path_obj);
@@ -1148,9 +1313,9 @@ brt_add(BitsetRouteTable *self, PyObject *args)
         PyMem_Free(r->segs); Py_DECREF(clauses); Py_DECREF(r->handler);
         return NULL;
     }
-    /* Convert the clauses to machine words now so eligibility never touches a
-     * PyLong on the match path. A clause that does not convert leaves cmasks
-     * NULL and the match-time loop raises for it, as it always did. */
+    /* Convert ordinary clauses to machine words so the common match path never
+     * touches PyLong arithmetic. A wider clause leaves cmasks NULL and uses the
+     * arbitrary-precision native fallback. */
     Py_ssize_t ncl = PyTuple_GET_SIZE(clauses);
     if (ncl > 0) {
         r->cmasks = PyMem_Malloc((size_t)ncl * sizeof(unsigned long long));
@@ -1175,13 +1340,97 @@ brt_add(BitsetRouteTable *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
-/* Resolve one method to its MethodGroups. Returns &brt_no_groups for a method
+static PyObject *
+brt_add_dynamic(PolicyRouteTable *self, PyObject *args)
+{
+    if (self->sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "compiled route tables are immutable");
+        return NULL;
+    }
+    PyObject *path_obj, *method_obj, *host_obj, *handler, *clauses = NULL;
+    if (!PyArg_ParseTuple(
+            args, "UUOO|O:add_dynamic", &path_obj, &method_obj, &host_obj,
+            &handler, &clauses)) return NULL;
+    if (host_obj != Py_None && !PyUnicode_Check(host_obj)) {
+        PyErr_SetString(PyExc_TypeError, "dynamic route host must be str or None");
+        return NULL;
+    }
+    if (clauses == NULL || clauses == Py_None) {
+        PyObject *zero = PyLong_FromLong(0);
+        clauses = zero == NULL ? NULL : PyTuple_Pack(1, zero);
+        Py_XDECREF(zero);
+        if (clauses == NULL) return NULL;
+    }
+    else if (!PyTuple_CheckExact(clauses)) {
+        PyErr_SetString(PyExc_TypeError, "access_clauses must be a tuple");
+        return NULL;
+    }
+    else {
+        Py_INCREF(clauses);
+    }
+    if (validate_access_clauses(clauses) < 0) {
+        Py_DECREF(clauses);
+        return NULL;
+    }
+
+    Py_ssize_t path_len;
+    const char *path = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
+    if (path == NULL) {
+        Py_DECREF(clauses);
+        return NULL;
+    }
+    if (path_len == 0 || path[0] != '/') {
+        Py_DECREF(clauses);
+        PyErr_SetString(PyExc_ValueError, "route paths must begin with '/'");
+        return NULL;
+    }
+    if (self->ndynamic == self->dynamic_cap) {
+        Py_ssize_t capacity = self->dynamic_cap ? self->dynamic_cap * 2 : 8;
+        BDynamicRoute *routes = PyMem_Realloc(
+            self->dynamic_routes, (size_t)capacity * sizeof(*routes));
+        if (routes == NULL) {
+            Py_DECREF(clauses);
+            return PyErr_NoMemory();
+        }
+        self->dynamic_routes = routes;
+        self->dynamic_cap = capacity;
+    }
+    BDynamicRoute *route = &self->dynamic_routes[self->ndynamic];
+    memset(route, 0, sizeof(*route));
+    route->method = Py_NewRef(method_obj);
+    route->handler = Py_NewRef(handler);
+    route->access_clauses = clauses;
+    route->host_route = host_obj != Py_None;
+    if (dynamic_path_compile(route, path, path_len) < 0) goto error;
+    if (route->host_route) {
+        Py_ssize_t host_len;
+        const char *host = PyUnicode_AsUTF8AndSize(host_obj, &host_len);
+        if (host == NULL || dynamic_host_compile(route, host, host_len) < 0) goto error;
+    }
+    if (!route->host_route && !route->greedy) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "add_dynamic requires a host pattern or final {name:path} placeholder");
+        goto error;
+    }
+    if (dynamic_compile_masks(route) < 0) goto error;
+    self->ndynamic++;
+    self->route_count++;
+    Py_RETURN_NONE;
+
+error:
+    if (!PyErr_Occurred()) PyErr_NoMemory();
+    dynamic_route_clear(route);
+    return NULL;
+}
+
+/* Resolve one method to its MethodGroups. Returns the table-owned empty group for a method
  * nothing routes, NULL only on error. The compiled groups are keyed by method
  * alone and indexed by nseg, so the hot path allocates nothing -- the old
  * (method, nseg) tuple key was the single biggest per-match cost on small
  * tables -- and the one-entry cache makes the steady state a pointer compare. */
 static MethodGroups *
-brt_method_groups(BitsetRouteTable *self, PyObject *method)
+brt_method_groups(PolicyRouteTable *self, PyObject *method)
 {
     if (self->dirty) {
         /* add() after matching: drop every compiled group, mirroring the pure
@@ -1209,7 +1458,7 @@ brt_method_groups(BitsetRouteTable *self, PyObject *method)
             routed = PyObject_RichCompareBool(self->routes[i].method, method, Py_EQ);
             if (routed < 0) return NULL;
         }
-        if (!routed) return &brt_no_groups;
+        if (!routed) return &self->no_groups;
         mg = PyMem_Calloc(1, sizeof(MethodGroups));
         if (mg == NULL) { PyErr_NoMemory(); return NULL; }
         mg->statics = Py_XNewRef(by_path);
@@ -1227,7 +1476,7 @@ brt_method_groups(BitsetRouteTable *self, PyObject *method)
 /* Build the group for one (method, nseg) into `mg`. Returns NULL with no
  * exception set when no routes have that shape; the NULL is cached. */
 static BGroup *
-brt_group_build(BitsetRouteTable *self, MethodGroups *mg, PyObject *method,
+brt_group_build(PolicyRouteTable *self, MethodGroups *mg, PyObject *method,
                 int nseg)
 {
     BRoute **cands = PyMem_Malloc((size_t)(self->nroutes ? self->nroutes : 1)
@@ -1269,7 +1518,7 @@ classification_pair(long code, PyObject *payload)
 /* Is `r` reachable by a caller holding `caller`? Clauses are disjunctive; a
  * zero clause admits everyone. */
 static int
-brt_compile_groups(BitsetRouteTable *self)
+brt_compile_groups(PolicyRouteTable *self)
 {
     if (!self->dirty) return 0;
     PyDict_Clear(self->groups);
@@ -1314,16 +1563,36 @@ brt_compile_groups(BitsetRouteTable *self)
 }
 
 static PyObject *
-brt_compile(BitsetRouteTable *self, PyObject *Py_UNUSED(unused))
+brt_compile(PolicyRouteTable *self, PyObject *Py_UNUSED(unused))
 {
     if (brt_compile_groups(self) < 0) return NULL;
     Py_RETURN_NONE;
 }
 
 static int
-route_eligible(BRoute *r, unsigned long long caller)
+clause_eligible(PyObject *clause, unsigned long long caller,
+                PyObject *wide_caller)
 {
-    if (r->cmasks != NULL) {
+    if (wide_caller != NULL) {
+        PyObject *intersection = PyNumber_And(clause, wide_caller);
+        if (intersection == NULL) return -1;
+        int equal = PyObject_RichCompareBool(intersection, clause, Py_EQ);
+        Py_DECREF(intersection);
+        return equal;
+    }
+    unsigned long long word = PyLong_AsUnsignedLongLong(clause);
+    if (word == (unsigned long long)-1 && PyErr_Occurred()) {
+        if (!PyErr_ExceptionMatches(PyExc_OverflowError)) return -1;
+        PyErr_Clear();
+        return 0;
+    }
+    return (word & ~caller) == 0;
+}
+
+static int
+route_eligible(BRoute *r, unsigned long long caller, PyObject *wide_caller)
+{
+    if (wide_caller == NULL && r->cmasks != NULL) {
         for (Py_ssize_t c = 0; c < r->ncmasks; c++) {
             if ((r->cmasks[c] & ~caller) == 0) return 1;
         }
@@ -1331,11 +1600,186 @@ route_eligible(BRoute *r, unsigned long long caller)
     }
     PyObject *clauses = r->access_clauses;
     for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(clauses); c++) {
-        unsigned long long cl = PyLong_AsUnsignedLongLong(PyTuple_GET_ITEM(clauses, c));
-        if (cl == (unsigned long long)-1 && PyErr_Occurred()) return -1;
-        if ((cl & ~caller) == 0) return 1;
+        int eligible = clause_eligible(
+            PyTuple_GET_ITEM(clauses, c), caller, wide_caller);
+        if (eligible != 0) return eligible;
     }
     return 0;
+}
+
+static int ticket_append(PyObject **ticket_out, PyObject *entry);
+
+static int
+dynamic_route_eligible(BDynamicRoute *route, unsigned long long caller,
+                       PyObject *wide_caller)
+{
+    if (wide_caller == NULL && route->cmasks != NULL) {
+        for (Py_ssize_t index = 0; index < route->ncmasks; index++) {
+            if ((route->cmasks[index] & ~caller) == 0) return 1;
+        }
+        return 0;
+    }
+    for (Py_ssize_t index = 0;
+         index < PyTuple_GET_SIZE(route->access_clauses); index++) {
+        int eligible = clause_eligible(
+            PyTuple_GET_ITEM(route->access_clauses, index), caller, wide_caller);
+        if (eligible != 0) return eligible;
+    }
+    return 0;
+}
+
+static Py_ssize_t
+dynamic_host_scan(const char *host, Py_ssize_t len, BSeg *out)
+{
+    const char *start = host;
+    Py_ssize_t count = 0;
+    for (const char *cursor = host;; cursor++) {
+        if (cursor == host + len || *cursor == '.') {
+            if (count == BRT_MAX_SEGMENTS) return -1;
+            out[count].bytes = (char *)start;
+            out[count].len = cursor - start;
+            count++;
+            if (cursor == host + len) return count;
+            start = cursor + 1;
+        }
+    }
+}
+
+static int
+dynamic_segments_match(const BDynamicSegment *pattern, Py_ssize_t count,
+                       const BSeg *actual)
+{
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (pattern[index].bytes == NULL) {
+            if (!pattern[index].greedy && actual[index].len == 0) return 0;
+            continue;
+        }
+        if (pattern[index].len != actual[index].len ||
+            memcmp(pattern[index].bytes, actual[index].bytes,
+                   (size_t)actual[index].len) != 0) return 0;
+    }
+    return 1;
+}
+
+static PyObject *
+dynamic_build_match(BDynamicRoute *route, PyObject *path_obj,
+                    const BSeg *path_segments, const BSeg *host_segments)
+{
+    PyObject *params = PyDict_New();
+    if (params == NULL) return NULL;
+    Py_ssize_t path_len;
+    const char *path = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
+    if (path == NULL) goto error;
+    for (Py_ssize_t index = 0; index < route->npath; index++) {
+        PyObject *name = route->path[index].name;
+        if (name == NULL) continue;
+        const char *value = path_segments[index].bytes;
+        Py_ssize_t length = route->path[index].greedy
+            ? path + path_len - value
+            : path_segments[index].len;
+        PyObject *text = PyUnicode_DecodeUTF8(value, length, "surrogateescape");
+        if (text == NULL || PyDict_SetItem(params, name, text) < 0) {
+            Py_XDECREF(text);
+            goto error;
+        }
+        Py_DECREF(text);
+    }
+    if (route->host_route) {
+        for (Py_ssize_t index = 0; index < route->nhost; index++) {
+            PyObject *name = route->host[index].name;
+            if (name == NULL) continue;
+            PyObject *text = PyUnicode_DecodeUTF8(
+                host_segments[index].bytes, host_segments[index].len,
+                "surrogateescape");
+            if (text == NULL || PyDict_SetItem(params, name, text) < 0) {
+                Py_XDECREF(text);
+                goto error;
+            }
+            Py_DECREF(text);
+        }
+    }
+    PyObject *result = PyTuple_New(2);
+    if (result == NULL) goto error;
+    PyTuple_SET_ITEM(result, 0, Py_NewRef(route->handler));
+    PyTuple_SET_ITEM(result, 1, params);
+    return result;
+
+error:
+    Py_DECREF(params);
+    return NULL;
+}
+
+/* Ordered native fallback for the two shapes the grouped bitset deliberately
+ * does not model: host predicates and a final greedy path segment.  A match is
+ * materialized only after every literal fact has succeeded. */
+static PyObject *
+dynamic_dispatch(PolicyRouteTable *self, PyObject *method_obj,
+                 PyObject *path_obj, PyObject *host_obj, int host_routes,
+                 unsigned long long caller, PyObject *wide_caller,
+                 PyObject **ticket_out,
+                 int *found_public)
+{
+    Py_ssize_t path_len;
+    const char *path = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
+    if (path == NULL) return NULL;
+    BSeg path_segments[BRT_MAX_SEGMENTS];
+    Py_ssize_t npath = brt_scan(path, path_len, path_segments);
+    if (npath < 0) Py_RETURN_NONE;
+
+    const char *host = NULL;
+    Py_ssize_t host_len = 0;
+    BSeg host_segments[BRT_MAX_SEGMENTS];
+    Py_ssize_t nhost = 0;
+    if (host_routes) {
+        host = PyUnicode_AsUTF8AndSize(host_obj, &host_len);
+        if (host == NULL) return NULL;
+        nhost = dynamic_host_scan(host, host_len, host_segments);
+        if (nhost < 0) Py_RETURN_NONE;
+    }
+
+    for (Py_ssize_t index = 0; index < self->ndynamic; index++) {
+        BDynamicRoute *route = &self->dynamic_routes[index];
+        if (route->host_route != host_routes) continue;
+        int same_method = PyObject_RichCompareBool(route->method, method_obj, Py_EQ);
+        if (same_method < 0) return NULL;
+        if (!same_method && PyUnicode_CompareWithASCIIString(method_obj, "HEAD") == 0) {
+            same_method = PyObject_RichCompareBool(route->method, self->get_method, Py_EQ);
+            if (same_method < 0) return NULL;
+        }
+        if (!same_method) continue;
+        if (route->greedy ? npath < route->npath : npath != route->npath) continue;
+        Py_ssize_t fixed_path = route->greedy ? route->npath - 1 : route->npath;
+        if (!dynamic_segments_match(route->path, fixed_path, path_segments)) continue;
+        if (host_routes &&
+            (nhost != route->nhost ||
+             !dynamic_segments_match(route->host, route->nhost, host_segments))) continue;
+        PyObject *match = dynamic_build_match(
+            route, path_obj, path_segments, host_segments);
+        if (match == NULL) return NULL;
+        int eligible = dynamic_route_eligible(route, caller, wide_caller);
+        if (eligible < 0) {
+            Py_DECREF(match);
+            return NULL;
+        }
+        if (eligible) {
+            if (found_public != NULL) *found_public = 1;
+            return match;
+        }
+        if (ticket_out != NULL) {
+            PyObject *entry = PyTuple_Pack(2, match, route->access_clauses);
+            Py_DECREF(match);
+            if (entry == NULL || ticket_append(ticket_out, entry) < 0) {
+                Py_XDECREF(entry);
+                return NULL;
+            }
+            Py_DECREF(entry);
+        }
+        else {
+            Py_DECREF(match);
+        }
+        Py_RETURN_NONE; /* first dynamic route owns this fact conjunction */
+    }
+    Py_RETURN_NONE;
 }
 
 /* Keep the common one-candidate ticket as the entry itself.  A list appears
@@ -1407,9 +1851,10 @@ build_match(BRoute *r, BSeg *segs, PyObject *path)
 /* `ticket_out`, when non-NULL, points at a list slot that is filled lazily on
  * the first unreachable candidate: public traffic never allocates a ticket. */
 static PyObject *
-brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
+brt_match_impl(PolicyRouteTable *self, PyObject *method_obj,
                PyObject *path_obj, unsigned long long caller,
-               PyObject **ticket_out, int *found_public)
+               PyObject *wide_caller, PyObject **ticket_out,
+               int *found_public)
 {
     if (brt_compile_groups(self) < 0) return NULL;
     Py_ssize_t path_len;
@@ -1430,9 +1875,9 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
             int eligible = 0;
             for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(clauses); c++) {
                 PyObject *cl_obj = PyTuple_GET_ITEM(clauses, c);
-                unsigned long long cl = PyLong_AsUnsignedLongLong(cl_obj);
-                if (cl == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-                if ((cl & ~caller) == 0) { eligible = 1; break; }
+                eligible = clause_eligible(cl_obj, caller, wide_caller);
+                if (eligible < 0) return NULL;
+                if (eligible) break;
             }
             if (eligible) {
                 if (found_public != NULL) *found_public = 1;
@@ -1516,7 +1961,7 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
                 }
             }
             if (!matches) continue;
-            int eligible = route_eligible(r, caller);
+            int eligible = route_eligible(r, caller, wide_caller);
             if (eligible < 0) goto done;
             if (eligible) {
                 if (found_public != NULL) *found_public = 1;
@@ -1543,18 +1988,19 @@ done:
 }
 
 
-/* HEAD falls back to GET, matching DecisionRouteTable. */
+/* HEAD falls back to GET, matching Wreath's routing contract. */
 static PyObject *
-brt_dispatch(BitsetRouteTable *self, PyObject *method_obj, PyObject *path_obj,
-             unsigned long long caller, PyObject **ticket_out, int *found_public)
+brt_dispatch(PolicyRouteTable *self, PyObject *method_obj, PyObject *path_obj,
+             unsigned long long caller, PyObject *wide_caller,
+             PyObject **ticket_out, int *found_public)
 {
-    PyObject *r = brt_match_impl(self, method_obj, path_obj, caller, ticket_out,
-                                 found_public);
+    PyObject *r = brt_match_impl(self, method_obj, path_obj, caller, wide_caller,
+                                 ticket_out, found_public);
     if (r == NULL || r != Py_None) return r;
     if (PyUnicode_CompareWithASCIIString(method_obj, "HEAD") != 0) return r;
     Py_DECREF(r);
-    return brt_match_impl(self, self->get_method, path_obj, caller, ticket_out,
-                          found_public);
+    return brt_match_impl(self, self->get_method, path_obj, caller, wide_caller,
+                          ticket_out, found_public);
 }
 
 static int
@@ -1575,8 +2021,33 @@ brt_require_unicode(PyObject *value, const char *name, const char *argument)
     return -1;
 }
 
+static int
+brt_caller_mask(PyObject *value, unsigned long long *word,
+                PyObject **wide)
+{
+    int sign = 0;
+    if (!PyLong_CheckExact(value) ||
+        PyLong_GetSign(value, &sign) < 0 || sign < 0) {
+        if (PyErr_Occurred()) return -1;
+        PyErr_SetString(PyExc_ValueError,
+                        "caller capability mask must be a non-negative integer");
+        return -1;
+    }
+    *word = PyLong_AsUnsignedLongLong(value);
+    if (*word == (unsigned long long)-1 && PyErr_Occurred()) {
+        if (!PyErr_ExceptionMatches(PyExc_OverflowError)) return -1;
+        PyErr_Clear();
+        *word = 0;
+        *wide = value; /* borrowed for the duration of this native call */
+    }
+    else {
+        *wide = NULL;
+    }
+    return 0;
+}
+
 static PyObject *
-brt_match(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
+brt_match(PolicyRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
 {
     if (brt_fastcall_arity("match", nargs, 2, 3) < 0 ||
         brt_require_unicode(args[0], "match", "method") < 0 ||
@@ -1587,40 +2058,26 @@ brt_match(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
     PyObject *path_obj = args[1];
     PyObject *caller_obj = nargs == 3 ? args[2] : NULL;
     unsigned long long caller = 0;
+    PyObject *wide_caller = NULL;
     if (caller_obj != NULL) {
-        if (!PyLong_CheckExact(caller_obj)) {
-            PyErr_SetString(PyExc_ValueError,
-                            "caller capability mask must be a non-negative integer");
-            return NULL;
-        }
-        caller = PyLong_AsUnsignedLongLong(caller_obj);
-        if (caller == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
+        if (brt_caller_mask(caller_obj, &caller, &wide_caller) < 0) return NULL;
     }
-    return brt_dispatch(self, method_obj, path_obj, caller, NULL, NULL);
+    PyObject *result = brt_dispatch(
+        self, method_obj, path_obj, caller, wide_caller, NULL, NULL);
+    if (result == NULL || result != Py_None) return result;
+    Py_DECREF(result);
+    return dynamic_dispatch(
+        self, method_obj, path_obj, Py_None, 0, caller, wide_caller, NULL, NULL);
 }
 
-/* (0, None) | (1, match) | (2, ticket): a reachable-by-anyone route answers 1
- * outright; otherwise every candidate that matched the path is returned as a
- * ticket for resolve() to settle once the caller is known. */
 static PyObject *
-brt_classify(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
+classification_finish(PyObject *result, PyObject *ticket, int found_public)
 {
-    if (brt_fastcall_arity("classify", nargs, 2, 2) < 0 ||
-        brt_require_unicode(args[0], "classify", "method") < 0 ||
-        brt_require_unicode(args[1], "classify", "path") < 0) {
-        return NULL;
-    }
-    PyObject *method_obj = args[0];
-    PyObject *path_obj = args[1];
-    PyObject *ticket = NULL; /* created lazily on the first protected candidate */
-    int found_public = 0;
-    PyObject *r = brt_dispatch(self, method_obj, path_obj, 0, &ticket, &found_public);
-    if (r == NULL) { Py_XDECREF(ticket); return NULL; }
     if (found_public) {
         Py_XDECREF(ticket);
-        return classification_pair(1, r);
+        return classification_pair(1, result);
     }
-    Py_DECREF(r);
+    Py_DECREF(result);
     if (ticket == NULL) {
         return classification_pair(0, Py_NewRef(Py_None));
     }
@@ -1631,6 +2088,66 @@ brt_classify(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
         ticket = as_tuple;
     }
     return classification_pair(2, ticket);
+}
+
+/* (0, None) | (1, match) | (2, ticket): a reachable-by-anyone route answers 1
+ * outright; otherwise every candidate that matched the path is returned as a
+ * ticket for resolve() to settle once the caller is known. */
+static PyObject *
+brt_classify(PolicyRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (brt_fastcall_arity("classify", nargs, 2, 2) < 0 ||
+        brt_require_unicode(args[0], "classify", "method") < 0 ||
+        brt_require_unicode(args[1], "classify", "path") < 0) {
+        return NULL;
+    }
+    PyObject *method_obj = args[0];
+    PyObject *path_obj = args[1];
+    PyObject *ticket = NULL; /* created lazily on the first protected candidate */
+    int found_public = 0;
+    PyObject *r = brt_dispatch(
+        self, method_obj, path_obj, 0, NULL, &ticket, &found_public);
+    if (r == NULL) { Py_XDECREF(ticket); return NULL; }
+    if (!found_public && ticket == NULL) {
+        Py_DECREF(r);
+        r = dynamic_dispatch(
+            self, method_obj, path_obj, Py_None, 0, 0, NULL, &ticket,
+            &found_public);
+        if (r == NULL) { Py_XDECREF(ticket); return NULL; }
+    }
+    return classification_finish(r, ticket, found_public);
+}
+
+static PyObject *
+brt_classify_request(PolicyRouteTable *self, PyObject *const *args,
+                     Py_ssize_t nargs)
+{
+    if (brt_fastcall_arity("classify_request", nargs, 3, 3) < 0 ||
+        brt_require_unicode(args[0], "classify_request", "method") < 0 ||
+        brt_require_unicode(args[1], "classify_request", "path") < 0 ||
+        brt_require_unicode(args[2], "classify_request", "host") < 0) {
+        return NULL;
+    }
+    PyObject *ticket = NULL;
+    int found_public = 0;
+    PyObject *result = dynamic_dispatch(
+        self, args[0], args[1], args[2], 1, 0, NULL, &ticket, &found_public);
+    if (result == NULL) return NULL;
+    if (found_public || ticket != NULL) {
+        return classification_finish(result, ticket, found_public);
+    }
+    Py_DECREF(result);
+    result = brt_dispatch(
+        self, args[0], args[1], 0, NULL, &ticket, &found_public);
+    if (result == NULL) return NULL;
+    if (found_public || ticket != NULL) {
+        return classification_finish(result, ticket, found_public);
+    }
+    Py_DECREF(result);
+    result = dynamic_dispatch(
+        self, args[0], args[1], Py_None, 0, 0, NULL, &ticket, &found_public);
+    if (result == NULL) return NULL;
+    return classification_finish(result, ticket, found_public);
 }
 
 static int
@@ -1644,14 +2161,15 @@ brt_ticket_is_single(PyObject *ticket)
 }
 
 static PyObject *
-brt_resolve_entry(PyObject *entry, unsigned long long caller)
+brt_resolve_entry(PyObject *entry, unsigned long long caller,
+                  PyObject *wide_caller)
 {
     PyObject *clauses = PyTuple_GET_ITEM(entry, 1);
     for (Py_ssize_t c = 0; c < PyTuple_GET_SIZE(clauses); c++) {
-        unsigned long long cl =
-            PyLong_AsUnsignedLongLong(PyTuple_GET_ITEM(clauses, c));
-        if (cl == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-        if ((cl & ~caller) == 0) {
+        int eligible = clause_eligible(
+            PyTuple_GET_ITEM(clauses, c), caller, wide_caller);
+        if (eligible < 0) return NULL;
+        if (eligible) {
             return Py_NewRef(PyTuple_GET_ITEM(entry, 0));
         }
     }
@@ -1659,14 +2177,16 @@ brt_resolve_entry(PyObject *entry, unsigned long long caller)
 }
 
 static PyObject *
-brt_resolve_word(PyObject *ticket, unsigned long long caller)
+brt_resolve_mask(PyObject *ticket, unsigned long long caller,
+                 PyObject *wide_caller)
 {
     if (brt_ticket_is_single(ticket)) {
-        return brt_resolve_entry(ticket, caller);
+        return brt_resolve_entry(ticket, caller, wide_caller);
     }
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ticket); i++) {
         PyObject *resolved =
-            brt_resolve_entry(PyTuple_GET_ITEM(ticket, i), caller);
+            brt_resolve_entry(
+                PyTuple_GET_ITEM(ticket, i), caller, wide_caller);
         if (resolved == NULL || resolved != Py_None) return resolved;
         Py_DECREF(resolved);
     }
@@ -1674,7 +2194,7 @@ brt_resolve_word(PyObject *ticket, unsigned long long caller)
 }
 
 static PyObject *
-brt_resolve(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
+brt_resolve(PolicyRouteTable *Py_UNUSED(self), PyObject *const *args,
             Py_ssize_t nargs)
 {
     if (brt_fastcall_arity("resolve", nargs, 2, 2) < 0) return NULL;
@@ -1684,18 +2204,14 @@ brt_resolve(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
         PyErr_SetString(PyExc_TypeError, "resolve ticket must be tuple");
         return NULL;
     }
-    if (!PyLong_CheckExact(caller_obj)) {
-        PyErr_SetString(PyExc_ValueError,
-                        "caller capability mask must be a non-negative integer");
-        return NULL;
-    }
-    unsigned long long caller = PyLong_AsUnsignedLongLong(caller_obj);
-    if (caller == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-    return brt_resolve_word(ticket, caller);
+    unsigned long long caller;
+    PyObject *wide_caller;
+    if (brt_caller_mask(caller_obj, &caller, &wide_caller) < 0) return NULL;
+    return brt_resolve_mask(ticket, caller, wide_caller);
 }
 
 static PyObject *
-brt_resolve_identity(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
+brt_resolve_identity(PolicyRouteTable *Py_UNUSED(self), PyObject *const *args,
                      Py_ssize_t nargs)
 {
     if (brt_fastcall_arity("resolve_identity", nargs, 4, 4) < 0) return NULL;
@@ -1703,17 +2219,28 @@ brt_resolve_identity(BitsetRouteTable *Py_UNUSED(self), PyObject *const *args,
         PyErr_SetString(PyExc_TypeError, "resolve ticket must be tuple");
         return NULL;
     }
-    unsigned long long caller;
+    unsigned long long caller = 0;
+    PyObject *wide_caller = NULL;
+    PyObject *owned_mask = NULL;
     if (wreath_compiled_capability_word(
             args[1], args[2], args[3], &caller) < 0) {
-        return NULL;
+        if (!PyErr_ExceptionMatches(PyExc_OverflowError)) return NULL;
+        PyErr_Clear();
+        owned_mask = wreath_compiled_capability_mask(args[1], args[2], args[3]);
+        if (owned_mask == NULL ||
+            brt_caller_mask(owned_mask, &caller, &wide_caller) < 0) {
+            Py_XDECREF(owned_mask);
+            return NULL;
+        }
     }
-    return brt_resolve_word(args[0], caller);
+    PyObject *resolved = brt_resolve_mask(args[0], caller, wide_caller);
+    Py_XDECREF(owned_mask);
+    return resolved;
 }
 
 /* Compatibility probe: never exposes protected tickets. */
 static PyObject *
-brt_probe(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
+brt_probe(PolicyRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
 {
     if (brt_fastcall_arity("probe", nargs, 3, 3) < 0 ||
         brt_require_unicode(args[0], "probe", "method") < 0 ||
@@ -1731,7 +2258,7 @@ brt_probe(BitsetRouteTable *self, PyObject *const *args, Py_ssize_t nargs)
 }
 
 static PyObject *
-brt_stats(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
+brt_stats(PolicyRouteTable *self, PyObject *Py_UNUSED(a))
 {
     Py_ssize_t words = 0, groups = 0, keys = 0;
     PyObject *k, *v;
@@ -1753,7 +2280,7 @@ brt_stats(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
 }
 
 static PyObject *
-brt_probe_stats_get(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
+brt_probe_stats_get(PolicyRouteTable *self, PyObject *Py_UNUSED(a))
 {
     ProbeStats *s = &self->probe_stats;
     PyObject *d = Py_BuildValue(
@@ -1770,12 +2297,17 @@ brt_probe_stats_get(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
 static PyMethodDef brt_methods[] = {
     {"add", (PyCFunction)brt_add, METH_VARARGS,
      "add(path, method, handler, access_clauses=(0,))"},
+    {"add_dynamic", (PyCFunction)brt_add_dynamic, METH_VARARGS,
+     "add_dynamic(path, method, host, handler, access_clauses=(0,))"},
     {"compile", (PyCFunction)brt_compile, METH_NOARGS,
      "compile() -> None; eagerly build every route group"},
     {"match", (PyCFunction)(void (*)(void))brt_match, METH_FASTCALL,
      "match(method, path, caller_mask=0) -> (handler, params | None) | None"},
     {"classify", (PyCFunction)(void (*)(void))brt_classify, METH_FASTCALL,
      "classify(method, path) -> (classification, public_match | ticket | None)"},
+    {"classify_request",
+     (PyCFunction)(void (*)(void))brt_classify_request, METH_FASTCALL,
+     "classify_request(method, path, host) -> classification and continuation"},
     {"resolve", (PyCFunction)(void (*)(void))brt_resolve, METH_FASTCALL,
      "resolve(ticket, caller_mask) -> (handler, params | None) | None"},
     {"resolve_identity",
@@ -1790,24 +2322,22 @@ static PyMethodDef brt_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
-static PyTypeObject BitsetRouteTableType = {
+static PyTypeObject PolicyRouteTableType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "wreath._native._core.BitsetRouteTable",
-    .tp_basicsize = sizeof(BitsetRouteTable),
+    .tp_name = "wreath._native._core.PolicyRouteTable",
+    .tp_basicsize = sizeof(PolicyRouteTable),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "One-pass bitset route table.",
+    .tp_doc = "One-pass route and capability policy table.",
     .tp_new = brt_new,
     .tp_dealloc = (destructor)brt_dealloc,
     .tp_methods = brt_methods,
 };
 
 int
-wreath_register_dtbitset(PyObject *module)
+wreath_register_policy_router(PyObject *module)
 {
-    /* Every shape in the unrouted-method sentinel reads as built-and-empty. */
-    memset(brt_no_groups.built, 1, sizeof(brt_no_groups.built));
     if (PyType_Ready(&BPathParamsType) < 0) return -1;
-    if (PyType_Ready(&BitsetRouteTableType) < 0) return -1;
-    return PyModule_AddObjectRef(module, "BitsetRouteTable",
-                                 (PyObject *)&BitsetRouteTableType);
+    if (PyType_Ready(&PolicyRouteTableType) < 0) return -1;
+    return PyModule_AddObjectRef(module, "PolicyRouteTable",
+                                 (PyObject *)&PolicyRouteTableType);
 }

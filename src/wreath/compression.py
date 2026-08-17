@@ -1,18 +1,19 @@
 """Gzip and zstd compression, on CPython's maintained native codecs.
 
 Wreath does not ship a deflate or a zstd implementation. Every entry point is a
-thin facade over `zlib` or over `compression.zstd`, both of which are C
-extensions in the interpreter, so the compression itself already runs at native
-speed and inherits the security fixes of the interpreter it is installed with.
+thin facade over `zlib` or over `compression.zstd`, both native codecs when the
+interpreter includes them, so compression already runs at native speed and
+inherits the interpreter's security fixes.
 Selecting a content encoding from `Accept-Encoding` is a separate concern and
 lives in `wreath.middleware.CompressionPolicy`; this module only turns bytes
 into compressed bytes.
 
 **zstd needs no third-party dependency, and brotli would.** `compression.zstd`
 arrived in the standard library in Python 3.14 (PEP 784), which is the whole
-reason Wreath can offer a second coding at all — `brotli` and `brotlicffi` are
-PyPI packages, and a mandatory runtime dependency in `src/wreath` is not
-something a content encoding is worth.
+reason Wreath can offer a second coding at all. The underlying `_zstd` extension
+is an optional CPython build capability: Wreath and gzip remain importable when
+it is absent, while zstd functions and `CompressionPolicy` refuse with the
+required build form. `brotli` and `brotlicffi` remain third-party packages.
 
 Each coding has a whole-buffer form and a streaming form:
 

@@ -13,17 +13,18 @@ flat tuple tape, and the per-request evaluator that walks it is C
 (`wreath._native._core.cedar_is_authorized`).
 
 Scope is deliberate and loud. The Cedar core — everything above — is
-implemented faithfully. Extension types (`ip`, `decimal`, `datetime`)
-and schema-based validation are not implemented yet; policies that use them
-fail at parse time with a clear error rather than evaluating differently from
-real Cedar. A policy set that parses is a policy set this engine evaluates by
-the book.
+implemented faithfully. `CedarSchema` validates declared action names and
+context attribute paths at construction and compiles action groups into the
+ordinary native entity hierarchy. Extension types (`ip`, `decimal`,
+`datetime`) are not implemented; policies that use them fail at parse time
+with a clear error rather than evaluating differently from real Cedar.
 
 The public surface is three names, re-exported from
 `wreath.authorization`:
 
 - `EntityUid` — a typed entity reference, `User::"alice"`.
 - `CedarEntity` — one entity: uid, attributes, parents.
+- `CedarSchema` — startup validation and action hierarchy declarations.
 - `CedarPolicies` — a parsed policy set that is itself an engine: it
   satisfies the `CedarEngine` protocol, so
   `CedarAuthorizer(engine=CedarPolicies(source))` needs nothing else.
@@ -42,12 +43,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .._native import _core
+from .cedar_schema import CedarSchema, validate_context_expression
 from .models import AuthorizationDecision
 
 __all__ = [
     "CedarEntity",
     "CedarParseError",
     "CedarPolicies",
+    "CedarSchema",
     "EntityUid",
 ]
 
@@ -895,18 +898,32 @@ class CedarPolicies:
         "_context_default",
         "_dangling",
         "_entities",
+        "_plan",
         "_policies",
         "_principal_by_action",
         "_principal_default",
         "_source",
         "_store",
+        "_schema",
     )
 
-    def __init__(self, source: str, *, entities: Iterable[CedarEntity] = ()) -> None:
+    def __init__(
+        self,
+        source: str,
+        *,
+        entities: Iterable[CedarEntity] = (),
+        schema: CedarSchema | str | None = None,
+    ) -> None:
         if not isinstance(source, str) or not source.strip():
             raise CedarParseError("policy source must be non-empty Cedar text")
         self._source = source
         self._policies = _Parser(_tokenize(source)).policies()
+        try:
+            self._schema = CedarSchema(schema) if isinstance(schema, str) else schema
+            schema_entities = self._validate_schema() if self._schema is not None else ()
+        except ValueError as error:
+            raise CedarParseError(str(error)) from error
+        self._plan = _core.cedar_compile_plan(self._policies)
         general = []
         exact: dict[tuple[str, str], list[object]] = {}
         for policy in self._policies:
@@ -925,7 +942,18 @@ class CedarPolicies:
             action: self._principal_default or _needs_principal_entity(policies)
             for action, policies in exact.items()
         }
-        self._entities = tuple(entities)
+        declared_entities = tuple(entities)
+        if self._schema is not None:
+            collisions = tuple(
+                str(entity.uid)
+                for entity in declared_entities
+                if entity.uid.type == "Action" and entity.uid.id in self._schema.actions
+            )
+            if collisions:
+                raise CedarParseError(
+                    "schema-declared action entities cannot be overridden: " + ", ".join(collisions)
+                )
+        self._entities = (*declared_entities, *schema_entities)
         self._store = _build_store(self._entities)
         # Parent uids the static hierarchy names but does not define. Kept as a
         # compact inventory for the layering surface; direct-parent traversal
@@ -935,6 +963,47 @@ class CedarPolicies:
             for _, parents in self._store.values()
             for parent in parents
             if parent not in self._store
+        )
+
+    def _validate_schema(self) -> tuple[CedarEntity, ...]:
+        """Validate the compiled policy and materialize its action hierarchy."""
+        schema = self._schema
+        if schema is None:
+            return ()
+        all_actions = set(schema.actions)
+        for policy in self._policies:
+            scope = policy[3]
+            if scope[0] in (_SCOPE_EQ, _SCOPE_IN):
+                if scope[1][0] != "Action":
+                    raise ValueError(
+                        f'action scope names {scope[1][0]!r}; use an Action::"..." uid'
+                    )
+                schema.require_action(scope[1][1])
+                actions = (
+                    {scope[1][1]} if scope[0] == _SCOPE_EQ else set(schema.descendants(scope[1][1]))
+                )
+            elif scope[0] == _SCOPE_IN_SET:
+                actions = set()
+                for entity_type, name in scope[1]:
+                    if entity_type != "Action":
+                        raise ValueError(
+                            f'action scope names {entity_type!r}; use Action::"..." uids'
+                        )
+                    schema.require_action(name)
+                    actions.add(name)
+            else:
+                actions = all_actions
+            contexts = schema.contexts(actions)
+            for _, expression in policy[5]:
+                validate_context_expression(expression, contexts)
+        return tuple(
+            CedarEntity(
+                EntityUid("Action", name),
+                parents=tuple(
+                    EntityUid("Action", parent) for parent in schema.action_parents(name)
+                ),
+            )
+            for name in schema.actions
         )
 
     def __len__(self) -> int:
@@ -1109,7 +1178,7 @@ class CedarPolicies:
         else:
             store = self._store
         return _core.cedar_route_denial(
-            self._policies,
+            self._plan,
             _as_uid_tuple(principal, "principal"),
             _as_uid_tuple(action, "action"),
             _as_uid_tuple(resource, "resource"),

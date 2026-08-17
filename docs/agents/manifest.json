@@ -65,14 +65,13 @@
     {
       "name": "routing",
       "capability": "Startup-compiled static, parameter, trailing-path and host routing; named reverse lookup; declarative routers; and generic ASGI application mounts",
-      "policy": "Ordinary static and single-segment parameter routes use the selected byte table. Host patterns and a final {name:path} use an ordered startup-compiled Python matcher because the segment-count tables cannot represent either without weakening their hot path: matching host routes run before the ordinary table, while an unscoped trailing-path route is a fallback after that table so it cannot shadow a literal route. Router inclusion remains declarative flattening; Wreath.mount is the explicit request-time ASGI composition surface.",
+      "policy": "One native PolicyRouteTable owns static, single-segment parameter, host-pattern and final {name:path} routing plus capability classification. Python materializes declarations before startup compilation and a handler only after native activation. Router inclusion remains declarative flattening; Wreath.mount is the explicit request-time ASGI composition surface.",
       "guides": [
         "docs/guides/routing.md"
       ],
       "sources": [
         "src/wreath/_routing.py",
-        "src/wreath/_native/router.c",
-        "src/wreath/_native/dtrouter.c"
+        "src/wreath/_native/policy_router.c"
       ],
       "tests": [
         "tests/test_routing_parity.py",
@@ -245,6 +244,7 @@
       ],
       "sources": [
         "src/wreath/binding.py",
+        "src/wreath/_model_fields.py",
         "src/wreath/_native/validate.c",
         "src/wreath/validation_errors.py"
       ],
@@ -757,6 +757,7 @@
       "sources": [
         "src/wreath/jobs.py",
         "src/wreath/_jobcore.py",
+        "src/wreath/_leased.py",
         "src/wreath/messaging.py",
         "src/wreath/services.py",
         "src/wreath/progress.py",
@@ -925,6 +926,23 @@
       ],
       "tests": [
         "tests/pagination/"
+      ]
+    },
+    {
+      "name": "provenance",
+      "capability": "Stored-artifact digests, multiple Ed25519 signatories, chained counter-signatures, and signed quorum verification",
+      "policy": "Artifact provenance is not HTTP Message Signatures: it signs an exact SHA-256 digest and deterministic sidecar for later verification, while RFC 9421 signs an in-flight HTTP message. Every counter-signature covers the preceding chain and the signed quorum. Hashing, base64url, Ed25519 signing, and verification use Wreath's existing native/data kernels; Python owns only immutable envelope orchestration. Production signing keys may stay behind a caller-supplied HSM/KMS callback.",
+      "guides": [
+        "docs/guides/provenance.md"
+      ],
+      "reference": [
+        "docs/reference/provenance.md"
+      ],
+      "sources": [
+        "src/wreath/provenance.py"
+      ],
+      "tests": [
+        "tests/test_provenance.py"
       ]
     },
     {
@@ -1150,6 +1168,7 @@
       "sources": [
         "src/wreath/server.py",
         "src/wreath/_asgi_driver.py",
+        "src/wreath/_asgi_state.py",
         "src/wreath/aws_lambda.py",
         "src/wreath/serverless.py",
         "src/wreath/cli.py",
@@ -1238,7 +1257,7 @@
         "asyncio.Queue",
         "heapq"
       ],
-      "policy": "One bounded table and one bounded queue, so that a bound, a deadline and a claim are written once rather than per subsystem. `wreath.kv.KV` is unsynchronised on purpose -- every caller is event-loop-local and a lock would charge every reader for a race no reader has -- and `wreath.queue.Queue` is locked, because it exists for the hand-offs that do cross threads. Loss is counted, never silent: a full queue returns False and increments `dropped`, and an evicting table increments `evictions`. Expiry is lazy in both directions; nothing sweeps in the background, because a sweeper duplicates across workers and swallows its own failures. `len()` counts what the primitive will still return rather than what it happens to hold, and `count(now=...)` exists because `len()` cannot take an injected clock -- collapsing the two silently broke MemoryStore's count. The native table is a SwissTable: one control byte per slot, scanned 32 lanes at a time by the arms in `_native/simd.h`, which `simd_probe('ctrl', ...)` crosses against the scalar definition. Hot methods are METH_FASTCALL and that is load-bearing, not housekeeping -- on METH_VARARGS the wrapper's argument tuple and keyword dict cost more than the lookup they carry, and measured 0.51us against the 0.20us table underneath. Deliberately NOT migrated, each for a stated reason: `webhooks.LocalReplayStore` (evicts earliest-expiring, pinned by a randomised model test; LRU is a different contract for a replay ledger), `orm/registry._cache` (bounded by retained *bytes* as well as by count, which KV does not express), `_mcp.SessionStore` (refuses at capacity with an operator-facing message and runs a destructor per session, where KV evicts silently), and the ASGI receive queues in `server.py`/`testing.py`/`response.py` (need blocking backpressure, which a deliberately lossy queue does not have). Four queue disciplines, and they differ in who waits rather than in speed: FIFO bounds the worst case and is the default; LIFO is deliberately unfair and is a latency choice for workloads where a stale item is worthless; PriorityQueue is a bounded binary heap, stable within a priority because most items in a real workload share one, and it never compares the payload -- so an unorderable object is queueable and no `__lt__` runs under the mutex mid-sift; RoundRobin is a lane per producer with a rotating cursor, `capacity` per lane rather than total, and a required `max_lanes` because a lane name arriving from a request is otherwise an unbounded allocation a caller controls. The rotation is plain Python on purpose: it moves a cursor over a list once per item and is nowhere near the cost of the queue operation it wraps, so there is nothing there for C to do. Two bounds and an eviction record, both added for callers rather than speculatively: `max_bytes` caps the summed per-entry `cost` the caller declares, and `track_evictions` makes `take_evicted()` report what was dropped. Between them they absorbed the last two hand-written LRUs -- `orm/registry._cache` and `_pgdriver._plans`, which were the same fifteen lines twice and differed only in what they did with the evicted entry. The driver needs the record because an evicted plan still exists on the PostgreSQL backend until a `Close ('S')` goes out for it; the registry needs nothing done with it and passes `track_evictions=False`, which costs it nothing. Only evictions are reported, never expiries or deletes: the caller already knows about those, and `clear()` reports nothing because a teardown is not an eviction -- the driver clears when the connection is going away, where the statements it would close no longer exist. `BoundedCache` and `MemoryStore` are subclasses of `KV`, not reimplementations: the first adds a `stats` property and the second the two-backend protocol's `claim`/`read` names, and everything else is inherited. That is why `KV` splits `tp_new` from `tp_init` -- a C type that configures itself in `tp_new` forces every subclass to override `__new__` and never call `super().__init__`, a rule nothing enforces. `wreath.queue.Queue` still carries that constraint and says so. Every construction of one of these under `src/wreath` must appear in `docs/reference/memory-budgets.md`; MAP013 fails the build otherwise, because a page answering 'how much does a worker hold' is worth reading only if something keeps it true. One family, one set of rules, and that is maintained deliberately: all four public types construct through `__init__` like ordinary Python classes (both C types split `tp_new` from `tp_init` for it), `clear` returns a count everywhere, `peek` means the same read-without-disturbing on all of them, and the three queues share fourteen names while differing only where they genuinely differ (`lifo`/`drop_oldest`, `drop_lowest`, `lanes`). `RoundRobin` mixes in the same `Awaiting` as the other two rather than restating the waiter and cancellation logic. The single shared name that means something different is `RoundRobin.capacity`, which is per lane; that is stated in the reference page and pinned by a test rather than smoothed over.",
+      "policy": "One bounded table and one bounded queue, so that a bound, a deadline and a claim are written once rather than per subsystem. `wreath.kv.KV` is unsynchronised on purpose -- every caller is event-loop-local and a lock would charge every reader for a race no reader has -- and `wreath.queue.Queue` is locked, because it exists for the hand-offs that do cross threads. Loss is counted, never silent: a full queue returns False and increments `dropped`, and an evicting table increments `evictions`. Expiry is lazy in both directions; nothing sweeps in the background, because a sweeper duplicates across workers and swallows its own failures. `len()` counts what the primitive will still return rather than what it happens to hold, and `count(now=...)` exists because `len()` cannot take an injected clock -- collapsing the two silently broke MemoryStore's count. The native table is a SwissTable: one control byte per slot, scanned 32 lanes at a time by the arms in `_native/simd.h`, which `simd_probe('ctrl', ...)` crosses against the scalar definition. Hot methods are METH_FASTCALL and that is load-bearing, not housekeeping -- on METH_VARARGS the wrapper's argument tuple and keyword dict cost more than the lookup they carry, and measured 0.51us against the 0.20us table underneath. `_capability_map.CapabilityMap` is the declarative security-token shell: overflow is explicitly LRU eviction, earliest-expiry eviction, or fail-closed refusal while KV retains native value/deadline ownership. `webhooks.LocalReplayStore` uses earliest-expiry, pinned by its randomised model test; `NonceLedger` refuses; challenge stores consume only after their ownership predicate matches. Deliberately NOT migrated, each for a stated reason: `orm/registry._cache` (bounded by retained *bytes* as well as by count, which KV does not express), `_mcp.SessionStore` (refuses at capacity with an operator-facing message and runs a destructor per session, where KV evicts silently), and the ASGI receive queues in `server.py`/`testing.py`/`response.py` (need blocking backpressure, which a deliberately lossy queue does not have). Four queue disciplines, and they differ in who waits rather than in speed: FIFO bounds the worst case and is the default; LIFO is deliberately unfair and is a latency choice for workloads where a stale item is worthless; PriorityQueue is a bounded binary heap, stable within a priority because most items in a real workload share one, and it never compares the payload -- so an unorderable object is queueable and no `__lt__` runs under the mutex mid-sift; RoundRobin is a lane per producer with a rotating cursor, `capacity` per lane rather than total, and a required `max_lanes` because a lane name arriving from a request is otherwise an unbounded allocation a caller controls. The rotation is plain Python on purpose: it moves a cursor over a list once per item and is nowhere near the cost of the queue operation it wraps, so there is nothing there for C to do. Two bounds and an eviction record, both added for callers rather than speculatively: `max_bytes` caps the summed per-entry `cost` the caller declares, and `track_evictions` makes `take_evicted()` report what was dropped. Between them they absorbed the last two hand-written LRUs -- `orm/registry._cache` and `_pgdriver._plans`, which were the same fifteen lines twice and differed only in what they did with the evicted entry. The driver needs the record because an evicted plan still exists on the PostgreSQL backend until a `Close ('S')` goes out for it; the registry needs nothing done with it and passes `track_evictions=False`, which costs it nothing. Only evictions are reported, never expiries or deletes: the caller already knows about those, and `clear()` reports nothing because a teardown is not an eviction -- the driver clears when the connection is going away, where the statements it would close no longer exist. `BoundedCache` and `MemoryStore` are subclasses of `KV`, not reimplementations: the first adds a `stats` property and the second the two-backend protocol's `claim`/`read` names, and everything else is inherited. That is why `KV` splits `tp_new` from `tp_init` -- a C type that configures itself in `tp_new` forces every subclass to override `__new__` and never call `super().__init__`, a rule nothing enforces. `wreath.queue.Queue` still carries that constraint and says so. Every construction of one of these under `src/wreath` must appear in `docs/reference/memory-budgets.md`; MAP013 fails the build otherwise, because a page answering 'how much does a worker hold' is worth reading only if something keeps it true. One family, one set of rules, and that is maintained deliberately: all four public types construct through `__init__` like ordinary Python classes (both C types split `tp_new` from `tp_init` for it), `clear` returns a count everywhere, `peek` means the same read-without-disturbing on all of them, and the three queues share fourteen names while differing only where they genuinely differ (`lifo`/`drop_oldest`, `drop_lowest`, `lanes`). `RoundRobin` mixes in the same `Awaiting` as the other two rather than restating the waiter and cancellation logic. The single shared name that means something different is `RoundRobin.capacity`, which is per lane; that is stated in the reference page and pinned by a test rather than smoothed over.",
       "guides": [
         "docs/guides/memory.md"
       ],
@@ -1249,6 +1268,7 @@
       ],
       "sources": [
         "src/wreath/kv.py",
+        "src/wreath/_capability_map.py",
         "src/wreath/queue.py",
         "src/wreath/_queue_protocol.py",
         "src/wreath/_native/kv.c",

@@ -13,6 +13,25 @@ from .test_connection import POSTGRES_BACKENDS, FakePostgres
 
 
 @pytest.mark.asyncio
+async def test_native_operation_owns_its_flight_record() -> None:
+    native = next(
+        backend for backend in POSTGRES_BACKENDS
+        if backend._implementation == "native"
+    )
+    loop = asyncio.get_running_loop()
+    operation = native.Operation(
+        7, "select 1", (), "fetchval", loop.create_future(), None
+    )
+
+    assert native.Operation.__base__ is object
+    assert operation.sequence == 7
+    assert operation.sql == "select 1"
+    assert operation.mode == "fetchval"
+    assert operation.rows is None
+    assert operation.state == "waiting"
+
+
+@pytest.mark.asyncio
 async def test_a_multi_operation_flush_writes_the_complete_batch() -> None:
     class Writer:
         def __init__(self) -> None:

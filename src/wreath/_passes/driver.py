@@ -48,6 +48,7 @@ from typing import Any
 
 from .. import _nplusone
 from .. import telemetry as _telemetry
+from .._jobcore import compute_backoff
 from . import keyset
 from .ledger import APPLYING, BLOCKED, DONE, STOPPED, UNVERIFIED, VERIFIED, VERIFYING, WALKING
 
@@ -586,7 +587,13 @@ async def _attempt(
         except Exception as error:  # noqa: BLE001 - a chunk failure is data, not a crash
             last_error = repr(error)
             if attempts < walk.chunk_retries:
-                await sleeper(min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * 2 ** (attempts - 1)))
+                await sleeper(
+                    compute_backoff(
+                        attempts,
+                        base=RETRY_BASE_SECONDS,
+                        cap=RETRY_CAP_SECONDS,
+                    )
+                )
             continue
         if not moved:
             return _Outcome(lost=True)

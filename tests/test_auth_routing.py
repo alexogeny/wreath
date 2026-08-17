@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover
     "table_type",
     [
         pytest.param(
-            None if _core is None else _core.DecisionRouteTable,
+            None if _core is None else _core.PolicyRouteTable,
             id="native",
             marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
         ),
@@ -73,7 +73,7 @@ def test_decision_router_prunes_routes_above_caller_access(table_type: type) -> 
 
 _DECISION_TABLES = [
     pytest.param(
-        None if _core is None else _core.DecisionRouteTable,
+        None if _core is None else _core.PolicyRouteTable,
         id="native",
         marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
     ),

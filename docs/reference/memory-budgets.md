@@ -24,6 +24,8 @@ reading only if something makes it true, which is the same reason
 | Idempotency replays | `middleware.idempotency.MemoryIdempotencyStore` | `max_entries`, `ttl` | 4096, 24h |
 | Task progress reports | `progress.ProgressRegistry` | `max_tasks`, `ttl` | per-registry |
 | Login attempt counters | `users` | `max_entries`, `ttl` | per-policy |
+| Reusable expiring capabilities | `_capability_map.CapabilityMap` | `max_entries`, `ttl`, `overflow` | per-owner |
+| Webhook replay claims | `webhooks.LocalReplayStore` | `max_entries`, `ttl` | required explicitly |
 | Second-factor challenges | `_secondfactor.MemoryChallengeStore` | `max_entries` | 4096 |
 | Signature replay nonces | `signatures.NonceLedger` | `max_entries`, `ttl` | 16384, 300s |
 | Questions awaiting an answer | `entity.EntityRegistry` | `max_pending` | 1024 |

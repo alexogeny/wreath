@@ -588,7 +588,7 @@ def scenario_ws_empty_messages(warmups: int, trials: int) -> dict[str, Any]:
 def native_route_table() -> Any:
     from wreath._native import _core
 
-    return _core.RouteTable
+    return _core.PolicyRouteTable
 
 
 def _adversarial_table(depth: int) -> tuple[Any, str]:

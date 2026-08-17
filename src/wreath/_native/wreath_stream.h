@@ -29,13 +29,14 @@ typedef struct {
 /* Reverse direction: native protocols emit directly through the metal
  * transport without a PyObject_Call boundary. */
 #define WREATH_TRANSPORT_CAPI_NAME "wreath._native._reactor._TRANSPORT_C_API"
-#define WREATH_TRANSPORT_CAPI_VERSION 1
+#define WREATH_TRANSPORT_CAPI_VERSION 2
 
 typedef struct {
     uint32_t version;
     int (*check)(PyObject *);
     int (*write)(PyObject *, PyObject *);
     int (*writelines)(PyObject *, PyObject *);
+    int (*is_closing)(PyObject *);
 } WreathTransportCAPI;
 
 #endif

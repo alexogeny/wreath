@@ -577,7 +577,7 @@ def test_a_nested_audience_is_a_refusal_not_a_server_error(
 # `OidcProvider.bearer_verifier()` awaits a JWKS fetch inside `authenticate`, so
 # an identity provider that is merely unreachable raises straight through here.
 
-_ROUTING_MODES = ("bitset", "trie", "decision")
+_ROUTING_MODES = ("policy",)
 
 
 class _Egress:
@@ -639,9 +639,8 @@ def _raising_backend_app(routing: str) -> tuple[Wreath, _Egress]:
 async def test_a_backend_that_raises_on_a_protected_route_is_a_500(routing: str) -> None:
     """The attack: make the backend raise and watch the app answer nothing.
 
-    Parametrised over every routing mode rather than pinned to the broken one,
-    because the defect *is* the disagreement between them -- a test that only
-    drove `bitset` would go green again the moment the early path moved.
+    Driven through the canonical policy router so its protected-route boundary
+    cannot turn a backend failure into a missing response.
     """
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
@@ -660,8 +659,8 @@ async def test_a_backend_that_raises_on_a_public_identify_route_is_a_500(
 ) -> None:
     """Control: the lazy path was already correct and must stay so.
 
-    Passes in both trees, in all three modes -- so a run where everything is
-    red is distinguishable from one that caught the protected-route hole.
+    This control makes a general failure distinguishable from the protected-route
+    hole above.
     """
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
@@ -673,11 +672,7 @@ async def test_a_backend_that_raises_on_a_public_identify_route_is_a_500(
 
 @pytest.mark.parametrize("routing", _ROUTING_MODES)
 async def test_a_backend_that_refuses_still_answers_401(routing: str) -> None:
-    """Control: the ordinary refusal is untouched, in every mode.
-
-    Passes in both trees. A fix that turned every anonymous call into a 500
-    would satisfy the attack above and break the framework.
-    """
+    """Control: an ordinary refusal remains 401 rather than becoming a 500."""
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
         refused = await client.get("/vault", headers={"authorization": "Bearer nope"})

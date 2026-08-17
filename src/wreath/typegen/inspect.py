@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from .._model_fields import dataclass_field_image
 from ..binding import _return_annotation
 from ..geospatial import Coordinate
 from ..pagination import Page
@@ -70,6 +71,15 @@ _SCALARS: dict[Any, TypeRef] = {
     Decimal: TypeRef("string", name="decimal"),
     bytes: TypeRef("string", name="byte"),
 }
+
+
+def _binding_field_metadata(items: tuple[Any, ...]) -> Any | None:
+    from ..binding import Field as BindingField
+
+    for item in items:
+        if isinstance(item, BindingField):
+            return item
+    return None
 _JS_KEYWORDS = frozenset(
     {
         "break", "case", "catch", "class", "const", "continue", "debugger",
@@ -336,29 +346,18 @@ class _Builder:
             except (TypeError, ValueError):
                 hints = {}
             fields: list[Field] = []
-            for dc_field in dataclasses.fields(annotation):
-                field_annotation = hints.get(dc_field.name, Any)
-                metadata = None
-                if typing.get_origin(field_annotation) is typing.Annotated:
-                    _base, *items = typing.get_args(field_annotation)
-                    from ..binding import Field as BindingField
-
-                    metadata = next(
-                        (item for item in items if isinstance(item, BindingField)), None
-                    )
-                required = (
-                    dc_field.default is dataclasses.MISSING
-                    and dc_field.default_factory is dataclasses.MISSING
-                )
+            for declared in dataclass_field_image(annotation, hints, fallback=Any):
+                field_annotation = declared.annotation
+                metadata = _binding_field_metadata(declared.metadata)
                 fields.append(
                     Field(
                         (
                             metadata.alias
                             if metadata is not None and metadata.alias
-                            else dc_field.name
+                            else declared.python_name
                         ),
                         self.type_ref(field_annotation),
-                        required,
+                        declared.required,
                         description=metadata.description if metadata is not None else None,
                         examples=metadata.examples if metadata is not None else (),
                         gt=metadata.gt if metadata is not None else None,
@@ -442,7 +441,7 @@ def build_api_model(
     image = app._application_image
     routes = list(image.routes())
     binding_specs = image.binding_specs()
-    resolved_ids, id_diagnostics = resolve_operation_ids(routes)
+    resolved_ids, id_diagnostics = image.operation_ids()
     builder = _Builder(allow_unknown)
     operations: list[Operation] = []
 

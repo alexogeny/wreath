@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ._asgi_state import ResponseCapture
 from .request import DEFAULT_LIMITS, Request
 
 __all__ = [
@@ -127,25 +128,6 @@ def _receive_factory(body: bytes) -> Any:
     return receive
 
 
-class _Capture:
-    """Collects the owned response the app sends over ASGI."""
-
-    __slots__ = ("status", "headers", "body")
-
-    def __init__(self) -> None:
-        self.status = 0
-        self.headers: tuple[tuple[bytes, bytes], ...] = ()
-        self.body = bytearray()
-
-    async def send(self, message: dict[str, Any]) -> None:
-        kind = message["type"]
-        if kind == "http.response.start":
-            self.status = message["status"]
-            self.headers = tuple((bytes(k), bytes(v)) for k, v in message.get("headers", ()))
-        elif kind == "http.response.body":
-            self.body += message.get("body", b"")
-
-
 async def replay_endpoint_plan(
     app: Any,
     canonical: CanonicalRequest,
@@ -154,6 +136,7 @@ async def replay_endpoint_plan(
     recorded_return: Any = None,
     recorded_exception: BaseException | None = None,
     adapters: Any = None,
+    trace: Any = None,
 ) -> PlanReplayResult:
     """Replay a canonical request through the owned endpoint pipeline.
 
@@ -164,20 +147,24 @@ async def replay_endpoint_plan(
     owned error path (it becomes a status like any request); only a misuse (e.g.
     `REPLACE` without a recorded result) raises `ValueError`.
     """
-    from ._replay_adapters import installed_adapters
+    from contextlib import nullcontext
+
+    from ._replay_adapters import installed_adapters, observed_boundaries
 
     mode = PlanMode(mode)
     scope = _scope(canonical)
-    capture = _Capture()
+    capture = ResponseCapture(strict=False)
 
     if mode is PlanMode.INVOKE:
         receive = _receive_factory(canonical.body)
         with installed_adapters(app, adapters):
-            await app(scope, receive, capture.send)
+            observer = observed_boundaries(app, trace) if trace is not None else nullcontext()
+            with observer:
+                await app(scope, receive, capture.send)
         return PlanReplayResult(
-            status=capture.status,
+            status=capture.status or 0,
             headers=capture.headers,
-            body=bytes(capture.body),
+            body=capture.body,
             mode=str(mode),
             best_effort=True,
             deterministic=False,
@@ -216,9 +203,9 @@ async def replay_endpoint_plan(
             response = _coerce_response(recorded_return)
         await response(capture.send)
     return PlanReplayResult(
-        status=capture.status,
+        status=capture.status or 0,
         headers=capture.headers,
-        body=bytes(capture.body),
+        body=capture.body,
         mode=str(mode),
         best_effort=False,
         deterministic=True,
@@ -262,19 +249,24 @@ def _substituted_endpoints(
 
 def _resolve_route(app: Any, canonical: CanonicalRequest) -> bool:
     """Whether the owned router matches this canonical request, without running
-    a handler. Uses the app's compiled matcher; tolerant of both routing modes."""
+    a handler. Uses the app's canonical compiled policy matcher."""
     if getattr(app, "_dirty", False):
         app._compile_routes()
     matcher = getattr(app, "_route_match", None)
     if matcher is None:
         return False
     try:
-        return matcher(canonical.method, canonical.path, 0) is not None
+        return (
+            matcher(
+                canonical.method,
+                canonical.path,
+                getattr(app, "_all_capability_mask", 0),
+            )
+            is not None
+        )
     except TypeError:
-        # `Wreath._route_match` adapts the arity across routing modes itself, so
-        # this only catches a foreign or mocked app whose matcher takes a
-        # different signature -- "tolerant of both routing modes" in the
-        # docstring above. Narrowed from a blanket catch: a matcher that raises
+        # This only catches a foreign or mocked app whose matcher takes a
+        # different signature. Narrowed from a blanket catch: a matcher that raises
         # for any other reason is a routing fault, and reporting "no route"
         # would make a replayed request silently miss a handler it should hit.
         return False

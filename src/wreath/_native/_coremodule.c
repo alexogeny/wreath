@@ -43,6 +43,11 @@ static PyMethodDef core_methods[] = {
      (PyCFunction)(void (*)(void))wreath_activate_path_call, METH_FASTCALL,
      "activate_path_call(handler, request, plan, error_type) -> result\n"
      "Activate path scalars and vectorcall the handler."},
+    {"request_layout", wreath_request_layout, METH_O,
+     "Compile one operation-owned exact Request slot layout."},
+    {"request_new", (PyCFunction)(void (*)(void))wreath_request_new,
+     METH_FASTCALL,
+     "Materialize one exact Request at the handler-activation boundary."},
     {"parse_dotenv", wreath_parse_dotenv, METH_O,
      "parse_dotenv(data) -> dict[str, str]"},
     {"read_osenv", wreath_read_osenv, METH_NOARGS,
@@ -131,6 +136,8 @@ static PyMethodDef core_methods[] = {
      "Flatten counter readings with native key and integer ownership."},
     {"locale_preference", wreath_locale_preference, METH_O,
      "Select the preferred language from an Accept-Language value."},
+    {"select_language", wreath_select_language, METH_VARARGS,
+     "Select an offered language from an Accept-Language value."},
     {"normalize_host", wreath_normalize_host, METH_VARARGS,
      "Normalize one HTTP Host authority or trusted-host pattern."},
     {"parse_accept", wreath_parse_accept, METH_O,
@@ -349,8 +356,10 @@ static PyMethodDef core_methods[] = {
     {"cedar_is_authorized", wreath_cedar_is_authorized, METH_VARARGS,
      "cedar_is_authorized(policies, principal, action, resource, context, store)"
      " -> (allowed, reason, diagnostics)"},
+    {"cedar_compile_plan", wreath_cedar_compile_plan, METH_O,
+     "Compile a decision-only Cedar policy plan for route authorization."},
     {"cedar_route_denial", wreath_cedar_route_denial, METH_VARARGS,
-     "Evaluate a route policy and materialize only its denial reason."},
+     "Evaluate a compiled route policy plan and materialize only its denial reason."},
     {"cedar_is_authorized_many", wreath_cedar_is_authorized_many, METH_VARARGS,
      "cedar_is_authorized_many(policies, principal, action, resources, context, store, stop)"
      " -> authorization result tuples"},
@@ -568,8 +577,7 @@ PyInit__core(void)
         return NULL;
     }
     if (wreath_security_ready() < 0 || wreath_jose_ready() < 0 ||
-        wreath_register_router(module) < 0 || wreath_register_dtrouter(module) < 0 ||
-        wreath_register_dtbitset(module) < 0 ||
+        wreath_register_policy_router(module) < 0 ||
         wreath_register_webpolicy(module) < 0 || wreath_register_proxy(module) < 0 ||
         wreath_register_ratelimit(module) < 0 ||
         wreath_register_scheduler(module) < 0 ||

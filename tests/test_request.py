@@ -11,12 +11,20 @@ from typing import Any, cast
 
 import pytest
 
+from wreath._native import _core
 from wreath.exceptions import (
     ClientDisconnect,
     PayloadTooLarge,
     RequestHeaderFieldsTooLarge,
 )
-from wreath.request import Request, RequestLimits, StreamConsumed, _multipart_boundary
+from wreath.request import (
+    _REQUEST_LAYOUT,
+    DEFAULT_LIMITS,
+    Request,
+    RequestLimits,
+    StreamConsumed,
+    _multipart_boundary,
+)
 
 HEADERS = [
     (b"host", b"example"),
@@ -35,6 +43,27 @@ def _request(headers: list[tuple[bytes, bytes]] | None = HEADERS) -> Request:
     if headers is not None:
         scope["headers"] = headers
     return Request(scope, _no_receive)
+
+
+@pytest.mark.parametrize("scope", [{"type": "http"}, object()])
+def test_native_activation_request_matches_public_constructor(scope: Any) -> None:
+    """The private constructor may only remove the Python initializer frame."""
+    params = {"item": "7"}
+    app = object()
+    public = Request(scope, _no_receive, params, DEFAULT_LIMITS, app=app)
+    activated = _core.request_new(
+        _REQUEST_LAYOUT, scope, _no_receive, params, DEFAULT_LIMITS, app
+    )
+
+    assert type(activated) is Request
+    missing = object()
+    for slot in Request.__slots__:
+        activated_value = getattr(activated, slot, missing)
+        public_value = getattr(public, slot, missing)
+        if slot in {"_client_source", "_policy_mask"}:
+            assert activated_value == public_value
+        else:
+            assert activated_value is public_value
 
 
 def test_header_scan_then_map_agree() -> None:

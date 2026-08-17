@@ -471,34 +471,45 @@ wreath_http_parse_request(PyObject *Py_UNUSED(self), PyObject *arg)
     return result;
 }
 
-PyObject *
-wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
+static int http_ascii_equals(
+    const uint8_t *data, Py_ssize_t len, const char *literal);
+static int http_is_ows(uint8_t c);
+
+void
+wreath_http_response_head_clear(WreathHttpResponseHead *head)
 {
-    Py_buffer view;
-    const uint8_t *data;
+    Py_CLEAR(head->headers);
+    Py_CLEAR(head->reason);
+}
+
+int
+wreath_http_parse_response_parts(
+    const uint8_t *data, Py_ssize_t size, PyObject *method,
+    WreathHttpResponseHead *head)
+{
     const uint8_t *head_end;
     const uint8_t *p;
     const uint8_t *end;
     const uint8_t *reason_start;
     const uint8_t *reason_end;
-    PyObject *headers = NULL;
-    PyObject *reason = NULL;
-    PyObject *result = NULL;
-    PyObject *minor_obj = NULL;
-    PyObject *status_obj = NULL;
-    PyObject *consumed_obj = NULL;
-    Py_ssize_t consumed;
-    int minor;
-    int status;
+    const uint8_t *first_length = NULL;
+    Py_ssize_t first_length_size = 0;
+    Py_ssize_t header_count = 0;
+    Py_ssize_t header_index = 0;
+    Py_ssize_t transfer_count = 0;
+    Py_ssize_t chunked_count = 0;
+    int last_is_chunked = 0;
+    int length_conflict = 0;
+    int saw_close = 0;
+    int saw_keep_alive = 0;
 
-    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
-    data = view.buf;
-    head_end = wreath_memmem(data, view.len, (const uint8_t *)"\r\n\r\n", 4);
+    memset(head, 0, sizeof(*head));
+    head->content_length = -1;
+    head_end = wreath_memmem(data, size, (const uint8_t *)"\r\n\r\n", 4);
     if (head_end == NULL) {
-        PyBuffer_Release(&view);
-        Py_RETURN_NONE;
+        return 0;
     }
-    consumed = (head_end - data) + 4;
+    head->consumed = (head_end - data) + 4;
     p = data;
     end = head_end + 2;
     if (end - p < 14 || memcmp(p, "HTTP/1.", 7) != 0 ||
@@ -508,9 +519,9 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
         malformed("malformed response status line");
         goto error;
     }
-    minor = p[7] - '0';
-    status = (p[9] - '0') * 100 + (p[10] - '0') * 10 + (p[11] - '0');
-    if (status < 100) {
+    head->minor = p[7] - '0';
+    head->status = (p[9] - '0') * 100 + (p[10] - '0') * 10 + (p[11] - '0');
+    if (head->status < 100) {
         malformed("malformed response status");
         goto error;
     }
@@ -536,8 +547,18 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
         goto error;
     }
     p += 2;
-    headers = PyList_New(0);
-    if (headers == NULL) goto error;
+
+    /* Count line endings before materialization so the request path allocates
+     * its final header tuple once.  The validating pass below still owns every
+     * syntax decision; this pass only determines the tuple size. */
+    for (const uint8_t *cursor = p; cursor < end; cursor++) {
+        if (*cursor == '\r' && cursor + 1 < end && cursor[1] == '\n') {
+            header_count++;
+            cursor++;
+        }
+    }
+    head->headers = PyTuple_New(header_count);
+    if (head->headers == NULL) goto error;
     while (p < end) {
         const uint8_t *name_start;
         const uint8_t *value_start;
@@ -578,6 +599,56 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
         while (value_end > value_start &&
                (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
         p += 2;
+
+        if (name_len == (Py_ssize_t)(sizeof("content-length") - 1) &&
+            http_ascii_equals(name_start, name_len, "content-length")) {
+            Py_ssize_t value_size = value_end - value_start;
+            if (first_length == NULL) {
+                first_length = value_start;
+                first_length_size = value_size;
+            } else if (value_size != first_length_size ||
+                       memcmp(first_length, value_start,
+                              (size_t)value_size) != 0) {
+                length_conflict = 1;
+            }
+        } else if (
+            name_len == (Py_ssize_t)(sizeof("transfer-encoding") - 1) &&
+            http_ascii_equals(name_start, name_len, "transfer-encoding")) {
+            const uint8_t *cursor = value_start;
+            for (;;) {
+                const uint8_t *separator = cursor;
+                const uint8_t *token_end;
+                while (separator < value_end && *separator != ',') separator++;
+                token_end = separator;
+                while (cursor < token_end && http_is_ows(*cursor)) cursor++;
+                while (token_end > cursor && http_is_ows(token_end[-1])) token_end--;
+                last_is_chunked = http_ascii_equals(
+                    cursor, (Py_ssize_t)(token_end - cursor), "chunked");
+                chunked_count += last_is_chunked;
+                transfer_count++;
+                if (separator == value_end) break;
+                cursor = separator + 1;
+            }
+        } else if (
+            name_len == (Py_ssize_t)(sizeof("connection") - 1) &&
+            http_ascii_equals(name_start, name_len, "connection")) {
+            const uint8_t *cursor = value_start;
+            for (;;) {
+                const uint8_t *separator = cursor;
+                const uint8_t *token_end;
+                while (separator < value_end && *separator != ',') separator++;
+                token_end = separator;
+                while (cursor < token_end && http_is_ows(*cursor)) cursor++;
+                while (token_end > cursor && http_is_ows(token_end[-1])) token_end--;
+                saw_close |= http_ascii_equals(
+                    cursor, (Py_ssize_t)(token_end - cursor), "close");
+                saw_keep_alive |= http_ascii_equals(
+                    cursor, (Py_ssize_t)(token_end - cursor), "keep-alive");
+                if (separator == value_end) break;
+                cursor = separator + 1;
+            }
+        }
+
         if (name_len <= 64) {
             uint8_t lowered[64];
             for (Py_ssize_t i = 0; i < name_len; i++) {
@@ -612,37 +683,123 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
         pair = value != NULL ? PyTuple_Pack(2, name, value) : NULL;
         Py_DECREF(name);
         Py_XDECREF(value);
-        if (pair == NULL || PyList_Append(headers, pair) < 0) {
-            Py_XDECREF(pair);
+        if (pair == NULL) goto error;
+        if (header_index >= header_count) {
+            Py_DECREF(pair);
+            malformed("malformed response header block");
             goto error;
         }
-        Py_DECREF(pair);
+        PyTuple_SET_ITEM(head->headers, header_index++, pair);
     }
-    reason = PyBytes_FromStringAndSize(
+    if (header_index != header_count) {
+        malformed("malformed response header block");
+        goto error;
+    }
+    head->reason = PyBytes_FromStringAndSize(
         (const char *)reason_start, reason_end - reason_start
     );
-    minor_obj = reason != NULL ? PyLong_FromLong(minor) : NULL;
-    status_obj = minor_obj != NULL ? PyLong_FromLong(status) : NULL;
-    consumed_obj = status_obj != NULL ? PyLong_FromSsize_t(consumed) : NULL;
-    result = consumed_obj != NULL ? PyTuple_New(5) : NULL;
-    if (result == NULL) goto error;
-    PyTuple_SET_ITEM(result, 0, minor_obj);
-    PyTuple_SET_ITEM(result, 1, status_obj);
-    PyTuple_SET_ITEM(result, 2, reason);
-    PyTuple_SET_ITEM(result, 3, headers);
-    PyTuple_SET_ITEM(result, 4, consumed_obj);
-    PyBuffer_Release(&view);
-    return result;
+    if (head->reason == NULL) goto error;
+
+    /* The public head parser historically validates only head syntax.  The
+     * fused transaction supplies its method and asks this same pass to decide
+     * framing and reuse; a NULL method retains the standalone boundary. */
+    if (method == NULL) return 1;
+
+    int no_body = head->status == 204 || head->status == 304;
+    if (!no_body && PyUnicode_Check(method)) {
+        int comparison = PyUnicode_CompareWithASCIIString(method, "HEAD");
+        if (comparison == -1 && PyErr_Occurred()) goto error;
+        no_body = comparison == 0;
+    }
+    if (no_body) {
+        head->framing = 0;
+        head->content_length = 0;
+    } else if (transfer_count && first_length != NULL) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "response has conflicting transfer-encoding and content-length");
+        goto error;
+    } else if (transfer_count) {
+        if (!last_is_chunked || chunked_count != 1) {
+            PyErr_SetString(PyExc_ValueError,
+                            "unsupported response transfer-encoding");
+            goto error;
+        }
+        head->framing = 1;
+    } else if (first_length != NULL) {
+        if (length_conflict) {
+            PyErr_SetString(PyExc_ValueError,
+                            "response has conflicting content-length values");
+            goto error;
+        }
+        if (first_length_size == 0) {
+            PyErr_SetString(PyExc_ValueError, "invalid response content-length");
+            goto error;
+        }
+        Py_ssize_t length = 0;
+        for (Py_ssize_t i = 0; i < first_length_size; i++) {
+            int digit = first_length[i] - '0';
+            if (digit < 0 || digit > 9) {
+                PyErr_SetString(PyExc_ValueError,
+                                "invalid response content-length");
+                goto error;
+            }
+            if (length > (PY_SSIZE_T_MAX - digit) / 10) {
+                PyErr_SetString(PyExc_OverflowError,
+                                "Python int too large to convert to C ssize_t");
+                goto error;
+            }
+            length = length * 10 + digit;
+        }
+        head->framing = 2;
+        head->content_length = length;
+    } else {
+        head->framing = 3;
+    }
+    head->reusable = head->framing != 3 &&
+        !saw_close && (head->minor != 0 || saw_keep_alive);
+    return 1;
 
 error:
+    wreath_http_response_head_clear(head);
+    return -1;
+}
+
+PyObject *
+wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    Py_buffer view;
+    WreathHttpResponseHead head;
+    PyObject *headers_list = NULL;
+    PyObject *minor = NULL;
+    PyObject *status = NULL;
+    PyObject *consumed = NULL;
+    PyObject *result = NULL;
+    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
+    int parsed = wreath_http_parse_response_parts(
+        view.buf, view.len, NULL, &head);
     PyBuffer_Release(&view);
-    Py_XDECREF(headers);
-    Py_XDECREF(reason);
-    Py_XDECREF(minor_obj);
-    Py_XDECREF(status_obj);
-    Py_XDECREF(consumed_obj);
-    Py_XDECREF(result);
-    return NULL;
+    if (parsed < 0) return NULL;
+    if (parsed == 0) Py_RETURN_NONE;
+    headers_list = PySequence_List(head.headers);
+    minor = headers_list != NULL ? PyLong_FromLong(head.minor) : NULL;
+    status = minor != NULL ? PyLong_FromLong(head.status) : NULL;
+    consumed = status != NULL ? PyLong_FromSsize_t(head.consumed) : NULL;
+    result = consumed != NULL ? PyTuple_New(5) : NULL;
+    if (result != NULL) {
+        PyTuple_SET_ITEM(result, 0, minor);
+        PyTuple_SET_ITEM(result, 1, status);
+        PyTuple_SET_ITEM(result, 2, Py_NewRef(head.reason));
+        PyTuple_SET_ITEM(result, 3, headers_list);
+        PyTuple_SET_ITEM(result, 4, consumed);
+    } else {
+        Py_XDECREF(headers_list);
+        Py_XDECREF(minor);
+        Py_XDECREF(status);
+        Py_XDECREF(consumed);
+    }
+    wreath_http_response_head_clear(&head);
+    return result;
 }
 
 static int

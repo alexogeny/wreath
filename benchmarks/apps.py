@@ -48,10 +48,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from wreath.authorization import roles
     from wreath.response import PreparedResponse, StreamingResponse, TextResponse
 
-    # Default routing mode unless asked otherwise, so this app tracks whatever
-    # Wreath's default is. Set WREATH_BENCH_ROUTING to A/B a backend end-to-end.
-    _ROUTING = os.environ.get("WREATH_BENCH_ROUTING")
-    app = Wreath(**({"routing": _ROUTING} if _ROUTING else {}))
+    app = Wreath()
 
     # The literal tokens the `auth-*` scenarios have always sent, and a real
     # HS256 verifier behind them. The two string compares run first and

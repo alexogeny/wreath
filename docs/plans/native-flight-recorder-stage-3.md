@@ -570,7 +570,7 @@ src/wreath/_native/server_http2.c
 src/wreath/_native/http3.h
 src/wreath/_native/http3_asgi.c
 src/wreath/_native/dtrouter.c
-src/wreath/_native/dtbitset.c
+src/wreath/_native/policy_router.c
 src/wreath/_native/router.c
 src/wreath/_routing.py
 src/wreath/app.py

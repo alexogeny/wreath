@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator
 
+from .._compression import require_zstd
 from .._webpolicy import (
     NO_TRANSFORM,
     append_vary,
@@ -83,9 +84,10 @@ class CompressionPolicy:
     is that no request that used to receive gzip receives a coding it did not ask
     for by name.
 
-    zstd is available because `compression.zstd` is in the standard library from
-    Python 3.14 (PEP 784). brotli is not offered: it would mean a mandatory
-    third-party runtime dependency, which a content coding does not justify.
+    zstd is available when this Python 3.14 build includes the optional `_zstd`
+    extension. Construction refuses immediately when it does not, naming the
+    required interpreter capability; brotli is not installed as a silent
+    third-party fallback.
 
     A response is compressed only when all of these hold. The request method is
     not `HEAD` and the status is not 204, 304, or 206. The response carries
@@ -123,6 +125,7 @@ class CompressionPolicy:
             the response-length side channel. False by default.
 
     Raises:
+        RuntimeError: this CPython build omitted the optional `_zstd` module.
         ValueError: `minimum_size` is negative, `gzip_level` is outside 0-9, or
             `zstd_level` is outside libzstd's range.
     """
@@ -148,6 +151,7 @@ class CompressionPolicy:
             raise ValueError("minimum_size must be non-negative")
         if not 0 <= gzip_level <= 9:
             raise ValueError("gzip_level must be between 0 and 9")
+        require_zstd()
         if not ZSTD_MIN_LEVEL <= zstd_level <= ZSTD_MAX_LEVEL:
             raise ValueError(f"zstd_level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
         self.minimum_size = minimum_size

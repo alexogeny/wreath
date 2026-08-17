@@ -5,8 +5,25 @@ import asyncio
 import pytest
 
 from wreath import Wreath
+from wreath._asgi_state import ResponseCapture
 from wreath.aws_lambda import LambdaAdapter
 from wreath.response import JSONResponse, Response
+
+
+@pytest.mark.asyncio
+async def test_response_capture_owns_strict_and_replay_message_semantics() -> None:
+    strict = ResponseCapture()
+    await strict.send({"type": "http.response.start", "status": 201})
+    await strict.send({"type": "http.response.body", "body": b"one", "more_body": True})
+    await strict.send({"type": "http.response.body", "body": b"two"})
+    strict.require_complete()
+    assert (strict.status, strict.body) == (201, b"onetwo")
+    with pytest.raises(RuntimeError, match="after the response ended"):
+        await strict.send({"type": "http.response.body", "body": b"late"})
+
+    replay = ResponseCapture(strict=False)
+    await replay.send({"type": "http.response.body", "body": b"captured"})
+    assert replay.body == b"captured"
 
 
 def test_lambda_payload_v2_runs_one_lifespan_across_warm_invocations() -> None:

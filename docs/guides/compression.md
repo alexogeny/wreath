@@ -33,9 +33,10 @@ just returns data.
 ## Two codings, and why they are not offered alike
 
 Python 3.14 added `compression.zstd` to the standard library (PEP 784), so Wreath
-can offer zstd without a third-party package. brotli is *not* offered, for the
-same reason turned around: `brotli` and `brotlicffi` are PyPI distributions, and
-a content coding does not justify a mandatory runtime dependency.
+can offer zstd without a third-party package. CPython can be built without its
+optional `_zstd` extension; in that environment Wreath and gzip still import,
+while constructing `CompressionPolicy` refuses and asks for Python 3.14 built
+with libzstd support. brotli is *not* installed as a silent fallback.
 
 zstd is served only to a client that **names** it. `gzip` is served to a client
 that names it *or* that sends a bare `*`:

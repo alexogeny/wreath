@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .._jobcore import compute_backoff
+
 #: How much of the old average a new sample leaves behind. 0.2 is roughly a
 #: 5-request window: fast enough that a newly-slow upstream is demoted within a
 #: handful of requests, slow enough that one unlucky sample does not.
@@ -179,7 +181,11 @@ class UpstreamPool:
         if upstream.failures < self._ejection.failures:
             return
         over = upstream.failures - self._ejection.failures
-        cooldown = min(self._ejection.seconds * (2 ** over), self._ejection.cap)
+        cooldown = compute_backoff(
+            over + 1,
+            base=self._ejection.seconds,
+            cap=self._ejection.cap,
+        )
         upstream.ejected_until = now + cooldown
 
     def stats(self) -> dict[str, int]:

@@ -5,5 +5,7 @@
 
 PyObject *wreath_activate_path(PyObject *, PyObject *);
 PyObject *wreath_activate_path_call(PyObject *, PyObject *const *, Py_ssize_t);
+PyObject *wreath_request_layout(PyObject *, PyObject *);
+PyObject *wreath_request_new(PyObject *, PyObject *const *, Py_ssize_t);
 
 #endif

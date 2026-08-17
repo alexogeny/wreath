@@ -257,27 +257,7 @@ class TrafficClass:
 
     def matches(self, facts: ClientFacts) -> bool:
         """Whether every declared condition holds for `facts`."""
-        ip = facts.ip
-        geo = None if ip is None else ip.geo
-        country = None if geo is None or geo.country is None else geo.country.upper()
-        ua = facts.user_agent
-        agent = facts.agent
-        return (
-            (not self.countries or country in self.countries)
-            and (not self.browsers or ua.browser in self.browsers)
-            and (not self.ip_versions or (ip is not None and ip.version in self.ip_versions))
-            and (
-                not self.address_sources
-                or (ip is not None and ip.source in self.address_sources)
-            )
-            and (
-                not self.agent_identities
-                or (agent.verified and agent.identity in self.agent_identities)
-            )
-            and (self.claimed_agent is None or agent.claimed is self.claimed_agent)
-            and (self.verified_agent is None or agent.verified is self.verified_agent)
-            and (self.mobile is None or ua.mobile is self.mobile)
-        )
+        return _traffic_matches(self, facts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,36 +291,32 @@ class _CompiledTrafficClass:
         )
 
     def matches(self, facts: ClientFacts) -> bool:
-        ip = facts.ip
-        geo = None if ip is None else ip.geo
-        country = None if geo is None or geo.country is None else geo.country.upper()
-        ua = facts.user_agent
-        agent = facts.agent
-        return (
-            (not self.countries or country in self.countries)
-            and (not self.browsers or ua.browser in self.browsers)
-            and (
-                not self.ip_versions
-                or (ip is not None and ip.version in self.ip_versions)
-            )
-            and (
-                not self.address_sources
-                or (ip is not None and ip.source in self.address_sources)
-            )
-            and (
-                not self.agent_identities
-                or (agent.verified and agent.identity in self.agent_identities)
-            )
-            and (
-                self.claimed_agent is None
-                or agent.claimed is self.claimed_agent
-            )
-            and (
-                self.verified_agent is None
-                or agent.verified is self.verified_agent
-            )
-            and (self.mobile is None or ua.mobile is self.mobile)
+        return _traffic_matches(self, facts)
+
+
+def _traffic_matches(rule: Any, facts: ClientFacts) -> bool:
+    """The one predicate used by declarations and membership-compiled rules."""
+    ip = facts.ip
+    geo = None if ip is None else ip.geo
+    country = None if geo is None or geo.country is None else geo.country.upper()
+    ua = facts.user_agent
+    agent = facts.agent
+    return (
+        (not rule.countries or country in rule.countries)
+        and (not rule.browsers or ua.browser in rule.browsers)
+        and (not rule.ip_versions or (ip is not None and ip.version in rule.ip_versions))
+        and (
+            not rule.address_sources
+            or (ip is not None and ip.source in rule.address_sources)
         )
+        and (
+            not rule.agent_identities
+            or (agent.verified and agent.identity in rule.agent_identities)
+        )
+        and (rule.claimed_agent is None or agent.claimed is rule.claimed_agent)
+        and (rule.verified_agent is None or agent.verified is rule.verified_agent)
+        and (rule.mobile is None or ua.mobile is rule.mobile)
+    )
 
 
 def _compile_traffic_class(

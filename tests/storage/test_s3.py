@@ -3,6 +3,7 @@
 Real S3/MinIO integration is gated on an env DSN and lives elsewhere; here we pin
 the S3 REST + SigV4 signing behaviour against canned responses.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,8 +41,13 @@ class FakeClient:
 def _store(handler, **kw):
     client = FakeClient(handler)
     store = S3ObjectStore(
-        client, bucket="b", region="us-east-1", access_key="AKIAEXAMPLE",
-        secret_key="secretkey", host="b.s3.us-east-1.amazonaws.com", **kw,
+        client,
+        bucket="b",
+        region="us-east-1",
+        access_key="AKIAEXAMPLE",
+        secret_key="secretkey",
+        host="b.s3.us-east-1.amazonaws.com",
+        **kw,
     )
     return store, client
 
@@ -77,11 +83,15 @@ def test_stat_and_exists():
     def handler(method, target, body):
         if "missing" in target:
             return FakeResp(404)
-        return FakeResp(200, [
-            (b"content-length", b"42"), (b"etag", b'"e"'),
-            (b"content-type", b"application/json"),
-            (b"last-modified", b"Tue, 15 Nov 2022 12:45:26 GMT"),
-        ])
+        return FakeResp(
+            200,
+            [
+                (b"content-length", b"42"),
+                (b"etag", b'"e"'),
+                (b"content-type", b"application/json"),
+                (b"last-modified", b"Tue, 15 Nov 2022 12:45:26 GMT"),
+            ],
+        )
 
     store, _ = _store(handler)
 
@@ -167,12 +177,18 @@ def test_list_sends_the_prefix_the_delimiter_and_the_token_it_was_handed():
             assert "prefix=photos%2F" in target, target
             assert "delimiter=%2F" in target, target
             assert "continuation-token" not in target, target
-            return FakeResp(200, body=_list_page(
-                keys=["photos/a.txt"], sizes=[3], truncated=True, token="TOK",
-                # After the token, as S3 sends it: an element matched by position
-                # rather than by name would overwrite the token with "b".
-                trailing="<Name>b</Name><KeyCount>1</KeyCount>",
-            ))
+            return FakeResp(
+                200,
+                body=_list_page(
+                    keys=["photos/a.txt"],
+                    sizes=[3],
+                    truncated=True,
+                    token="TOK",
+                    # After the token, as S3 sends it: an element matched by position
+                    # rather than by name would overwrite the token with "b".
+                    trailing="<Name>b</Name><KeyCount>1</KeyCount>",
+                ),
+            )
         assert "continuation-token=TOK" in target, target
         return FakeResp(200, body=_list_page(keys=["photos/b.txt"], sizes=[5]))
 
@@ -180,8 +196,10 @@ def test_list_sends_the_prefix_the_delimiter_and_the_token_it_was_handed():
 
     async def go():
         got = [(o.key, o.size, o.etag) async for o in store.list("photos/", delimiter="/")]
-        assert got == [("photos/a.txt", 3, "e-photos/a.txt"),
-                       ("photos/b.txt", 5, "e-photos/b.txt")], got
+        assert got == [
+            ("photos/a.txt", 3, "e-photos/a.txt"),
+            ("photos/b.txt", 5, "e-photos/b.txt"),
+        ], got
         assert len(seen) == 2
 
     asyncio.run(go())
@@ -243,6 +261,7 @@ def test_list_refuses_a_contents_element_that_names_no_object():
     refusal the message has to name; `None` reaching `normalize_key` instead is a
     different message about a type, from a response that is not wrong about types.
     """
+
     def page(contents):
         return (
             '<?xml version="1.0"?><ListBucketResult'
@@ -267,15 +286,22 @@ def test_list_stops_when_a_page_is_truncated_but_names_no_token():
     complete that carries one anyway. Either half alone leaves a walk that asks for
     the same page forever, so each is pinned separately.
     """
+
     def one_page(truncated, token):
         calls = []
 
         def handler(method, target, body):
             calls.append(target)
             assert len(calls) == 1, f"kept listing past the last page: {calls}"
-            return FakeResp(200, body=_list_page(
-                keys=["a.txt"], sizes=[1], truncated=truncated, token=token,
-            ))
+            return FakeResp(
+                200,
+                body=_list_page(
+                    keys=["a.txt"],
+                    sizes=[1],
+                    truncated=truncated,
+                    token=token,
+                ),
+            )
 
         store, _ = _store(handler)
 
@@ -310,11 +336,14 @@ def test_multipart_write_stream():
     def handler(method, target, body):
         if method == "POST" and "uploads=" in target and "uploadId" not in target:
             state["upload_id"] = "UP1"
-            return FakeResp(200, body=(
-                b'<InitiateMultipartUploadResult'
-                b' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-                b"<UploadId>UP1</UploadId></InitiateMultipartUploadResult>"
-            ))
+            return FakeResp(
+                200,
+                body=(
+                    b"<InitiateMultipartUploadResult"
+                    b' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                    b"<UploadId>UP1</UploadId></InitiateMultipartUploadResult>"
+                ),
+            )
         if method == "PUT" and "partNumber" in target:
             state["parts"] += 1
             return FakeResp(200, [(b"etag", f'"p{state["parts"]}"'.encode())])
@@ -361,7 +390,7 @@ def test_read_stream_windows():
     def rh(method, target, body):
         rng = client.calls[-1][2].get("range", "")
         lo, hi = (int(x) for x in rng.removeprefix("bytes=").split("-"))
-        piece = obj[lo:hi + 1]
+        piece = obj[lo : hi + 1]
         return FakeResp(206 if piece else 416, body=piece)
 
     client._handler = rh
@@ -412,13 +441,30 @@ def test_app_objects_local_roundtrip(tmp_path):
     assert with_dup
 
 
+def test_app_objects_memory_registration():
+    from wreath import Wreath
+    from wreath.objects import MemoryObjectStore
+
+    app = Wreath()
+    store = app.objects("scratch", backend="memory", url_secret=b"s" * 32)
+    assert isinstance(store, MemoryObjectStore)
+    assert app.state.objects_scratch is store
+
+    with pytest.raises(TypeError, match="does not accept"):
+        app.objects("bad", backend="memory", root="nowhere")
+
+
 def test_app_objects_s3_registration():
     from wreath import Wreath
 
     app = Wreath()
     store = app.objects(
-        "assets", backend="s3", bucket="ev-assets", region="ap-southeast-2",
-        access_key="AKIA", secret_key="sk",
+        "assets",
+        backend="s3",
+        bucket="ev-assets",
+        region="ap-southeast-2",
+        access_key="AKIA",
+        secret_key="sk",
     )
     assert isinstance(store, S3ObjectStore)
     assert app.state.objects_assets is store
@@ -457,9 +503,9 @@ def test_a_failed_abort_is_counted_not_swallowed():
             return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
         if method == "PUT":
             return FakeResp(200, [(b"etag", b'"p"')])
-        if method == "POST":                    # complete -> fails
+        if method == "POST":  # complete -> fails
             return FakeResp(500, [], b"nope")
-        if method == "DELETE":                  # abort -> transport is gone too
+        if method == "DELETE":  # abort -> transport is gone too
             raise ConnectError("connection refused")
         raise AssertionError(method)
 
@@ -477,6 +523,7 @@ def test_a_failed_abort_is_counted_not_swallowed():
 
 def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
     """Only transport errors are absorbed; a programming error still surfaces."""
+
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
             return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
@@ -502,6 +549,7 @@ def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
 # -- multipart failure handling ----------------------------------------------
 def _multipart_body():
     """5 MiB + a tail: enough to force an initiate, a part, and a final part."""
+
     async def chunks():
         yield b"x" * (5 * 1024 * 1024)
         yield b"y" * 16
@@ -586,6 +634,7 @@ def test_a_chunk_iterator_that_raises_aborts_the_upload():
 
 def test_an_abort_s3_refuses_is_counted_too():
     """A 403 on the abort orphans exactly as much as a dropped connection does."""
+
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
             return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
@@ -639,8 +688,11 @@ def test_multipart_initiate_sends_the_content_type():
 
 
 def test_stat_survives_a_non_ascii_content_type():
-    headers = [(b"content-length", b"1"), (b"etag", b'"e"'),
-               (b"content-type", b'text/plain; name="caf\xe9.txt"')]
+    headers = [
+        (b"content-length", b"1"),
+        (b"etag", b'"e"'),
+        (b"content-type", b'text/plain; name="caf\xe9.txt"'),
+    ]
     store, _ = _store(lambda *a: FakeResp(200, headers))
     st = asyncio.run(store.stat("a.txt"))
     assert st.content_type is not None and "caf" in st.content_type
@@ -655,18 +707,26 @@ def test_url_secret_is_refused_rather_than_ignored():
 
 def test_the_host_is_derived_from_the_bucket_and_region_when_none_is_given():
     """...and an explicit one is used instead, which is what points this at MinIO."""
+
     def handler(method, target, body):
         return FakeResp(200, [(b"content-length", b"0"), (b"etag", b'"e"')])
 
     derived = S3ObjectStore(
-        FakeClient(handler), bucket="b", region="eu-west-2",
-        access_key="AK", secret_key="SK",
+        FakeClient(handler),
+        bucket="b",
+        region="eu-west-2",
+        access_key="AK",
+        secret_key="SK",
     )
     assert derived._host == "b.s3.eu-west-2.amazonaws.com"
 
     client = FakeClient(handler)
     explicit = S3ObjectStore(
-        client, bucket="b", region="eu-west-2", access_key="AK", secret_key="SK",
+        client,
+        bucket="b",
+        region="eu-west-2",
+        access_key="AK",
+        secret_key="SK",
         host="minio.internal:9000",
     )
     asyncio.run(explicit.stat("k"))
@@ -718,6 +778,7 @@ def test_a_part_keeps_the_unsigned_payload_hash_it_was_given():
     reason for the exception -- not hashing 5 MiB a second time -- would be gone
     with the tests still green.
     """
+
     def handler(method, target, body):
         if method == "POST" and "uploads=" in target and "uploadId" not in target:
             return FakeResp(200, body=b"<x><UploadId>UP1</UploadId></x>")
@@ -741,6 +802,7 @@ def test_a_part_etag_is_carried_into_the_completion_body():
     And a part answered without an ETag has to reach the completion as an empty
     one rather than as an `AttributeError` from inside `write_stream`.
     """
+
     def handler(method, target, body):
         if method == "POST" and "uploads=" in target and "uploadId" not in target:
             return FakeResp(200, body=b"<x><UploadId>UP1</UploadId></x>")
@@ -756,8 +818,10 @@ def test_a_part_etag_is_carried_into_the_completion_body():
     asyncio.run(store.write_stream("big.bin", _multipart_body()))
     complete = next(c for c in client.calls if c[0] == "POST" and "uploadId" in c[1])
     xml = complete[3].decode()
-    assert "<PartNumber>1</PartNumber><ETag>&quot;part-one&quot;</ETag>" in xml or \
-           '<PartNumber>1</PartNumber><ETag>"part-one"</ETag>' in xml, xml
+    assert (
+        "<PartNumber>1</PartNumber><ETag>&quot;part-one&quot;</ETag>" in xml
+        or '<PartNumber>1</PartNumber><ETag>"part-one"</ETag>' in xml
+    ), xml
     assert "<ETag></ETag>" in xml, xml  # the part that answered without one
 
 
@@ -770,6 +834,7 @@ def test_exists_reports_an_unexpected_status_rather_than_absence():
 
 def test_an_abort_answered_404_is_not_an_orphan():
     """`NoSuchUpload` means there is nothing left to reclaim, so nothing to alarm about."""
+
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
             return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")

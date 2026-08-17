@@ -90,7 +90,7 @@ def test_idle_connection_receive_floor_is_at_most_32k(filename: str) -> None:
 
 def test_compiled_bitset_releases_build_only_route_storage() -> None:
     """A sealed route image should not retain registration and compiled copies."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     compile_groups = _function(source, "brt_compile_groups", "brt_compile")
     assert "PyMem_Free(self->routes)" in compile_groups
     assert "self->routes = NULL" in compile_groups

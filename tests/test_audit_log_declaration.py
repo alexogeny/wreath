@@ -79,13 +79,18 @@ def test_the_trail_declares_the_four_columns_a_record_needs():
     assert all(not column.null for column in declaration().columns)
 
 
+def test_the_trails_schema_claim_installs_the_guard_as_version_two():
+    component = declaration().schema_claim("audit_log")
+    assert component.target_version == 2
+    assert component.steps[0].statements == declaration().statements()
+    assert component.steps[1].statements == append_only_statements("audit_records")
+
+
 def test_a_records_stream_is_one_per_audited_row():
     # A stream per row rather than per table is what makes "everything that ever
     # happened to this row" a range scan, and it is also the unit an erasure
     # names.
-    change = Change(
-        table="public.photos", key="41", operation="update", actor="user:1", fields={}
-    )
+    change = Change(table="public.photos", key="41", operation="update", actor="user:1", fields={})
     assert change.subject == "public.photos:41"
 
 
@@ -107,6 +112,7 @@ def test_an_unqualified_trail_emits_unqualified_ddl():
     assert statements[0] == "REVOKE UPDATE, DELETE, TRUNCATE ON audit_records FROM PUBLIC"
     assert "audit_records_guard()" in statements[1]
     assert "ON audit_records" in statements[3]
+    assert "BEFORE TRUNCATE" in statements[5]
 
 
 def test_the_ddl_is_a_revoke_and_a_trigger_because_either_alone_escapes():
@@ -115,6 +121,8 @@ def test_the_ddl_is_a_revoke_and_a_trigger_because_either_alone_escapes():
     assert "CREATE OR REPLACE FUNCTION" in statements[1]
     assert statements[2].startswith("DROP TRIGGER IF EXISTS")
     assert "BEFORE UPDATE OR DELETE" in statements[3]
+    assert statements[4].startswith("DROP TRIGGER IF EXISTS")
+    assert "BEFORE TRUNCATE" in statements[5]
 
 
 def test_the_trigger_refuses_update_unconditionally_and_delete_conditionally():
@@ -256,9 +264,7 @@ def test_a_batched_record_carries_the_same_payload_a_single_one_does():
     assert args[3] == "41"
     # Sorted keys, so two records of the same change are byte-identical and a
     # reader diffing them sees a change rather than a re-ordering.
-    assert args[4] == json.dumps(
-        {"caption": "after", "exif_gps": REDACTED}, sort_keys=True
-    )
+    assert args[4] == json.dumps({"caption": "after", "exif_gps": REDACTED}, sort_keys=True)
 
 
 def test_a_value_json_cannot_render_becomes_a_string_rather_than_a_failure():

@@ -6,6 +6,7 @@ import pytest
 
 from wreath.pagination import (
     DEFAULT_SIZE,
+    CursorParams,
     Page,
     PageParams,
     page_params,
@@ -76,7 +77,16 @@ def test_page_params_clamps_and_falls_back():
     assert junk.page == 1 and junk.size == DEFAULT_SIZE
 
 
+def test_cursor_params_keeps_the_opaque_position_and_native_bounds():
+    from wreath.pagination import cursor_params
+
+    assert cursor_params(_Q("after=abc-_&size=9999&sort=-name")) == CursorParams(
+        after="abc-_", size=100, sort=("-name",)
+    )
+
+
 # --- ORM query shaping (needs the built package for the model layout) --------
+
 
 def _model():
     from wreath.orm import Mapped, Model, column
@@ -107,9 +117,7 @@ def _retrieval_model():
         id: Mapped[int] = column(Int64, primary_key=True)
         title: Mapped[str] = column(Text)
         embedding: Mapped[list] = column(Vector(3))
-        search: Mapped[bytes] = column(
-            TsVector("english", sources=("title",)), index="gin"
-        )
+        search: Mapped[bytes] = column(TsVector("english", sources=("title",)), index="gin")
 
     return Doc
 
@@ -186,6 +194,68 @@ async def test_paginate_prefers_the_efficient_count_when_available():
     assert all(projection != 1 for _, _, projection in session.calls)
 
 
+class _CursorSession:
+    def __init__(self, items):
+        self.items = items
+        self.queries = []
+
+    async def fetch(self, query):
+        self.queries.append(query)
+        return self.items[: query.limit_]
+
+
+@pytest.mark.asyncio
+async def test_cursor_pagination_adds_a_primary_key_tie_breaker_and_round_trips():
+    from wreath.pagination import paginate_cursor
+
+    Widget = _model()
+    first_session = _CursorSession(
+        [
+            {"id": 1, "name": "same"},
+            {"id": 2, "name": "same"},
+            {"id": 3, "name": "later"},
+        ]
+    )
+    first = await paginate_cursor(
+        first_session,
+        Widget.select(),
+        CursorParams(size=2, sort=("name",)),
+        allow_sort=("name",),
+    )
+    assert first.has_next and first.next
+    assert [
+        ordering.expression.column.python_name for ordering in first_session.queries[0].orderings
+    ] == [
+        "name",
+        "id",
+    ]
+
+    second_session = _CursorSession([{"id": 3, "name": "later"}])
+    second = await paginate_cursor(
+        second_session,
+        Widget.select(),
+        CursorParams(after=first.next, size=2, sort=("name",)),
+        allow_sort=("name",),
+    )
+    assert not second.has_next
+    assert len(second_session.queries[0].predicates) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_is_bound_to_its_sort_order():
+    from wreath.pagination import paginate_cursor
+
+    Widget = _model()
+    session = _CursorSession([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}])
+    first = await paginate_cursor(session, Widget.select(), CursorParams(size=1, sort=("name",)))
+    with pytest.raises(ValueError, match="invalid pagination cursor"):
+        await paginate_cursor(
+            _CursorSession([]),
+            Widget.select(),
+            CursorParams(after=first.next, size=1, sort=("-name",)),
+        )
+
+
 # --- what `wreath mutant` found nothing was standing on -----------------------
 
 
@@ -203,7 +273,9 @@ def test_the_ceilings_are_the_documented_numbers() -> None:
 
     assert (MAX_SIZE, MAX_PAGE) == (100, 10_000)
     assert page_params(_Q("page=999999&size=999999")) == PageParams(
-        page=10_000, size=100, sort=(),
+        page=10_000,
+        size=100,
+        sort=(),
     )
 
 
@@ -223,7 +295,9 @@ def test_parse_sort_drops_blanks_rather_than_producing_them() -> None:
 def test_a_blank_page_or_size_falls_back_rather_than_clamping_to_one() -> None:
     """`?page=` is absent, not zero: the default is 1 and 20, not 1 and 1."""
     assert page_params(_Q("page=&size=")) == PageParams(
-        page=1, size=DEFAULT_SIZE, sort=(),
+        page=1,
+        size=DEFAULT_SIZE,
+        sort=(),
     )
     assert page_params(_Q("page=%20&size=%20")).size == DEFAULT_SIZE
     # And `sort=` absent or blank is no sort at all, not a one-element tuple.
@@ -294,7 +368,7 @@ def test_a_filter_allow_list_narrows_below_the_default() -> None:
     from wreath.pagination import apply_filters, sortable_fields
 
     Widget = _model()
-    assert "id" in sortable_fields(Widget)          # the default would allow it
+    assert "id" in sortable_fields(Widget)  # the default would allow it
     with pytest.raises(ValueError):
         apply_filters(Widget.select(), {"id": 1}, allow=("name",))
     assert len(apply_filters(Widget.select(), {"id": 1}).predicates) == 1
@@ -313,8 +387,11 @@ async def test_paginate_applies_the_sort_and_honours_allow_sort() -> None:
     session = _FakeSession(items=[{"id": 1}], total=1)
 
     sorted_page = await paginate(
-        session, Widget.select(), PageParams(page=1, size=10, sort=("-name",)),
-        allow_sort=("name",), total=1,
+        session,
+        Widget.select(),
+        PageParams(page=1, size=10, sort=("-name",)),
+        allow_sort=("name",),
+        total=1,
     )
     assert sorted_page.total == 1
 
@@ -322,12 +399,18 @@ async def test_paginate_applies_the_sort_and_honours_allow_sort() -> None:
     # than quietly sorted by -- which is what forwarding `allow=` is for.
     with pytest.raises(ValueError):
         await paginate(
-            session, Widget.select(), PageParams(page=1, size=10, sort=("id",)),
-            allow_sort=("name",), total=1,
+            session,
+            Widget.select(),
+            PageParams(page=1, size=10, sort=("id",)),
+            allow_sort=("name",),
+            total=1,
         )
 
     # And with no sort the query is untouched, so the branch is pinned both ways.
     plain = await paginate(
-        session, Widget.select(), PageParams(page=1, size=10), total=1,
+        session,
+        Widget.select(),
+        PageParams(page=1, size=10),
+        total=1,
     )
     assert plain.total == 1

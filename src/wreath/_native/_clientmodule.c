@@ -17,6 +17,12 @@ static PyMethodDef client_methods[] = {
      "parse_chunk_size(line) -> int"},
     {"serialize_request", wreath_http_serialize_request, METH_VARARGS,
      "serialize_request(method, target, host, headers, body) -> bytes"},
+    {"_configure_fast_path", wreath_http_client_configure_fast_path,
+     METH_VARARGS, NULL},
+    {"_request_once", wreath_http_client_request_once, METH_VARARGS, NULL},
+    {"_request_default", wreath_http_client_request_default, METH_VARARGS, NULL},
+    {"_counters_new", wreath_http_client_counters_new, METH_NOARGS, NULL},
+    {"_counters_snapshot", wreath_http_client_counters_snapshot, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
 

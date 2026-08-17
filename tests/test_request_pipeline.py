@@ -18,7 +18,7 @@ from wreath.testing import TestClient
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_global_hooks_cover_miss_without_running_auth_or_route_middleware(
     mode: str,
 ) -> None:
@@ -113,7 +113,7 @@ async def test_public_route_skips_auth_and_classifies_once() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_protected_denial_runs_global_finalizers_but_not_route_middleware(
     mode: str,
 ) -> None:
@@ -206,20 +206,18 @@ async def test_security_finalizer_covers_auth_denial() -> None:
 
 
 @pytest.mark.asyncio
-async def test_protected_route_without_backend_has_routing_mode_parity() -> None:
-    statuses: list[int] = []
-    for mode in ("decision", "trie"):
-        app = Wreath(routing=mode)
+async def test_protected_route_without_backend_is_rejected() -> None:
+    app = Wreath(routing="policy")
 
-        @app.get("/private")
-        @roles("admin")
-        async def private(request: Any) -> str:
-            return "private"
+    @app.get("/private")
+    @roles("admin")
+    async def private(request: Any) -> str:
+        return "private"
 
-        async with TestClient(app) as client:
-            statuses.append((await client.get("/private")).status)
+    async with TestClient(app) as client:
+        status = (await client.get("/private")).status
 
-    assert statuses == [401, 401]
+    assert status == 401
 
 
 @pytest.mark.asyncio
@@ -272,7 +270,7 @@ async def test_global_security_finalizer_covers_static_files(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_explicit_pipeline_stages_run_in_cost_order(mode: str) -> None:
     events: list[str] = []
 

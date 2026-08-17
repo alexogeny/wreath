@@ -1356,3 +1356,9 @@ class Request:
         result = FormData(fields, {}, every)
         self._form = result
         return result
+
+
+# The framework's native activation seam uses this immutable, module-owned
+# layout to materialize the same public Request without executing its Python
+# initializer. Direct callers keep the ordinary Request(...) API above.
+_REQUEST_LAYOUT = _core.request_layout(Request)

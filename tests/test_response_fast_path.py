@@ -265,6 +265,11 @@ async def test_exact_response_bypasses_coercion_in_every_dispatch_shape(
         async def _wreath_response(self, status: Any, headers: Any, body: Any) -> None:
             calls.append((status, headers, body))
 
+        def _wreath_response_nowait(
+            self, status: Any, headers: Any, body: Any
+        ) -> None:
+            calls.append((status, headers, body))
+
     sync_auth = Wreath()
     sync_auth.configure_auth(BearerTokenBackend(lambda token: Identity("u")))
 

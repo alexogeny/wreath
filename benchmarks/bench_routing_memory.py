@@ -1,11 +1,11 @@
-"""Memory cost of each routing backend over an application's lifecycle.
+"""Memory cost of the application policy router over its lifecycle.
 
-Wallclock is only half the question, and for these backends it is the less
-interesting half: the compiled forms differ by orders of magnitude in size
-(see docs/plans/bitset-routing.md), while match time differs by a few percent.
-This measures the other half on the real 10,000-route benchmark application.
+Wallclock is only half the question. The historical compiled forms differed by
+orders of magnitude in size (see docs/plans/bitset-routing.md); applications now
+use the winning policy table. This measures its other half on the real
+10,000-route benchmark application.
 
-Per routing mode, in a *fresh subprocess* (resident memory is only meaningful in
+In a *fresh subprocess* (resident memory is only meaningful in
 isolation, and route registration happens at import):
 
 - ``rss_registered``   after importing the app, so routes exist but are not compiled
@@ -38,7 +38,7 @@ from pathlib import Path
 from time import perf_counter_ns
 from typing import Any
 
-MODES = ("decision", "trie", "bitset")
+MODES = ("policy",)
 
 
 def _proc_kb(field: str) -> int:
@@ -58,9 +58,9 @@ def _param_heavy_app(mode: str, routes: int, segmax: int, param: float) -> tuple
     """A synthetic parameter-heavy table: the shape the bitset is built for.
 
     The benchmark application is mostly static routes, and a fully literal route
-    is answered by the shared static dict without reaching any of the three
-    backends. That makes it the wrong table to see the compiled forms diverge on
-    -- so measure this one alongside it, not instead of it.
+    is answered by the policy table's static dict without reaching its grouped
+    masks. That makes it the wrong table to expose the parameter-heavy compiled
+    form, so measure this one alongside it, not instead of it.
     """
     import random
 

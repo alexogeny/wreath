@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import zlib
 from compression import zstd
 
@@ -15,6 +17,40 @@ from wreath._compression import (
     gzip_decompress,
     zstd_compress,
 )
+
+
+def test_wreath_imports_without_the_optional_cpython_zstd_module() -> None:
+    """Regression for the Linux 0.3.0 wheel smoke-test environment."""
+    script = """
+import sys
+sys.modules['_zstd'] = None
+
+from wreath import Wreath
+from wreath.compression import gzip_compress, zstd_compress
+from wreath.policy import CompressionPolicy
+
+Wreath()
+assert gzip_compress(b'wheel smoke')
+try:
+    CompressionPolicy()
+except RuntimeError as error:
+    assert 'CPython build with the optional _zstd module' in str(error)
+else:
+    raise AssertionError('zstd policy configuration did not refuse')
+try:
+    zstd_compress(b'wheel smoke')
+except RuntimeError as error:
+    assert 'use gzip' in str(error)
+else:
+    raise AssertionError('zstd compression did not refuse')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("level", range(10))

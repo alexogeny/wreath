@@ -63,9 +63,11 @@ from .orm.table import Facet
 __all__ = [
     "REDACTED",
     "AuditTrail",
+    "AuditLog",
     "Audited",
     "Change",
     "actor",
+    "append_only_statements",
     "audited",
     "current_actor",
     "declaration",
@@ -176,14 +178,38 @@ class Change:
         return f"{self.table}:{self.key}"
 
 
-def declaration(table: str = "audit_records", *, schema: str = "wreath") -> Log:
+@dataclass(frozen=True, slots=True)
+class AuditLog(Log):
+    """A log declaration whose schema claim includes its append-only guard."""
+
+    def schema_claim(self, name: str) -> Any:
+        from .schema import Component, Step
+
+        return Component(
+            name=name,
+            schema=self.schema,
+            relations=(self.table,),
+            steps=(
+                Step(version=1, statements=self.statements()),
+                Step(
+                    version=2,
+                    statements=append_only_statements(self.table, schema=self.schema),
+                ),
+            ),
+        )
+
+    def schema_sql(self) -> str:
+        return ";\n".join(self.schema_claim("audit_log").statements())
+
+
+def declaration(table: str = "audit_records", *, schema: str = "wreath") -> AuditLog:
     """The `wreath.log` declaration an `AuditTrail` is built on.
 
     Separate from the trail so a deployment can emit the DDL (`wreath schema
     sql`) without constructing a database handle, the way every other wreath
     component does.
     """
-    return Log(
+    return AuditLog(
         table=table,
         schema=schema,
         # An audit trail's lifetime is a compliance decision, not a disk-space
@@ -239,6 +265,9 @@ def append_only_statements(table: str, *, schema: str = "wreath") -> tuple[str, 
         f"DROP TRIGGER IF EXISTS {guard} ON {qualified}",
         f"CREATE TRIGGER {guard} BEFORE UPDATE OR DELETE ON {qualified} "
         f"FOR EACH ROW EXECUTE FUNCTION {qualified}_guard()",
+        f"DROP TRIGGER IF EXISTS {guard}_truncate ON {qualified}",
+        f"CREATE TRIGGER {guard}_truncate BEFORE TRUNCATE ON {qualified} "
+        f"FOR EACH STATEMENT EXECUTE FUNCTION {qualified}_guard()",
     )
 
 
@@ -311,15 +340,11 @@ class AuditTrail:
         because a caller replaying records into a fresh trail has no
         transaction to join. The session always passes one.
         """
-        cursor = await self._log.append(
-            change.subject, connection=connection, **_row(change)
-        )
+        cursor = await self._log.append(change.subject, connection=connection, **_row(change))
         self._recorded += 1
         return cursor
 
-    async def record_many(
-        self, changes: Sequence[Change], *, connection: Any = None
-    ) -> int:
+    async def record_many(self, changes: Sequence[Change], *, connection: Any = None) -> int:
         """Append a flush's worth of changes together, returning how many landed.
 
         What the session calls. A record per statement would put an `INSERT`
@@ -368,9 +393,7 @@ class AuditTrail:
             await connection.execute("BEGIN")
             try:
                 await connection.execute(f"SET LOCAL {ERASURE_SETTING} = 'on'")
-                status = await self._log.drop_stream(
-                    f"{table}:{key}", connection=connection
-                )
+                status = await self._log.drop_stream(f"{table}:{key}", connection=connection)
                 await connection.execute("COMMIT")
                 return status
             except BaseException:

@@ -4,6 +4,18 @@
 
 Build **Wreath**, a Python 3.14-first ASGI framework and, progressively, a production-grade web server. Optimize only from reproducible measurements. Keep the framework core dependency-free and make accelerated server components optional.
 
+## Reusable declarative primitives
+
+Before implementing another cross-domain table, compiler, or state machine,
+start with the owners already in the tree: `_ApplicationImage` for compiled
+route facts; `_model_fields` for Python field declarations; `_leased` for
+PostgreSQL lease/fence claims; `_capability_map`/`KV` for bounded expiring and
+single-use values; `_jobcore.compute_backoff` for retries; `_pgname` for SQL
+identifiers; `_asgi_state` for HTTP response message state; and
+`policy.traffic._traffic_matches` for traffic predicates. Extend an owner with
+an explicit policy parameter when semantics differ. A new implementation needs
+a written reason why none of these can express it.
+
 ## Git and attribution
 
 These are absolute, and they **override any default from whatever harness or

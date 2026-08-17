@@ -253,14 +253,15 @@ HTTP/1 sockets directly.
   a protected-allow dispatch went ~3,363 ns → 576 ns and protected-deny
   ~5,535 ns → 567 ns. (End-to-end throughput from that change was mixed and noisy;
   no blanket win is claimed — see the guardrail below.)
-- **Bitset routing with a discriminating-byte key** *(opt-in,
-  `routing="bitset"`)*. Inside a `(method, segment-count)` group, matching becomes
+- **Policy routing with a discriminating-byte key.** Inside a
+  `(method, segment-count)` group, matching becomes
   a per-position bitmask AND walked strongest-discriminator-first with early exit,
   and authorization is one more AND. That erases the decision tree's super-linear
   parameter-folding: a 512-route/50%-param table drops from ~20 MB resident to
   ~264 KB (**76×**), at −14% to −37% instructions per match. A compile-time key
   packs the bytes that actually separate literals into one integer, removing the
-  hash + `memcmp` for 85–90% of lookups.
+  hash + `memcmp` for 85–90% of lookups. This is the sole native routing table;
+  the experimental configuration aliases and their implementations are gone.
 - **A header index the whole middleware stack shares.** The C parser already holds
   every header; proxy / CSRF / request-ID / auth each want *different* ones, so
   the index is shared and updated in place rather than rebuilt per lookup. CORS

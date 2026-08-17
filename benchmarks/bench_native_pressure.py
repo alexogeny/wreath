@@ -684,14 +684,14 @@ def build_router_app(routes: int) -> Any:
                 f"/services/group-{leaf % 10}/resource-{leaf}/{{item_id}}"
             )(endpoint)
         protected.include_router(tenant)
-    app = Wreath(routing="decision")
+    app = Wreath(routing="policy")
     app.include_router(protected)
     return app
 
 
 def scenario_router_compile(warmup: int, trials: int) -> dict[str, Any]:
     counts = [5_000, 10_000]
-    params = {"route_counts": counts, "leaves_per_branch": 100, "routing": "decision"}
+    params = {"route_counts": counts, "leaves_per_branch": 100, "routing": "policy"}
     errors: list[str] = []
     per_count: dict[str, Any] = {}
     all_seconds: list[float] = []

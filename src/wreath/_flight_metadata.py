@@ -30,10 +30,12 @@ from ._flight_schema import (
 
 def build_metadata_image(app: Any) -> MetadataImage:
     """Introspect a compiled `Wreath` app into a canonical metadata image."""
-    from ._auth.requirements import merge_requirements, requirement_for
-    from .binding import inspect_handler
+    from ._auth.requirements import requirement_for
 
-    routes = getattr(app, "_routes", ())
+    image = app._application_image
+    routes = image.routes()
+    binding_specs = image.binding_specs()
+    requirements = image.requirements()
     databases = getattr(app, "_databases", {}) or {}
     orm_registries = getattr(app, "_orm_registries", {}) or {}
 
@@ -67,19 +69,9 @@ def build_metadata_image(app: Any) -> MetadataImage:
     raw_routes: list[dict[str, Any]] = []
     plan_keys: dict[tuple, dict[str, Any]] = {}
 
-    for definition in routes:
-        spec = None
-        try:
-            spec = inspect_handler(definition.endpoint, definition.path)
-        except TypeError:
-            # `inspect_handler` already returns None for anything it cannot
-            # inspect; the only thing it *raises* is TypeError, for a handler
-            # it judges invalid (`*args`/`**kwargs`, a bare `Session`). Such a
-            # route cannot serve either, so the app is already broken -- the
-            # image just declines to describe it rather than failing the build
-            # a second time. Anything else escaping is a bug in the inspector
-            # and is no longer swallowed here.
-            spec = None
+    for definition, spec, requirement in zip(
+        routes, binding_specs, requirements, strict=True
+    ):
 
         dep_names = sorted(
             {_callable_name(dep.fn) for dep in getattr(definition, "dependencies", ())}
@@ -92,9 +84,6 @@ def build_metadata_image(app: Any) -> MetadataImage:
         for name in mw_names:
             middleware.intern(name)
 
-        requirement = merge_requirements(
-            definition.requirement, requirement_for(definition.endpoint)
-        )
         auth_name = _auth_policy_name(requirement)
         if auth_name is not None:
             auth_policies.intern(auth_name)
@@ -107,7 +96,7 @@ def build_metadata_image(app: Any) -> MetadataImage:
                 {
                     "method": method.upper(),
                     "path": definition.path,
-                    "operation_id": _operation_id(definition, method),
+                    "operation_id": image.operation_id(definition, method),
                     "tags": tuple(getattr(definition, "tags", ())),
                     "dep_names": dep_names,
                     "mw_names": mw_names,
@@ -322,15 +311,6 @@ def _coverage(spec: Any) -> str:
     # handler is "mixed" (native transport + Python binding/handler), an
     # untyped request-only handler is "python".
     return "mixed" if spec is not None else "python"
-
-
-def _operation_id(definition: Any, method: str) -> str:
-    explicit = getattr(definition, "operation_id", None)
-    if explicit:
-        return str(explicit)
-    # Deterministic fallback mirroring the typegen/OpenAPI derivation shape.
-    path = definition.path.strip("/").replace("/", "_").replace("{", "").replace("}", "")
-    return f"{method.lower()}_{path}" if path else method.lower()
 
 
 def _ws_operation_id(path: str) -> str:

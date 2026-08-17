@@ -1083,11 +1083,11 @@ def test_the_bitset_figure_agrees_with_the_matching_it_illustrates() -> None:
     Each row claims how many segment tests its route survives; running the real
     table against the same request must pick the one row that survives them all.
     """
-    from wreath._native._core import BitsetRouteTable
+    from wreath._native._core import PolicyRouteTable
 
     from wreath._docs.figures import _COLUMNS, _ROUTES
 
-    table = BitsetRouteTable()
+    table = PolicyRouteTable()
     for route, _ in _ROUTES:
         table.add(route, "GET", route)
     matched = table.match("GET", "/orders/42/items")

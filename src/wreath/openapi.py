@@ -23,7 +23,7 @@ from typing import Any
 
 from .negotiation import PROTOBUF as _PROTOBUF
 from .protobuf import is_message as _is_message
-from .typegen.inspect import _Builder, _return_annotation, resolve_operation_ids
+from .typegen.inspect import _Builder, _return_annotation
 from .typegen.model import Model, TypeRef
 
 #: The protobuf media type wreath emits and documents. Spelled from
@@ -57,33 +57,7 @@ def _contract_candidates(app: Any, definition: Any, method: str) -> list[Any]:
     route middleware is filtered by the same `applies_to` predicate
     `compile_middleware` evaluates, against the same `MiddlewareRoute`.
     """
-    from ._auth.requirements import merge_requirements, requirement_for
-    from .middleware.base import MiddlewareRoute
-
-    globals_ = [
-        item[2]
-        for item in sorted(app._global_middleware, key=lambda item: (item[0], item[1]))
-    ]
-    route_scoped = [
-        item[2] for item in sorted(app._middleware, key=lambda item: (item[0], item[1]))
-    ]
-    requirement = merge_requirements(
-        definition.requirement, requirement_for(definition.endpoint)
-    )
-    route = MiddlewareRoute(
-        definition.path,
-        method,
-        definition.endpoint,
-        authenticated=bool(getattr(requirement, "authenticated", False)),
-    )
-    policy = app._http_policy
-    applicable = list(policy.components if policy is not None else ())
-    applicable.extend(globals_)
-    for item in (*route_scoped, *definition.middleware):
-        predicate = getattr(item, "applies_to", None)
-        if predicate is None or predicate(route):
-            applicable.append(item)
-    return applicable
+    return list(app._application_image.contract_candidates(definition, method))
 
 
 def _collect_contracts(app: Any, definition: Any, method: str) -> list[Any]:
@@ -285,7 +259,7 @@ def generate_openapi(
     image = app._application_image
     routes = list(image.routes())
     binding_specs = image.binding_specs()
-    resolved_ids, _diagnostics = resolve_operation_ids(routes)
+    resolved_ids, _diagnostics = image.operation_ids()
     paths: dict[str, dict[str, Any]] = {}
 
     for index, definition in enumerate(routes):

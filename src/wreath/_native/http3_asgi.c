@@ -894,6 +894,16 @@ h3_stream_wreath_response(
     return result;
 }
 
+/* HTTP/3 flow control can suspend here, so the common application entry point
+ * keeps returning that awaitable.  The method exists on every native protocol
+ * so dispatch does not branch on transport type. */
+static PyObject *
+h3_stream_wreath_response_nowait(
+    WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    return h3_stream_wreath_response(self, args, nargs);
+}
+
 static PyObject *
 h3_stream_wreath_start(
     WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs)
@@ -925,6 +935,9 @@ static PyMethodDef h3_stream_methods[] = {
     {"_receive", h3_stream_receive, METH_NOARGS, NULL},
     {"_send", h3_stream_send, METH_O, NULL},
     {"_wreath_response", (PyCFunction)(void (*)(void))h3_stream_wreath_response,
+     METH_FASTCALL, NULL},
+    {"_wreath_response_nowait",
+     (PyCFunction)(void (*)(void))h3_stream_wreath_response_nowait,
      METH_FASTCALL, NULL},
     {"_wreath_stream_start", (PyCFunction)(void (*)(void))h3_stream_wreath_start,
      METH_FASTCALL, NULL},

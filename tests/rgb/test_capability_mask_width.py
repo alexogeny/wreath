@@ -13,7 +13,7 @@ import pytest
 from wreath._native import _core
 from wreath.app import Wreath
 
-_TABLES = [_core.DecisionRouteTable]
+_TABLES = [_core.PolicyRouteTable]
 _BUILDERS = [_core.build_capability_mask]
 
 #: Wider than a machine word on purpose: index 0 is `authenticated`, so a role
@@ -52,6 +52,68 @@ def test_route_table_matches_on_a_bit_past_64(table_type: type) -> None:
     assert table.match("GET", "/wide", authenticated | high) == (handler, None)
     assert table.match("GET", "/wide", authenticated | other) is None
     assert table.match("GET", "/wide", authenticated) is None
+
+
+def test_parameter_and_dynamic_routes_keep_wide_capability_masks() -> None:
+    required = 1 | (1 << 100)
+    table = _core.PolicyRouteTable()
+    parameter = object()
+    greedy = object()
+    hosted = object()
+    table.add("/items/{item}", "GET", parameter, (required,))
+    table.add_dynamic("/files/{rest:path}", "GET", None, greedy, (required,))
+    table.add_dynamic(
+        "/items/{item}", "GET", "{tenant}.example.test", hosted, (required,)
+    )
+    table.compile()
+
+    assert table.match("GET", "/items/42", required) == (
+        parameter,
+        {"item": "42"},
+    )
+    classification, ticket = table.classify_request(
+        "GET", "/items/42", "acme.example.test"
+    )
+    assert classification == 2
+    assert table.resolve(ticket, required) == (
+        hosted,
+        {"item": "42", "tenant": "acme"},
+    )
+    classification, ticket = table.classify_request(
+        "GET", "/files/reports/annual.pdf", "elsewhere.test"
+    )
+    assert classification == 2
+    assert table.resolve(ticket, required) == (
+        greedy,
+        {"rest": "reports/annual.pdf"},
+    )
+
+
+def test_identity_resolution_builds_a_wide_mask_inside_native_code() -> None:
+    authenticated = 1
+    high = 1 << 100
+    table = _core.PolicyRouteTable()
+    handler = object()
+    table.add("/wide/{item}", "GET", handler, (authenticated | high,))
+    classification, ticket = table.classify("GET", "/wide/42")
+
+    assert classification == 2
+    descriptor = (authenticated, {"high": high}, {})
+    assert table.resolve_identity(ticket, descriptor, {"high"}, set()) == (
+        handler,
+        {"item": "42"},
+    )
+    assert table.resolve_identity(ticket, descriptor, set(), set()) is None
+
+
+@pytest.mark.parametrize("clause", [-1, "permission"])
+def test_access_clauses_refuse_invalid_masks_at_registration(clause: object) -> None:
+    table = _core.PolicyRouteTable()
+    with pytest.raises(
+        ValueError,
+        match=r"access_clauses\[0\] must be a non-negative int",
+    ):
+        table.add("/invalid", "GET", object(), (clause,))
 
 
 def test_application_compiles_more_than_64_distinct_capabilities() -> None:

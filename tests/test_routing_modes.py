@@ -1,12 +1,13 @@
-"""The Wreath app must behave identically under both routing backends."""
+"""The fused policy router is Wreath's sole routing implementation."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from wreath import JSONResponse, Wreath
+from wreath._native import _core
 from wreath._routing import Router as CompiledRouter
 from wreath._routing import RoutingMode
 
@@ -56,7 +57,7 @@ def _build(mode: RoutingMode) -> Wreath:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_static_and_dynamic(mode: RoutingMode) -> None:
     app = _build(mode)
     assert (await invoke(app, "/"))[1]["body"] == b'{"page":"home"}'
@@ -66,7 +67,7 @@ async def test_static_and_dynamic(mode: RoutingMode) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_head_uses_get(mode: RoutingMode) -> None:
     app = _build(mode)
     sent = await invoke(app, "/users/42", method="HEAD")
@@ -75,11 +76,9 @@ async def test_head_uses_get(mode: RoutingMode) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
+@pytest.mark.parametrize("mode", ["policy"])
 async def test_a_method_miss_is_405_under_every_backend(mode: RoutingMode) -> None:
-    """The 404-vs-405 split is derived by re-classifying the path under each
-    registered method, so it has to agree across all three backends -- including
-    the trie, whose `classify` is a shim over `match`."""
+    """The 404-vs-405 split reclassifies under each registered method."""
     app = _build(mode)
 
     @app.route("/users/{uid}", methods=("DELETE",))
@@ -96,15 +95,29 @@ async def test_a_method_miss_is_405_under_every_backend(mode: RoutingMode) -> No
     assert b"allow" not in dict(missing[0]["headers"])
 
 
-def test_default_routing_mode_is_bitset() -> None:
+def test_default_routing_mode_uses_the_policy_table() -> None:
     app = Wreath()
-    assert app._routing == "bitset"
-    assert app.router._mode == "bitset"
+    assert app._routing == "policy"
+    assert app.router._mode == "policy"
+    assert type(app.router._table).__name__ == "PolicyRouteTable"
+
+
+def test_native_module_exports_only_the_canonical_route_table() -> None:
+    assert hasattr(_core, "PolicyRouteTable")
+    assert not hasattr(_core, "BitsetRouteTable")
+    assert not hasattr(_core, "DecisionRouteTable")
+    assert not hasattr(_core, "RouteTable")
 
 
 def test_unknown_mode_rejected() -> None:
-    with pytest.raises(ValueError, match="unknown routing mode"):
-        Wreath(routing="quantum")  # type: ignore
+    with pytest.raises(ValueError, match="unknown routing mode 'quantum'; use 'policy'"):
+        Wreath(routing=cast(Any, "quantum"))
+
+
+@pytest.mark.parametrize("mode", ["bitset", "decision", "trie"])
+def test_removed_routing_mode_aliases_are_rejected(mode: str) -> None:
+    with pytest.raises(ValueError, match=f"unknown routing mode '{mode}'; use 'policy'"):
+        Wreath(routing=cast(Any, mode))
 
 
 @pytest.mark.parametrize(
@@ -131,7 +144,7 @@ def test_a_final_greedy_path_placeholder_is_accepted() -> None:
     router.add("/assets/{rest:path}", "GET", handler)
 
 
-@pytest.mark.parametrize("mode", ["decision", "bitset"])
+@pytest.mark.parametrize("mode", ["policy"])
 def test_classifying_backends_issue_and_resolve_protected_tickets(
     mode: RoutingMode,
 ) -> None:
@@ -147,3 +160,71 @@ def test_classifying_backends_issue_and_resolve_protected_tickets(
         handler,
         {"item": "42"},
     )
+
+
+def test_policy_table_orders_host_static_and_greedy_routes() -> None:
+    router = CompiledRouter("policy")
+
+    async def fallback(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    async def manifest(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    async def tenant(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    router.add("/assets/{rest:path}", "GET", fallback)
+    router.add("/assets/manifest.json", "GET", manifest)
+    router.add("/assets/{name}", "GET", tenant, host="{account}.example.test")
+    router.compile()
+
+    assert router.classify_request(
+        "GET", "/assets/logo.svg", "acme.example.test"
+    ) == (1, (tenant, {"name": "logo.svg", "account": "acme"}))
+    assert router.classify_request(
+        "GET", "/assets/manifest.json", "elsewhere.test"
+    ) == (1, (manifest, None))
+    assert router.classify_request(
+        "GET", "/assets/css/site.css", "elsewhere.test"
+    ) == (1, (fallback, {"rest": "css/site.css"}))
+
+
+@pytest.mark.parametrize(
+    ("path", "host", "request_path", "request_host", "params"),
+    [
+        (
+            "/private/{rest:path}",
+            None,
+            "/private/reports/annual.pdf",
+            "example.test",
+            {"rest": "reports/annual.pdf"},
+        ),
+        (
+            "/private/{item}",
+            "{tenant}.example.test",
+            "/private/42",
+            "acme.example.test",
+            {"item": "42", "tenant": "acme"},
+        ),
+    ],
+)
+def test_dynamic_protected_routes_resolve_the_native_continuation(
+    path: str,
+    host: str | None,
+    request_path: str,
+    request_host: str,
+    params: dict[str, str],
+) -> None:
+    required = 4
+    router = CompiledRouter("policy")
+    router.add(path, "GET", handler, (required,), host=host)
+    router.compile()
+
+    classification, ticket = router.classify_request(
+        "GET", request_path, request_host
+    )
+
+    assert classification == 2
+    assert router.resolve(ticket, 0) is None
+    assert router.resolve(ticket, required) == (handler, params)

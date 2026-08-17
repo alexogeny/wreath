@@ -37,6 +37,11 @@ parse_response_head = _client.parse_response_head
 response_framing = _client.response_framing
 response_keeps_alive = _client.response_keeps_alive
 parse_chunk_size = _client.parse_chunk_size
+configure_fast_path = _client._configure_fast_path
+request_once = _client._request_once
+request_default = _client._request_default
+new_counters = _client._counters_new
+counter_snapshot = _client._counters_snapshot
 
 
 def serialize_request(

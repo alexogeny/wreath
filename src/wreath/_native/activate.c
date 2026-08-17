@@ -1,6 +1,148 @@
 /* Execute a startup-compiled path-only scalar activation plan in one C call. */
 #include "activate.h"
 
+/* The framework materializes its public Request at the handler-activation
+ * boundary.  Its lazy fields intentionally remain unassigned; everything
+ * below merely performs the exact slot initialization Request.__init__ would
+ * otherwise execute as a Python frame.  Layout state belongs to the capsule
+ * created by request_layout(), not to this extension process-wide. */
+typedef struct {
+    PyTypeObject *type;
+    PyObject *client_source;
+    Py_ssize_t scope;
+    Py_ssize_t context;
+    Py_ssize_t receive;
+    Py_ssize_t client_source_slot;
+    Py_ssize_t app;
+    Py_ssize_t header_map;
+    Py_ssize_t header_scanned;
+    Py_ssize_t path_params;
+    Py_ssize_t policy_mask;
+    Py_ssize_t identity;
+    Py_ssize_t route_outcome;
+    Py_ssize_t state;
+    Py_ssize_t limits;
+} RequestLayout;
+
+#define REQUEST_LAYOUT_CAPSULE "wreath._core.RequestLayout.v1"
+#define REQUEST_SLOT(object, offset) \
+    (*(PyObject **)((char *)(object) + (offset)))
+
+static int
+request_slot_offset(PyTypeObject *type, const char *name, Py_ssize_t *out)
+{
+    PyObject *descr = type->tp_dict == NULL
+        ? NULL : PyDict_GetItemString(type->tp_dict, name);
+    if (descr == NULL || !PyObject_TypeCheck(descr, &PyMemberDescr_Type)) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "%s has no __slots__ member %s; Request and the native activation "
+            "kernel are out of step and the extension must be rebuilt",
+            type->tp_name, name);
+        return -1;
+    }
+    *out = ((PyMemberDescrObject *)descr)->d_member->offset;
+    return 0;
+}
+
+static void
+request_layout_free(PyObject *capsule)
+{
+    RequestLayout *layout = PyCapsule_GetPointer(
+        capsule, REQUEST_LAYOUT_CAPSULE);
+    if (layout == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    Py_DECREF(layout->type);
+    Py_DECREF(layout->client_source);
+    PyMem_Free(layout);
+}
+
+PyObject *
+wreath_request_layout(PyObject *Py_UNUSED(module), PyObject *type_object)
+{
+    if (!PyType_Check(type_object)) {
+        PyErr_SetString(PyExc_TypeError, "request_layout expects a Request type");
+        return NULL;
+    }
+    PyTypeObject *type = (PyTypeObject *)type_object;
+    RequestLayout *layout = PyMem_Calloc(1, sizeof(*layout));
+    if (layout == NULL) return PyErr_NoMemory();
+    layout->type = (PyTypeObject *)Py_NewRef(type_object);
+    layout->client_source = PyUnicode_FromString("socket");
+#define REQUEST_OFFSET(field, name) \
+    request_slot_offset(type, (name), &layout->field) < 0
+    if (layout->client_source == NULL ||
+        REQUEST_OFFSET(scope, "_scope") ||
+        REQUEST_OFFSET(context, "_context") ||
+        REQUEST_OFFSET(receive, "_receive") ||
+        REQUEST_OFFSET(client_source_slot, "_client_source") ||
+        REQUEST_OFFSET(app, "_app") ||
+        REQUEST_OFFSET(header_map, "_header_map") ||
+        REQUEST_OFFSET(header_scanned, "_header_scanned") ||
+        REQUEST_OFFSET(path_params, "_path_params") ||
+        REQUEST_OFFSET(policy_mask, "_policy_mask") ||
+        REQUEST_OFFSET(identity, "_identity") ||
+        REQUEST_OFFSET(route_outcome, "_route_outcome") ||
+        REQUEST_OFFSET(state, "_state") ||
+        REQUEST_OFFSET(limits, "_limits")) {
+        Py_DECREF(layout->type);
+        Py_XDECREF(layout->client_source);
+        PyMem_Free(layout);
+        return NULL;
+    }
+#undef REQUEST_OFFSET
+    return PyCapsule_New(
+        layout, REQUEST_LAYOUT_CAPSULE, request_layout_free);
+}
+
+static void
+request_slot_init(PyObject *request, Py_ssize_t offset, PyObject *value)
+{
+    REQUEST_SLOT(request, offset) = Py_NewRef(value);
+}
+
+PyObject *
+wreath_request_new(PyObject *Py_UNUSED(module), PyObject *const *args,
+                   Py_ssize_t nargs)
+{
+    if (nargs != 6 && nargs != 7) {
+        PyErr_Format(PyExc_TypeError,
+                     "request_new expected 6 or 7 arguments, got %zd", nargs);
+        return NULL;
+    }
+    RequestLayout *layout = PyCapsule_GetPointer(
+        args[0], REQUEST_LAYOUT_CAPSULE);
+    if (layout == NULL) return NULL;
+    PyObject *request = layout->type->tp_alloc(layout->type, 0);
+    if (request == NULL) return NULL;
+    if (PyDict_Check(args[1])) {
+        request_slot_init(request, layout->scope, args[1]);
+        request_slot_init(request, layout->context, Py_None);
+    }
+    else {
+        request_slot_init(request, layout->scope, Py_None);
+        request_slot_init(request, layout->context, args[1]);
+    }
+    request_slot_init(request, layout->receive, args[2]);
+    request_slot_init(request, layout->client_source_slot,
+                      layout->client_source);
+    request_slot_init(request, layout->app, args[5]);
+    request_slot_init(request, layout->header_map, Py_None);
+    request_slot_init(request, layout->header_scanned, Py_False);
+    request_slot_init(request, layout->path_params, args[3]);
+    request_slot_init(
+        request, layout->policy_mask,
+        Py_GetConstantBorrowed(Py_CONSTANT_ZERO));
+    request_slot_init(
+        request, layout->identity, nargs == 7 ? args[6] : Py_None);
+    request_slot_init(request, layout->route_outcome, Py_None);
+    request_slot_init(request, layout->state, Py_None);
+    request_slot_init(request, layout->limits, args[4]);
+    return request;
+}
+
 enum { ACTIVATE_STR = 0, ACTIVATE_INT = 1, ACTIVATE_FLOAT = 2, ACTIVATE_BOOL = 3 };
 
 static int

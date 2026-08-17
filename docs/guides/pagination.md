@@ -47,6 +47,35 @@ The three query parameters are bound **on the handler**, and the bounds come fro
 so an unbounded page number is a full scan a caller can ask for at will; past
 that depth, filter on a keyset instead.
 
+## Keyset pagination for deep or changing lists
+
+Use `cursor_params` and `paginate_cursor` when a list can grow while a client
+walks it, or when `OFFSET` would become expensive:
+
+```python
+from wreath.binding import Depends
+from wreath.pagination import CursorParams, cursor_params, paginate_cursor
+
+@app.get("/orders/feed")
+async def order_feed(
+    request,
+    params: CursorParams = Depends(cursor_params),
+):
+    page = await paginate_cursor(
+        session,
+        Order.select(),
+        params,
+        allow_sort=("created_at",),
+    )
+    return page.as_dict()
+```
+
+The first request has no `after`; the next request sends the returned `next`
+value unchanged. Every requested ordering automatically gains all primary-key
+columns as tie-breakers, so equal timestamps neither repeat nor disappear. The
+opaque cursor is bound to that exact ordering and an altered or cross-list token
+is a client-safe `400`, as is a sort/filter name outside its allow-list.
+
 
 ## Bind the query parameters
 

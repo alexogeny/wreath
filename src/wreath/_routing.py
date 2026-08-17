@@ -1,21 +1,14 @@
-"""Routing with three interchangeable compiled backends.
+"""Routing through one capability-aware native policy table.
 
-The `"decision"` backend compiles the route set into a decision tree that
-tests the cheapest, most-discriminating feature first (HTTP method, then segment
-count, then selected segment values) so a request classifies in a few hash
-lookups and only one route is fully verified. The `"trie"` backend keeps the
-earlier left-to-right segment trie.
+The policy table groups routes by method and segment count, then intersects
+compiled literal, parameter, and capability masks in strongest-discriminator
+order. It returns either a public route or an opaque protected continuation;
+authentication resolves that continuation without routing a second time or
+exposing a handler first.
 
-The default `"bitset"` backend gives every route in a (method, segment-count) group a
-bit and intersects one mask per segment position, so a parameter route no longer
-folds into every literal branch the way the decision tree needs it to. That
-folding is what makes the tree grow super-linearly with the parameter fraction;
-the bitset stays linear. See `docs/plans/bitset-routing.md` for the
-measurements.
-
-All three are C, and all three answer identically — the tests route one corpus
-through each and compare, so an input they disagree on is a defect in whichever
-one is odd.
+`PolicyRouteTable` is the sole implementation and `"policy"` is the sole mode.
+Old experimental mode spellings are refused at construction instead of
+silently selecting a compatibility path.
 """
 
 from __future__ import annotations
@@ -45,16 +38,7 @@ Handler = Callable[..., Awaitable[Any] | Any]
 #: declared handlers at registration and reloaded with compiled ones at startup.
 CompiledHandler = Callable[["Request"], Awaitable[Any] | Any]
 
-RoutingMode = Literal["decision", "trie", "bitset"]
-
-_TABLES: dict[str, Any] = {
-    "decision": _core.DecisionRouteTable,
-    "trie": _core.RouteTable,
-    "bitset": _core.BitsetRouteTable,
-}
-
-#: Backends carrying the full classify/resolve protocol; "trie" matches only.
-_CLASSIFYING = frozenset({"decision", "bitset"})
+RoutingMode = Literal["policy"]
 
 
 def check_placeholders(path: str) -> None:
@@ -64,7 +48,7 @@ def check_placeholders(path: str) -> None:
     braces. A final `{key:path}` placeholder is the one supported converter and
     greedily captures the remaining path. Reject partial braces, empty names,
     unknown converters, and non-final greedy placeholders at registration so
-    the three routing backends cannot interpret a malformed declaration differently.
+    the policy compiler never has to guess at a malformed declaration.
 
     Raises:
         ValueError: A placeholder is malformed or uses an unsupported converter.
@@ -95,13 +79,11 @@ def check_placeholders(path: str) -> None:
 class Router:
     __slots__ = ("_mode", "_table")
 
-    def __init__(self, mode: RoutingMode = "bitset") -> None:
-        try:
-            table_type = _TABLES[mode]
-        except KeyError:
-            raise ValueError(f"unknown routing mode: {mode!r}") from None
-        self._mode = mode
-        self._table = table_type()
+    def __init__(self, mode: RoutingMode = "policy") -> None:
+        if mode != "policy":
+            raise ValueError(f"unknown routing mode {mode!r}; use 'policy'")
+        self._mode = "policy"
+        self._table = _core.PolicyRouteTable()
 
     def compile(self) -> None:
         """Eagerly compile a backend that exposes a startup compiler."""
@@ -115,49 +97,48 @@ class Router:
         method: str,
         handler: Handler,
         access_clauses: tuple[int, ...] = (0,),
+        *,
+        host: str | None = None,
     ) -> None:
         check_placeholders(path)
         table: Any = self._table
-        if self._mode in _CLASSIFYING:
-            table.add(path, method.upper(), handler, access_clauses)
+        if host is not None or ":path}" in path:
+            table.add_dynamic(
+                path,
+                method.upper(),
+                None if host is None else host.lower(),
+                handler,
+                access_clauses,
+            )
         else:
-            table.add(path, method.upper(), handler)
+            table.add(path, method.upper(), handler, access_clauses)
 
     def classify(self, method: str, path: str) -> tuple[int, Any]:
         """Classify one path traversal into miss, public match, or protected ticket.
 
-        The `"trie"` backend stores no capability clauses, so it has no protected
-        class to report and this shim answers every hit as a public match. Nothing
-        is lost by that: a trie route's requirement is enforced by the dispatcher's
-        authorization stage instead, which is the branch `_CLASSIFYING` selects.
+        Every route follows this protocol.
         """
-        if self._mode in _CLASSIFYING:
-            table: Any = self._table
-            return table.classify(method, path)
-        matched = self._table.match(method, path)
-        return (0, None) if matched is None else (1, matched)
+        table: Any = self._table
+        return table.classify(method, path)
+
+    def classify_request(self, method: str, path: str, host: str) -> tuple[int, Any]:
+        """Classify host, ordinary, and greedy route facts in precedence order."""
+        table: Any = self._table
+        return table.classify_request(method, path, host)
 
     def resolve(self, ticket: Any, caller_mask: int) -> Any:
         """Resolve a protected ticket without restarting path search.
 
-        The `"trie"` shim returns its argument unchanged rather than filtering on
-        `caller_mask`, because `classify` above issues no ticket for that backend.
-        The pair keeps one shape for a caller that does not branch on the mode.
+        The continuation was produced by this same table and is never rerouted.
         """
-        if self._mode in _CLASSIFYING:
-            table: Any = self._table
-            return table.resolve(ticket, caller_mask)
-        return ticket
+        table: Any = self._table
+        return table.resolve(ticket, caller_mask)
 
     def match(
         self, method: str, path: str, caller_mask: int = 0
     ) -> tuple[Handler | None, dict[str, str] | None]:
         table: Any = self._table
-        matched = (
-            table.match(method, path, caller_mask)
-            if self._mode in _CLASSIFYING
-            else table.match(method, path)
-        )
+        matched = table.match(method, path, caller_mask)
         if matched is None:
             return None, None
         return matched

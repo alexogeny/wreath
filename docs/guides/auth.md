@@ -178,6 +178,21 @@ vocabulary. `wreath doctor routes` reports declared, unknown, and currently
 unused actions, which turns coverage into a reviewable artifact rather than a
 second hand-maintained list.
 
+For a Cedar schema file, compile it alongside the policies:
+
+```python
+from wreath.authorization import CedarPolicies, CedarSchema
+
+schema = CedarSchema(Path("permissions/schema.cedarschema").read_text())
+engine = CedarPolicies(policy_source, schema=schema)
+```
+
+This rejects unknown actions and nested context attributes during application
+construction. An action declared `in ["document"]` becomes an `Action` parent
+in the same native entity graph as every other hierarchy, so a policy scoped to
+`action in Action::"document"` needs no caller-supplied action entities and no
+request-time schema interpretation.
+
 The default mappers model the common case: the authenticated identity becomes
 the principal, its roles become `Role::"..."` parents (so `principal in
 Role::"editor"` works with no further wiring), and the request method and path
@@ -188,9 +203,9 @@ without writing a policy; see [Second factors](second-factors.md). Forbid
 overrides permit, the default is deny, and a
 policy that errors is skipped and reported in the decision's diagnostics —
 never silently satisfied. The engine covers the Cedar core. Cedar extension
-constructor syntax (`ip`, `decimal`, `datetime`) and schema validation are not
-implemented and fail loudly at parse time; Wreath time policy uses the core i64
-model described below, so the compiled tape carries it. A
+constructor syntax (`ip`, `decimal`, `datetime`) is not implemented and fails
+loudly at parse time; Wreath time policy uses the core i64 model described
+below, so the compiled tape carries it. A
 different evaluator can be swapped in through the same `CedarEngine` protocol
 the built-in engine satisfies.
 

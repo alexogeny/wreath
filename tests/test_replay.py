@@ -128,10 +128,7 @@ async def test_segmentation_does_not_change_the_owned_response(protocol_cls: typ
 @proto
 @pytest.mark.asyncio
 async def test_body_request_replays(protocol_cls: type) -> None:
-    post = (
-        b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
-        b"Connection: close\r\n\r\nhello"
-    )
+    post = b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
     rec = record_transport_segments([post])
     result = await replay_transport(_app(), rec, protocol_cls=protocol_cls)
     assert b"hello" in result.response
@@ -255,3 +252,44 @@ async def test_plan_skip_reports_route_resolution() -> None:
     assert hit.note == "route matched"
     assert miss.note == "no route matched"
     assert hit.body == b"" and hit.status == 0
+
+
+@pytest.mark.asyncio
+async def test_plan_skip_resolves_a_protected_route_without_authorizing_it() -> None:
+    from wreath.authorization import authorize
+
+    app = wreath.Wreath()
+
+    @app.get("/protected")
+    @authorize(action="read", resource='Document::"1"')
+    async def protected(request):
+        return "secret"
+
+    result = await replay_endpoint_plan(
+        app, CanonicalRequest("GET", "/protected"), mode=PlanMode.SKIP
+    )
+    assert result.note == "route matched"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_replay_records_object_store_crossings() -> None:
+    from wreath.recording import BoundaryTrace
+
+    app = wreath.Wreath()
+    store = app.objects("documents", backend="memory")
+    await store.write("report", b"approved")
+
+    @app.get("/report")
+    async def report(request):
+        body = await app.state.objects_documents.read("report")
+        return wreath.response.TextResponse(body.decode())
+
+    trace = BoundaryTrace(8)
+    result = await replay_endpoint_plan(
+        app,
+        CanonicalRequest("GET", "/report"),
+        mode=PlanMode.INVOKE,
+        trace=trace,
+    )
+    assert result.status == 200
+    assert [(event.seam, event.target) for event in trace.events] == [(6, "documents")]

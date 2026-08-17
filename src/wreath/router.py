@@ -32,6 +32,8 @@ from ._routing import Handler, check_placeholders
 from .binding import Depends
 from .middleware.base import Middleware
 
+_EMPTY_REQUIREMENT = AuthRequirement()
+
 
 def _prefix(value: str) -> str:
     if not value:
@@ -44,14 +46,23 @@ def _prefix(value: str) -> str:
 
 
 def _path(prefix: str, path: str) -> str:
-    if not path.startswith("/"):
-        raise ValueError("route paths must begin with '/'")
-    check_placeholders(path)
+    _validate_route_path(path)
     if not prefix:
         return path
     if path == "/":
         return prefix or "/"
     return prefix + path
+
+
+def _validate_route_path(path: str) -> None:
+    if not path.startswith("/"):
+        raise ValueError("route paths must begin with '/'")
+    check_placeholders(path)
+
+
+def _validate_status_code(status_code: int) -> None:
+    if not 100 <= status_code <= 599:
+        raise ValueError("status_code must be between 100 and 599")
 
 
 def _permission_requirement(permissions: Iterable[str]) -> AuthRequirement:
@@ -61,6 +72,61 @@ def _permission_requirement(permissions: Iterable[str]) -> AuthRequirement:
     return AuthRequirement(
         authenticated=True,
         permission_checks=(SetRequirement(values, "all"),),
+    )
+
+
+def _route_definition(
+    path: str,
+    endpoint: Handler,
+    *,
+    methods: Iterable[str],
+    middleware: Iterable[Middleware] = (),
+    tags: Iterable[str] = (),
+    summary: str | None = None,
+    dependencies: Iterable[Depends] = (),
+    permissions: Iterable[str] = (),
+    requirement: AuthRequirement = _EMPTY_REQUIREMENT,
+    operation_id: str | None = None,
+    response_only: bool = False,
+    status_code: int = 200,
+    response_description: str = "Successful response",
+    response_media_type: str = "application/json",
+    responses: Mapping[int, Any] | None = None,
+    deprecated: bool = False,
+    include_in_schema: bool = True,
+    security: Mapping[str, Iterable[str]] | None = None,
+    name: str | None = None,
+    host: str | None = None,
+    cancel_on_disconnect: bool | None = None,
+) -> RouteDefinition:
+    """Normalize one route declaration into the sole immutable route record.
+
+    `Router` and `Wreath` differ in where they store the result, not in what a
+    declaration means. Keeping normalization here prevents their decorator
+    surfaces, router inclusion, and startup compiler from growing independent
+    interpretations of methods, permissions, responses, or security metadata.
+    """
+    return RouteDefinition(
+        path=path,
+        methods=tuple(method.upper() for method in methods),
+        endpoint=endpoint,
+        middleware=tuple(middleware),
+        tags=tuple(tags),
+        summary=summary,
+        dependencies=tuple(dependencies),
+        requirement=merge_requirements(requirement, _permission_requirement(permissions)),
+        operation_id=operation_id,
+        response_only=response_only,
+        status_code=status_code,
+        response_description=response_description,
+        response_media_type=response_media_type,
+        responses=tuple((int(code), spec) for code, spec in (responses or {}).items()),
+        deprecated=deprecated,
+        include_in_schema=include_in_schema,
+        security=tuple((key, tuple(scopes)) for key, scopes in (security or {}).items()),
+        name=name,
+        host=host,
+        cancel_on_disconnect=cancel_on_disconnect,
     )
 
 
@@ -341,39 +407,32 @@ class Router:
             ValueError: The path does not begin with a slash.
         """
         full_path = _path(self._prefix, path)
-        route_methods = tuple(method.upper() for method in methods)
-        route_middleware = self._middleware + tuple(middleware)
-        route_tags = self._tags + tuple(tags)
-        route_dependencies = self._dependencies + tuple(dependencies)
-        requirement = merge_requirements(self._requirement, _permission_requirement(permissions))
-        if not 100 <= status_code <= 599:
-            raise ValueError("status_code must be between 100 and 599")
-        response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
-        route_security = tuple((name, tuple(scopes)) for name, scopes in (security or {}).items())
+        _validate_status_code(status_code)
 
         def register(handler: Handler) -> Handler:
             self._routes.append(
-                RouteDefinition(
+                _route_definition(
                     full_path,
-                    route_methods,
                     handler,
-                    route_middleware,
-                    route_tags,
-                    summary,
-                    route_dependencies,
-                    requirement,
-                    operation_id,
-                    response_only,
-                    status_code,
-                    response_description,
-                    response_media_type,
-                    response_specs,
-                    deprecated,
-                    include_in_schema,
-                    route_security,
-                    name,
-                    host,
-                    cancel_on_disconnect,
+                    methods=methods,
+                    middleware=(*self._middleware, *middleware),
+                    tags=(*self._tags, *tags),
+                    summary=summary,
+                    dependencies=(*self._dependencies, *dependencies),
+                    permissions=permissions,
+                    requirement=self._requirement,
+                    operation_id=operation_id,
+                    response_only=response_only,
+                    status_code=status_code,
+                    response_description=response_description,
+                    response_media_type=response_media_type,
+                    responses=responses,
+                    deprecated=deprecated,
+                    include_in_schema=include_in_schema,
+                    security=security,
+                    name=name,
+                    host=host,
+                    cancel_on_disconnect=cancel_on_disconnect,
                 )
             )
             return handler

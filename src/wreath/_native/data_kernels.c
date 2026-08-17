@@ -2776,6 +2776,169 @@ wreath_locale_preference(PyObject *Py_UNUSED(self), PyObject *header)
                  : PyUnicode_FromString("en");
 }
 
+typedef struct {
+    PyObject *original;
+    Py_UCS4 *text;
+    Py_ssize_t length;
+    int refused;
+} LocaleOffer;
+
+static int
+locale_tag_equal(const Py_UCS4 *left, Py_ssize_t left_start, Py_ssize_t left_end,
+                 const Py_UCS4 *right, Py_ssize_t right_length)
+{
+    if (left_end - left_start != right_length) return 0;
+    for (Py_ssize_t index = 0; index < right_length; index++) {
+        Py_UCS4 a = left[left_start + index], b = right[index];
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static int
+locale_primary_equal(const Py_UCS4 *left, Py_ssize_t left_start, Py_ssize_t left_end,
+                     const Py_UCS4 *right, Py_ssize_t right_length)
+{
+    Py_ssize_t left_length = 0, right_primary = 0;
+    while (left_start + left_length < left_end && left[left_start + left_length] != '-')
+        left_length++;
+    while (right_primary < right_length && right[right_primary] != '-') right_primary++;
+    return locale_tag_equal(left, left_start, left_start + left_length,
+                            right, right_primary);
+}
+
+PyObject *
+wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *header, *offered_object;
+    if (!PyArg_ParseTuple(args, "OO:select_language", &header, &offered_object)) return NULL;
+    if (!PyUnicode_Check(header)) {
+        PyErr_Format(PyExc_TypeError, "Accept-Language must be str, got %.200s",
+                     Py_TYPE(header)->tp_name);
+        return NULL;
+    }
+    PyObject *offered = PySequence_Fast(offered_object,
+                                        "offered languages must be a sequence");
+    if (offered == NULL) return NULL;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(offered);
+    if (count == 0) {
+        Py_DECREF(offered);
+        PyErr_SetString(PyExc_ValueError,
+                        "offered must contain at least one language");
+        return NULL;
+    }
+    LocaleOffer *offers = PyMem_Calloc((size_t)count, sizeof(LocaleOffer));
+    if (offers == NULL) {
+        Py_DECREF(offered);
+        return PyErr_NoMemory();
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(offered, index);
+        if (!PyUnicode_Check(item)) {
+            PyErr_Format(PyExc_TypeError, "offered language must be str, got %.200s",
+                         Py_TYPE(item)->tp_name);
+            goto language_error;
+        }
+        offers[index].original = item;
+        offers[index].length = PyUnicode_GetLength(item);
+        offers[index].text = PyUnicode_AsUCS4Copy(item);
+        if (offers[index].text == NULL) goto language_error;
+    }
+    Py_ssize_t length = PyUnicode_GetLength(header);
+    Py_UCS4 *text = PyUnicode_AsUCS4Copy(header);
+    if (text == NULL) goto language_error;
+    Py_ssize_t best = -1;
+    double best_quality = 0.0, wildcard_quality = 0.0;
+    Py_ssize_t part_start = 0;
+    while (part_start <= length) {
+        Py_ssize_t part_end = part_start;
+        while (part_end < length && text[part_end] != ',') part_end++;
+        Py_ssize_t start = part_start, end = part_end;
+        locale_trim(text, &start, &end);
+        Py_ssize_t separator = start;
+        while (separator < end && text[separator] != ';') separator++;
+        Py_ssize_t tag_start = start, tag_end = separator;
+        locale_trim(text, &tag_start, &tag_end);
+        double quality = 1.0;
+        Py_ssize_t parameter_start = separator < end ? separator + 1 : end;
+        while (parameter_start <= end) {
+            Py_ssize_t parameter_end = parameter_start;
+            while (parameter_end < end && text[parameter_end] != ';') parameter_end++;
+            Py_ssize_t equals = parameter_start;
+            while (equals < parameter_end && text[equals] != '=') equals++;
+            Py_ssize_t key_start = parameter_start, key_end = equals;
+            locale_trim(text, &key_start, &key_end);
+            if (locale_ascii_equal(text, key_start, key_end, "q")) {
+                double parsed;
+                if (equals == parameter_end ||
+                    !locale_quality(text, equals + 1, parameter_end, &parsed))
+                    quality = 0.0;
+                else
+                    quality = parsed;
+                break;
+            }
+            if (parameter_end == end) break;
+            parameter_start = parameter_end + 1;
+        }
+        if (tag_end - tag_start == 1 && text[tag_start] == '*') {
+            if (quality > wildcard_quality) wildcard_quality = quality;
+        } else if (tag_start < tag_end) {
+            Py_ssize_t match = -1;
+            for (Py_ssize_t index = 0; index < count; index++) {
+                if (locale_tag_equal(text, tag_start, tag_end,
+                                     offers[index].text, offers[index].length)) {
+                    match = index;
+                    break;
+                }
+            }
+            if (match < 0) {
+                for (Py_ssize_t index = 0; index < count; index++) {
+                    if (locale_primary_equal(text, tag_start, tag_end,
+                                             offers[index].text,
+                                             offers[index].length)) {
+                        match = index;
+                        break;
+                    }
+                }
+            }
+            if (match >= 0) {
+                if (quality <= 0.0)
+                    offers[match].refused = 1;
+                else if (quality > best_quality) {
+                    best = match;
+                    best_quality = quality;
+                }
+            }
+        }
+        if (part_end == length) break;
+        part_start = part_end + 1;
+    }
+    PyMem_Free(text);
+    Py_ssize_t selected = best;
+    if (selected < 0 && wildcard_quality > 0.0) {
+        for (Py_ssize_t index = 0; index < count; index++) {
+            if (!offers[index].refused) {
+                selected = index;
+                break;
+            }
+        }
+    }
+    if (selected < 0) selected = 0;
+    PyObject *result = offers[selected].original;
+    Py_INCREF(result);
+    for (Py_ssize_t index = 0; index < count; index++) PyMem_Free(offers[index].text);
+    PyMem_Free(offers);
+    Py_DECREF(offered);
+    return result;
+language_error:
+    for (Py_ssize_t index = 0; index < count; index++) PyMem_Free(offers[index].text);
+    PyMem_Free(offers);
+    Py_DECREF(offered);
+    return NULL;
+}
+
 static int
 host_port_valid(const char *text, size_t length)
 {

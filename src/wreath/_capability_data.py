@@ -215,6 +215,13 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
         'replaces': ('fastapi-pagination', 'django-filter'),
     },
     {
+        'name': 'provenance',
+        'capability': 'Stored-artifact digests, multiple Ed25519 signatories, chained counter-signatures, and signed quorum verification',
+        'modules': ('wreath.provenance',),
+        'guides': ('docs/guides/provenance.md',),
+        'replaces': (),
+    },
+    {
         'name': 'crud',
         'capability': 'Generated REST CRUD routes for an ORM model, off until you opt in twice',
         'modules': ('wreath.crud',),

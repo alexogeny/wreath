@@ -7,6 +7,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from ._asgi_state import ResponseCapture
+
 ASGI = {"version": "3.0", "spec_version": "2.5"}
 
 
@@ -150,10 +152,7 @@ class WarmASGIDriver:
 
     async def _invoke(self, scope: dict[str, Any], body: bytes) -> ASGIResponse:
         sent_request = False
-        response_finished = False
-        status: int | None = None
-        headers: tuple[tuple[bytes, bytes], ...] = ()
-        chunks: list[bytes] = []
+        capture = ResponseCapture()
         response_complete = asyncio.Event()
 
         async def receive() -> dict[str, Any]:
@@ -165,32 +164,16 @@ class WarmASGIDriver:
             return {"type": "http.request", "body": body, "more_body": False}
 
         async def send(message: dict[str, Any]) -> None:
-            nonlocal headers, response_finished, status
-            kind = message.get("type")
-            if response_finished:
-                raise RuntimeError("ASGI app sent a message after the response ended")
-            if kind == "http.response.start":
-                if status is not None:
-                    raise RuntimeError("ASGI app sent two response starts")
-                status = int(message["status"])
-                headers = tuple(message.get("headers", ()))
-                return
-            if kind == "http.response.body":
-                if status is None:
-                    raise RuntimeError("ASGI app sent a body before response start")
-                chunks.append(bytes(message.get("body", b"")))
-                response_finished = not bool(message.get("more_body", False))
-                if response_finished:
-                    response_complete.set()
-                return
-            raise RuntimeError(f"ASGI app sent unsupported HTTP message {kind!r}")
+            await capture.send(message)
+            if capture.finished:
+                response_complete.set()
 
         await self._app(scope, receive, send)
+        capture.require_complete()
+        status = capture.status
         if status is None:
             raise RuntimeError("ASGI app returned without starting a response")
-        if not response_finished:
-            raise RuntimeError("ASGI app returned before ending the response body")
-        return ASGIResponse(status, headers, b"".join(chunks))
+        return ASGIResponse(status, capture.headers, capture.body)
 
     def close(self) -> None:
         with self._lock:

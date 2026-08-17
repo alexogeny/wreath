@@ -38,7 +38,7 @@ import ipaddress
 import socket
 import ssl
 import threading
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -950,12 +950,15 @@ class HTTPClient:
         "_idle",
         "_limits",
         "_name",
+        "_native_counters",
         "_open",
         "_port",
         "_rate",
         "_rate_bucket",
         "_redirect",
         "_requests",
+        "_request_plans",
+        "_request_last_plan",
         "_retry",
         "_reused",
         "_scheme",
@@ -1025,9 +1028,17 @@ class HTTPClient:
         self._tls = tls or ClientTLS()
         self._active: set[_Connection] = set()
         self._idle: list[_Connection] = []
+        self._native_counters = _client_codec.new_counters()
         self._open = 0
         self._waiters = 0
         self._requests = 0
+        self._request_plans: dict[tuple[str, str], tuple[str, bytes]] = {}
+        # The common service client repeats one method/target indefinitely.
+        # The native transaction keeps that single plan here so a hit performs
+        # identity checks over retained boundary objects instead of allocating
+        # a temporary dict-key tuple for every request.  The bounded dict below
+        # remains the general cache and the observable private test seam.
+        self._request_last_plan: tuple[str, str, str, bytes] | None = None
         self._framed_cleanly = False
         self._reused = 0
         self._started = False
@@ -1132,12 +1143,15 @@ class HTTPClient:
 
     def snapshot(self) -> ClientSnapshot:
         """A `ClientSnapshot` of the pool right now. Synchronous, never blocks."""
+        native_requests, native_reused = _client_codec.counter_snapshot(
+            self._native_counters
+        )
         return ClientSnapshot(
             active=len(self._active),
             idle=len(self._idle),
             waiters=self._waiters,
-            requests=self._requests,
-            reused=self._reused,
+            requests=self._requests + native_requests,
+            reused=self._reused + native_reused,
         )
 
     def get(
@@ -1270,6 +1284,32 @@ class HTTPClient:
         # their duration is precisely what the Inspector wants to see.
         marker = _phase_marker.get(None)
         if marker is None:
+            if (
+                idempotency_key is None
+                and not headers
+                and not body
+                and self._retry is _DEFAULT_RETRY
+                and self._redirect is _DEFAULT_REDIRECT
+                and self._rate_bucket is None
+                and (
+                    not self._trace.propagate
+                    or _telemetry.outbound_context.get(None) is None
+                )
+            ):
+                native = _client_codec.request_default(
+                    self,
+                    method,
+                    target,
+                    ClientResponse,
+                    ProtocolError,
+                    ResponseTooLarge,
+                    ResponseTimeout,
+                    _TransportError,
+                    ClientError,
+                    RequestTimeout,
+                )
+                if native is not None:
+                    return await cast(Awaitable[ClientResponse], native)
             return await self._request_timed(
                 method, target, headers=headers, body=body,
                 idempotency_key=idempotency_key,
@@ -1587,7 +1627,24 @@ class HTTPClient:
         host = f"[{self._host}]" if ":" in self._host else self._host
         return host if default else f"{host}:{self._port}"
 
-    async def _request_once(self, method: str, request: bytes) -> ClientResponse:
+    def _request_once(self, method: str, request: bytes) -> Awaitable[ClientResponse]:
+        native = _client_codec.request_once(
+            self,
+            method,
+            request,
+            ClientResponse,
+            ProtocolError,
+            ResponseTooLarge,
+            ResponseTimeout,
+            _TransportError,
+        )
+        if native is not None:
+            return cast(Awaitable[ClientResponse], native)
+        return self._request_once_python(method, request)
+
+    async def _request_once_python(
+        self, method: str, request: bytes
+    ) -> ClientResponse:
         connection = await self._acquire()
         reusable = False
         try:
@@ -1702,7 +1759,9 @@ class HTTPClient:
             for family, _socket_type, _protocol, _canonical, sockaddr in addresses:
                 self._destination.validate_address(self._address(family, sockaddr))
             self._dns_addresses = addresses
-            self._dns_expires_at = now + self._limits.dns_cache_ttl
+            # The configured TTL starts when the usable cache entry exists.
+            # A slow resolver must not consume the entry's own lifetime.
+            self._dns_expires_at = loop.time() + self._limits.dns_cache_ttl
             return addresses
 
     @staticmethod
@@ -2143,6 +2202,14 @@ class HTTPClient:
             if chunk[-2:] != b"\r\n":
                 raise ProtocolError("malformed response chunk terminator")
             body.extend(chunk[:-2])
+
+
+_client_codec.configure_fast_path(
+    HTTPClient,
+    _Connection,
+    ClientLimits,
+    ClientTimeout,
+)
 
 
 __all__ = [

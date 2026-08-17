@@ -305,7 +305,7 @@ async def test_frozen_route_ambiguous_raw_path_uses_the_general_lifecycle(
     app = Wreath()
     app.frozen("/ready", PreparedResponse.text("ready"))
     app._compile_routes()
-    original = app_module.Request
+    original = app_module._request_new
     constructed = 0
 
     def observed_request(*args: Any, **kwargs: Any) -> Any:
@@ -314,7 +314,7 @@ async def test_frozen_route_ambiguous_raw_path_uses_the_general_lifecycle(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
-    monkeypatch.setattr(app_module, "Request", observed_request)
+    monkeypatch.setattr(app_module, "_request_new", observed_request)
     sent = await invoke(app, "/ready", raw_path=b"%2fready")
 
     assert sent[0]["status"] == 400
@@ -328,7 +328,7 @@ async def test_frozen_route_active_trace_uses_the_general_lifecycle(
     app = Wreath()
     app.frozen("/ready", PreparedResponse.text("ready"))
     app._compile_routes()
-    original = app_module.Request
+    original = app_module._request_new
     constructed = 0
 
     def observed_request(*args: Any, **kwargs: Any) -> Any:
@@ -337,7 +337,7 @@ async def test_frozen_route_active_trace_uses_the_general_lifecycle(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app_module._telemetry, "PROPAGATING", True)
-    monkeypatch.setattr(app_module, "Request", observed_request)
+    monkeypatch.setattr(app_module, "_request_new", observed_request)
     sent = await invoke(app, "/ready")
 
     assert sent[1]["body"] == b"ready"
@@ -351,7 +351,7 @@ async def test_frozen_route_attached_flight_uses_the_general_lifecycle(
     app = Wreath()
     app.frozen("/ready", PreparedResponse.text("ready"))
     app._compile_routes()
-    original = app_module.Request
+    original = app_module._request_new
     constructed = 0
 
     def observed_request(*args: Any, **kwargs: Any) -> Any:
@@ -360,7 +360,7 @@ async def test_frozen_route_attached_flight_uses_the_general_lifecycle(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
-    monkeypatch.setattr(app_module, "Request", observed_request)
+    monkeypatch.setattr(app_module, "_request_new", observed_request)
     sent = await invoke(app, "/ready", scope_extra={"_wreath_flight": (1, 1)})
 
     assert sent[1]["body"] == b"ready"

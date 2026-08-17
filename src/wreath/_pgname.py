@@ -42,8 +42,32 @@ def validate_unquoted_identifier(
     return value
 
 
+def quote_identifier(
+    value: str,
+    *,
+    bare: re.Pattern[str] | None = None,
+    reserved: frozenset[str] = frozenset(),
+    reject_quote: bool = False,
+) -> str:
+    """Render one PostgreSQL identifier with one escaping implementation."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"unusable SQL identifier: {value!r}")
+    if reject_quote and '"' in value:
+        raise ValueError(f"unusable SQL identifier: {value!r}")
+    if bare is not None and bare.fullmatch(value) and value not in reserved:
+        return value
+    return '"' + value.replace('"', '""') + '"'
+
+
+def quote_qualified(parts: tuple[str, ...]) -> str:
+    """Render an already-validated qualified identifier."""
+    return ".".join(quote_identifier(part) for part in parts)
+
+
 __all__ = [
     "MAX_IDENTIFIER_BYTES",
+    "quote_identifier",
+    "quote_qualified",
     "validate_identifier",
     "validate_unquoted_identifier",
 ]

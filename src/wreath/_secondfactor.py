@@ -1538,53 +1538,47 @@ class MemoryChallengeStore:
     ceremony, and an unbounded one is a way to spend a server's memory.
     """
 
-    __slots__ = ("_cache", "_clock")
+    __slots__ = ("_cache",)
 
     def __init__(
         self, *, max_entries: int = 4096, clock: Callable[[], float] = time.monotonic
     ) -> None:
-        from .cache import BoundedCache
+        from ._capability_map import CapabilityMap
 
         # `ttl=None`: the deadline is per-entry and kept in the value, because
         # one store holds ceremonies with different lifetimes. The cache's own
         # bound is what evicts whatever is never spent.
-        self._cache: Any = BoundedCache(max_entries=max_entries, ttl=None, clock=clock)
-        self._clock = clock
+        self._cache = CapabilityMap(max_entries=max_entries, clock=clock)
 
     async def put(
         self, handle: str, *, user_id: str, kind: str, payload: dict[str, Any], ttl: float
     ) -> None:
-        self._cache.set(handle, (user_id, kind, dict(payload), self._clock() + float(ttl)))
+        self._cache.put(handle, (user_id, kind, dict(payload)), ttl=float(ttl))
 
     async def peek(self, handle: str) -> ChallengeRow | None:
-        entry = self._cache.get(handle)
+        entry = self._cache.peek(handle)
         if entry is None:
             return None
-        held_user, held_kind, payload, deadline = entry
-        if self._clock() >= deadline:
-            return None
+        held_user, held_kind, payload = entry
         # A copy, so editing what was read cannot edit what is still stored.
         return ChallengeRow(held_user, held_kind, dict(payload))
 
     async def consume(
         self, handle: str, *, user_id: str, kind: str
     ) -> dict[str, Any] | None:
-        entry = self._cache.get(handle)
+        entry = self._cache.consume(
+            handle,
+            predicate=lambda held: held[0] == user_id and held[1] == kind,
+        )
         if entry is None:
-            return None
-        held_user, held_kind, payload, deadline = entry
-        if self._clock() >= deadline:
-            self._cache.delete(handle)
-            return None
-        if held_user != user_id or held_kind != kind:
             # Refused *without* consuming: the row belongs to whoever began the
             # ceremony, and an attempt on it must not cost them their challenge.
             return None
-        self._cache.delete(handle)
+        _held_user, _held_kind, payload = entry
         return payload
 
     async def discard(self, handle: str) -> None:
-        self._cache.delete(handle)
+        self._cache.discard(handle)
 
 
 class PostgresChallengeStore:

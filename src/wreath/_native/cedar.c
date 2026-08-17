@@ -27,12 +27,26 @@ typedef struct {
 } cedar_ctx;
 
 #define CEDAR_DECISION_BATCH_CAPSULE "wreath.cedar.decision_batch"
+#define CEDAR_PLAN_CAPSULE "wreath.cedar.plan"
 
 typedef struct {
     Py_ssize_t count;
     unsigned char *allowed;
     unsigned char *reason;
 } CedarDecisionBatch;
+
+typedef struct {
+    PyObject *policy;       /* borrowed from CedarPlan.policies */
+    PyObject *exact_action; /* borrowed, or NULL */
+} CedarPlanPolicy;
+
+typedef struct {
+    PyObject *policies; /* owned; keeps every borrowed policy field alive */
+    CedarPlanPolicy *forbids;
+    CedarPlanPolicy *permits;
+    Py_ssize_t forbid_count;
+    Py_ssize_t permit_count;
+} CedarPlan;
 
 static PyObject *cedar_eval(cedar_ctx *ctx, PyObject *node, int depth);
 
@@ -48,6 +62,20 @@ cedar_decision_batch_destroy(PyObject *capsule)
     PyMem_Free(batch->reason);
     PyMem_Free(batch->allowed);
     PyMem_Free(batch);
+}
+
+static void
+cedar_plan_destroy(PyObject *capsule)
+{
+    CedarPlan *plan = PyCapsule_GetPointer(capsule, CEDAR_PLAN_CAPSULE);
+    if (plan == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    PyMem_Free(plan->forbids);
+    PyMem_Free(plan->permits);
+    Py_DECREF(plan->policies);
+    PyMem_Free(plan);
 }
 
 int
@@ -120,6 +148,101 @@ cedar_program_int(PyObject *value)
 {
     /* native-error-lint: allow NE005 -- compiler-emitted small non-negative int */
     return PyLong_AsLong(value);
+}
+
+PyObject *
+wreath_cedar_compile_plan(PyObject *Py_UNUSED(self), PyObject *policies)
+{
+    if (!PyTuple_CheckExact(policies)) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "cedar plan policies must be a tuple, got %.200s",
+            Py_TYPE(policies)->tp_name);
+        return NULL;
+    }
+    Py_ssize_t policy_count = PyTuple_GET_SIZE(policies);
+    Py_ssize_t forbid_count = 0;
+    for (Py_ssize_t index = 0; index < policy_count; index++) {
+        PyObject *policy = PyTuple_GET_ITEM(policies, index);
+        if (!PyTuple_CheckExact(policy) || PyTuple_GET_SIZE(policy) < 6) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "cedar plan policy %zd must be a compiled six-field tuple",
+                index);
+            return NULL;
+        }
+        long effect = cedar_program_int(PyTuple_GET_ITEM(policy, 0));
+        if ((effect == -1 && PyErr_Occurred()) || (effect != 0 && effect != 1)) {
+            if (!PyErr_Occurred()) {
+                PyErr_Format(
+                    PyExc_ValueError,
+                    "cedar plan policy %zd effect must be 0 (permit) or 1 (forbid)",
+                    index);
+            }
+            return NULL;
+        }
+        forbid_count += effect != 0;
+    }
+
+    CedarPlan *plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) return PyErr_NoMemory();
+    plan->forbid_count = forbid_count;
+    plan->permit_count = policy_count - forbid_count;
+    if (plan->forbid_count != 0) {
+        plan->forbids = PyMem_Calloc(
+            (size_t)plan->forbid_count, sizeof(*plan->forbids));
+    }
+    if (plan->permit_count != 0) {
+        plan->permits = PyMem_Calloc(
+            (size_t)plan->permit_count, sizeof(*plan->permits));
+    }
+    if ((plan->forbid_count != 0 && plan->forbids == NULL) ||
+        (plan->permit_count != 0 && plan->permits == NULL)) {
+        PyMem_Free(plan->forbids);
+        PyMem_Free(plan->permits);
+        PyMem_Free(plan);
+        return PyErr_NoMemory();
+    }
+
+    Py_ssize_t forbid_index = 0;
+    Py_ssize_t permit_index = 0;
+    for (Py_ssize_t index = 0; index < policy_count; index++) {
+        PyObject *policy = PyTuple_GET_ITEM(policies, index);
+        int forbid = cedar_program_int(PyTuple_GET_ITEM(policy, 0)) != 0;
+        CedarPlanPolicy *compiled = forbid
+            ? &plan->forbids[forbid_index++]
+            : &plan->permits[permit_index++];
+        compiled->policy = policy;
+        PyObject *action_scope = PyTuple_GET_ITEM(policy, 3);
+        if (!PyTuple_CheckExact(action_scope) || PyTuple_GET_SIZE(action_scope) == 0) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "cedar plan policy %zd action scope must be a compiled tuple",
+                index);
+            goto error;
+        }
+        long action_kind = cedar_program_int(PyTuple_GET_ITEM(action_scope, 0));
+        if (action_kind == -1 && PyErr_Occurred()) goto error;
+        if (action_kind == 1) {
+            if (PyTuple_GET_SIZE(action_scope) < 2) {
+                PyErr_Format(
+                    PyExc_ValueError,
+                    "cedar plan policy %zd exact action scope has no action",
+                    index);
+                goto error;
+            }
+            compiled->exact_action = PyTuple_GET_ITEM(action_scope, 1);
+        }
+    }
+    plan->policies = Py_NewRef(policies);
+    PyObject *capsule = PyCapsule_New(plan, CEDAR_PLAN_CAPSULE, cedar_plan_destroy);
+    if (capsule != NULL) return capsule;
+    Py_DECREF(plan->policies);
+error:
+    PyMem_Free(plan->forbids);
+    PyMem_Free(plan->permits);
+    PyMem_Free(plan);
+    return NULL;
 }
 
 static PyObject *
@@ -1236,6 +1359,36 @@ cedar_policy_satisfied_resource(cedar_ctx *ctx, PyObject *policy)
     return cedar_policy_conditions(ctx, policy);
 }
 
+/* Decision-only route evaluation is allowed to order the conjunction by cost:
+ * exact action is a pointer/tuple comparison, while principal and resource
+ * scopes may walk an entity graph.  A compiled policy caches that exact action
+ * and its effect, so neither is decoded from Python integers per request. */
+static int
+cedar_plan_policy_satisfied(cedar_ctx *ctx, const CedarPlanPolicy *compiled)
+{
+    PyObject *policy = compiled->policy;
+    if (compiled->exact_action != NULL) {
+        int matched = PyObject_RichCompareBool(
+            ctx->vars[1], compiled->exact_action, Py_EQ);
+        if (matched <= 0) return matched;
+    }
+    else {
+        int matched = cedar_scope_matches(
+            ctx, PyTuple_GET_ITEM(policy, 3), ctx->vars[1]);
+        if (matched < 0) return -2;
+        if (!matched) return 0;
+    }
+    int principal = cedar_scope_matches(
+        ctx, PyTuple_GET_ITEM(policy, 2), ctx->vars[0]);
+    if (principal < 0) return -2;
+    if (!principal) return 0;
+    int resource = cedar_scope_matches(
+        ctx, PyTuple_GET_ITEM(policy, 4), ctx->vars[2]);
+    if (resource < 0) return -2;
+    if (!resource) return 0;
+    return cedar_policy_conditions(ctx, policy);
+}
+
 /* Compiled expressions are immutable tuples.  Constants are leaves even when
  * their value is itself a tuple (for example an entity uid), so this walk can
  * conservatively prove that a condition never reads vars[2] (`resource`). */
@@ -1404,6 +1557,55 @@ cedar_authorize_compact_one(
     return 0;
 }
 
+/* A decision does not need the diagnostic engine's complete matched-policy
+ * inventory.  Cedar's effect algebra permits two safe early exits: the first
+ * satisfied forbid fixes the answer to deny, and after every forbid has failed
+ * the first satisfied permit fixes it to allow.  Evaluation errors remain
+ * policy-local and are skipped exactly as in cedar_authorize_compact_one. */
+static int
+cedar_authorize_plan_one(
+    const CedarPlan *plan, PyObject *principal, PyObject *action,
+    PyObject *resource, PyObject *context, PyObject *store,
+    unsigned char *allowed, unsigned char *reason)
+{
+    cedar_ctx ctx = {{principal, action, resource, context}, store, NULL};
+    for (Py_ssize_t index = 0; index < plan->forbid_count; index++) {
+        int outcome = cedar_plan_policy_satisfied(&ctx, &plan->forbids[index]);
+        if (outcome == -2) {
+            Py_XDECREF(ctx.error);
+            return -1;
+        }
+        if (outcome == -1) {
+            Py_CLEAR(ctx.error);
+            continue;
+        }
+        if (outcome == 1) {
+            *allowed = 0;
+            *reason = 2;
+            return 0;
+        }
+    }
+    for (Py_ssize_t index = 0; index < plan->permit_count; index++) {
+        int outcome = cedar_plan_policy_satisfied(&ctx, &plan->permits[index]);
+        if (outcome == -2) {
+            Py_XDECREF(ctx.error);
+            return -1;
+        }
+        if (outcome == -1) {
+            Py_CLEAR(ctx.error);
+            continue;
+        }
+        if (outcome == 1) {
+            *allowed = 1;
+            *reason = 1;
+            return 0;
+        }
+    }
+    *allowed = 0;
+    *reason = 0;
+    return 0;
+}
+
 PyObject *
 wreath_cedar_is_authorized(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -1421,16 +1623,18 @@ wreath_cedar_is_authorized(PyObject *Py_UNUSED(self), PyObject *args)
 PyObject *
 wreath_cedar_route_denial(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *policies, *principal, *action, *resource, *context, *store;
-    if (!PyArg_ParseTuple(args, "O!OOOO!O!:cedar_route_denial",
-                          &PyTuple_Type, &policies, &principal, &action, &resource,
+    PyObject *plan_object, *principal, *action, *resource, *context, *store;
+    if (!PyArg_ParseTuple(args, "OOOOO!O!:cedar_route_denial",
+                          &plan_object, &principal, &action, &resource,
                           &PyDict_Type, &context, &PyDict_Type, &store)) {
         return NULL;
     }
+    CedarPlan *plan = PyCapsule_GetPointer(plan_object, CEDAR_PLAN_CAPSULE);
+    if (plan == NULL) return NULL;
     unsigned char allowed, reason;
-    if (cedar_authorize_compact_one(
-            policies, principal, action, resource, context, store,
-            NULL, NULL, &allowed, &reason) < 0) return NULL;
+    if (cedar_authorize_plan_one(
+            plan, principal, action, resource, context, store,
+            &allowed, &reason) < 0) return NULL;
     if (allowed) Py_RETURN_NONE;
     static const char *reasons[] = {
         "no permit policy matched", "cedar permit", "explicit forbid",
