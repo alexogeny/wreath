@@ -38,7 +38,7 @@ async def invoke(
     "table_type",
     [
         pytest.param(
-            None if _core is None else _core.DecisionRouteTable,
+            None if _core is None else _core.PolicyRouteTable,
             id="native",
             marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
         ),
@@ -64,7 +64,7 @@ def test_probe_classifies_public_protected_and_missing_paths(table_type: type) -
     "table_type",
     [
         pytest.param(
-            None if _core is None else _core.DecisionRouteTable,
+            None if _core is None else _core.PolicyRouteTable,
             id="native",
             marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
         ),
@@ -90,7 +90,7 @@ def test_single_pass_classification_resolves_protected_ticket(table_type: type) 
     "table_type",
     [
         pytest.param(
-            None if _core is None else _core.DecisionRouteTable,
+            None if _core is None else _core.PolicyRouteTable,
             id="native",
             marks=pytest.mark.skipif(_core is None, reason="native extension unavailable"),
         ),
