@@ -1602,62 +1602,6 @@
         ]
       }
     },
-    "trie-router-match-scale": {
-      "contract": {
-        "group": "extended",
-        "stage": "component",
-        "axis": "input size",
-        "assumption": "Trie match cost is independent of route count: O(1) in N.",
-        "expect_exponent": 0.0,
-        "tolerance": 0.5,
-        "metric": null,
-        "sizes": [
-          500,
-          1000,
-          2000,
-          4000
-        ],
-        "todo": null
-      },
-      "observation": {
-        "probe": "trie-router-match-scale",
-        "group": "extended",
-        "stage": "component",
-        "axis": "input size",
-        "assumption": "Trie match cost is independent of route count: O(1) in N.",
-        "expect_exponent": 0.0,
-        "tolerance": 0.5,
-        "fitted_exponent": 0.071,
-        "tail_exponent": 0.068,
-        "local_exponents": [
-          0.069,
-          0.095,
-          0.041
-        ],
-        "class": "O(1)",
-        "degree_name": "constant",
-        "todo": null,
-        "status": "PASS",
-        "sizes": [
-          500,
-          1000,
-          2000,
-          4000
-        ],
-        "seconds": [
-          0.0008235519635491073,
-          0.0008639979641884565,
-          0.0009226779802702367,
-          0.0009495389531366527
-        ],
-        "counters": [
-          {},
-          {},
-          {},
-          {}
-        ]
-      }
-    },
     "http-parse-request-headers": {
       "contract": {
         "group": "metal-http1",
