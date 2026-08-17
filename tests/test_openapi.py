@@ -13,6 +13,7 @@ import pytest
 
 import wreath.binding as binding
 from wreath import Wreath
+from wreath._flight_metadata import build_metadata_image
 from wreath.binding import Field as SchemaField
 from wreath.binding import File, Form, Query
 from wreath.openapi import ResponseSpec, compare_openapi, generate_openapi
@@ -174,6 +175,33 @@ def test_operation_ids_match_typegen() -> None:
     assert openapi_ids == typegen_ids
     # The canonical derivation, not handler.__name__.
     assert "getWidgetsByWidgetId" in openapi_ids
+
+
+def test_operation_ids_are_one_fact_across_all_control_planes() -> None:
+    """Multi-method explicit ids used to drift by consumer."""
+    from wreath.doctor import route_manifest
+    from wreath.typegen import build_api_model
+
+    app = Wreath()
+
+    @app.route(
+        "/widgets/{widget_id}",
+        methods=("GET", "PATCH"),
+        operation_id="widgetById",
+    )
+    async def widget(request: Any, widget_id: int) -> Widget:
+        raise NotImplementedError
+
+    expected = {"widgetByIdGET", "widgetByIdPATCH"}
+    openapi_ids = {
+        operation["operationId"]
+        for operation in generate_openapi(app)["paths"]["/widgets/{widget_id}"].values()
+    }
+    typegen_ids = {operation.id for operation in build_api_model(app).operations}
+    flight_ids = {route.operation_id for route in build_metadata_image(app).routes}
+    manifest_ids = {route["operation_id"] for route in route_manifest(app)["routes"]}
+
+    assert openapi_ids == typegen_ids == flight_ids == manifest_ids == expected
 
 
 def test_route_tags_and_summary() -> None:

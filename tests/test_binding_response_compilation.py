@@ -83,6 +83,23 @@ class Holder:
     when: datetime.datetime
 
 
+@dataclasses.dataclass
+class Found:
+    kind: str
+    value: int
+
+
+@dataclasses.dataclass
+class Missing:
+    kind: str
+    reason: str
+
+
+@dataclasses.dataclass
+class ResultEnvelope:
+    result: Found | Missing
+
+
 _UUID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 _WHEN = datetime.datetime(2026, 7, 31, 12, 30, tzinfo=datetime.UTC)
 
@@ -114,6 +131,8 @@ CASES: list[tuple[Any, Any]] = [
     (list[Point], [Point(1, 2), Point(3, 4)]),
     (dict[str, Point], {"origin": Point(0, 0)}),
     (Point | None, None),
+    (Found | Missing, Missing("missing", "gone")),
+    (ResultEnvelope, ResultEnvelope(Missing("missing", "gone"))),
     (Tagged, Tagged("ada", 1.5)),
     (list[Tagged], [Tagged("ada", 1.5)]),
     (Holder, Holder([Point(1, 2)], {"a": Point(3, 4)}, _WHEN)),
@@ -202,12 +221,8 @@ def test_the_two_compiled_walks_compose_as_the_interpreted_ones_do(
 CLAIMED = [case for case in CASES if _projection_is_identity(case[0])]
 
 
-@pytest.mark.parametrize(
-    "annotation,value", CLAIMED, ids=[_identifier(c) for c in CLAIMED]
-)
-def test_claiming_the_projection_is_identity_means_it_is(
-    annotation: Any, value: Any
-) -> None:
+@pytest.mark.parametrize("annotation,value", CLAIMED, ids=[_identifier(c) for c in CLAIMED])
+def test_claiming_the_projection_is_identity_means_it_is(annotation: Any, value: Any) -> None:
     """`compile_response_validator` skips the projection on this claim.
 
     A wrong `True` is silent: the validator is handed the raw handler value

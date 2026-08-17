@@ -147,7 +147,7 @@ async def test_a_host_routed_application_keeps_the_general_dispatcher() -> None:
         return Response(b"hot")
 
     app._compile_routes()
-    assert app._dynamic_matcher is not None
+    assert app._has_dynamic_routes
     assert app._dispatch_http == app._handle_http
 
 

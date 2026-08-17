@@ -66,20 +66,6 @@ def test_http1_equivalent_dynamic_response_headers_reuse_validated_wire() -> Non
     assert "PyList_AsTuple(headers)" in begin
 
 
-def test_decision_router_compile_has_no_pairwise_distinctness_scan() -> None:
-    """Route compilation must not compare every candidate with its predecessors."""
-    source = (_NATIVE / "dtrouter.c").read_text()
-    build = _function(source, "dnode_build", "install_group")
-
-    pairwise = re.search(
-        r"for \(Py_ssize_t i = 0; i < ncand; i\+\+\).*?"
-        r"for \(Py_ssize_t j = 0; j < i; j\+\+\).*?seg_equal",
-        build,
-        re.DOTALL,
-    )
-    assert pairwise is None, "dnode_build performs an O(candidate_count**2) distinctness scan"
-
-
 def test_eager_request_completion_does_not_cross_back_to_probe_task_state() -> None:
     """The synchronous fast path should not need a Python Task.done() round trip."""
     source = (_NATIVE / "server_http1.c").read_text()
@@ -127,24 +113,16 @@ def test_well_known_name_matching_does_not_strlen_constants_per_request() -> Non
 
 def test_default_bitset_router_matches_literals_without_python_segment_objects() -> None:
     """The default matcher must compare literal UTF-8 slices without Unicode keys."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     match = _function(source, "brt_match_impl", "brt_dispatch")
 
     assert "PyUnicode_FromStringAndSize(" not in match
     assert "PyUnicode_DecodeUTF8(" not in match
 
 
-def test_decision_router_has_no_process_global_python_objects() -> None:
-    """Cached Python objects must belong to module state for subinterpreters and nogil."""
-    source = (_NATIVE / "dtrouter.c").read_text()
-
-    assert "static PyObject *public_caller_mask" not in source
-    assert "static PyObject *get_method" not in source
-
-
 def test_bitset_hot_methods_use_fastcall() -> None:
     """The default router must not allocate argument tuples for each hot call."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     methods = source[source.index("static PyMethodDef brt_methods[]"):]
 
     for name in ("match", "classify", "resolve", "probe"):
@@ -154,7 +132,7 @@ def test_bitset_hot_methods_use_fastcall() -> None:
 
 def test_bitset_groups_are_compiled_before_the_first_match() -> None:
     """A request must never compile a route group lazily."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     match = _function(source, "brt_match_impl", "brt_dispatch")
 
     assert "brt_group_build(" not in match, "first match pays route-group compilation"
@@ -162,7 +140,7 @@ def test_bitset_groups_are_compiled_before_the_first_match() -> None:
 
 def test_bitset_common_large_groups_do_not_spill_survivors_to_heap() -> None:
     """Groups through 4096 routes should use bounded stack scratch."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     size = re.search(r"uint64_t stack_words\[(\d+)\]", source)
 
     assert size is not None and int(size.group(1)) >= 64, (
@@ -172,7 +150,7 @@ def test_bitset_common_large_groups_do_not_spill_survivors_to_heap() -> None:
 
 def test_bitset_path_parameters_are_lazy_native_slices() -> None:
     """Matching should not eagerly allocate a dict and Unicode object per capture."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
     build = _function(source, "build_match", "brt_match_impl")
 
     assert "PyDict_New(" not in build
@@ -181,10 +159,11 @@ def test_bitset_path_parameters_are_lazy_native_slices() -> None:
 
 def test_bitset_has_no_process_global_python_objects() -> None:
     """The default router's cached objects must be held by module state."""
-    source = (_NATIVE / "dtbitset.c").read_text()
+    source = (_NATIVE / "policy_router.c").read_text()
 
     assert "static PyObject *brt_zero" not in source
     assert "static PyObject *get" not in source
+    assert "static MethodGroups brt_no_groups" not in source
 
 
 def test_http1_idle_keepalive_releases_spike_capacity() -> None:

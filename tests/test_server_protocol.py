@@ -1377,6 +1377,20 @@ async def test_native_typed_response_abi_emits_complete_response() -> None:
     assert wire.endswith(b"\r\n\r\nhello")
 
 
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_one_shot_reports_synchronous_completion_without_awaitable() -> None:
+    async def typed_response(scope: dict, receive: Any, send: Any) -> None:
+        protocol = send.__self__
+        pending = protocol._wreath_response_nowait(
+            200, [(b"content-type", b"text/plain")], b"hello"
+        )
+        assert pending is None
+
+    wire = bytes((await drive(_NativeHttpProtocol, typed_response, [GET])).buffer)
+    assert wire.endswith(b"\r\n\r\nhello")
+
+
 @impl
 @pytest.mark.asyncio
 async def test_one_shot_keep_alive_second_request(protocol_cls: type) -> None:

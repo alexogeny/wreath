@@ -15,6 +15,26 @@ from wreath._jobcore import (
     dedup_key,
     valid_transition,
 )
+from wreath._leased import claim_sql, fenced_update_sql
+
+
+def test_leased_work_sql_keeps_skip_locked_alias_and_fence_in_one_shape() -> None:
+    claim = claim_sql(
+        "deliveries",
+        key="delivery_id",
+        alias="AS d",
+        predicate="state='ready'",
+        order="run_at",
+        limit="$1",
+        assignments="state='leased', fence=d.fence+1",
+        returning="d.delivery_id, d.fence",
+    )
+    assert "FOR UPDATE SKIP LOCKED LIMIT $1" in claim
+    assert "UPDATE deliveries AS d" in claim
+    assert "WHERE d.delivery_id=c.delivery_id" in claim
+    assert fenced_update_sql("deliveries", "state='done'") == (
+        "UPDATE deliveries SET state='done' WHERE id=$1 AND fence=$2"
+    )
 
 
 def test_legal_transitions():

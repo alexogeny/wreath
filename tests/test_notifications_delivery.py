@@ -27,6 +27,7 @@ from wreath._userkit import (
 from wreath._webpush import PushError, PushResult, PushSubscription, VapidKeys
 from wreath.notifications import (
     Email,
+    InApp,
     InMemoryPushSubscriptions,
     Notifications,
     Recipient,
@@ -49,6 +50,19 @@ class PhotoShared:
 
     def navigate(self) -> str:
         return "/photos/1"
+
+
+async def test_in_app_delivery_uses_the_room_broadcast_contract() -> None:
+    class Rooms:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def broadcast(self, room: str, message: str) -> None:
+            self.calls.append((room, message))
+
+    rooms = Rooms()
+    await InApp(rooms).deliver(Recipient("u1"), PhotoShared("Ada"), object())
+    assert rooms.calls == [("notifications:u1", "Ada shared a photo")]
 
 
 # --- the suppression boundary ------------------------------------------------

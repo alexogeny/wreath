@@ -19,6 +19,7 @@ from wreath.authorization import (
     CedarEntity,
     CedarParseError,
     CedarPolicies,
+    CedarSchema,
     EntityUid,
     authorize,
 )
@@ -158,6 +159,69 @@ def test_entity_uid_parses_cedar_and_bare_forms() -> None:
     assert EntityUid.parse('App::User::"a::b"') == EntityUid("App::User", "a::b")
     with pytest.raises(CedarParseError):
         EntityUid.parse("no-separator")
+
+
+_SCHEMA = """
+type RequestContext = { "seat": { "status": String } };
+entity User;
+entity Document;
+action "document";
+action "read" in ["document"] appliesTo {
+  principal: [User], resource: [Document], context: RequestContext
+};
+"""
+
+
+def test_schema_rejects_a_misspelled_context_attribute_at_construction() -> None:
+    with pytest.raises(CedarParseError, match=r"context\.seat\.statsu"):
+        CedarPolicies(
+            'permit(principal, action == Action::"read", resource) '
+            'when { context.seat.statsu == "active" };',
+            schema=_SCHEMA,
+        )
+
+
+def test_schema_rejects_a_misspelled_guarded_attribute_at_construction() -> None:
+    with pytest.raises(CedarParseError, match=r"context\.statsu"):
+        CedarPolicies(
+            'permit(principal, action == Action::"read", resource) '
+            "when { context has statsu };",
+            schema=_SCHEMA,
+        )
+
+
+def test_schema_action_groups_feed_the_native_hierarchy() -> None:
+    engine = CedarPolicies(
+        'permit(principal, action in Action::"document", resource);',
+        schema=CedarSchema(_SCHEMA),
+    )
+    assert engine.is_authorized(
+        principal=ALICE,
+        action=EntityUid("Action", "read"),
+        resource=DOC,
+    ).allowed
+
+
+def test_schema_rejects_an_unknown_action_at_construction() -> None:
+    with pytest.raises(CedarParseError, match="unknown action 'raed'"):
+        CedarPolicies(
+            'permit(principal, action == Action::"raed", resource);',
+            schema=_SCHEMA,
+        )
+
+
+def test_schema_requires_an_attribute_on_every_action_a_group_policy_can_match() -> None:
+    schema = """
+    action "documents";
+    action "read" in ["documents"] appliesTo { context: { "seat": String } };
+    action "write" in ["documents"] appliesTo { context: { "actor": String } };
+    """
+    with pytest.raises(CedarParseError, match=r"context\.seat"):
+        CedarPolicies(
+            'forbid(principal, action in Action::"documents", resource) '
+            'when { context.seat == "suspended" };',
+            schema=schema,
+        )
 
 
 # -- scopes and the authorization algorithm -----------------------------------
@@ -825,6 +889,29 @@ CEDAR_SEMANTICS = [
         id="forbid-overrides-a-matching-permit",
     ),
     pytest.param(
+        "permit(principal, action, resource);"
+        'forbid(principal, action == Action::"read", resource);',
+        (
+            False,
+            "explicit forbid",
+            ("permit policy0 matched", "forbid policy1 matched"),
+        ),
+        id="later-forbid-still-overrides-an-earlier-permit",
+    ),
+    pytest.param(
+        "forbid(principal, action, resource) when { context.missing };"
+        "permit(principal, action, resource);",
+        (
+            True,
+            "cedar permit",
+            (
+                "forbid policy0 skipped: record has no attribute 'missing'",
+                "permit policy1 matched",
+            ),
+        ),
+        id="erroring-forbid-is-skipped-before-permit",
+    ),
+    pytest.param(
         "permit(principal, action, resource) when { context.missing == 1 };",
         # An absent attribute is an evaluation error, and an erroring policy is
         # *skipped* rather than treated as true or as a forbid.
@@ -908,7 +995,7 @@ def test_route_evaluation_materializes_only_a_denial(
     )
 
     denial = _core.cedar_route_denial(
-        engine._policies,
+        engine._plan,
         ("User", "alice"),
         ("Action", "read"),
         ("Document", "42"),
