@@ -134,9 +134,7 @@ def test_a_raising_body_still_restores_every_boundary():
     scope = _Scope()
     holder = _Holder()
     with pytest.raises(RuntimeError, match="the attempt raised"):
-        with installed_boundaries(
-            scope, _adapters(), slots=((holder, "_db", "main"),)
-        ):
+        with installed_boundaries(scope, _adapters(), slots=((holder, "_db", "main"),)):
             raise RuntimeError("the attempt raised")
     assert scope._databases["main"] == "real-database"
     assert scope._http_clients["api"] == "real-client"
@@ -266,3 +264,29 @@ async def test_a_scope_with_nothing_to_watch_leaves_the_binder_alone():
     with observed_boundaries(scope, _Trace()):
         assert scope._dirty is False
     assert scope._dirty is False
+
+
+async def test_every_object_store_operation_is_observed_once():
+    from wreath._replay_adapters import observed_boundaries
+    from wreath.objects import MemoryObjectStore
+
+    class Objects:
+        def __init__(self):
+            self._object_stores = {"files": MemoryObjectStore(url_secret=b"s" * 32)}
+
+    async def chunks():
+        yield b"stream"
+
+    scope, trace = Objects(), _Trace()
+    with observed_boundaries(scope, trace):
+        store = scope._object_stores["files"]
+        await store.write("one", b"1")
+        await store.write_stream("two", chunks())
+        await store.read("one")
+        assert b"".join([chunk async for chunk in store.read_stream("two")]) == b"stream"
+        await store.stat("one")
+        assert await store.exists("one")
+        assert [item.key async for item in store.list()] == ["one", "two"]
+        assert store.url("one").startswith("memory:")
+        await store.delete("one")
+    assert [event[1] for event in trace.events] == [6] * 9

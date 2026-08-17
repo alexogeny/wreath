@@ -176,6 +176,15 @@ and object storage. `fault_corpus`'s own docstring lists every region and says
 what makes it one; the paragraphs below say why the less obvious ones are
 separate regions rather than variations on their neighbours.
 
+Object-store observation covers the complete `ObjectStore` protocol: whole and
+streaming reads/writes, `stat`, `exists`, `list`, `delete`, and URL minting.
+Streaming coordinates remain open through iteration, so an error after the
+first chunk is attributed to the crossing that actually failed.
+Pass a `BoundaryTrace` as `trace=` to `replay_endpoint_plan` to record those
+crossings while re-driving an HTTP request; application-state object-store
+handles are swapped together with the internal registry and restored after the
+attempt.
+
 **A region has to name a failure the owned code answers differently.** That is
 the bar, and most of these exist because two failures that look alike want
 opposite recoveries:
