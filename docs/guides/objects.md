@@ -47,6 +47,7 @@ from wreath import Wreath
 
 app = Wreath()
 
+app.objects("test", backend="memory")
 app.objects("scratch", backend="local", root="./var/blobs")
 app.objects("assets", backend="s3", bucket="ev-assets", region="ap-southeast-2")
 # S3 credentials from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
