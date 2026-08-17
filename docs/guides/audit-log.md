@@ -91,14 +91,14 @@ trail = AuditTrail(PostgresLog(database, declaration()))
 session = Session(registry, "write", audit=trail)
 ```
 
-The DDL comes from the declaration, through the ordinary schema machinery, plus
-the statements that make the table append-only:
+The DDL comes from one declaration through the ordinary schema machinery. Step
+1 creates the table; step 2 installs the row guard and the statement-level
+`TRUNCATE` guard, so upgrading an existing version-1 trail also closes it:
 
 ```python
-from wreath.audit_log import append_only_statements, declaration
+from wreath.audit_log import declaration
 
-declaration().schema_claim("audit_log")       # for wreath's schema bootstrap
-append_only_statements("audit_records")       # REVOKE + trigger
+declaration().schema_claim("audit_log")
 ```
 
 ## Three properties worth knowing about
@@ -111,16 +111,16 @@ the WAL — has a window in it, and the window is exactly where the interesting
 failures live.
 
 **The trail is append-only in the database.** `wreath` emits a `REVOKE` and a
-trigger, so the application's own role cannot rewrite history and neither can a
-hand-written `UPDATE` at two in the morning. An audit table the application can
-change is not an audit trail to anybody who asks for one.
+row and statement triggers, so the application's own role cannot update, delete,
+or truncate history. A database superuser can deliberately disable triggers;
+that administrative capability must be controlled outside the application.
 
 **Erasure is possible, and explicit.** An audit trail holds personal data, and a
 subject may ask to be forgotten — a trail that could not answer that would force
 you to choose between two obligations. `AuditTrail.forget` deletes one subject's
 records, and it works by setting a transaction-scoped flag the trigger looks
 for. Nothing else can delete a record: not a handler, not a migration, not a
-curious superuser. And because the flag is `SET LOCAL`, the permission ends with
+ordinary database role. And because the flag is `SET LOCAL`, the permission ends with
 the transaction rather than travelling with a pooled connection into whatever
 runs next.
 

@@ -406,6 +406,8 @@ async def test_the_trail_refuses_an_update_from_the_database_itself(
             )
         with pytest.raises(Exception, match="append-only"):
             await connection.execute(f'DELETE FROM "{_SCHEMA}".audit_records')
+        with pytest.raises(Exception, match="append-only"):
+            await connection.execute(f'TRUNCATE "{_SCHEMA}".audit_records')
     finally:
         await database.release("write", connection)
 
