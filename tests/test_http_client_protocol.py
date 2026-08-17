@@ -115,6 +115,22 @@ def test_parse_response_head_accepts_every_fragment_boundary() -> None:
     )
 
 
+def test_public_head_parser_does_not_apply_request_specific_framing() -> None:
+    """Framing refusal belongs to a request transaction, not syntax parsing."""
+    data = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"content-length: 2\r\n"
+        b"transfer-encoding: chunked\r\n\r\n"
+    )
+    assert parse_response_head(data) == (
+        1,
+        200,
+        b"OK",
+        [(b"content-length", b"2"), (b"transfer-encoding", b"chunked")],
+        len(data),
+    )
+
+
 @pytest.mark.parametrize(
     ("data", "match"),
     [

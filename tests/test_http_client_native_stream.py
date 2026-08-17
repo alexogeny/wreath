@@ -15,7 +15,12 @@ import importlib
 import pytest
 from _metal import requires_metal
 
-from wreath.http_client import DestinationPolicy, HTTPClient
+from wreath.http_client import (
+    ClientTimeout,
+    DestinationPolicy,
+    HTTPClient,
+    RequestTimeout,
+)
 
 
 def _client(port: int) -> HTTPClient:
@@ -162,3 +167,94 @@ def test_client_large_body_spans_many_reads_on_metal_loop() -> None:
         getattr(t, "_fused_stream", None) == "wreath._native._client"
         for t in transports
     )
+
+
+@requires_metal
+def test_reused_request_is_one_native_transaction_with_a_compiled_plan() -> None:
+    loop = _metal_loop_or_skip()
+    transports: list = []
+
+    async def exercise():
+        requests: list[bytes] = []
+
+        async def handler(reader, writer):
+            for body in (b"first", b"second"):
+                requests.append(await reader.readuntil(b"\r\n\r\n"))
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            async with _client(port) as client:
+                first = await client.get("/same")
+                second = await client.get("/same")
+                snapshot = client.snapshot()
+                plan_count = len(client._request_plans)
+            return first, second, snapshot, plan_count, requests
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    first, second, snapshot, plan_count, requests = _run(
+        loop, exercise(), transports
+    )
+    assert (first.body, second.body) == (b"first", b"second")
+    assert snapshot.requests == 2
+    assert snapshot.reused == 1
+    assert plan_count == 1
+    assert requests[0] == requests[1]
+
+
+@requires_metal
+def test_native_transaction_enforces_the_total_deadline() -> None:
+    loop = _metal_loop_or_skip()
+    transports: list = []
+
+    async def exercise():
+        second_arrived = asyncio.Event()
+        handler_done = asyncio.Event()
+
+        async def handler(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                await writer.drain()
+                await reader.readuntil(b"\r\n\r\n")
+                second_arrived.set()
+                await reader.read()
+            finally:
+                handler_done.set()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client = HTTPClient(
+            "deadline",
+            base_url=f"http://127.0.0.1:{port}",
+            destination=DestinationPolicy(allow_private=True, allow_loopback=True),
+            timeout=ClientTimeout(total=0.02),
+        )
+        await client.start()
+        try:
+            assert (await client.get("/slow")).body == b"ok"
+            with pytest.raises(
+                RequestTimeout, match="outbound request exceeded total timeout"
+            ):
+                await client.get("/slow")
+            await second_arrived.wait()
+            return client.snapshot()
+        finally:
+            await client.close()
+            await handler_done.wait()
+            server.close()
+            await server.wait_closed()
+
+    snapshot = _run(loop, exercise(), transports)
+    assert snapshot.active == 0
+    assert snapshot.idle == 0

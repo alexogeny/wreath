@@ -39,6 +39,26 @@ def _local_policy() -> DestinationPolicy:
     return DestinationPolicy(allow_private=True, allow_loopback=True)
 
 
+@pytest.mark.parametrize(("over_tls", "keep_open"), [(False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_client_stream_eof_only_keeps_plaintext_transport_open(
+    over_tls: bool,
+    keep_open: bool,
+) -> None:
+    class Transport:
+        @staticmethod
+        def get_extra_info(name: str, default: object = None) -> object:
+            if name == "sslcontext" and over_tls:
+                return object()
+            return default
+
+    stream = http_client_module._ClientStream()
+    stream.connection_made(Transport())
+
+    assert stream.eof_received() is keep_open
+    stream.connection_lost(None)
+
+
 @pytest.mark.asyncio
 async def test_reused_connection_skips_condition_when_no_waiter_exists() -> None:
     """The idle pool transition is atomic until an operation actually awaits."""
@@ -1362,6 +1382,49 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
     assert resolutions == 1
     assert contexts == 1
     assert connection_limits == [12345, 12345]
+
+
+@pytest.mark.asyncio
+async def test_dns_cache_ttl_starts_after_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    clock = 10.0
+    resolutions = 0
+
+    async def getaddrinfo(
+        *_args: object, **_kwargs: object
+    ) -> list[tuple[object, ...]]:
+        nonlocal clock, resolutions
+        resolutions += 1
+        clock += 2.0
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 80),
+            )
+        ]
+
+    monkeypatch.setattr(loop, "time", lambda: clock)
+    monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
+    client = HTTPClient(
+        "dns-ttl",
+        base_url="http://example.com",
+        limits=ClientLimits(dns_cache_ttl=30),
+    )
+
+    await client._resolve()
+
+    assert client._dns_expires_at == 42.0
+    clock = 41.0
+    await client._resolve()
+    assert resolutions == 1
+    clock = 42.0
+    await client._resolve()
+    assert resolutions == 2
 
 
 @pytest.mark.asyncio
