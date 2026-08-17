@@ -99,8 +99,10 @@ route is never walked twice, and a public one never authenticates at all.
 
 What that buys, measured on a 512-route table with half its segments
 parameterised: resident size drops from about 20 MB to about 264 KB — **76×** —
-at 14% to 37% fewer instructions per match. It is opt-in today with
-`routing="bitset"`; the decision tree remains the default.
+at 14% to 37% fewer instructions per match. This is now the application router;
+`routing="policy"` names it directly. It is the sole compiled table; the former
+experimental bitset, decision-tree, and trie names and implementations were
+removed so configuration cannot select a second request path.
 
 ## How we know
 
