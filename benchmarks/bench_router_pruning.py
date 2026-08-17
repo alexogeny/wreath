@@ -4,7 +4,7 @@ This is a focused framework/router benchmark, not an end-to-end server result.
 It builds a protected parent Router containing many tenant subrouters, compiles
 it through Wreath, and compares a fully eligible leaf match with an anonymous
 match that should reject the protected subtree from its root capability
-summary without traversing descendant decision nodes.
+summary without scanning descendant routes.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def build_routers(branches: int, leaves: int) -> tuple[Wreath, str]:
             )
         protected.include_router(tenant)
 
-    app = Wreath(routing="decision")
+    app = Wreath(routing="policy")
     app.include_router(protected)
     target = (
         f"/control/tenant-{branches - 1}/services/"
@@ -66,15 +66,15 @@ def compile_trials(branches: int, leaves: int, trials: int) -> list[float]:
 
 
 def implementation_name() -> str:
-    """Report whether the decision router resolved to native or pure Python."""
+    """Report the canonical native policy router."""
     try:
         import wreath._native._core as core
 
-        if getattr(core, "DecisionRouteTable", None) is not None:
+        if getattr(core, "PolicyRouteTable", None) is not None:
             return f"native ({core.__file__})"
     except ImportError:
         pass
-    return "pure"
+    return "unavailable"
 
 
 def sample(match: Any, path: str, mask: int, iterations: int, trials: int) -> list[float]:

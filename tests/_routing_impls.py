@@ -1,12 +1,4 @@
-"""Shared helpers to exercise every routing implementation.
-
-Three: the decision-tree table, the trie table and the bitset table. Tests import
-these to assert behavioural parity and the performance ordering. Adding a backend
-here enrols it in every parity test.
-
-Parity across three *different algorithms* answering the same question is the
-oracle: an input the three disagree on is a defect in whichever one is odd.
-"""
+"""Shared helpers for the canonical native policy-routing corpus."""
 
 from __future__ import annotations
 
@@ -24,9 +16,7 @@ class RouteTableLike(Protocol):
 
 # name -> table factory.
 IMPLS: dict[str, Any] = {
-    "c-dt": _core.DecisionRouteTable,
-    "c-trie": _core.RouteTable,
-    "c-bitset": _core.BitsetRouteTable,
+    "c-policy": _core.PolicyRouteTable,
 }
 
 

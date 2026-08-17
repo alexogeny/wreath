@@ -1,8 +1,4 @@
-"""Behavioural parity across all four routing implementations.
-
-Every registered path, HEAD fallback, and a large random fuzz corpus must
-produce identical matches from c-dt, py-dt, c-trie, and py-trie.
-"""
+"""Behavioural corpus for the canonical native policy router."""
 
 from __future__ import annotations
 
@@ -109,8 +105,8 @@ def test_literal_beats_parameter(name: str) -> None:
 
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_static_match_is_repeatable(name: str) -> None:
-    # Regression: the C decision table returns a precomputed (handler, None)
-    # tuple for static hits; repeated matches must stay correct and identical.
+    # Static hits return a precomputed (handler, None) tuple; repeated matches
+    # must stay correct and identical.
     table = IMPLS[name]()
     table.add("/health", "GET", "h")
     for _ in range(3):
@@ -118,9 +114,8 @@ def test_static_match_is_repeatable(name: str) -> None:
         assert table.match("HEAD", "/health") == ("h", None)
 
 
-@pytest.mark.skipif("c-bitset" not in IMPLS, reason="native extension unavailable")
-def test_compiled_native_bitset_is_sealed_and_keeps_both_route_shapes() -> None:
-    table = IMPLS["c-bitset"]()
+def test_compiled_native_policy_table_is_sealed_and_keeps_both_route_shapes() -> None:
+    table = IMPLS["c-policy"]()
     table.add("/health", "GET", "static")
     table.add("/users/{uid}", "GET", "dynamic")
     table.compile()
@@ -135,7 +130,7 @@ def test_compiled_native_bitset_is_sealed_and_keeps_both_route_shapes() -> None:
 def test_head_falls_back_after_dynamic_verification_miss(name: str) -> None:
     # Regression: an explicit dynamic HEAD route that reaches a leaf but fails
     # literal verification must still fall back to the GET tree. The C
-    # decision table used to report a plain miss here.
+    # An earlier router used to report a plain miss here.
     table = IMPLS[name]()
     table.add("/h/{x}/only-head", "HEAD", "head-route")
     table.add("/h/{x}/other", "GET", "get-route")
@@ -146,9 +141,8 @@ def test_head_falls_back_after_dynamic_verification_miss(name: str) -> None:
 
 # --- sorted child lookup ----------------------------------------------------
 #
-# The native trie keeps each node's children sorted so a wide static fanout is
-# found by binary search rather than a scan. Registration order therefore must
-# not influence matching, and every child must still be reachable.
+# Registration order must not influence matching, and every literal must still
+# be reachable from a wide static fanout.
 
 def _build_stable(factory, routes: list[tuple[str, str]]):
     """Build with an order-independent handler, so only ordering is under test.
@@ -235,9 +229,8 @@ def _adversarial(factory, depth: int):
 def test_adversarial_miss_terminates_and_agrees(name: str) -> None:
     """A method miss where every level branches must still be a clean miss.
 
-    The trie is a tree, so each (node, index) state is reachable by exactly one
-    path and the traversal visits each node at most once: the work is bounded by
-    the table's own size, not by re-exploring failed states.
+    The work must remain bounded by the table's own size rather than
+    re-exploring failed states.
     """
     factory = IMPLS[name]
     table, path = _adversarial(factory, 10)
