@@ -317,6 +317,27 @@ async def test_cached_execute_without_result_columns(
 
 
 @pytest.mark.asyncio
+async def test_cached_fetchval_completes_from_native_receive_slab(
+    postgres: Any, database: tuple[FakePostgres, str]
+) -> None:
+    """The hot scalar path materializes only its value, not a Z message."""
+    _, dsn = database
+    conn = await postgres.connect(dsn)
+    try:
+        assert await conn.fetchval("select 42") == 42
+        receive_stats = getattr(conn._reader, "_receive_stats", None)
+        before = receive_stats() if receive_stats is not None else None
+        assert await conn.fetchval("select 42") == 42
+        after = receive_stats() if receive_stats is not None else None
+    finally:
+        await conn.close()
+
+    if before is not None and after is not None:
+        assert after["direct_completions"] - before["direct_completions"] == 1
+        assert after["queued_messages"] - before["queued_messages"] == 0
+
+
+@pytest.mark.asyncio
 async def test_plan_created_by_execute_is_reused_by_fetch(
     postgres: Any, database: tuple[FakePostgres, str]
 ) -> None:
