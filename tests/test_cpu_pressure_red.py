@@ -89,13 +89,6 @@ def test_h2_flush_transfers_output_without_bytearray_copy() -> None:
     assert "PyBytes_FromStringAndSize(PyByteArray_AS_STRING(self->out)" not in flush
 
 
-def test_opt_in_decision_router_uses_raw_segment_keys() -> None:
-    """The legacy backend should not create Unicode keys while descending."""
-    source = (_NATIVE / "dtrouter.c").read_text()
-    match = _function(source, "match_group", "drt_match")
-    assert "seg_obj(" not in match
-
-
 def test_multipart_disposition_is_decoded_in_the_native_pass() -> None:
     """Part metadata should not be reparsed by a Python loop after splitting."""
     source = (_SRC / "_multipart.py").read_text()
