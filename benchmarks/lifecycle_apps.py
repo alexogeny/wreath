@@ -125,7 +125,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from wreath.postgres import Database, PoolConfig
 
     app = Wreath(
-        routing=os.environ.get("WREATH_BENCH_ROUTING", "decision"),
+        routing="policy",
         http_policy=HttpPolicy(
             security_headers=SecurityHeadersPolicy(
                 content_security_policy=CONTENT_SECURITY_POLICY,
