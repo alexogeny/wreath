@@ -16,6 +16,7 @@ The PostgreSQL responder mirrors the proven flight logic of
 tests/postgres/test_connection.py (trust auth, extended-protocol flights, one
 int4 DataRow per select) as an incremental wire parser.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -91,11 +92,7 @@ class _BenchPostgresProtocol(asyncio.Protocol):
             startup_len = struct.unpack_from("!I", self.buffer)[0]
             if len(self.buffer) < startup_len:
                 return
-            if (
-                startup_len == 16
-                and struct.unpack_from("!I", self.buffer, 4)[0]
-                == _PG_CANCEL_CODE
-            ):
+            if startup_len == 16 and struct.unpack_from("!I", self.buffer, 4)[0] == _PG_CANCEL_CODE:
                 self.transport.close()  # type: ignore[attr-defined]
                 return
             del self.buffer[:startup_len]
@@ -115,16 +112,43 @@ class _BenchPostgresProtocol(asyncio.Protocol):
                 self.transport.close()  # type: ignore[attr-defined]
                 return
             self.flight.append((kind, payload))
+            if kind == 0x48 and any(  # 'H' Flush after Parse/Describe
+                flight_kind == 0x50 for flight_kind, _ in self.flight
+            ):
+                # asyncpg prepares a statement as Parse/Describe/Flush, then
+                # sends Bind/Execute/Sync only after it has read the parameter
+                # and row descriptions. Wreath combines those phases in one
+                # flight. Supporting both keeps this one deterministic peer an
+                # independent, shared fixture for the stack comparison.
+                self._prepare(out)
+                self.flight.clear()
             if kind == 0x53:  # 'S' Sync: the flight is complete
                 self._respond(out)
                 self.flight.clear()
         if out:
             self.transport.write(bytes(out))  # type: ignore[attr-defined]
 
-    def _respond(self, out: bytearray) -> None:
-        parse = next(
-            (payload for kind, payload in self.flight if kind == 0x50), None
+    def _prepare(self, out: bytearray) -> None:
+        parse = next(payload for kind, payload in self.flight if kind == 0x50)
+        statement_name, _, tail = parse.partition(b"\x00")
+        query, _, parameter_data = tail.partition(b"\x00")
+        self.statements[statement_name] = query.decode()
+        parameter_count = struct.unpack_from("!H", parameter_data)[0]
+        if query.decode() == _PG_HOT_SQL:
+            # asyncpg asks PostgreSQL to infer the type and therefore sends
+            # zero OIDs in Parse; ParameterDescription must report the inferred
+            # int4 before asyncpg will encode the one argument.
+            parameter_count = 1
+        out += _message(b"1")
+        description = struct.pack("!H", parameter_count)
+        description += struct.pack("!I", 23) * parameter_count
+        out += _message(b"t", description)
+        out += (
+            _row_description() if query.lstrip().lower().startswith(b"select") else _message(b"n")
         )
+
+    def _respond(self, out: bytearray) -> None:
+        parse = next((payload for kind, payload in self.flight if kind == 0x50), None)
         parameter_count = 0
         if parse is not None:  # 'P'
             statement_name, _, tail = parse.partition(b"\x00")
@@ -133,9 +157,7 @@ class _BenchPostgresProtocol(asyncio.Protocol):
             parameter_count = struct.unpack_from("!H", parameter_data)[0]
             sql = self.statements[statement_name]
         else:
-            bind = next(
-                payload for kind, payload in self.flight if kind == 0x42
-            )  # 'B'
+            bind = next(payload for kind, payload in self.flight if kind == 0x42)  # 'B'
             _, _, bind_tail = bind.partition(b"\x00")
             sql = self.statements[bind_tail.partition(b"\x00")[0]]
 
@@ -172,9 +194,7 @@ class BenchPostgres:
 
     async def start(self) -> str:
         loop = asyncio.get_running_loop()
-        self.server = await loop.create_server(
-            _BenchPostgresProtocol, "127.0.0.1", 0
-        )
+        self.server = await loop.create_server(_BenchPostgresProtocol, "127.0.0.1", 0)
         port = self.server.sockets[0].getsockname()[1]
         return f"postgresql://bench:bench@127.0.0.1:{port}/bench"
 
@@ -185,8 +205,7 @@ class BenchPostgres:
 
 
 _UPSTREAM_BODY = (
-    b'{"service":"upstream","status":"ok","items":[1,2,3,4,5],'
-    b'"region":"local","cached":false}'
+    b'{"service":"upstream","status":"ok","items":[1,2,3,4,5],"region":"local","cached":false}'
 )
 _UPSTREAM_RESPONSE = (
     b"HTTP/1.1 200 OK\r\n"
@@ -229,9 +248,7 @@ class BenchUpstreamHttp:
 
     async def start(self) -> int:
         loop = asyncio.get_running_loop()
-        self.server = await loop.create_server(
-            _BenchUpstreamHttpProtocol, "127.0.0.1", 0
-        )
+        self.server = await loop.create_server(_BenchUpstreamHttpProtocol, "127.0.0.1", 0)
         return int(self.server.sockets[0].getsockname()[1])
 
     async def close(self) -> None:

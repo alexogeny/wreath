@@ -18,6 +18,59 @@ different template engine, an ORM that lacks a feature, a WSGI adapter in the
 path — the report says so, rather than letting a green cell imply more than it
 should.
 
+## End-to-end retired instructions
+
+`bench_holistic_stack_instructions.py` compares the broad application people
+actually end up maintaining. All three arms render one operations dashboard through
+policy/session middleware, nested validation, bearer and Cedar authorization,
+overlapping PostgreSQL and HTTP clients, a 730 × 48 × 6 series projection,
+temporal/geospatial/vector work, pagination, protobuf, MessagePack, templates,
+compression and HTML. Ordinary Wreath uses its format-aware native gzip. The
+optimal Wreath arm selects RFC 9842 DCZ when the HTTPS client supplies the exact
+hash of a real neighbouring response, and retains prepared fragment gzip as its
+ordinary-client fallback. FastAPI uses Starlette, Pydantic, cedarpy, asyncpg,
+aiohttp, NumPy, Jinja, protobuf and msgspec.
+
+```bash
+uv sync --inexact --group benchmark
+uv run python -m benchmarks.bench_holistic_stack_instructions \
+  --requests 30 --trials 5 --connections 8 --warmup 50 \
+  --output docs/perf/data/e2e-holistic-stack-instructions.json
+```
+
+The request count is workload-sized: even the 30/15 slope subtracts totals
+separated by billions of retired instructions. Every arm uses TLS 1.3 over
+HTTP/1.1. Every response is checked for the common business and policy facts
+before its counter is accepted; the DCZ arm additionally verifies its framing,
+dictionary, decoding and cache key, and its gzip fallback is exercised before
+measurement. An unchanged `holistic-aa` rebuild records the resolution floor.
+
+`bench_e2e_instructions.py` compares the complete service stack people actually
+assemble, then decomposes it cumulatively. The Wreath arm uses Wreath's metal
+server, binding, auth, Cedar, PostgreSQL driver, and HTTP client. The competitor
+uses FastAPI, Starlette CORS, Pydantic, Uvicorn/uvloop/httptools, `HTTPBearer`,
+`cedarpy`, `asyncpg`, and `aiohttp`.
+
+```bash
+uv sync --inexact --group benchmark
+uv run python -m benchmarks.bench_e2e_instructions \
+  --requests 4000 --trials 5 --connections 32 --warmup 500 \
+  --output docs/perf/data/e2e-stack-instructions.json
+```
+
+The only metric is `instructions:u`. Each sample is the slope between a fresh
+4,000-request process and a fresh 2,000-request process; fixed imports, startup,
+compilation, warm-up, and perf attachment cancel. High/low order alternates, and
+`complete-aa` rebuilds the final arm unchanged as a same-size resolution control.
+Every process is pinned, `PYTHONHASHSEED=0`, and every response, CORS header, and
+completed request count is verified before its counter is accepted.
+
+PostgreSQL and HTTP are real client wire operations against shared deterministic
+in-process peers. There is deliberately no external database daemon, DNS, disk,
+or service scheduler in the measurement. The peer's small cost belongs to the
+server process and is therefore included in both arms. This is an application
+instruction account, not a database throughput result.
+
 ## Quieting the machine first (`--quiet`, Linux only)
 
 A desktop is a hostile place to measure. `wreath-bench --quiet=TIER` removes the

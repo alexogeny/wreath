@@ -31,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import math
+import os
 from dataclasses import dataclass
+from pathlib import Path as FilePath
 from typing import Annotated, Any
 
 from wreath import Wreath
@@ -565,6 +567,26 @@ def _csrf_exempt(request: Any) -> bool:
     return request.method == "POST" and request.path == "/v1/webhooks/field-observations"
 
 
+_COMPRESSION = CompressionPolicy(
+    minimum_size=512,
+    compress_authenticated=True,
+)
+if os.environ.get("WREATH_BENCH_OPTIMAL_COMPRESSION") == "1":
+    # A retained response for neighbouring resource 41 is the client-held raw
+    # dictionary for resource 42.  It differs at two dynamic byte positions;
+    # bytes 249 onward are an independently verified stable template span.
+    _DICTIONARY = (
+        FilePath(__file__).with_name("data").joinpath("holistic-dictionary-v1.html")
+    ).read_bytes().removesuffix(b"\n")
+    _COMPRESSION._configure_dcz_dictionary("html", _DICTIONARY)
+    _COMPRESSION._configure_gzip_fragment(
+        "html",
+        _DICTIONARY,
+        prefix_bytes=249,
+        suffix_bytes=0,
+    )
+
+
 _HTTP_POLICY = HttpPolicy(
     proxy=ProxyPolicy(trusted=["127.0.0.1"]),
     trusted_host=TrustedHostPolicy(
@@ -591,10 +613,7 @@ _HTTP_POLICY = HttpPolicy(
         secure=False,
     ),
     cache_control=CachePolicy(CacheControl(private=True, no_store=True)),
-    compression=CompressionPolicy(
-        minimum_size=512,
-        compress_authenticated=True,
-    ),
+    compression=_COMPRESSION,
 )
 app = Wreath(http_policy=_HTTP_POLICY)
 _CLIENT_FACTS = app.client_facts("holistic")
