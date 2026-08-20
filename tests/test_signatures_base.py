@@ -13,6 +13,7 @@ self-consistent -- not that it is correct. These tests pin it two ways:
 from __future__ import annotations
 
 import base64
+from types import MappingProxyType
 
 import pytest
 
@@ -92,6 +93,14 @@ def test_native_base_serializes_every_supported_parameter_shape():
         params
     ).encode()
     assert base.splitlines()[-1] == expected
+
+
+def test_base_accepts_read_only_mapping_parameters() -> None:
+    components = (("@method", MappingProxyType({})),)
+    params = MappingProxyType({"created": 1})
+    assert signature_base(rfc_message(), components, params) == signature_base(
+        rfc_message(), (("@method", {}),), {"created": 1}
+    )
 
 
 def test_rfc_signature_verifies_against_the_rfc_key():

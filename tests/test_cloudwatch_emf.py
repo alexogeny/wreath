@@ -263,7 +263,9 @@ def test_native_counter_documents_match_the_independent_python_definition() -> N
         Counters(
             "jobs",
             "mail",
-            {f"metric_{index}": index for index in range(101)},
+            types.MappingProxyType(
+                {f"metric_{index}": index for index in range(101)}
+            ),
             gauges=frozenset({"metric_0"}),
         ),
     )

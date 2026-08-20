@@ -40,10 +40,12 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+from typing import cast
 
 import pytest
 
 from wreath.edge import Upstream, UpstreamPool
+from wreath.edge.serve import EdgeHandle
 
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
 _SLOT = int("".join(c for c in _WORKER if c.isdigit()) or 0)
@@ -91,22 +93,28 @@ def _self_signed() -> tuple[str, str]:
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.UTC)
     cert = (
-        x509.CertificateBuilder().subject_name(name).issuer_name(name)
-        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]),
-                       critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
         .sign(key, hashes.SHA256())
     )
     cf, cp = tempfile.mkstemp(suffix=".pem")
     kf, kp = tempfile.mkstemp(suffix=".pem")
     os.write(cf, cert.public_bytes(serialization.Encoding.PEM))
     os.close(cf)
-    os.write(kf, key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption()))
+    os.write(
+        kf,
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ),
+    )
     os.close(kf)
     return cp, kp
 
@@ -123,6 +131,44 @@ def _serve():
     return edge.serve
 
 
+class _CloseServer:
+    sockets = ()
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.waited = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.waited = True
+
+
+class _CloseTable:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def test_close_cancels_and_joins_pending_upstream_reopens() -> None:
+    """A reconnect task is owned until shutdown, never left pending on the loop."""
+    server = _CloseServer()
+    table = _CloseTable()
+    task = asyncio.create_task(asyncio.sleep(60))
+    tasks = {task}
+    handle = EdgeHandle(cast(asyncio.Server, server), table, [], 0, tasks)
+
+    await handle.aclose()
+
+    assert task.cancelled()
+    assert tasks == set()
+    assert table.closed
+    assert server.closed and server.waited
+
+
 class _Origin:
     """Records the head it received and answers a fixed 200."""
 
@@ -137,7 +183,7 @@ class _Origin:
         while True:
             try:
                 head = await reader.readuntil(b"\r\n\r\n")
-            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError):
+            except asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError:
                 break
             self.heads.append(head)
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
@@ -156,8 +202,10 @@ class _Origin:
 async def _get(port: int, path: bytes = b"/p") -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
-        writer.write(b"GET " + path + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                     b"X-Keep: 1\r\nConnection: close\r\n\r\n")
+        writer.write(
+            b"GET " + path + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"X-Keep: 1\r\nConnection: close\r\n\r\n"
+        )
         await writer.drain()
         return await asyncio.wait_for(reader.read(-1), 5)
     finally:
@@ -224,7 +272,7 @@ async def test_no_task_is_created_for_a_forwarded_request() -> None:
         created += 1
         return original(*args, **kwargs)
 
-    loop.create_task = counting                      # type: ignore[method-assign]
+    loop.create_task = counting  # type: ignore[method-assign]
     try:
         for i in range(3):
             writer.write(b"GET /p%d HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % i)
@@ -235,7 +283,7 @@ async def test_no_task_is_created_for_a_forwarded_request() -> None:
         assert created == 0, f"{created} Task(s) created for three forwarded requests"
         assert len(origin.heads) == 3, "the upstream connection was not reused"
     finally:
-        loop.create_task = original                  # type: ignore[method-assign]
+        loop.create_task = original  # type: ignore[method-assign]
         writer.close()
         await handle.aclose()
         await origin.close()
@@ -256,22 +304,29 @@ async def test_upstream_connections_are_open_before_the_first_request() -> None:
     handle = await serve(UpstreamPool([Upstream(url)]), host="127.0.0.1", port=port)
     try:
         assert handle.upstream_connections() > 0, (
-            "no upstream connection was opened during configuration")
+            "no upstream connection was opened during configuration"
+        )
     finally:
         await handle.aclose()
         await origin.close()
 
 
-@pytest.mark.parametrize("raw,reason", [
-    (b"GET /p HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", "two Host headers"),
-    (b"POST /p HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n"
-     b"Content-Length: 6\r\n\r\nhello", "two Content-Length headers"),
-    (b"POST /p HTTP/1.1\r\nHost: a\r\nContent-Length: 6\r\n"
-     b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n", "Content-Length with Transfer-Encoding"),
-])
-async def test_the_native_path_keeps_the_smuggling_refusals(
-    raw: bytes, reason: str
-) -> None:
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        (b"GET /p HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", "two Host headers"),
+        (
+            b"POST /p HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello",
+            "two Content-Length headers",
+        ),
+        (
+            b"POST /p HTTP/1.1\r\nHost: a\r\nContent-Length: 6\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            "Content-Length with Transfer-Encoding",
+        ),
+    ],
+)
+async def test_the_native_path_keeps_the_smuggling_refusals(raw: bytes, reason: str) -> None:
     """The refusals survive the rewrite, and nothing reaches the origin.
 
     Pinned separately from `test_edge_forwarding_contract.py` because that file
@@ -324,18 +379,23 @@ async def test_serve_terminates_tls_natively() -> None:
     await origin.start(origin_port)
     url = f"http://127.0.0.1:{origin_port}"
     port = _next_port()
-    handle = await serve(UpstreamPool([Upstream(url)]), host="127.0.0.1",
-                         port=port,
-                         ssl=metal_tls_context(certfile=cert, keyfile=key))
+    handle = await serve(
+        UpstreamPool([Upstream(url)]),
+        host="127.0.0.1",
+        port=port,
+        ssl=metal_tls_context(certfile=cert, keyfile=key),
+    )
     try:
         client = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_CLIENT)
         client.check_hostname = False
         client.verify_mode = ssl_module.CERT_NONE
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", port, ssl=client, server_hostname="localhost")
+            "127.0.0.1", port, ssl=client, server_hostname="localhost"
+        )
         try:
-            writer.write(b"GET /p HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                         b"X-Keep: 1\r\nConnection: close\r\n\r\n")
+            writer.write(
+                b"GET /p HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Keep: 1\r\nConnection: close\r\n\r\n"
+            )
             await writer.drain()
             response = await asyncio.wait_for(reader.read(-1), 10)
         finally:
@@ -345,8 +405,7 @@ async def test_serve_terminates_tls_natively() -> None:
         assert origin.heads, "nothing reached the origin"
         # The hop to the origin stays plaintext here, so the origin sees a
         # forwarded record saying the *client* arrived over https.
-        assert b"x-forwarded-proto: https" in origin.heads[0].lower(), \
-            origin.heads[0]
+        assert b"x-forwarded-proto: https" in origin.heads[0].lower(), origin.heads[0]
     finally:
         await handle.aclose()
         await origin.close()

@@ -8,7 +8,7 @@ import pytest
 
 from wreath._jobcore import PayloadTooLarge
 from wreath._replay_adapters import DatabaseDouble
-from wreath.messaging import MessageBus
+from wreath.messaging import Message, MessageBus, MessageEnvelope
 
 
 def _bus(db):
@@ -23,6 +23,25 @@ async def test_publish_ephemeral_notifies():
     wire, body = call[1]
     assert wire.startswith("wm_")
     assert json.loads(body) == {"id": 1}
+
+
+async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
+    db = DatabaseDouble()
+    bus = _bus(db)
+    envelope = MessageEnvelope(
+        "booking.created",
+        {"id": 1},
+        correlation_id="checkout-7",
+        causation_id="command-3",
+    )
+    await bus.publish("booking_created", envelope)
+    call = next(c for c in db.calls if "pg_notify" in c[0])
+    wire = json.loads(call[1][1])
+    assert wire["__wreath_message__"] == 1
+    assert wire["payload"] == {"id": 1}
+    delivered = Message(payload=wire, channel="booking_created", group=None, tenant="")
+    assert delivered.envelope() == envelope
+    assert MessageEnvelope.decode({"id": 1}) is None
 
 
 async def test_publish_ephemeral_oversized_rejected():

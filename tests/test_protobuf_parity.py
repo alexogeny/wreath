@@ -32,6 +32,7 @@ from __future__ import annotations
 import enum
 import math
 import struct
+from types import MappingProxyType
 
 import pytest
 
@@ -328,6 +329,10 @@ def test_repeated_nested_messages() -> None:
 )
 def test_maps(mapping: dict) -> None:
     _same_bytes(_with(21, mapping))
+
+
+def test_maps_accept_read_only_mapping_fallback() -> None:
+    _same_bytes(_with(21, MappingProxyType({"a": 1, "b": 2})))
 
 
 def test_unknown_field_bytes_are_appended_identically() -> None:

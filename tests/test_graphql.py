@@ -126,6 +126,13 @@ def test_alias_amplification_is_bounded() -> None:
     assert caught.value.code == "aliases"
 
 
+def test_same_spelling_alias_still_counts_as_alias_syntax() -> None:
+    """`field: field` is still an alias even though its response key matches."""
+    with pytest.raises(GraphQLSyntaxError) as caught:
+        parse("{ field: field field: field }", Limits(max_aliases=1))
+    assert caught.value.code == "aliases"
+
+
 def test_the_step_budget_is_a_backstop() -> None:
     with pytest.raises(GraphQLSyntaxError) as caught:
         parse("{ " + " ".join(f"f{i}" for i in range(5000)) + " }",

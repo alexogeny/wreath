@@ -357,6 +357,46 @@ def test_filters_default_to_the_same_allow_list_as_sorting() -> None:
     assert len(apply_filters(Widget.select(), {"name": "a"}).predicates) == 1
 
 
+def test_filter_set_compiles_rich_operators_and_listing_sort_once() -> None:
+    from wreath.pagination import FilterField, FilterSet, Listing
+
+    Widget = _model()
+    filters = FilterSet(
+        Widget,
+        {
+            "identifier": FilterField("id", ("gte", "lt", "in")),
+            "name": ("eq", "ilike"),
+        },
+        max_terms=3,
+    )
+    listing = Listing(filters, sort=("id", "name"), default_sort=("-id",))
+    query = listing.apply(
+        Widget.select(),
+        filters={"identifier": {"gte": 2, "lt": 10}, "name": {"ilike": "A%"}},
+    )
+    assert [predicate.operator for predicate in query.predicates] == [">=", "<", "ILIKE"]
+    assert [ordering.direction for ordering in query.orderings] == ["DESC"]
+
+
+def test_filter_set_refuses_undeclared_operators_and_unbounded_terms() -> None:
+    from wreath.pagination import FilterSet, InvalidPagination
+
+    Widget = _model()
+    filters = FilterSet(Widget, {"id": ("eq", "gte")}, max_terms=1)
+    with pytest.raises(InvalidPagination, match="does not allow"):
+        filters.apply(Widget.select(), {"id": {"lt": 3}})
+    with pytest.raises(InvalidPagination, match="max_terms"):
+        filters.apply(Widget.select(), {"id": {"eq": 3, "gte": 1}})
+
+
+def test_filter_set_refuses_text_operators_on_non_text_columns_at_declaration() -> None:
+    from wreath.pagination import FilterSet
+
+    Widget = _model()
+    with pytest.raises(ValueError, match="Text or Varchar"):
+        FilterSet(Widget, {"id": ("ilike",)})
+
+
 def test_a_filter_allow_list_narrows_below_the_default() -> None:
     """`allow=` must actually replace `sortable_fields`, not sit beside it.
 
