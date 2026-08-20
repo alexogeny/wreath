@@ -273,15 +273,18 @@ the alternative expressible in one `traceparent` column is no trace at all.
 traceparent onto every subscriber group's row, and the consumer — routinely a different
 service on a different day — runs its handler under it.
 
-**Ephemeral fan-out carries nothing, deliberately.** The plan's rule for the queue
-("context rides the row, never the `NOTIFY`") does not transfer to ephemeral publish,
-because there is no row: `pg_notify($1, $2)` carries your payload *as* the message. The
-only place a traceparent could go is inside that payload, which means wrapping every
-ephemeral message in an envelope — a breaking change to a live wire format between
-processes, needing a versioned envelope that a mid-rolling-deploy subscriber on the old
-build can still read. The 8000-byte `NOTIFY` bound is not the obstacle; a traceparent is
-55 bytes. It is deferred, with a row in [the roadmap](../reference/roadmap.md), and
-`wreath doctor trace` names it as unsearched every time it runs.
+**Ephemeral fan-out has an explicit envelope.** A plain payload keeps its old wire
+shape and carries no context. Pass a `MessageEnvelope` when an event needs identity,
+correlation, causation, or a `trace_context`. The marker and version make detection
+exact; `Message.envelope()` returns the declaration for that shape and `None` for a
+legacy payload.
+
+The bus does not capture ambient context into an ephemeral message behind the caller's
+back. The publisher names it in the envelope. During a rolling deployment an old
+consumer still receives the envelope as an ordinary JSON object, so deploy consumers
+before producers when the envelope is required. `wreath doctor trace` still names
+ephemeral messages as unsearched: a `NOTIFY` has no durable row or history to inspect
+after delivery, whether or not its payload carried a trace.
 
 ## Following a trace afterwards
 
@@ -300,4 +303,4 @@ tool that quietly leaves a source out is worse than one that answers nothing, be
 "no durable work carries this trace" then reads as "nothing does". Every source it could
 not reach is named: a table that is not on this database, a schema still on the version
 before propagation, an Inspector socket nobody gave it, a trace that has aged out of the
-ring, and ephemeral bus messages, which carry no context at all.
+ring, and ephemeral bus messages, which leave no durable history to search.
