@@ -365,6 +365,23 @@
     "_native/geospatial.c::<file>::CL-NEST",
     "_native/graphql.c::<file>::CL-NEST",
     "_native/graphql_parser.c::<file>::CL-NEST",
+    "_native/gzip/decode/crc32.c::wreath_gzip_decoder_crc32_init_tables::CL-NEST",
+    "_native/gzip/decode/inflate.c::<file>::CL-LINEAR-IN-LOOP",
+    "_native/gzip/decode/inflate.c::<file>::CL-NEST",
+    "_native/gzip/decode/inflate.c::inflate_member::CL-LINEAR-IN-LOOP",
+    "_native/gzip/decode/inflate.c::inflate_member::CL-NEST",
+    "_native/gzip/decode/inflate.c::load_dynamic::CL-LINEAR-IN-LOOP",
+    "_native/gzip/decode/inflate.c::wreath_gzip_decoder_build_fused::CL-NEST",
+    "_native/gzip/encode/crc32.c::wreath_gzip_encoder_crc32_init_tables::CL-NEST",
+    "_native/gzip/encode/deflate.c::<file>::CL-NEST",
+    "_native/gzip/encode/deflate.c::emit_stored_run::CL-LINEAR-IN-LOOP",
+    "_native/gzip/encode/deflate.c::rle_lengths::CL-NEST",
+    "_native/gzip/encode/deflate.c::wreath_gzip_encoder_defl_static_init::CL-NEST",
+    "_native/gzip/encode/huff.c::<file>::CL-LINEAR-IN-LOOP",
+    "_native/gzip/encode/huff.c::<file>::CL-NEST",
+    "_native/gzip/encode/huff.c::sort_by_freq::CL-LINEAR-IN-LOOP",
+    "_native/gzip/encode/huff.c::sort_by_freq::CL-NEST",
+    "_native/gzip/encode/parse_core.h::<file>::CL-NEST",
     "_native/header_block.c::<file>::CL-LINEAR-IN-LOOP",
     "_native/headers.c::<file>::CL-LINEAR-IN-LOOP",
     "_native/http.c::<file>::CL-LINEAR-IN-LOOP",
@@ -1742,7 +1759,7 @@
     },
     {
       "file": "_auth/cedar.py",
-      "line": 785,
+      "line": 792,
       "code": "SL-IN-LOOP",
       "function": "_query_base",
       "loop_depth": 1,
@@ -4102,7 +4119,7 @@
     },
     {
       "file": "_docs/site.py",
-      "line": 460,
+      "line": 465,
       "code": "SL-SLICE-LOOP",
       "function": "_sections",
       "loop_depth": 1,
@@ -4112,7 +4129,7 @@
     },
     {
       "file": "_docs/site.py",
-      "line": 589,
+      "line": 599,
       "code": "SL-LINEAR-METHOD",
       "function": "_check_page",
       "loop_depth": 1,
@@ -5672,7 +5689,7 @@
     },
     {
       "file": "_native/client_http1.c",
-      "line": 794,
+      "line": 792,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5682,7 +5699,7 @@
     },
     {
       "file": "_native/client_http1.c",
-      "line": 911,
+      "line": 909,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5692,7 +5709,7 @@
     },
     {
       "file": "_native/client_http1.c",
-      "line": 912,
+      "line": 910,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5702,7 +5719,7 @@
     },
     {
       "file": "_native/client_http1.c",
-      "line": 914,
+      "line": 912,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7259,6 +7276,506 @@
       "confidence": "medium",
       "message": "loop nested 2 deep",
       "source": "while (position < length &&"
+    },
+    {
+      "file": "_native/gzip/decode/crc32.c",
+      "line": 24,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_decoder_crc32_init_tables",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(c & 1));"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 263,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (uint32_t j = s; j < s + 8; j++) sorted[next[lens[j]]++] = (uint16_t)j;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 283,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (uint32_t i = 0; i < half; i++) table[half + i] = table[i];"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 285,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(table + half, table, (size_t)half * sizeof *table);"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 294,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (; code < end; code++) table[rev8[code] >> sh] = ents[sorted[k++]] | l;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 297,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (; code < end; code++) table[rev_code(code, sh)] = ents[sorted[k++]] | l;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 306,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (uint32_t j = count[l]; j; j--) {"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 309,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "for (uint32_t i = brev(code, l); i < (1u << root); i += step) table[i] = e;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 327,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (; code < end; code++) {"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 354,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "for (uint32_t i = 0; i < half; i++) sub[half + i] = sub[i];"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 391,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_decoder_build_fused",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (cnt < 4) {"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 569,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (uint32_t j = r; j < end; j += step) table[j] = e;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 646,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (uint32_t i = r; i < end; i += 1u << l) table[i] = e;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 838,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "load_dynamic",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memset(): linear call inside a loop",
+      "source": "memset(lens + i, (int)fill, rep);"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 1017,
+      "code": "CL-NEST",
+      "function": "inflate_member",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s->bc >= 8 && len) {"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 1026,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "inflate_member",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(s->out, s->in, len);"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 1044,
+      "code": "CL-NEST",
+      "function": "inflate_member",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (;;) {"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 1102,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s.in < s.in_end && *s.in) s.in++;"
+    },
+    {
+      "file": "_native/gzip/decode/inflate.c",
+      "line": 1107,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s.in < s.in_end && *s.in) s.in++;"
+    },
+    {
+      "file": "_native/gzip/encode/crc32.c",
+      "line": 23,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_encoder_crc32_init_tables",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & -(c & 1));"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 158,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_encoder_defl_static_init",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s < 28 && len >= lbase[s + 1]) s++;"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 164,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_encoder_defl_static_init",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s < 29 && d >= dbase[s + 1]) s++;"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 170,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_encoder_defl_static_init",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (s < 29 && d >= dbase[s + 1]) s++;"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 185,
+      "code": "CL-NEST",
+      "function": "wreath_gzip_encoder_defl_static_init",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int k = 1; k < 40; k += 2) { l += t / k; t *= z2; }"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 225,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (i + run < total && all[i + run] == cur) run++;"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 228,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run >= 11) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 234,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run >= 3) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 240,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run--) { rle_push(r, 0, 0, 0); cl_freq[0]++; }"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 245,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run >= 3) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 251,
+      "code": "CL-NEST",
+      "function": "rle_lengths",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run--) { rle_push(r, cur, 0, 0); cl_freq[cur]++; }"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 300,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run--) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 422,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (unsigned s = 0; s < 30; s++) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 506,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (run--) check_tok[check_n++] = GZ_TOK_LIT(in[check_pos++]);"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 656,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (pos < end) ll[in[pos++]]++;"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 675,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (pos < end) {"
+    },
+    {
+      "file": "_native/gzip/encode/deflate.c",
+      "line": 1149,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "emit_stored_run",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(e->bw.out, in + from, raw);"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 40,
+      "code": "CL-NEST",
+      "function": "sort_by_freq",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (j && freq[ord[j - 1]] > f) { ord[j] = ord[j - 1]; j--; }"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 48,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "sort_by_freq",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memset(): linear call inside a loop",
+      "source": "memset(cnt, 0, sizeof cnt);"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 49,
+      "code": "CL-NEST",
+      "function": "sort_by_freq",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int i = 0; i < m; i++) cnt[(freq[ord[i]] >> sh) & 0xff]++;"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 51,
+      "code": "CL-NEST",
+      "function": "sort_by_freq",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int i = 0; i < 256; i++) { unsigned c = cnt[i]; cnt[i] = run; run += c; }"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 52,
+      "code": "CL-NEST",
+      "function": "sort_by_freq",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int i = 0; i < m; i++) tmp[cnt[(freq[ord[i]] >> sh) & 0xff]++] = ord[i];"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 53,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "sort_by_freq",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(ord, tmp, (size_t)m * sizeof *ord);"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 82,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (i < m || j < np) {"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 94,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(prv, cur, (size_t)k * sizeof *prv);"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 105,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int k = 0; k < s; k++) leaves += isleaf[l][k];"
+    },
+    {
+      "file": "_native/gzip/encode/huff.c",
+      "line": 114,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (int lv = 1; lv <= maxlen; lv++) l += take[lv] > i;"
+    },
+    {
+      "file": "_native/gzip/encode/parse_core.h",
+      "line": 200,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (hpos < pos) {"
+    },
+    {
+      "file": "_native/gzip/encode/parse_core.h",
+      "line": 233,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (unsigned k = 0; k < len; k++) bud += lit_cost[in[pos + k]];"
+    },
+    {
+      "file": "_native/gzip/encode/parse_core.h",
+      "line": 294,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (hpos < pos) {"
+    },
+    {
+      "file": "_native/gzip/encode/parse_core.h",
+      "line": 333,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (pos < stop) {"
     },
     {
       "file": "_native/header_block.c",
@@ -9792,7 +10309,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 871,
+      "line": 873,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9802,7 +10319,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 873,
+      "line": 875,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9812,7 +10329,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 879,
+      "line": 881,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -9822,7 +10339,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 880,
+      "line": 882,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -9832,7 +10349,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 884,
+      "line": 886,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 2,
@@ -9842,7 +10359,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 1273,
+      "line": 1275,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9852,7 +10369,7 @@
     },
     {
       "file": "_native/server_policy.c",
-      "line": 1294,
+      "line": 1296,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10242,7 +10759,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 600,
+      "line": 618,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10252,7 +10769,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 609,
+      "line": 627,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10262,7 +10779,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 625,
+      "line": 643,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10272,7 +10789,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 633,
+      "line": 651,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -13932,7 +14449,7 @@
     },
     {
       "file": "app.py",
-      "line": 1097,
+      "line": 1098,
       "code": "SL-LINEAR-CALL",
       "function": "_components_by_database",
       "loop_depth": 1,
@@ -13942,7 +14459,7 @@
     },
     {
       "file": "app.py",
-      "line": 1860,
+      "line": 1861,
       "code": "SL-IN-LOOP",
       "function": "register",
       "loop_depth": 1,
@@ -13952,7 +14469,7 @@
     },
     {
       "file": "app.py",
-      "line": 2014,
+      "line": 2015,
       "code": "SL-IN-LOOP",
       "function": "include_router",
       "loop_depth": 1,
@@ -13962,7 +14479,7 @@
     },
     {
       "file": "app.py",
-      "line": 2019,
+      "line": 2020,
       "code": "SL-IN-LOOP",
       "function": "include_router",
       "loop_depth": 2,
@@ -13972,7 +14489,7 @@
     },
     {
       "file": "app.py",
-      "line": 2029,
+      "line": 2030,
       "code": "SL-COMP-LOOP",
       "function": "include_router",
       "loop_depth": 1,
@@ -13982,7 +14499,7 @@
     },
     {
       "file": "app.py",
-      "line": 2029,
+      "line": 2030,
       "code": "SL-LINEAR-METHOD",
       "function": "include_router",
       "loop_depth": 1,
@@ -13992,7 +14509,7 @@
     },
     {
       "file": "app.py",
-      "line": 4511,
+      "line": 4512,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14002,7 +14519,7 @@
     },
     {
       "file": "app.py",
-      "line": 4514,
+      "line": 4515,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14012,7 +14529,7 @@
     },
     {
       "file": "app.py",
-      "line": 4552,
+      "line": 4553,
       "code": "SL-COMP-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14022,7 +14539,7 @@
     },
     {
       "file": "app.py",
-      "line": 4560,
+      "line": 4561,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14032,7 +14549,7 @@
     },
     {
       "file": "app.py",
-      "line": 4579,
+      "line": 4580,
       "code": "SL-COMP-NEST",
       "function": "_compile_routes_locked",
       "loop_depth": 0,
@@ -14042,7 +14559,7 @@
     },
     {
       "file": "app.py",
-      "line": 4660,
+      "line": 4661,
       "code": "SL-COMP-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 2,
@@ -14052,7 +14569,7 @@
     },
     {
       "file": "app.py",
-      "line": 4682,
+      "line": 4683,
       "code": "SL-IN-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 2,
@@ -14062,7 +14579,7 @@
     },
     {
       "file": "app.py",
-      "line": 4736,
+      "line": 4737,
       "code": "SL-COMP-NEST",
       "function": "_compile_routes_locked",
       "loop_depth": 0,
@@ -14072,7 +14589,7 @@
     },
     {
       "file": "app.py",
-      "line": 4911,
+      "line": 4912,
       "code": "SL-COMP-LOOP",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14082,7 +14599,7 @@
     },
     {
       "file": "app.py",
-      "line": 4911,
+      "line": 4912,
       "code": "SL-LINEAR-METHOD",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14092,27 +14609,27 @@
     },
     {
       "file": "app.py",
-      "line": 4913,
+      "line": 4914,
       "code": "SL-COMP-LOOP",
       "function": "_compile_capabilities",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "comprehension over `check.values` inside a loop",
-      "source": "names.update(f\"permission:{value}\" for value in check.values)"
-    },
-    {
-      "file": "app.py",
-      "line": 4913,
-      "code": "SL-LINEAR-METHOD",
-      "function": "_compile_capabilities",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "`names.update()` inside a loop: update() is linear in its argument",
       "source": "names.update(f\"permission:{value}\" for value in check.values)"
     },
     {
       "file": "app.py",
       "line": 4914,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_compile_capabilities",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "`names.update()` inside a loop: update() is linear in its argument",
+      "source": "names.update(f\"permission:{value}\" for value in check.values)"
+    },
+    {
+      "file": "app.py",
+      "line": 4915,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_capabilities",
       "loop_depth": 1,
@@ -14122,7 +14639,7 @@
     },
     {
       "file": "app.py",
-      "line": 4937,
+      "line": 4938,
       "code": "SL-COMP-LOOP",
       "function": "_requirement_clauses",
       "loop_depth": 1,
@@ -14132,7 +14649,7 @@
     },
     {
       "file": "app.py",
-      "line": 4968,
+      "line": 4969,
       "code": "SL-COMP-NEST",
       "function": "_requirement_clauses",
       "loop_depth": 1,
@@ -14142,7 +14659,7 @@
     },
     {
       "file": "app.py",
-      "line": 5299,
+      "line": 5300,
       "code": "SL-ACCUM-ADD",
       "function": "_close_all",
       "loop_depth": 1,
@@ -14152,7 +14669,7 @@
     },
     {
       "file": "app.py",
-      "line": 5403,
+      "line": 5404,
       "code": "SL-LINEAR-CALL",
       "function": "_lifespan",
       "loop_depth": 2,
@@ -14162,7 +14679,7 @@
     },
     {
       "file": "app.py",
-      "line": 5448,
+      "line": 5449,
       "code": "SL-LINEAR-CALL",
       "function": "_lifespan",
       "loop_depth": 2,
@@ -14922,7 +15439,7 @@
     },
     {
       "file": "grpc.py",
-      "line": 370,
+      "line": 371,
       "code": "SL-IN-LOOP",
       "function": "<module>",
       "loop_depth": 1,
@@ -15462,7 +15979,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 523,
+      "line": 623,
       "code": "SL-LINEAR-METHOD",
       "function": "_insert_durable",
       "loop_depth": 1,
@@ -15472,7 +15989,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 850,
+      "line": 950,
       "code": "SL-LINEAR-CALL",
       "function": "drain",
       "loop_depth": 1,
@@ -15482,7 +15999,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 875,
+      "line": 975,
       "code": "SL-ACCUM-ADD",
       "function": "_pump",
       "loop_depth": 1,
@@ -15492,7 +16009,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 947,
+      "line": 1047,
       "code": "SL-ACCUM-ADD",
       "function": "_consume",
       "loop_depth": 1,
@@ -15502,7 +16019,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 1076,
+      "line": 1176,
       "code": "SL-ACCUM-ADD",
       "function": "_sweeper",
       "loop_depth": 1,
@@ -15512,7 +16029,7 @@
     },
     {
       "file": "messaging.py",
-      "line": 1113,
+      "line": 1213,
       "code": "SL-LINEAR-CALL",
       "function": "_wake_consumers",
       "loop_depth": 1,
