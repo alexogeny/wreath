@@ -8,10 +8,11 @@ directory provisioning — SCIM and SAML both land on this model rather than
 inventing a second one.
 
 It is deliberately not an ORM model you have to adopt. `OrganizationStore` is
-the seam and `InMemoryOrganizationStore` is the reference implementation, in the
-same spirit as `wreath.users`' pluggable `UserStore`, because organisations are
-the table an existing application is most likely to already have under a
-different name.
+the seam. `InMemoryOrganizationStore` is the development/reference
+implementation; `PostgresOrganizationStore` is the durable, multi-worker
+implementation and contributes its three tables to Wreath's startup schema
+walk. Applications with an existing organisation model can still implement the
+protocol over their own tables.
 
 `scim_router` is the directory-provisioning surface, and it is the clearest
 illustration of that promise: SCIM 2.0 (RFC 7643 and RFC 7644) served straight

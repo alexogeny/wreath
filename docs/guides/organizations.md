@@ -29,9 +29,11 @@ combining rule rather than auditing every caller.
 ## Organisations, members, roles
 
 ```python
-from wreath.organizations import InMemoryOrganizationStore, Memberships
+from wreath.organizations import Memberships, PostgresOrganizationStore
 
-store = InMemoryOrganizationStore(roles={"admin", "member", "billing"})
+store = PostgresOrganizationStore(
+    app.postgres("main"), roles={"admin", "member", "billing"}
+)
 await store.add_member("acme", "alice", roles={"admin"})
 await store.add_member("globex", "alice", roles={"member"})
 ```
@@ -39,6 +41,14 @@ await store.add_member("globex", "alice", roles={"member"})
 Roles are declared up front. That is what lets a policy naming a role that does
 not exist fail at startup instead of denying quietly forever, and it is the same
 bargain `wreath.flags` makes.
+
+`PostgresOrganizationStore` owns three indexed tables: organisations,
+memberships, and invitations. Once it reaches `Memberships(store)` on the
+configured authorizer, Wreath discovers and applies that schema during lifespan
+startup. Invitation acceptance marks the invitation consumed and writes the
+membership in one statement, so another worker — or a new API process after a
+restart — sees both. Use `InMemoryOrganizationStore` only for tests and
+single-process development where losing all three maps is intentional.
 
 Wire the memberships into the authorizer and they become Cedar context:
 
@@ -84,7 +94,17 @@ invitation = await store.invite("acme", "new@example.com", roles={"member"}, ttl
 membership = await store.accept(invitation.token, user_id)
 ```
 
-Single-use, expiring, and compared in constant time.
+Single-use and expiring. The in-memory implementation compares the token in
+constant time; the PostgreSQL implementation looks up a fixed-width SHA-256
+digest and consumes it in the same statement that writes membership.
+
+The organisation store is only one owner in the identity lifecycle. Persist all
+three production owners: accounts through `OrmUserStore` over your user model,
+organisations through `PostgresOrganizationStore`, and server-side sessions
+through `PostgresSessionStore` passed to `SessionPolicy`. Persist the session
+signing secret outside the process too. Mixing a durable organisation store
+with `InMemoryUserStore`, a memory session double, or a freshly generated secret
+still logs everybody out or loses accepted accounts at the next restart.
 
 ## Delegation: an agent acting for a person
 
