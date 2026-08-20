@@ -6,6 +6,46 @@
 #include <math.h>
 #include <stdint.h>
 
+typedef enum {
+    DATA_ATTR_TARGET,
+    DATA_ATTR_KIND,
+    DATA_ATTR_TYPE,
+    DATA_ATTR_PAYLOAD,
+    DATA_ATTR_FRACTION,
+    DATA_ATTR_NUMBER,
+    DATA_ATTR_SEAM,
+    DATA_ATTR_COORDINATE,
+    DATA_ATTR_ERROR_TYPE,
+    DATA_ATTR_SUBSYSTEM,
+    DATA_ATTR_VALUES,
+    DATA_ATTR_COUNT,
+} DataAttr;
+
+static PyObject *data_attr_names[DATA_ATTR_COUNT];
+
+static int
+data_attrs_ready(void)
+{
+    static const char *names[DATA_ATTR_COUNT] = {
+        "target", "kind", "type", "payload", "fraction", "number", "seam",
+        "coordinate", "error_type", "subsystem", "values",
+    };
+    for (int index = 0; index < DATA_ATTR_COUNT; index++) {
+        data_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (data_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(data_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+data_getattr(PyObject *object, DataAttr attribute)
+{
+    return PyObject_GetAttr(object, data_attr_names[attribute]);
+}
+
 typedef struct {
     Py_hash_t hash;
     PyObject *key;
@@ -637,10 +677,7 @@ decode_address(const uint8_t *data, Py_ssize_t length, Py_ssize_t *offset,
                                           host_length, "strict");
     *offset += host_length;
     PyObject *port_obj = host == NULL ? NULL : PyLong_FromUnsignedLong(port);
-    PyObject *result = host != NULL && port_obj != NULL
-        ? PyTuple_Pack(2, host, port_obj) : NULL;
-    Py_XDECREF(host); Py_XDECREF(port_obj);
-    return result;
+    return wreath_tuple2_from_owned(host, port_obj);
 }
 
 PyObject *
@@ -788,9 +825,9 @@ wreath_fault_encode_parts(PyObject *Py_UNUSED(self), PyObject *args)
         Py_ssize_t total = 4;
         PyObject **adapter_items = PySequence_Fast_ITEMS(adapters);
         for (Py_ssize_t index = 0; index < adapter_count; index++) {
-            PyObject *target = PyObject_GetAttrString(adapter_items[index], "target");
+            PyObject *target = data_getattr(adapter_items[index], DATA_ATTR_TARGET);
             PyObject *kind = target == NULL ? NULL
-                : PyObject_GetAttrString(adapter_items[index], "kind");
+                : data_getattr(adapter_items[index], DATA_ATTR_KIND);
             if (kind == NULL ||
                 object_signed(adapter_items[index], "seam", 0, UINT8_MAX,
                               &wire[index].seam) < 0 ||
@@ -854,8 +891,8 @@ wreath_fault_encode_parts(PyObject *Py_UNUSED(self), PyObject *args)
         }
         PyMem_Free(wire);
     }
-    PyObject *result = PyTuple_Pack(2, body, adapt);
-    Py_DECREF(body); Py_DECREF(adapt); Py_DECREF(faults); Py_DECREF(adapters);
+    PyObject *result = wreath_tuple2_from_owned(body, adapt);
+    Py_DECREF(faults); Py_DECREF(adapters);
     return result;
 fault_encode_error:
     Py_DECREF(faults); Py_DECREF(adapters);
@@ -965,9 +1002,7 @@ wreath_fault_decode_parts(PyObject *Py_UNUSED(self), PyObject *args)
             PyTuple_SET_ITEM(adapter_faults, index, fault);
         }
     }
-    PyObject *result = PyTuple_Pack(2, faults, adapter_faults);
-    Py_DECREF(faults); Py_DECREF(adapter_faults);
-    return result;
+    return wreath_tuple2_from_owned(faults, adapter_faults);
 fault_decode_error:
     Py_DECREF(faults); Py_DECREF(adapter_faults);
     return NULL;
@@ -1549,6 +1584,7 @@ static PyType_Spec data_log_buffer_spec = {
 int
 wreath_register_data_kernels(PyObject *module)
 {
+    if (data_attrs_ready() < 0) return -1;
     PyObject *type = PyType_FromSpec(&data_log_buffer_spec);
     if (type == NULL) return -1;
     if (PyModule_AddObject(module, "LogBuffer", type) < 0) {
@@ -1559,9 +1595,9 @@ wreath_register_data_kernels(PyObject *module)
 }
 
 static int
-data_object_long(PyObject *owner, const char *name, long long *value)
+data_object_long(PyObject *owner, DataAttr attribute, long long *value)
 {
-    PyObject *object = PyObject_GetAttrString(owner, name);
+    PyObject *object = data_getattr(owner, attribute);
     if (object == NULL) return -1;
     *value = PyLong_AsLongLong(object);
     Py_DECREF(object);
@@ -1599,7 +1635,8 @@ wreath_log_cell_encode(PyObject *Py_UNUSED(self), PyObject *args)
         }
         PyObject *arg = items[index];
         long long kind_value;
-        if (data_object_long(arg, "type", &kind_value) < 0) goto log_encode_error;
+        if (data_object_long(arg, DATA_ATTR_TYPE, &kind_value) < 0)
+            goto log_encode_error;
         if (kind_value < WREATH_NFR_LOG_ARG_NONE ||
             kind_value > WREATH_NFR_LOG_ARG_LENGTH) {
             PyErr_Format(PyExc_ValueError, "unknown log argument type %lld", kind_value);
@@ -1623,7 +1660,7 @@ wreath_log_cell_encode(PyObject *Py_UNUSED(self), PyObject *args)
             continue;
         }
         if (kind == WREATH_NFR_LOG_ARG_STR) {
-            PyObject *payload_obj = PyObject_GetAttrString(arg, "payload");
+            PyObject *payload_obj = data_getattr(arg, DATA_ATTR_PAYLOAD);
             if (payload_obj == NULL) goto log_encode_error;
             PyObject *payload = PyBytes_FromObject(payload_obj);
             Py_DECREF(payload_obj);
@@ -1652,7 +1689,7 @@ wreath_log_cell_encode(PyObject *Py_UNUSED(self), PyObject *args)
             continue;
         }
         if (kind == WREATH_NFR_LOG_ARG_FLOAT) {
-            PyObject *fraction = PyObject_GetAttrString(arg, "fraction");
+            PyObject *fraction = data_getattr(arg, DATA_ATTR_FRACTION);
             double number = fraction == NULL ? -1.0 : PyFloat_AsDouble(fraction);
             Py_XDECREF(fraction);
             if (number == -1.0 && PyErr_Occurred()) goto log_encode_error;
@@ -1661,7 +1698,7 @@ wreath_log_cell_encode(PyObject *Py_UNUSED(self), PyObject *args)
             wreath_store_u64_le(packed + used, bits);
             used += 8;
         } else {
-            PyObject *number = PyObject_GetAttrString(arg, "number");
+            PyObject *number = data_getattr(arg, DATA_ATTR_NUMBER);
             if (number == NULL) goto log_encode_error;
             if (kind == WREATH_NFR_LOG_ARG_BOOL) {
                 int truth = PyObject_IsTrue(number);
@@ -1998,13 +2035,13 @@ wreath_step_encode(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject **boundary_items = PySequence_Fast_ITEMS(boundaries);
     for (Py_ssize_t index = 0; index < boundary_count; index++) {
         PyObject *event = boundary_items[index];
-        PyObject *seam_obj = PyObject_GetAttrString(event, "seam");
+        PyObject *seam_obj = data_getattr(event, DATA_ATTR_SEAM);
         PyObject *coordinate_obj = seam_obj == NULL ? NULL
-            : PyObject_GetAttrString(event, "coordinate");
+            : data_getattr(event, DATA_ATTR_COORDINATE);
         PyObject *target = coordinate_obj == NULL ? NULL
-            : PyObject_GetAttrString(event, "target");
+            : data_getattr(event, DATA_ATTR_TARGET);
         PyObject *failure = target == NULL ? NULL
-            : PyObject_GetAttrString(event, "error_type");
+            : data_getattr(event, DATA_ATTR_ERROR_TYPE);
         if (failure == NULL) {
             Py_XDECREF(seam_obj); Py_XDECREF(coordinate_obj);
             Py_XDECREF(target); goto step_writer_error;
@@ -2162,9 +2199,7 @@ step_boundary_done:
         PyObject *name = data_read_text(data, length, &offset, error_type);
         PyObject *state = name == NULL ? NULL
             : data_read_text(data, length, &offset, error_type);
-        PyObject *pair = name != NULL && state != NULL
-            ? PyTuple_Pack(2, name, state) : NULL;
-        Py_XDECREF(name); Py_XDECREF(state);
+        PyObject *pair = wreath_tuple2_from_owned(name, state);
         if (pair == NULL) {
             Py_DECREF(boundaries); Py_DECREF(compensations);
             goto step_objects_error;
@@ -2560,9 +2595,9 @@ wreath_metrics_flatten(PyObject *Py_UNUSED(self), PyObject *args)
     MetricTable table = {0};
     PyObject *reading;
     while ((reading = PyIter_Next(readings)) != NULL) {
-        PyObject *subsystem_object = PyObject_GetAttrString(reading, "subsystem");
+        PyObject *subsystem_object = data_getattr(reading, DATA_ATTR_SUBSYSTEM);
         PyObject *values = subsystem_object == NULL ? NULL
-            : PyObject_GetAttrString(reading, "values");
+            : data_getattr(reading, DATA_ATTR_VALUES);
         Py_DECREF(reading);
         if (values == NULL) {
             Py_XDECREF(subsystem_object);
@@ -3399,8 +3434,7 @@ wreath_parse_accept(PyObject *Py_UNUSED(self), PyObject *header)
         PyObject *media = PyUnicode_FromKindAndData(
             PyUnicode_4BYTE_KIND, text + range->start, range->end - range->start);
         PyObject *quality = media == NULL ? NULL : PyFloat_FromDouble(range->quality);
-        PyObject *pair = quality == NULL ? NULL : PyTuple_Pack(2, media, quality);
-        Py_XDECREF(media); Py_XDECREF(quality);
+        PyObject *pair = wreath_tuple2_from_owned(media, quality);
         if (pair == NULL) {
             Py_DECREF(result); result = NULL; goto accept_result_error;
         }

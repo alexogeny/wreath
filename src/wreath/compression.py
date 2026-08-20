@@ -1,9 +1,8 @@
-"""Gzip and zstd compression, on CPython's maintained native codecs.
+"""Gzip and zstd compression on native codecs.
 
-Wreath does not ship a deflate or a zstd implementation. Every entry point is a
-thin facade over `zlib` or over `compression.zstd`, both native codecs when the
-interpreter includes them, so compression already runs at native speed and
-inherits the interpreter's security fixes.
+Gzip uses Wreath's independent, format-aware encoder and decoder. The optional
+format hint changes parser and table policy, never the RFC 1951/1952 wire
+format. Zstd uses Python 3.14's `compression.zstd` extension.
 Selecting a content encoding from `Accept-Encoding` is a separate concern and
 lives in `wreath.middleware.CompressionPolicy`; this module only turns bytes
 into compressed bytes.
@@ -15,9 +14,11 @@ is an optional CPython build capability: Wreath and gzip remain importable when
 it is absent, while zstd functions and `CompressionPolicy` refuse with the
 required build form. `brotli` and `brotlicffi` remain third-party packages.
 
-Each coding has a whole-buffer form and a streaming form:
+Each coding has a whole-buffer form and a chunk-accepting form:
 
-- `gzip_compress(data, level=5)` / `GzipCompressor(level=5)`, levels 0-9.
+- `gzip_compress(data, level=5, format="unknown")` /
+  `GzipCompressor(level=5, format="unknown")`, levels 0-9. The format can be a
+  name or an HTTP Content-Type.
 - `gzip_decompress(data, max_output_bytes=...)` reads one back. It is the only
   entry point here that *decodes*, because decoding is the direction with an
   adversary in it: a gzip member's input length says nothing about its output
@@ -30,17 +31,13 @@ Each coding has a whole-buffer form and a streaming form:
   hardcoded. Note there is no zstd equivalent of gzip's `0`: levels below 1 are
   libzstd's *fast* modes, not a store mode.
 
-The streaming forms are the same three-state machine — open, finished, closed.
-`compress(chunk)` may return `b""` while the encoder buffers, `finish()` emits
-the remainder plus the trailer or frame epilogue, and `close()` drops a
-still-open encoder without emitting one. A compressor answers `compress` and
-`finish` only while it is open; after `finish()` or `close()` either raises
-`RuntimeError`, so a stream cannot be silently continued past its own end.
-`close()` is idempotent and never raises.
+The chunk-accepting forms are the same three-state machine — open, finished,
+closed. Gzip holds chunks until `finish()` so the format-aware encoder sees the
+whole member; zstd may emit blocks incrementally. `close()` drops a still-open
+encoder, is idempotent, and never raises.
 
-That refusal is not symmetric in what it prevents. A second `flush()` on a
-`zlib` object is harmless, but a second `flush(FLUSH_FRAME)` on a stdlib
-`zstd.ZstdCompressor` emits a second, *empty* 9-byte frame rather than raising —
+That refusal is load-bearing for zstd. A second `flush(FLUSH_FRAME)` on a
+stdlib `zstd.ZstdCompressor` emits a second, *empty* 9-byte frame rather than raising —
 valid zstd that no decoder complains about, so the failure surfaces as a
 `Content-Length` 9 bytes too long rather than as an error. `ZstdCompressor.finish`
 raising is what keeps that attributable.

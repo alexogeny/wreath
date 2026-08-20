@@ -55,8 +55,8 @@ def _connection_named(headers: tuple[tuple[bytes, bytes], ...]) -> frozenset[byt
     for name, value in headers:
         if name != b"connection":
             continue
-        for token in value.split(b","):
-            token = token.strip().lower()
+        for raw_token in value.split(b","):
+            token = raw_token.strip().lower()
             if token and token not in (b"close", b"keep-alive"):
                 named.add(token)
     return frozenset(named)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wreath"
-version = "0.3.1"
+version = "0.3.2"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = "==3.14.*"
@@ -27,9 +27,9 @@ classifiers = [
 # implementation into the framework. The base wheel always carries the
 # portable native core. `linux` adds the io_uring reactor, while `h3` and
 # `http3` are aliases for the same HTTP/3 extension and its bundled QUIC stack.
-linux = ["wreath-linux==0.3.1; sys_platform == 'linux'"]
-h3 = ["wreath-http3==0.3.1; sys_platform == 'linux'"]
-http3 = ["wreath-http3==0.3.1; sys_platform == 'linux'"]
+linux = ["wreath-linux==0.3.2; sys_platform == 'linux'"]
+h3 = ["wreath-http3==0.3.2; sys_platform == 'linux'"]
+http3 = ["wreath-http3==0.3.2; sys_platform == 'linux'"]
 
 # PyPI renders these as the project's sidebar links. Without them the listing
 # has no way back to the source or the documentation, and every relative link
@@ -84,6 +84,10 @@ dev = [
   "ty",
 ]
 benchmark = [
+  # Pragmatic outbound HTTP client for the FastAPI e2e instruction comparison.
+  # Wreath uses its built-in client; aiohttp is the performance-oriented
+  # ecosystem peer. Benchmark-only, never a Wreath runtime dependency.
+  "aiohttp>=3.12",
   "alembic>=1.16",
   # Bench-only competitor for bench_cedar: the official Rust Cedar engine via
   # its Python bindings. Never a runtime dependency — Wreath's own engine is
@@ -107,6 +111,13 @@ benchmark = [
   # No fastwsgi: 0.0.9 is the latest release and it cannot be imported on this
   # interpreter. See the candidates table in benchmarks/README.md.
   "litestar>=2.17",
+  # Natural ecosystem peers for Wreath's native holistic dashboard kernels.
+  # These remain benchmark-only: dense numerical work, compiled templates,
+  # compact records and protobuf are built into the Wreath arm.
+  "jinja2>=3.1",
+  "msgspec>=0.19",
+  "numpy>=2.3",
+  "protobuf>=6.31",
   "pydantic>=2.11",
   "sanic>=25.3",
   "starlette>=0.47",

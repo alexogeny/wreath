@@ -16,6 +16,7 @@ from wreath._docs import THEMES, Link, Nav, Page, Repo, Section, Site
 
 nav = Nav(
     Page("Home", "index.md"),
+    Page("Documentation map", "map.md"),
     Page("What you don't have to install", "capabilities.md"),
     Section(
         "Getting started",
@@ -249,15 +250,18 @@ nav = Nav(
     ),
     Section(
         "API reference",
+        Page("Overview", "reference/index.md"),
         Page("Application", "reference/app.md"),
         Page("Router", "reference/router.md"),
         Page("Request", "reference/request.md"),
         Page("Client facts", "reference/client_facts.md"),
         Page("Responses", "reference/response.md"),
         Page("Binding and validation", "reference/binding.md"),
+        Page("Reusable contracts", "reference/contracts.md"),
         Page("HTTP policy", "reference/policy.md"),
         Page("Middleware", "reference/middleware.md"),
         Page("Authentication", "reference/auth.md"),
+        Page("Action tokens", "reference/tokens.md"),
         Page("Authorization", "reference/authorization.md"),
         Page("WebSockets", "reference/websocket.md"),
         Page("Native server", "reference/server.md"),
@@ -314,6 +318,7 @@ nav = Nav(
         Page("Supervised services", "reference/services.md"),
         Page("User management", "reference/users.md"),
         Page("Notifications", "reference/notifications.md"),
+        Page("Email", "reference/email.md"),
         Page("Organizations", "reference/organizations.md"),
         Page("Quotas", "reference/quota.md"),
         Page("Named queries", "reference/queries.md"),
@@ -365,6 +370,7 @@ nav = Nav(
         # dead link. The release-notes skill adds a line here as well as to
         # the index.
         Page("Overview", "release_notes/index.md"),
+        Page("v0.3.2", "release_notes/0.3.2.md"),
         Page("v0.3.1", "release_notes/0.3.1.md"),
         Page("v0.3.0", "release_notes/0.3.0.md"),
         Page("v0.2.1", "release_notes/0.2.1.md"),
@@ -387,6 +393,7 @@ site = Site(
     # A build with no network renders the link without them and warns.
     repo=Repo("https://github.com/alexogeny/wreath", stats=True),
     links=(Link("Wreath on PyPI", "https://pypi.org/project/wreath/", icon="package"),),
+    map_page="map.md",
     description=(
         "Guides, cookbook, and API reference for the Wreath ASGI framework "
         "and native server."

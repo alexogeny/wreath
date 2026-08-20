@@ -102,6 +102,27 @@ static PyMethodDef core_methods[] = {
      "Encode one complete outbound HTTP replay exchange."},
     {"http_exchange_decode", wreath_http_exchange_decode, METH_VARARGS,
      "Decode one complete outbound HTTP replay exchange."},
+    {"gzip_encoder_new", wreath_gzip_encoder_new, METH_NOARGS,
+     "Allocate application-owned reusable gzip encoder workspace."},
+    {"gzip_compress", (PyCFunction)(void (*)(void))wreath_gzip_compress, METH_FASTCALL,
+     "gzip_compress(data, level, format) -> RFC 1952 member."},
+    {"gzip_compress_with", (PyCFunction)(void (*)(void))wreath_gzip_compress_with,
+     METH_FASTCALL,
+     "gzip_compress_with(workspace, data, level, format) -> RFC 1952 member."},
+    {"gzip_fragment_compress_with",
+     (PyCFunction)(void (*)(void))wreath_gzip_fragment_compress_with,
+     METH_FASTCALL,
+     "gzip_fragment_compress_with(workspace, data, level, format, fragments)."},
+    {"gzip_decoder_new", wreath_gzip_decoder_new, METH_NOARGS,
+     "Allocate stream-owned reusable gzip decoder workspace."},
+    {"gzip_decompress", (PyCFunction)(void (*)(void))wreath_gzip_decompress,
+     METH_FASTCALL,
+     "gzip_decompress(data, max_output_bytes, format) -> bytes."},
+    {"gzip_decompress_with", (PyCFunction)(void (*)(void))wreath_gzip_decompress_with,
+     METH_FASTCALL,
+     "gzip_decompress_with(workspace, data, max_output_bytes, format) -> bytes."},
+    {"gzip_codec_info", wreath_gzip_codec_info, METH_NOARGS,
+     "Identify the independent native gzip kernels."},
     {"first_duplicate", wreath_first_duplicate, METH_O,
      "Return the first repeated item in a sequence, or None."},
     {"minimal_prefixes", wreath_minimal_prefixes, METH_O,
@@ -565,6 +586,9 @@ static WreathCoreCAPI core_capi = {
     wreath_parse_cookie_data_raw,
     wreath_user_agent_blocked,
     wreath_user_agent_database_check,
+    wreath_gzip_compress_workspace,
+    wreath_gzip_fragment_compress_workspace,
+    wreath_gzip_format_object,
 };
 
 
@@ -577,6 +601,10 @@ PyInit__core(void)
         return NULL;
     }
     if (wreath_security_ready() < 0 || wreath_jose_ready() < 0 ||
+        wreath_observability_ready() < 0 || wreath_protobuf_ready() < 0 ||
+        wreath_graphql_parser_ready() < 0 || wreath_graphql_ready() < 0 ||
+        wreath_scim_ready() < 0 || wreath_http_replay_ready() < 0 ||
+        wreath_series_ready() < 0 ||
         wreath_register_policy_router(module) < 0 ||
         wreath_register_webpolicy(module) < 0 || wreath_register_proxy(module) < 0 ||
         wreath_register_ratelimit(module) < 0 ||

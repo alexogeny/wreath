@@ -65,9 +65,7 @@ class EmfBridge:
 
         self._source = _snapshot_source(source, bridge="cloudwatch-emf")
 
-        explicit_sources = _counter_sources(
-            counter_sources, bridge="CloudWatch"
-        )
+        explicit_sources = _counter_sources(counter_sources, bridge="CloudWatch")
         self._app = app
         self._counter_sources = explicit_sources
         self._namespace = namespace
@@ -76,8 +74,9 @@ class EmfBridge:
         self._cumulative = cumulative
         self._deltas = _core.metric_delta_state()
 
-    def blobs(self, snapshot: Any, *, timestamp_ms: int,
-              recorder_loss: dict | None = None) -> list[dict]:
+    def blobs(
+        self, snapshot: Any, *, timestamp_ms: int, recorder_loss: dict | None = None
+    ) -> list[dict]:
         """The list of EMF blobs for one snapshot."""
         from .metrics import collect
 
@@ -133,8 +132,12 @@ def activate_cloudwatch_emf(
 ) -> EmfBridge:
     """Wrap a snapshot source in a CloudWatch EMF bridge (see module doc)."""
     return EmfBridge(
-        source, namespace=namespace, dimensions=dimensions,
-        route_labels=route_labels, cumulative=cumulative, app=app,
+        source,
+        namespace=namespace,
+        dimensions=dimensions,
+        route_labels=route_labels,
+        cumulative=cumulative,
+        app=app,
         counter_sources=counter_sources,
     )
 
@@ -159,9 +162,7 @@ def _counter_blobs(
                 key = (reading.subsystem, reading.instance, name)
                 previous = deltas.get(key)
                 deltas[key] = current
-                if cumulative or name in reading.gauges:
-                    emitted = current
-                elif previous is None or current < previous:
+                if cumulative or name in reading.gauges or previous is None or current < previous:
                     emitted = current
                 else:
                     emitted = current - previous
@@ -171,22 +172,20 @@ def _counter_blobs(
             batch = items[offset : offset + _MAX_METRICS_PER_BLOB]
             dims = {**dimensions, "Instance": reading.instance}
             definitions = [
-                {"Name": f"{reading.subsystem}_{name}", "Unit": "None"}
-                for name, _value in batch
+                {"Name": f"{reading.subsystem}_{name}", "Unit": "None"} for name, _value in batch
             ]
             blob: dict[str, Any] = {
                 **dims,
-                **{
-                    f"{reading.subsystem}_{name}": value
-                    for name, value in batch
-                },
+                **{f"{reading.subsystem}_{name}": value for name, value in batch},
                 "_aws": {
                     "Timestamp": timestamp_ms,
-                    "CloudWatchMetrics": [{
-                        "Namespace": namespace,
-                        "Dimensions": [list(dims)],
-                        "Metrics": definitions,
-                    }],
+                    "CloudWatchMetrics": [
+                        {
+                            "Namespace": namespace,
+                            "Dimensions": [list(dims)],
+                            "Metrics": definitions,
+                        }
+                    ],
                 },
             }
             blobs.append(blob)

@@ -64,7 +64,7 @@ source that counts no rows at all.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from . import _nplusone
 from ._passes import driver as _driver
@@ -110,9 +110,7 @@ class Table:
 
     def __post_init__(self) -> None:
         for part in (self.name, *(() if self.schema is None else (self.schema,))):
-            validate_unquoted_identifier(
-                part, "table", error=PassDeclarationError
-            )
+            validate_unquoted_identifier(part, "table", error=PassDeclarationError)
 
     @property
     def sql(self) -> str:
@@ -232,13 +230,23 @@ class Rows:
         the row the last chunk finished on is not seen twice.
         """
         end = await _driver.fetch_key(
-            executor, table=walk.table, keys=self.keys, cursor=cursor,
-            frontier_sql=frontier_sql, offset=self.limit - 1, reverse=False,
+            executor,
+            table=walk.table,
+            keys=self.keys,
+            cursor=cursor,
+            frontier_sql=frontier_sql,
+            offset=self.limit - 1,
+            reverse=False,
         )
         if end is None:
             end = await _driver.fetch_key(
-                executor, table=walk.table, keys=self.keys, cursor=cursor,
-                frontier_sql=frontier_sql, offset=None, reverse=True,
+                executor,
+                table=walk.table,
+                keys=self.keys,
+                cursor=cursor,
+                frontier_sql=frontier_sql,
+                offset=None,
+                reverse=True,
             )
         return None if end is None else (cursor, end)
 
@@ -265,7 +273,7 @@ class Ceiling:
     monotone: str | None = None
 
     #: A fixed ceiling is captured once, so the walk it bounds can finish.
-    recurring = False
+    recurring: ClassVar[bool] = False
 
     @classmethod
     def at_launch(cls, *, monotone: str | None = None) -> Ceiling:
@@ -311,9 +319,7 @@ class Ceiling:
         )
         if record is None:
             return None
-        values = tuple(
-            _driver._field(record, item.name, index) for index, item in enumerate(keys)
-        )
+        values = tuple(_driver._field(record, item.name, index) for index, item in enumerate(keys))
         return _keyset.encode_cursor(keys, values)
 
     def predicate(self, keys: tuple[Key, ...], ceiling: Any, binds: Any) -> str:
@@ -328,10 +334,9 @@ class Ceiling:
             # nothing to do and says so rather than scanning to find out.
             return "FALSE"
         decoded = _keyset.decode_cursor(keys, ceiling)
-        assert decoded is not None
-        return _keyset.row_comparison(
-            keys, _keyset.upto_operator(keys), binds.add_all(decoded)
-        )
+        if decoded is None:
+            raise ValueError("a non-empty pass ceiling must decode to key values")
+        return _keyset.row_comparison(keys, _keyset.upto_operator(keys), binds.add_all(decoded))
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,13 +361,11 @@ class Sealed:
     after: Any = 0.0
 
     #: A re-derived frontier means a cycle completes and the pass does not.
-    recurring = True
+    recurring: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         after = 0.0 if self.after is None else self.after
-        object.__setattr__(
-            self, "after", _seconds(after, what="Sealed after", allow_zero=True)
-        )
+        object.__setattr__(self, "after", _seconds(after, what="Sealed after", allow_zero=True))
 
     def refuse(self, keys: tuple[Key, ...], *, table: str) -> None:
         """Refuse a clock-derived frontier over a key that is not a timestamp.
@@ -398,7 +401,8 @@ class Sealed:
         if ceiling is None:  # pragma: no cover - the clock always answers
             return "FALSE"
         decoded = _keyset.decode_cursor(keys[:1], ceiling)
-        assert decoded is not None
+        if decoded is None:
+            raise ValueError("a non-empty sealed frontier must decode to a timestamp")
         operator = ">" if keys[0].descending else "<"
         return f"{keys[0].name} {operator} {binds.add(decoded[0])}"
 
@@ -747,13 +751,23 @@ class PassStatus:
 
 def _status_from(row: Any, keys: tuple[Key, ...] = ()) -> PassStatus:
     return PassStatus(
-        name=row.name, tenant=row.tenant, phase=row.phase, cursor=row.cursor,
-        ceiling=row.ceiling, units_done=row.units_done, rows_done=row.rows_done,
-        chunk_limit=row.chunk_limit, paced_reason=row.paced_reason,
-        started_at=row.started_at, last_advance=row.last_advance,
-        cycle_started=row.cycle_started, driven_at=row.driven_at,
-        last_drive_error=row.last_drive_error, verified_at=row.verified_at,
-        verified_fact=row.verified_fact, last_error=row.last_error,
+        name=row.name,
+        tenant=row.tenant,
+        phase=row.phase,
+        cursor=row.cursor,
+        ceiling=row.ceiling,
+        units_done=row.units_done,
+        rows_done=row.rows_done,
+        chunk_limit=row.chunk_limit,
+        paced_reason=row.paced_reason,
+        started_at=row.started_at,
+        last_advance=row.last_advance,
+        cycle_started=row.cycle_started,
+        driven_at=row.driven_at,
+        last_drive_error=row.last_drive_error,
+        verified_at=row.verified_at,
+        verified_fact=row.verified_fact,
+        last_error=row.last_error,
         progress=_progress.describe(row, keys, now=row.now),
         holes_open=row.holes_open,
         pending=len(row.pending or ()),
@@ -788,9 +802,24 @@ class ChunkedPass:
     """
 
     __slots__ = (
-        "_alias", "_chunk_retries", "_frontier", "_gate", "_ledger", "_model",
-        "_name", "_on_chunk_failure", "_pace", "_progress", "_query_budget",
-        "_rewrites", "_schema", "_shift", "_table", "_tenant", "_units", "_work",
+        "_alias",
+        "_chunk_retries",
+        "_frontier",
+        "_gate",
+        "_ledger",
+        "_model",
+        "_name",
+        "_on_chunk_failure",
+        "_pace",
+        "_progress",
+        "_query_budget",
+        "_rewrites",
+        "_schema",
+        "_shift",
+        "_table",
+        "_tenant",
+        "_units",
+        "_work",
         "_workload",
     )
 
@@ -821,8 +850,7 @@ class ChunkedPass:
         _nplusone.check_budget(query_budget, f"pass {name!r}")
         if not isinstance(units, (Rows, Buckets)):
             raise PassDeclarationError(
-                f"units= must be a range source -- Rows(...) or Buckets(...); "
-                f"got {units!r}"
+                f"units= must be a range source -- Rows(...) or Buckets(...); got {units!r}"
             )
         if not isinstance(work, _Work):
             raise PassDeclarationError(
@@ -850,9 +878,7 @@ class ChunkedPass:
                 "attempts would dead-letter every chunk without running it."
             )
         if gate is not None and not isinstance(gate, Gate):
-            raise PassDeclarationError(
-                f"gate= must be a Gate(...); got {gate!r}"
-            )
+            raise PassDeclarationError(f"gate= must be a Gate(...); got {gate!r}")
         self._name = name
         self._tenant = tenant
         self._schema = schema
@@ -879,8 +905,7 @@ class ChunkedPass:
         units.refuse(table=self._table)
         if not isinstance(self._progress, Denominator):
             raise PassDeclarationError(
-                "progress= must be Estimated(), Exact() or Keyspace(); "
-                f"got {progress!r}"
+                f"progress= must be Estimated(), Exact() or Keyspace(); got {progress!r}"
             )
         self._progress.refuse(units.keys, table=self._table)
         refuse = getattr(frontier, "refuse", None)
@@ -1098,7 +1123,8 @@ class ChunkedPass:
     ) -> ShiftResult:
         """Run chunks until the shift budget, a stop signal, or the end of the walk."""
         return await _driver.run_shift(
-            self, database,
+            self,
+            database,
             stopping=stopping,
             budget=self._shift if budget is None else budget,
             sleep=sleep,
@@ -1117,16 +1143,18 @@ class ChunkedPass:
         rows = 0
         holes = 0
         while True:
-            result = await self.run_shift(
-                database, stopping=stopping, budget=None, sleep=sleep
-            )
+            result = await self.run_shift(database, stopping=stopping, budget=None, sleep=sleep)
             chunks += result.chunks
             rows += result.rows
             holes += result.holes
             if result.stopped != "budget":
                 return ShiftResult(
-                    chunks, rows, complete=result.complete,
-                    stopped=result.stopped, error=result.error, holes=holes,
+                    chunks,
+                    rows,
+                    complete=result.complete,
+                    stopped=result.stopped,
+                    error=result.error,
+                    holes=holes,
                 )
 
     async def status(self, database: Any) -> PassStatus | None:
@@ -1173,9 +1201,7 @@ class ChunkedPass:
                 guards=self.guards,
                 rewrites=self._rewrites,
             )
-            return await self._ledger.requeue(
-                connection, cursor_from=lower, cursor_to=upper
-            )
+            return await self._ledger.requeue(connection, cursor_from=lower, cursor_to=upper)
         finally:
             await database.release(self._workload, connection)
 
@@ -1245,9 +1271,7 @@ def _resolve_source(over: Any) -> tuple[Any, str, str]:
         # a caller who needs an explicit schema names it with Table(...).
         qualified = f'"{name}"."{table}"' if kind == "fixed" and name else f'"{table}"'
         return over, qualified, table
-    raise PassDeclarationError(
-        f"over= must be a model class or a Table('name'); got {over!r}"
-    )
+    raise PassDeclarationError(f"over= must be a model class or a Table('name'); got {over!r}")
 
 
 async def read_status(

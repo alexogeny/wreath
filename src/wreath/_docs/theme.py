@@ -235,6 +235,12 @@ header.site{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--borde
  font-family:var(--font-display);font-size:var(--text-lg);font-weight:700;
  letter-spacing:var(--track-xl);}
 .brand .mark{width:1.5rem;height:1.5rem;flex:none;color:var(--link);}
+.browse{display:inline-flex;align-items:center;height:2rem;padding:0 var(--space-3);
+ border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+ font-family:var(--font-mono);font-size:var(--text-sm);font-weight:700;
+ color:var(--fg);text-decoration:none;letter-spacing:.01em;}
+.browse:hover{border-color:var(--link);background:var(--surface-2);}
+.browse:focus-visible{outline:2px solid var(--link);outline-offset:2px;}
 .bar .spacer{flex:1;}
 /* The links menu. Declared with the header rather than with the components so
    it does not arrive a frame late and shove the theme control sideways. */
@@ -1310,7 +1316,7 @@ def page(
     footer: str = "", home_href: str = "index.html", feel: str = "flat",
     js_href: str = "assets/docs.js", tabs_html: str = "", canonical: str = "",
     repo_html: str = "", links_html: str = "", section_title: str = "",
-    section_href: str = "",
+    section_href: str = "", map_href: str = "",
 ) -> str:
     """Assemble one full HTML document (no external requests)."""
     title = f"{page_title} · {site_name}" if page_title else site_name
@@ -1347,6 +1353,7 @@ def page(
         f'<div class="sections-menu">{tabs_html}</div></details>'
         if tabs_html else ""
     )
+    browse = f'<a class="browse" href="{_e(map_href)}">Browse</a>' if map_href else ""
     layout_class = "layout" if nav_html else "layout no-side"
     return (
         "<!doctype html>\n"
@@ -1364,6 +1371,7 @@ def page(
         f' aria-controls="site-nav" aria-label="Show navigation">{_ICON_MENU}</button>'
         f'<a class="brand" href="{_e(home_href)}" aria-label="{_e(site_name)}, home">'
         f'{_MARK}<span class="brand-name">{_e(site_name)}</span></a>'
+        f"{browse}"
         f"{sections}"
         '<span class="spacer"></span>'
         f'<button class="search-open" id="search-open" type="button" '

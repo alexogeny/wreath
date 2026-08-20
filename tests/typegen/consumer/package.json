@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "description": "Pinned toolchain that compiles and exercises generated Wreath clients.",
+  "engines": {
+    "node": ">=22.18"
+  },
   "devDependencies": {
     "typescript": "5.7.2",
     "@tanstack/react-query": "5.62.7",

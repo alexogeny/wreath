@@ -10,6 +10,45 @@
 #define FLIGHT_LOG 6
 #define FLIGHT_CLIENT_FACTS 7
 
+typedef enum {
+    FLIGHT_ATTR_PENDING,
+    FLIGHT_ATTR_CYCLE_PRIVATE,
+    FLIGHT_ATTR_MAX_PENDING,
+    FLIGHT_ATTR_CORRELATION,
+    FLIGHT_ATTR_CLIENT_FACTS,
+    FLIGHT_ATTR_PHASES,
+    FLIGHT_ATTR_LOGS,
+    FLIGHT_ATTR_FINALIZE,
+    FLIGHT_ATTR_CYCLE,
+    FLIGHT_ATTR_COMPLETION,
+    FLIGHT_ATTR_COUNT,
+} FlightAttr;
+
+static PyObject *flight_attr_names[FLIGHT_ATTR_COUNT];
+
+static int
+flight_attrs_ready(void)
+{
+    static const char *names[FLIGHT_ATTR_COUNT] = {
+        "_pending", "_cycle", "_max_pending", "correlation", "client_facts",
+        "phases", "logs", "_finalize", "cycle", "completion",
+    };
+    for (int index = 0; index < FLIGHT_ATTR_COUNT; index++) {
+        flight_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (flight_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(flight_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+flight_getattr(PyObject *object, FlightAttr attribute)
+{
+    return PyObject_GetAttr(object, flight_attr_names[attribute]);
+}
+
 typedef struct {
     PyObject_HEAD
     PyObject *config;
@@ -606,6 +645,7 @@ static PyType_Spec flight_assembly_spec = {
 int
 wreath_register_flight_project(PyObject *module)
 {
+    if (flight_attrs_ready() < 0) return -1;
     PyObject *type = PyType_FromSpec(&flight_assembly_spec);
     if (type == NULL) return -1;
     if (PyModule_AddObject(module, "FlightAssembly", type) < 0) {
@@ -676,9 +716,9 @@ wreath_flight_project_cells(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "flight projection config must have fifteen items");
         return NULL;
     }
-    pending = PyObject_GetAttrString(projector, "_pending");
-    cycle = PyObject_GetAttrString(projector, "_cycle");
-    max_pending_object = PyObject_GetAttrString(projector, "_max_pending");
+    pending = flight_getattr(projector, FLIGHT_ATTR_PENDING);
+    cycle = flight_getattr(projector, FLIGHT_ATTR_CYCLE_PRIVATE);
+    max_pending_object = flight_getattr(projector, FLIGHT_ATTR_MAX_PENDING);
     if (pending == NULL || cycle == NULL || max_pending_object == NULL) goto error;
     max_pending = PyLong_AsSsize_t(max_pending_object);
     if (max_pending < 0 && PyErr_Occurred()) goto error;
@@ -764,10 +804,10 @@ flight_increment(PyObject *loss, const char *name)
 static int
 flight_count_orphans(PyObject *entry, PyObject *loss)
 {
-    PyObject *correlation = PyObject_GetAttrString(entry, "correlation");
-    PyObject *client_facts = PyObject_GetAttrString(entry, "client_facts");
-    PyObject *phases = PyObject_GetAttrString(entry, "phases");
-    PyObject *logs = PyObject_GetAttrString(entry, "logs");
+    PyObject *correlation = flight_getattr(entry, FLIGHT_ATTR_CORRELATION);
+    PyObject *client_facts = flight_getattr(entry, FLIGHT_ATTR_CLIENT_FACTS);
+    PyObject *phases = flight_getattr(entry, FLIGHT_ATTR_PHASES);
+    PyObject *logs = flight_getattr(entry, FLIGHT_ATTR_LOGS);
     int phase_truth, log_truth;
     if (correlation == NULL || client_facts == NULL || phases == NULL || logs == NULL)
         goto error;
@@ -803,7 +843,7 @@ wreath_flight_settle(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
     keys = PyDict_Keys(pending);
-    finalize = PyObject_GetAttrString(projector, "_finalize");
+    finalize = flight_getattr(projector, FLIGHT_ATTR_FINALIZE);
     if (keys == NULL || finalize == NULL) goto error;
     for (Py_ssize_t index = 0; index < PyList_GET_SIZE(keys); index++) {
         PyObject *request_id = PyList_GET_ITEM(keys, index);
@@ -811,13 +851,13 @@ wreath_flight_settle(PyObject *Py_UNUSED(self), PyObject *args)
         Py_ssize_t seen;
         if (PyDict_GetItemRef(pending, request_id, &entry) < 0) goto error;
         if (entry == NULL) continue;
-        entry_cycle = PyObject_GetAttrString(entry, "cycle");
+        entry_cycle = flight_getattr(entry, FLIGHT_ATTR_CYCLE);
         if (entry_cycle == NULL) { Py_DECREF(entry); goto error; }
         seen = PyLong_AsSsize_t(entry_cycle);
         Py_DECREF(entry_cycle);
         if (seen == -1 && PyErr_Occurred()) { Py_DECREF(entry); goto error; }
         if (seen >= cycle) { Py_DECREF(entry); continue; }
-        completion = PyObject_GetAttrString(entry, "completion");
+        completion = flight_getattr(entry, FLIGHT_ATTR_COMPLETION);
         if (completion == NULL) { Py_DECREF(entry); goto error; }
         if (completion != Py_None) {
             PyObject *ignored = PyObject_CallFunctionObjArgs(
@@ -860,7 +900,7 @@ wreath_flight_evict_pending(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
     while (PyDict_Next(pending, &position, &key, &entry)) {
-        PyObject *cycle_object = PyObject_GetAttrString(entry, "cycle");
+        PyObject *cycle_object = flight_getattr(entry, FLIGHT_ATTR_CYCLE);
         Py_ssize_t cycle;
         if (cycle_object == NULL) goto error;
         cycle = PyLong_AsSsize_t(cycle_object);
@@ -874,7 +914,7 @@ wreath_flight_evict_pending(PyObject *Py_UNUSED(self), PyObject *args)
     }
     if (PyDict_DelItem(pending, oldest_key) < 0) goto error;
     {
-        PyObject *completion = PyObject_GetAttrString(oldest_entry, "completion");
+        PyObject *completion = flight_getattr(oldest_entry, FLIGHT_ATTR_COMPLETION);
         if (completion == NULL) goto error;
         if (completion != Py_None) {
             Py_DECREF(completion);

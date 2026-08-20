@@ -1,16 +1,15 @@
 # Cookbook
 
-The guides explain how each part of Wreath works. This is the other half: short,
-practical recipes for getting a specific thing done, with the whole solution in
-one place so you can read it, adapt it, and move on.
+Start here when your question begins with a verb. Each recipe carries one task
+from declaration to verification, with the surrounding policy included. Copy
+the shape, change the names, and leave.
 
-There are two circles of readers here, and each gets its own set.
-
-- **[For developers](#for-developers)** — you're building something and need the
-  pattern for a common task.
-- **[For coding agents](agents/index.md)** — you're changing this codebase, and
-  you need to know the gates it must pass, the invariants it must keep, and how
-  to prove a change actually works.
+| You are… | Use |
+|---|---|
+| building an application | [Developer recipes](#for-developers) |
+| changing Wreath itself | [Agent cookbook](agents/index.md) |
+| trying to understand a subsystem | [Guides](../map.md#i-am-building-a-service) |
+| looking up an exact signature | [API reference](../reference/index.md) |
 
 ## For developers
 

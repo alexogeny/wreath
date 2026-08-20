@@ -16,10 +16,13 @@ it.
 right call with a pluggable `UserStore`, and the same reasoning applies harder
 here: organisations are the table an existing application is most likely to
 already have, under a different name, with columns nobody wants to migrate.
-`OrganizationStore` is the seam; `InMemoryOrganizationStore` is the reference
-implementation and what the tests run against.
+`OrganizationStore` is the seam. `InMemoryOrganizationStore` is the bounded
+development/reference implementation; `PostgresOrganizationStore` is the
+durable implementation shared by API workers and process restarts.
 
-    store = InMemoryOrganizationStore(roles={"admin", "member", "billing"})
+    store = PostgresOrganizationStore(
+        app.postgres("main"), roles={"admin", "member", "billing"}
+    )
     await store.add_member("acme", "alice", roles={"admin"})
 
     app.configure_auth(backend, CedarAuthorizer(
@@ -74,18 +77,20 @@ application's own Cedar policies rather than by anything SCIM decides.
 
 Listing an organisation's members is the one question the authorization path
 never asks, so it is a separate seam: `MemberDirectory`, which
-`InMemoryOrganizationStore` implements and `scim_router` requires.
+both shipped stores implement and `scim_router` requires.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from ._scim import scim_router
+from .store import _Statements, rows_affected, sql_identifier
 
 __all__ = [
     "Invitation",
@@ -95,6 +100,7 @@ __all__ = [
     "Memberships",
     "Organization",
     "OrganizationStore",
+    "PostgresOrganizationStore",
     "active_organization",
     "load_into",
     "scim_router",
@@ -167,8 +173,9 @@ class Invitation:
     until acceptance, and acceptance is what binds it to a user.
 
     Args:
-        token: the secret in the invitation link. Compared in constant time on
-            acceptance; single-use.
+        token: the secret in the invitation link. The in-memory store compares
+            it in constant time; the PostgreSQL store indexes its fixed-width
+            SHA-256 digest. Single-use in both.
         organization: where the invitation is to
         email: who was invited, before they exist
         roles: what they get on acceptance
@@ -399,6 +406,430 @@ class InMemoryOrganizationStore:
         )
 
 
+class _OrganizationStatements(_Statements):
+    """Lazy prepared statements for the relational organisation store."""
+
+    __slots__ = ("_database", "_defined", "_prefix", "_prepare_lock")
+
+    _statement_owner = "organization store"
+
+    def __init__(self, database: Any, prefix: str) -> None:
+        self._database = database
+        self._prefix = sql_identifier(prefix, what="prefix")
+        self._init_statements()
+
+    def _statement_name(self, name: str) -> str:
+        return f"{self._prefix}_{name}"
+
+
+class PostgresOrganizationStore:
+    """Durable organisations, memberships, and invitations in PostgreSQL.
+
+    Every instance is stateless apart from lazily prepared statements. Building
+    a new instance after a process restart therefore reads the same rows, and
+    two workers share invitation consumption rather than each accepting its own
+    in-memory copy.
+
+    Invitation acceptance is one PostgreSQL statement: it conditionally marks
+    the invitation accepted and upserts the membership from the row it marked.
+    The returned membership *is* proof that this caller consumed the token.
+    Concurrent acceptance can return at most one membership.
+
+    Tokens are looked up by a fixed-width SHA-256 digest. The raw token remains
+    in the row so an operator can list or resend invitations, but it is never
+    used in an index comparison and a presented token is never interpolated
+    into SQL.
+
+    Args:
+        database: the application database shared by every API worker.
+        roles: the non-empty, declared role vocabulary.
+        table: base table name. `_membership` and `_invitation` are
+            appended for the related tables; all three are plain identifiers.
+        prefix: prepared-statement prefix. Defaults to `table`.
+    """
+
+    __slots__ = (
+        "_database",
+        "_invitations_table",
+        "_memberships_table",
+        "_organizations_table",
+        "_roles",
+        "_statements",
+    )
+
+    def __init__(
+        self,
+        database: Any,
+        *,
+        roles: Iterable[str],
+        table: str = "wreath_organization",
+        prefix: str | None = None,
+    ) -> None:
+        self._roles = frozenset(str(role) for role in roles)
+        if not self._roles:
+            raise ValueError(
+                "PostgresOrganizationStore requires a non-empty role vocabulary; "
+                "without one a policy naming a role cannot be checked at startup"
+            )
+        self._database = database
+        self._organizations_table = sql_identifier(table)
+        self._memberships_table = sql_identifier(f"{table}_membership")
+        self._invitations_table = sql_identifier(f"{table}_invitation")
+        statements = _OrganizationStatements(database, table if prefix is None else prefix)
+        self._statements = statements
+
+        organizations = self._organizations_table
+        memberships = self._memberships_table
+        invitations = self._invitations_table
+        statements.define(
+            "organization",
+            f"SELECT id, name, metadata FROM {organizations} WHERE id = $1::text",
+            workload="read",
+        )
+        statements.define(
+            "create",
+            f"INSERT INTO {organizations} (id, name, metadata) "
+            "VALUES ($1::text, $2::text, $3::jsonb) "
+            "ON CONFLICT (id) DO NOTHING RETURNING id",
+        )
+        statements.define(
+            "memberships",
+            f"SELECT organization_id, user_id, roles FROM {memberships} "
+            "WHERE user_id = $1::text ORDER BY organization_id",
+            workload="read",
+        )
+        statements.define(
+            "members",
+            f"SELECT organization_id, user_id, roles FROM {memberships} "
+            "WHERE organization_id = $1::text ORDER BY user_id",
+            workload="read",
+        )
+        statements.define(
+            "add_member",
+            f"WITH ensured AS (\n"
+            f"  INSERT INTO {organizations} (id, name, metadata)\n"
+            "  VALUES ($1::text, '', '{}'::jsonb)\n"
+            "  ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id\n"
+            "  RETURNING id\n"
+            ")\n"
+            f"INSERT INTO {memberships} (organization_id, user_id, roles)\n"
+            "SELECT id, $2::text, $3::jsonb FROM ensured\n"
+            "ON CONFLICT (organization_id, user_id) DO UPDATE SET roles = EXCLUDED.roles\n"
+            "RETURNING organization_id, user_id, roles",
+        )
+        statements.define(
+            "remove_member",
+            f"DELETE FROM {memberships} WHERE organization_id = $1::text AND user_id = $2::text",
+        )
+
+        invite_head = (
+            f"WITH ensured AS (\n"
+            f"  INSERT INTO {organizations} (id, name, metadata)\n"
+            "  VALUES ($2::text, '', '{}'::jsonb)\n"
+            "  ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id\n"
+            "  RETURNING id\n"
+            ")\n"
+            f"INSERT INTO {invitations} "
+            "(token_hash, token, organization_id, email, roles, expires_at)\n"
+        )
+        invite_tail = (
+            "\nRETURNING organization_id, email, roles, extract(epoch FROM expires_at)::float8"
+        )
+        statements.define(
+            "invite_forever",
+            invite_head
+            + "SELECT $1::bytea, $5::text, id, $3::text, $4::jsonb, NULL FROM ensured"
+            + invite_tail,
+        )
+        statements.define(
+            "invite_ttl",
+            invite_head + "SELECT $1::bytea, $5::text, id, $3::text, $4::jsonb, "
+            "clock_timestamp() + make_interval(secs => $6::float8) FROM ensured" + invite_tail,
+        )
+        statements.define(
+            "invite_at",
+            invite_head + "SELECT $1::bytea, $5::text, id, $3::text, $4::jsonb, "
+            "to_timestamp($6::float8) FROM ensured" + invite_tail,
+        )
+
+        accept_head = (
+            f"WITH accepted AS (\n"
+            f"  UPDATE {invitations} SET accepted_by = $2::text, "
+            "accepted_at = clock_timestamp()\n"
+            "  WHERE token_hash = $1::bytea AND accepted_by IS NULL\n"
+        )
+        accept_tail = (
+            "  RETURNING organization_id, roles\n"
+            "), written AS (\n"
+            f"  INSERT INTO {memberships} (organization_id, user_id, roles)\n"
+            "  SELECT organization_id, $2::text, roles FROM accepted\n"
+            "  ON CONFLICT (organization_id, user_id) DO UPDATE SET roles = EXCLUDED.roles\n"
+            "  RETURNING organization_id, user_id, roles\n"
+            ")\n"
+            "SELECT organization_id, user_id, roles FROM written"
+        )
+        statements.define(
+            "accept",
+            accept_head
+            + "    AND (expires_at IS NULL OR expires_at > clock_timestamp())\n"
+            + accept_tail,
+        )
+        statements.define(
+            "accept_at",
+            accept_head
+            + "    AND (expires_at IS NULL OR expires_at > to_timestamp($3::float8))\n"
+            + accept_tail,
+        )
+        statements.define(
+            "invitation_state",
+            "SELECT accepted_by, "
+            "(expires_at IS NOT NULL AND expires_at <= clock_timestamp()) "
+            f"FROM {invitations} WHERE token_hash = $1::bytea",
+        )
+        statements.define(
+            "invitation_state_at",
+            "SELECT accepted_by, "
+            "(expires_at IS NOT NULL AND expires_at <= to_timestamp($2::float8)) "
+            f"FROM {invitations} WHERE token_hash = $1::bytea",
+        )
+        statements.define(
+            "invitations",
+            "SELECT token, organization_id, email, roles, "
+            "extract(epoch FROM expires_at)::float8, accepted_by "
+            f"FROM {invitations} WHERE organization_id = $1::text "
+            "ORDER BY created_at, token_hash",
+            workload="read",
+        )
+
+    def roles(self) -> frozenset[str]:
+        """The declared role vocabulary."""
+        return self._roles
+
+    def _check_roles(self, roles: frozenset[str]) -> None:
+        unknown = sorted(roles - self._roles)
+        if unknown:
+            raise ValueError(
+                f"unknown role(s) {', '.join(unknown)}; declared roles are "
+                f"{', '.join(sorted(self._roles))}"
+            )
+
+    @staticmethod
+    def _json(value: object) -> object:
+        if isinstance(value, (str, bytes)):
+            from ._json import loads
+
+            return loads(value)
+        return value
+
+    def _roles_from(self, value: object) -> frozenset[str]:
+        decoded = self._json(value)
+        if not isinstance(decoded, list) or any(not isinstance(role, str) for role in decoded):
+            raise ValueError("organization roles must be a JSON array of strings")
+        roles = frozenset(cast("list[str]", decoded))
+        self._check_roles(roles)
+        return roles
+
+    @staticmethod
+    def _token_hash(token: str) -> bytes:
+        return hashlib.sha256(token.encode("utf-8")).digest()
+
+    @property
+    def schema_database(self) -> Any:
+        """The database that owns `component()`'s three tables."""
+        return self._database
+
+    def component(self) -> Any:
+        """The durable store's additive, application-owned schema claim."""
+        from .schema import Component, Step
+
+        organizations = self._organizations_table
+        memberships = self._memberships_table
+        invitations = self._invitations_table
+        return Component(
+            name="organizations",
+            schema="",
+            relations=(organizations, memberships, invitations),
+            steps=(
+                Step(
+                    version=1,
+                    statements=(
+                        f"CREATE TABLE IF NOT EXISTS {organizations} (\n"
+                        "  id text PRIMARY KEY,\n"
+                        "  name text NOT NULL DEFAULT '',\n"
+                        "  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n"
+                        ")",
+                        f"CREATE TABLE IF NOT EXISTS {memberships} (\n"
+                        f"  organization_id text NOT NULL REFERENCES {organizations}(id) "
+                        "ON DELETE CASCADE,\n"
+                        "  user_id text NOT NULL,\n"
+                        "  roles jsonb NOT NULL DEFAULT '[]'::jsonb,\n"
+                        "  PRIMARY KEY (organization_id, user_id),\n"
+                        "  CHECK (jsonb_typeof(roles) = 'array')\n"
+                        ")",
+                        f"CREATE INDEX IF NOT EXISTS {memberships}_user_idx "
+                        f"ON {memberships} (user_id)",
+                        f"CREATE TABLE IF NOT EXISTS {invitations} (\n"
+                        "  token_hash bytea PRIMARY KEY,\n"
+                        "  token text NOT NULL,\n"
+                        f"  organization_id text NOT NULL REFERENCES {organizations}(id) "
+                        "ON DELETE CASCADE,\n"
+                        "  email text NOT NULL,\n"
+                        "  roles jsonb NOT NULL DEFAULT '[]'::jsonb,\n"
+                        "  expires_at timestamptz,\n"
+                        "  accepted_by text,\n"
+                        "  accepted_at timestamptz,\n"
+                        "  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),\n"
+                        "  CHECK (jsonb_typeof(roles) = 'array')\n"
+                        ")",
+                        f"CREATE INDEX IF NOT EXISTS {invitations}_organization_idx "
+                        f"ON {invitations} (organization_id, created_at)",
+                    ),
+                ),
+            ),
+        )
+
+    def schema_sql(self) -> str:
+        """DDL for all three durable tables, derived from `component()`."""
+        return self.component().sql()
+
+    async def organization(self, org_id: str) -> Organization | None:
+        row = await self._statements.statement("organization").fetchrow(org_id)
+        if row is None:
+            return None
+        metadata = self._json(row[2])
+        clean_metadata = (
+            {str(key): value for key, value in metadata.items()}
+            if isinstance(metadata, Mapping)
+            else {}
+        )
+        return Organization(
+            id=str(row[0]),
+            name=str(row[1]),
+            metadata=clean_metadata,
+        )
+
+    async def create(self, organization: Organization) -> Organization:
+        from ._json import dumps
+
+        metadata = dumps(dict(organization.metadata)).decode("utf-8")
+        row = await self._statements.statement("create").fetchrow(
+            organization.id, organization.name, metadata
+        )
+        if row is None:
+            raise ValueError(f"organization {organization.id!r} already exists")
+        return organization
+
+    def _membership(self, row: Any) -> Membership:
+        return Membership(str(row[0]), str(row[1]), self._roles_from(row[2]))
+
+    async def memberships(self, user_id: str) -> tuple[Membership, ...]:
+        rows = await self._statements.statement("memberships").fetch(user_id)
+        return tuple(self._membership(row) for row in rows)
+
+    async def members(self, org_id: str) -> tuple[Membership, ...]:
+        rows = await self._statements.statement("members").fetch(org_id)
+        return tuple(self._membership(row) for row in rows)
+
+    async def add_member(
+        self, org_id: str, user_id: str, *, roles: Iterable[str] = ()
+    ) -> Membership:
+        from ._json import dumps
+
+        wanted = frozenset(str(role) for role in roles)
+        self._check_roles(wanted)
+        encoded = dumps(sorted(wanted)).decode("utf-8")
+        row = await self._statements.statement("add_member").fetchrow(org_id, user_id, encoded)
+        if row is None:
+            raise RuntimeError("PostgreSQL did not return the membership it wrote")
+        return self._membership(row)
+
+    async def remove_member(self, org_id: str, user_id: str) -> bool:
+        status = await self._statements.statement("remove_member").execute(org_id, user_id)
+        return rows_affected(status) == 1
+
+    async def invite(
+        self,
+        org_id: str,
+        email: str,
+        *,
+        roles: Iterable[str] = (),
+        ttl: float | None = None,
+        now: float | None = None,
+    ) -> Invitation:
+        from ._json import dumps
+
+        wanted = frozenset(str(role) for role in roles)
+        self._check_roles(wanted)
+        token = secrets.token_urlsafe(32)
+        args: tuple[Any, ...] = (
+            self._token_hash(token),
+            org_id,
+            email,
+            dumps(sorted(wanted)).decode("utf-8"),
+            token,
+        )
+        if ttl is None:
+            name = "invite_forever"
+        elif now is None:
+            name, args = "invite_ttl", (*args, float(ttl))
+        else:
+            name, args = "invite_at", (*args, float(now + ttl))
+        row = await self._statements.statement(name).fetchrow(*args)
+        if row is None:
+            raise RuntimeError("PostgreSQL did not return the invitation it wrote")
+        return Invitation(
+            token=token,
+            organization=str(row[0]),
+            email=str(row[1]),
+            roles=self._roles_from(row[2]),
+            expires_at=None if row[3] is None else float(row[3]),
+        )
+
+    async def accept(self, token: str, user_id: str, *, now: float | None = None) -> Membership:
+        digest = self._token_hash(token)
+        if now is None:
+            accept_name, accept_args = "accept", (digest, user_id)
+        else:
+            accept_name, accept_args = "accept_at", (digest, user_id, float(now))
+        row = await self._statements.statement(accept_name).fetchrow(*accept_args)
+        if row is not None:
+            return self._membership(row)
+
+        if now is None:
+            state_name, state_args = "invitation_state", (digest,)
+        else:
+            state_name, state_args = "invitation_state_at", (digest, float(now))
+        # This diagnostic must use the writer pool too: it immediately follows
+        # the atomic UPDATE, and a replica may not yet contain the invitation or
+        # its accepted_by value. A lagging read would misreport a spent token as
+        # nonexistent (or, worse, still live).
+        state = await self._statements.statement(state_name).fetchrow(*state_args)
+        if state is None:
+            raise ValueError("no such invitation")
+        if state[0] is not None:
+            raise ValueError("invitation has already been accepted")
+        if bool(state[1]):
+            raise ValueError("invitation has expired")
+        # A valid, unaccepted row here means another transaction changed and
+        # rolled it back between the two statements. Refuse rather than using a
+        # read-then-write fallback that would break the single-use guarantee.
+        raise RuntimeError("invitation changed while it was being accepted; retry")
+
+    async def invitations(self, org_id: str) -> tuple[Invitation, ...]:
+        rows = await self._statements.statement("invitations").fetch(org_id)
+        return tuple(
+            Invitation(
+                token=str(row[0]),
+                organization=str(row[1]),
+                email=str(row[2]),
+                roles=self._roles_from(row[3]),
+                expires_at=None if row[4] is None else float(row[4]),
+                accepted_by=None if row[5] is None else str(row[5]),
+            )
+            for row in rows
+        )
+
+
 class Memberships:
     """The authorizer's seam: this caller's organisations and roles, synchronously.
 
@@ -442,6 +873,12 @@ class Memberships:
         """
         roles = getattr(self._store, "roles", None)
         return frozenset() if not callable(roles) else frozenset(roles())
+
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """Durable stores whose schema the configured authorizer must own."""
+        component = getattr(self._store, "component", None)
+        return (self._store,) if callable(component) else ()
 
     def for_request(self, request: Any) -> tuple[Membership, ...]:
         """This caller's memberships, from the snapshot or a synchronous source."""

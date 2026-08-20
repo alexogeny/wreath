@@ -16,6 +16,38 @@
 #include <sys/random.h>
 #endif
 
+static PyObject *policy_name_contains;
+static PyObject *policy_name_forwarded_client;
+static PyObject *policy_name_throttled;
+static PyObject *policy_scheme_http;
+static PyObject *policy_scheme_https;
+static PyObject *policy_header_host;
+
+int
+wreath_policy_ready(void)
+{
+    if (policy_name_contains == NULL &&
+        (policy_name_contains = PyUnicode_InternFromString("contains")) == NULL)
+        return -1;
+    if (policy_name_forwarded_client == NULL &&
+        (policy_name_forwarded_client =
+            PyUnicode_InternFromString("forwarded_client")) == NULL)
+        return -1;
+    if (policy_name_throttled == NULL &&
+        (policy_name_throttled = PyUnicode_InternFromString("throttled")) == NULL)
+        return -1;
+    if (policy_scheme_http == NULL &&
+        (policy_scheme_http = PyUnicode_InternFromString("http")) == NULL)
+        return -1;
+    if (policy_scheme_https == NULL &&
+        (policy_scheme_https = PyUnicode_InternFromString("https")) == NULL)
+        return -1;
+    if (policy_header_host == NULL &&
+        (policy_header_host = PyBytes_FromString("host")) == NULL)
+        return -1;
+    return 0;
+}
+
 
 static PyObject *
 program_item(WreathPolicyProgram *program, Py_ssize_t index)
@@ -61,14 +93,16 @@ trim_ows(const char **data, Py_ssize_t *size)
                          (*data)[*size - 1] == '\t')) (*size)--;
 }
 
-/* 0 none, 1 gzip, 2 zstd. Mirrors the public selector exactly. */
+/* 0 none, 1 gzip, 2 zstd, 3 dcz.  The fallback is retained so an unmatched
+ * dictionary can continue through prepared-fragment and format-aware gzip
+ * without reparsing Accept-Encoding. */
 static int
-select_compression(PyObject *value)
+select_compression(PyObject *value, int allow_dcz, int *fallback)
 {
     if (value == NULL || !PyBytes_Check(value)) return 0;
     const char *data = PyBytes_AS_STRING(value);
     Py_ssize_t size = PyBytes_GET_SIZE(value), start = 0;
-    int gzip_named = 0, gzip_q = 0, zstd_q = 0, wildcard_q = 0;
+    int gzip_named = 0, gzip_q = 0, zstd_q = 0, dcz_q = 0, wildcard_q = 0;
     for (Py_ssize_t i = 0; i <= size; i++) {
         if (i < size && data[i] != ',') continue;
         const char *item = data + start;
@@ -107,11 +141,22 @@ select_compression(PyObject *value)
             gzip_q = quality;
         }
         else if (ascii_equal_ci(coding, coding_size, "zstd", 4)) zstd_q = quality;
+        else if (ascii_equal_ci(coding, coding_size, "dcz", 3)) dcz_q = quality;
         else if (coding_size == 1 && coding[0] == '*') wildcard_q = quality;
     }
     if (!gzip_named) gzip_q = wildcard_q;
-    if (zstd_q > 0 && zstd_q >= gzip_q) return 2;
-    return gzip_q > 0 ? 1 : 0;
+    int ordinary = zstd_q > 0 && zstd_q >= gzip_q ? 2 : (gzip_q > 0 ? 1 : 0);
+    int ordinary_q = ordinary == 2 ? zstd_q : (ordinary == 1 ? gzip_q : 0);
+    int selected = allow_dcz && dcz_q > 0 && dcz_q >= ordinary_q ? 3 : ordinary;
+    if (fallback != NULL) {
+        /* A client that selected DCZ opted into the prepared-response ladder.
+         * On a dictionary miss, gzip wins its ordinary tie with zstd so the
+         * prepared fragment gets the next attempt.  A strictly higher zstd q
+         * still wins, and the gzip codec owns fragment-to-format fallthrough. */
+        *fallback = selected == 3 && gzip_q > 0 && gzip_q >= zstd_q
+            ? 1 : ordinary;
+    }
+    return selected;
 }
 
 
@@ -452,6 +497,49 @@ ai_scraping_config_valid(const WreathCoreCAPI *core, PyObject *config)
     return 1;
 }
 
+static int
+compression_config_valid(PyObject *config)
+{
+    if (!PyTuple_CheckExact(config) || PyTuple_GET_SIZE(config) != 9 ||
+        !PyLong_Check(PyTuple_GET_ITEM(config, 0)) ||
+        !PyLong_Check(PyTuple_GET_ITEM(config, 1)) ||
+        !PyLong_Check(PyTuple_GET_ITEM(config, 2)) ||
+        (PyTuple_GET_ITEM(config, 3) != Py_True &&
+         PyTuple_GET_ITEM(config, 3) != Py_False) ||
+        !PyCallable_Check(PyTuple_GET_ITEM(config, 4)) ||
+        !PyCapsule_CheckExact(PyTuple_GET_ITEM(config, 5)) ||
+        !PyTuple_CheckExact(PyTuple_GET_ITEM(config, 6)) ||
+        PyTuple_GET_SIZE(PyTuple_GET_ITEM(config, 6)) != 7 ||
+        !PyCallable_Check(PyTuple_GET_ITEM(config, 7)) ||
+        !PyTuple_CheckExact(PyTuple_GET_ITEM(config, 8)) ||
+        PyTuple_GET_SIZE(PyTuple_GET_ITEM(config, 8)) != 7) goto invalid;
+
+    PyObject *dictionaries = PyTuple_GET_ITEM(config, 6);
+    PyObject *fragments = PyTuple_GET_ITEM(config, 8);
+    for (Py_ssize_t i = 0; i < 7; i++) {
+        PyObject *dictionary = PyTuple_GET_ITEM(dictionaries, i);
+        if (dictionary != Py_None &&
+            (!PyTuple_CheckExact(dictionary) || PyTuple_GET_SIZE(dictionary) != 3 ||
+             !PyBytes_CheckExact(PyTuple_GET_ITEM(dictionary, 0)) ||
+             !PyBytes_CheckExact(PyTuple_GET_ITEM(dictionary, 1)) ||
+             PyBytes_GET_SIZE(PyTuple_GET_ITEM(dictionary, 1)) != 32)) goto invalid;
+        PyObject *fragment = PyTuple_GET_ITEM(fragments, i);
+        if (fragment != Py_None &&
+            (!PyTuple_CheckExact(fragment) || PyTuple_GET_SIZE(fragment) != 5 ||
+             !PyLong_Check(PyTuple_GET_ITEM(fragment, 0)) ||
+             !PyLong_Check(PyTuple_GET_ITEM(fragment, 1)) ||
+             !PyBytes_CheckExact(PyTuple_GET_ITEM(fragment, 2)) ||
+             !PyBytes_CheckExact(PyTuple_GET_ITEM(fragment, 3)) ||
+             !PyLong_Check(PyTuple_GET_ITEM(fragment, 4)))) goto invalid;
+    }
+    return 1;
+
+invalid:
+    PyErr_SetString(PyExc_RuntimeError,
+                    "invalid native compression policy descriptor");
+    return 0;
+}
+
 
 static int
 run_ai_scraping(const WreathCoreCAPI *core, PyObject *config,
@@ -508,11 +596,14 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
         return -1;
     }
     PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
-    if (ai_scraping != NULL) {
+    PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
+    if (ai_scraping != NULL || compression != NULL) {
         program->core = (const WreathCoreCAPI *)PyCapsule_Import(
             WREATH_CORE_CAPI_NAME, 0);
         if (program->core == NULL) return -1;
-        if (!ai_scraping_config_valid(program->core, ai_scraping)) return -1;
+        if (ai_scraping != NULL &&
+            !ai_scraping_config_valid(program->core, ai_scraping)) return -1;
+        if (compression != NULL && !compression_config_valid(compression)) return -1;
     }
     program->response_transform = (unsigned char)(
         program_item(program, WREATH_POLICY_CACHE) != NULL ||
@@ -543,6 +634,7 @@ wreath_policy_state_clear(WreathPolicyState *state)
     Py_CLEAR(state->client);
     Py_CLEAR(state->scheme);
     Py_CLEAR(state->origin);
+    Py_CLEAR(state->available_dictionary);
     Py_CLEAR(state->request_id);
     Py_CLEAR(state->csrf_token);
     memset(state, 0, sizeof(*state));
@@ -761,12 +853,12 @@ run_rate(WreathPolicyState *state, PyObject *rate, WreathPolicyReply *reply)
     }
     if (append_literal(reply->headers, "x-ratelimit-remaining", "0") < 0) return -1;
     PyObject *owner = PyTuple_GET_ITEM(rate, 3);
-    PyObject *old = PyObject_GetAttrString(owner, "throttled");
+    PyObject *old = PyObject_GetAttr(owner, policy_name_throttled);
     PyObject *one = old != NULL ? PyLong_FromLong(1) : NULL;
     PyObject *next = one != NULL ? PyNumber_Add(old, one) : NULL;
     Py_XDECREF(old);
     Py_XDECREF(one);
-    if (next == NULL || PyObject_SetAttrString(owner, "throttled", next) < 0) {
+    if (next == NULL || PyObject_SetAttr(owner, policy_name_throttled, next) < 0) {
         Py_XDECREF(next);
         return -1;
     }
@@ -785,7 +877,7 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
     PyObject *networks = PyTuple_GET_ITEM(proxy, 0);
     PyObject *address = PyObject_Str(PyTuple_GET_ITEM(state->client, 0));
     PyObject *contains = address != NULL
-        ? PyObject_CallMethod(networks, "contains", "O", address) : NULL;
+        ? PyObject_CallMethodOneArg(networks, policy_name_contains, address) : NULL;
     Py_XDECREF(address);
     if (contains == NULL) return -1;
     int trusted = PyObject_IsTrue(contains);
@@ -794,12 +886,12 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
 
     PyObject *forwarded = find_header(headers, "x-forwarded-for", 15, NULL);
     if (forwarded != NULL) {
-        PyObject *client = PyObject_CallMethod(
-            networks, "forwarded_client", "O", forwarded);
+        PyObject *client = PyObject_CallMethodOneArg(
+            networks, policy_name_forwarded_client, forwarded);
         if (client == NULL) return -1;
         if (client != Py_None) {
-            PyObject *effective = PyTuple_Pack(2, client, Py_None);
-            Py_DECREF(client);
+            PyObject *effective = wreath_tuple2_from_owned(
+                client, Py_NewRef(Py_None));
             if (effective == NULL) return -1;
             Py_SETREF(state->client, effective);
         }
@@ -820,9 +912,8 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
             while (end > start && (data[end - 1] == ' ' || data[end - 1] == '\t')) end--;
             if (ascii_equal_ci(data + start, end - start, "http", 4) ||
                 ascii_equal_ci(data + start, end - start, "https", 5)) {
-                PyObject *scheme = PyUnicode_FromString(
-                    end - start == 4 ? "http" : "https");
-                if (scheme == NULL) return -1;
+                PyObject *scheme = Py_NewRef(
+                    end - start == 4 ? policy_scheme_http : policy_scheme_https);
                 Py_SETREF(state->scheme, scheme);
             }
         }
@@ -840,11 +931,9 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
             while (start < end && (data[start] == ' ' || data[start] == '\t')) start++;
             while (end > start && (data[end - 1] == ' ' || data[end - 1] == '\t')) end--;
             if (end > start) {
-                PyObject *name = PyBytes_FromString("host");
                 PyObject *value = PyBytes_FromStringAndSize(data + start, end - start);
-                int result = name != NULL && value != NULL
-                    ? replace_header(headers, name, value) : -1;
-                Py_XDECREF(name);
+                int result = value != NULL
+                    ? replace_header(headers, policy_header_host, value) : -1;
                 Py_XDECREF(value);
                 if (result < 0) return -1;
             }
@@ -1108,8 +1197,23 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
     state->client = Py_NewRef(client);
     state->scheme = Py_NewRef(scheme);
     if (program_item(program, WREATH_POLICY_COMPRESSION) != NULL) {
+        PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
         PyObject *accepted = find_header(headers, "accept-encoding", 15, NULL);
-        state->compression_coding = (unsigned char)select_compression(accepted);
+        int fallback = 0;
+        int allow_dcz = PyTuple_CheckExact(compression) &&
+            PyTuple_GET_SIZE(compression) >= 9 &&
+            PyTuple_CheckExact(PyTuple_GET_ITEM(compression, 6));
+        state->compression_coding = (unsigned char)select_compression(
+            accepted, allow_dcz, &fallback);
+        state->compression_fallback = (unsigned char)fallback;
+        if (state->compression_coding == 3) {
+            Py_ssize_t count = 0;
+            PyObject *available = find_header(
+                headers, "available-dictionary", 20, &count);
+            if (count == 1 && available != NULL) {
+                state->available_dictionary = Py_NewRef(available);
+            }
+        }
     }
     if (program_item(program, WREATH_POLICY_SECURITY) != NULL) {
         state->completed |= WREATH_POLICY_DONE_SECURITY;
@@ -1320,8 +1424,8 @@ encoded_etag(PyObject *etag, int coding)
     if (size >= 2 && data[0] == 'W' && data[1] == '/') prefix = 2;
     if (size - prefix < 2 || data[prefix] != '"' || data[size - 1] != '"')
         return Py_NewRef(Py_None);
-    const char *suffix = coding == 2 ? "--zstd" : "--gzip";
-    Py_ssize_t suffix_size = 6;
+    const char *suffix = coding == 3 ? "--dcz" : (coding == 2 ? "--zstd" : "--gzip");
+    Py_ssize_t suffix_size = coding == 3 ? 5 : 6;
     PyObject *result = PyBytes_FromStringAndSize(NULL, size + suffix_size);
     if (result == NULL) return NULL;
     char *out = PyBytes_AS_STRING(result);
@@ -1329,6 +1433,29 @@ encoded_etag(PyObject *etag, int coding)
     memcpy(out + size - 1, suffix, (size_t)suffix_size);
     out[size - 1 + suffix_size] = '"';
     return result;
+}
+
+static PyObject *
+matching_dcz_dictionary(WreathPolicyProgram *program, PyObject *compression,
+                        PyObject *available, PyObject *content_type)
+{
+    if (available == NULL || !PyBytes_Check(available) ||
+        !PyTuple_CheckExact(compression) || PyTuple_GET_SIZE(compression) < 9)
+        return NULL;
+    const char *token = PyBytes_AS_STRING(available);
+    Py_ssize_t token_size = PyBytes_GET_SIZE(available);
+    trim_ows(&token, &token_size);
+    PyObject *table = PyTuple_GET_ITEM(compression, 6);
+    if (!PyTuple_CheckExact(table) || PyTuple_GET_SIZE(table) != 7) return NULL;
+    int format;
+    if (program->core->gzip_format(content_type, &format) < 0) return NULL;
+    PyObject *entry = PyTuple_GET_ITEM(table, format);
+    if (entry == Py_None || !PyTuple_CheckExact(entry) ||
+        PyTuple_GET_SIZE(entry) != 3) return NULL;
+    PyObject *expected = PyTuple_GET_ITEM(entry, 0);
+    return PyBytes_Check(expected) && PyBytes_GET_SIZE(expected) == token_size &&
+        memcmp(PyBytes_AS_STRING(expected), token, (size_t)token_size) == 0
+        ? entry : NULL;
 }
 
 int
@@ -1369,22 +1496,53 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
     Py_ssize_t minimum = PyLong_AsSsize_t(PyTuple_GET_ITEM(compression, 0));
     if ((minimum == -1 && PyErr_Occurred()) || PyBytes_GET_SIZE(*body) < minimum)
         return PyErr_Occurred() ? -1 : 0;
+    PyObject *content_type = response_value(headers, "content-type", 12);
     if (response_index_literal(headers, "content-encoding", 16) >= 0 ||
         response_index_literal(headers, "content-range", 13) >= 0 ||
-        !compressible_type(response_value(headers, "content-type", 12)) ||
+        !compressible_type(content_type) ||
         has_cache_token(response_value(headers, "cache-control", 13),
                         "no-transform", 12)) return 0;
+    int coding = state->compression_coding;
+    PyObject *dcz_dictionary = NULL;
+    if (coding == 3) {
+        int secure = state->scheme != NULL &&
+            PyUnicode_Compare(state->scheme, policy_scheme_https) == 0;
+        if (secure) {
+            dcz_dictionary = matching_dcz_dictionary(
+                program, compression, state->available_dictionary, content_type);
+        }
+        if (dcz_dictionary == NULL) coding = state->compression_fallback;
+        if (coding == 0) return 0;
+    }
     PyObject *etag = response_value(headers, "etag", 4);
-    PyObject *new_etag = encoded_etag(etag, state->compression_coding);
+    PyObject *new_etag = encoded_etag(etag, coding);
     if (new_etag == NULL && etag != NULL) return -1;
     if (new_etag == Py_None) {
         Py_DECREF(new_etag);
         return 0;
     }
-    int coding = state->compression_coding;
-    PyObject *level = PyTuple_GET_ITEM(compression, coding == 2 ? 2 : 1);
-    PyObject *compressor = PyTuple_GET_ITEM(compression, coding == 2 ? 5 : 4);
-    PyObject *compressed = PyObject_CallFunctionObjArgs(compressor, *body, level, NULL);
+    PyObject *level = PyTuple_GET_ITEM(
+        compression, coding == 2 || coding == 3 ? 2 : 1);
+    PyObject *compressed;
+    if (coding == 3) {
+        PyObject *compressor = PyTuple_GET_ITEM(compression, 7);
+        compressed = PyObject_CallFunctionObjArgs(
+            compressor, dcz_dictionary, *body, level, NULL);
+    }
+    else if (coding == 2) {
+        PyObject *compressor = PyTuple_GET_ITEM(compression, 4);
+        compressed = PyObject_CallFunctionObjArgs(compressor, *body, level, NULL);
+    }
+    else {
+        long gzip_level = PyLong_AsLong(level);
+        if (gzip_level == -1 && PyErr_Occurred()) {
+            Py_XDECREF(new_etag);
+            return -1;
+        }
+        compressed = program->core->gzip_fragment_compress(
+            PyTuple_GET_ITEM(compression, 5), *body, (int)gzip_level,
+            content_type, PyTuple_GET_ITEM(compression, 8));
+    }
     if (compressed == NULL) {
         Py_XDECREF(new_etag);
         return -1;
@@ -1398,8 +1556,10 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
         return -1;
     }
     Py_DECREF(length);
-    if (append_literal(headers, "content-encoding", coding == 2 ? "zstd" : "gzip") < 0 ||
+    const char *coding_name = coding == 3 ? "dcz" : (coding == 2 ? "zstd" : "gzip");
+    if (append_literal(headers, "content-encoding", coding_name) < 0 ||
         append_vary(headers, "accept-encoding", 15) < 0 ||
+        (coding == 3 && append_vary(headers, "available-dictionary", 20) < 0) ||
         (new_etag != NULL && replace_literal_header(headers, "etag", 4, new_etag) < 0)) {
         Py_XDECREF(new_etag);
         return -1;

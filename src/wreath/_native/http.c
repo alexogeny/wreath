@@ -680,9 +680,7 @@ wreath_http_parse_response_parts(
         value = PyBytes_FromStringAndSize(
             (const char *)value_start, value_end - value_start
         );
-        pair = value != NULL ? PyTuple_Pack(2, name, value) : NULL;
-        Py_DECREF(name);
-        Py_XDECREF(value);
+        pair = wreath_tuple2_from_owned(name, value);
         if (pair == NULL) goto error;
         if (header_index >= header_count) {
             Py_DECREF(pair);

@@ -123,6 +123,14 @@ def test_windows_native_build_enables_c11_atomics_and_owns_pi() -> None:
     assert "const double to_rad = M_PI" not in geospatial
 
 
+def test_outbound_client_uses_cpython_portable_monotonic_clock() -> None:
+    source = (ROOT / "src/wreath/_native/client_http1.c").read_text()
+
+    assert "PyTime_Monotonic(&now)" in source
+    assert "clock_gettime" not in source
+    assert "CLOCK_MONOTONIC" not in source
+
+
 def test_publish_follows_the_exact_successful_main_ci_commit() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
     trigger = workflow[True]

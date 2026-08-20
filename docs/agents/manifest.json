@@ -240,16 +240,19 @@
         "docs/guides/forms.md"
       ],
       "reference": [
-        "docs/reference/binding.md"
+        "docs/reference/binding.md",
+        "docs/reference/contracts.md"
       ],
       "sources": [
         "src/wreath/binding.py",
+        "src/wreath/contracts.py",
         "src/wreath/_model_fields.py",
         "src/wreath/_native/validate.c",
         "src/wreath/validation_errors.py"
       ],
       "tests": [
         "tests/test_binding.py",
+        "tests/test_contracts.py",
         "tests/test_binding_sources.py",
         "tests/test_binding_complexity.py",
         "tests/test_binding_response_compilation.py",
@@ -349,6 +352,8 @@
         "src/wreath/policy/",
         "src/wreath/_compression.py",
         "src/wreath/compression.py",
+        "src/wreath/_native/gzip_codec.c",
+        "src/wreath/_native/gzip/",
         "src/wreath/cache_control.py",
         "src/wreath/_webpolicy.py",
         "src/wreath/session_store.py",
@@ -365,6 +370,7 @@
         "tests/test_cache_control.py",
         "tests/test_compression_policy.py",
         "tests/test_compression_parity.py",
+        "docs/perf/data/gzip-native-instructions.json",
         "tests/test_proxy_middleware.py",
         "tests/test_ratelimit_middleware.py",
         "tests/test_tiered_ratelimit.py",
@@ -399,11 +405,13 @@
       ],
       "reference": [
         "docs/reference/auth.md",
-        "docs/reference/authorization.md"
+        "docs/reference/authorization.md",
+        "docs/reference/tokens.md"
       ],
       "sources": [
         "src/wreath/auth.py",
         "src/wreath/authorization.py",
+        "src/wreath/tokens.py",
         "src/wreath/_auth/",
         "src/wreath/_curves.py",
         "src/wreath/_native/authz.c",
@@ -412,6 +420,7 @@
       ],
       "tests": [
         "tests/test_authentication.py",
+        "tests/test_tokens.py",
         "tests/test_auth_pipeline.py",
         "tests/test_auth_routing.py",
         "tests/test_auth_verifier_call_count.py",
@@ -519,7 +528,7 @@
     },
     {
       "name": "organizations",
-      "capability": "Tenancy at the identity layer: organisations, memberships, roles within them, invitations that survive the invitee having no account, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning with filtering, sorting and paging as an adapter onto exactly those stores",
+      "capability": "Tenancy at the identity layer: durable organisations, memberships, roles within them, single-use invitations that survive both the invitee having no account and API restarts, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning with filtering, sorting and paging as an adapter onto exactly those stores",
       "replaces": [
         "workos",
         "scalekit",
@@ -542,6 +551,7 @@
       ],
       "tests": [
         "tests/test_organizations_store.py",
+        "tests/postgres/test_organizations_restart.py",
         "tests/test_organizations_cedar.py",
         "tests/test_principal_narrow.py",
         "tests/test_scim_provisioning.py",
@@ -1686,9 +1696,11 @@
         "docs/guides/notifications.md"
       ],
       "reference": [
-        "docs/reference/notifications.md"
+        "docs/reference/notifications.md",
+        "docs/reference/email.md"
       ],
       "sources": [
+        "src/wreath/email.py",
         "src/wreath/notifications.py",
         "src/wreath/_webpush.py",
         "src/wreath/_native/aesgcm.c",
@@ -1697,6 +1709,7 @@
       ],
       "tests": [
         "tests/test_dkim_signing.py",
+        "tests/test_email_surface.py",
         "tests/test_webpush_crypto.py",
         "tests/test_aesgcm_parity.py",
         "tests/test_aesgcm_vectors.py",

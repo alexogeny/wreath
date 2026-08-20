@@ -364,6 +364,7 @@ extern PyObject *s_body;
 extern PyObject *s_more_body;
 extern PyObject *s_status;
 extern PyObject *s_headers;
+extern PyObject *s_trailers;
 extern PyObject *s_http_request;  /* "http.request" */
 extern PyObject *s_http_disconnect;  /* "http.disconnect" */
 extern PyObject *s_resp_start;  /* "http.response.start" */

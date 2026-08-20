@@ -36,6 +36,49 @@ typedef struct {
     int redacted;
 } ReplayHeaders;
 
+typedef enum {
+    REPLAY_ATTR_METHOD,
+    REPLAY_ATTR_TARGET,
+    REPLAY_ATTR_HTTP_VERSION,
+    REPLAY_ATTR_REASON,
+    REPLAY_ATTR_IDEMPOTENCY_KEY,
+    REPLAY_ATTR_REQUEST_BODY,
+    REPLAY_ATTR_RESPONSE_BODY,
+    REPLAY_ATTR_REQUEST_HEADERS,
+    REPLAY_ATTR_RESPONSE_HEADERS,
+    REPLAY_ATTR_DEPENDENCY_ID,
+    REPLAY_ATTR_RESPONSE_STATUS,
+    REPLAY_ATTR_SEQUENCE,
+    REPLAY_ATTR_HEADERS_REDACTED,
+    REPLAY_ATTR_UPPER,
+    REPLAY_ATTR_COUNT
+} ReplayAttr;
+
+static PyObject *replay_attrs[REPLAY_ATTR_COUNT];
+
+int
+wreath_http_replay_ready(void)
+{
+    static const char *const names[REPLAY_ATTR_COUNT] = {
+        "method", "target", "http_version", "reason", "idempotency_key",
+        "request_body", "response_body", "request_headers", "response_headers",
+        "dependency_id", "response_status", "sequence", "headers_redacted",
+        "upper"
+    };
+    for (Py_ssize_t i = 0; i < REPLAY_ATTR_COUNT; i++) {
+        if (replay_attrs[i] == NULL &&
+            (replay_attrs[i] = PyUnicode_InternFromString(names[i])) == NULL)
+            return -1;
+    }
+    return 0;
+}
+
+static inline PyObject *
+replay_getattr(PyObject *exchange, ReplayAttr attribute)
+{
+    return PyObject_GetAttr(exchange, replay_attrs[attribute]);
+}
+
 static void
 header_policy_clear(HeaderPolicy *policy)
 {
@@ -209,10 +252,10 @@ error:
 }
 
 static int
-read_short_attr(PyObject *exchange, const char *attribute, const char *label,
+read_short_attr(PyObject *exchange, ReplayAttr attribute, const char *label,
                 uint16_t *out, PyObject *error_type)
 {
-    PyObject *object = PyObject_GetAttrString(exchange, attribute);
+    PyObject *object = replay_getattr(exchange, attribute);
     if (object == NULL) return -1;
     int overflow = 0;
     long long value = PyLong_AsLongLongAndOverflow(object, &overflow);
@@ -231,13 +274,14 @@ read_short_attr(PyObject *exchange, const char *attribute, const char *label,
 }
 
 static PyObject *
-encoded_text_attr(PyObject *exchange, const char *attribute, const char *encoding,
+encoded_text_attr(PyObject *exchange, ReplayAttr attribute, const char *encoding,
                   int uppercase)
 {
-    PyObject *text = PyObject_GetAttrString(exchange, attribute);
+    PyObject *text = replay_getattr(exchange, attribute);
     if (text == NULL) return NULL;
     if (uppercase) {
-        PyObject *upper = PyObject_CallMethod(text, "upper", NULL);
+        PyObject *upper = PyObject_CallMethodNoArgs(
+            text, replay_attrs[REPLAY_ATTR_UPPER]);
         Py_DECREF(text);
         text = upper;
         if (text == NULL) return NULL;
@@ -288,43 +332,43 @@ wreath_http_exchange_encode(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *request_source = NULL, *response_source = NULL;
     if (header_policy_init(&policy, forbidden) < 0) return NULL;
 
-    method = encoded_text_attr(exchange, "method", "ascii", 1);
+    method = encoded_text_attr(exchange, REPLAY_ATTR_METHOD, "ascii", 1);
     target = method == NULL ? NULL
-        : encoded_text_attr(exchange, "target", "ascii", 0);
+        : encoded_text_attr(exchange, REPLAY_ATTR_TARGET, "ascii", 0);
     version = target == NULL ? NULL
-        : encoded_text_attr(exchange, "http_version", "ascii", 0);
+        : encoded_text_attr(exchange, REPLAY_ATTR_HTTP_VERSION, "ascii", 0);
     PyObject *object = version == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "reason");
+        : replay_getattr(exchange, REPLAY_ATTR_REASON);
     reason = object == NULL ? NULL : replay_bytes(object);
     Py_XDECREF(object);
     object = reason == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "idempotency_key");
+        : replay_getattr(exchange, REPLAY_ATTR_IDEMPOTENCY_KEY);
     if (object != NULL) {
         if (object == Py_None) idempotency = PyBytes_FromStringAndSize(NULL, 0);
         else idempotency = PyUnicode_AsEncodedString(object, "utf-8", "strict");
         Py_DECREF(object);
     }
     object = idempotency == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "request_body");
+        : replay_getattr(exchange, REPLAY_ATTR_REQUEST_BODY);
     request_body = object == NULL ? NULL : replay_bytes(object);
     Py_XDECREF(object);
     object = request_body == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "response_body");
+        : replay_getattr(exchange, REPLAY_ATTR_RESPONSE_BODY);
     response_body = object == NULL ? NULL : replay_bytes(object);
     Py_XDECREF(object);
     request_source = response_body == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "request_headers");
+        : replay_getattr(exchange, REPLAY_ATTR_REQUEST_HEADERS);
     response_source = request_source == NULL ? NULL
-        : PyObject_GetAttrString(exchange, "response_headers");
+        : replay_getattr(exchange, REPLAY_ATTR_RESPONSE_HEADERS);
     if (response_source == NULL ||
         replay_headers_init(&request_headers, request_source, &policy, error_type) < 0 ||
         replay_headers_init(&response_headers, response_source, &policy, error_type) < 0)
         goto error;
 
     uint16_t dependency_id, status;
-    if (read_short_attr(exchange, "dependency_id", "dependency id",
+    if (read_short_attr(exchange, REPLAY_ATTR_DEPENDENCY_ID, "dependency id",
                         &dependency_id, error_type) < 0 ||
-        read_short_attr(exchange, "response_status", "response status",
+        read_short_attr(exchange, REPLAY_ATTR_RESPONSE_STATUS, "response status",
                         &status, error_type) < 0 ||
         check_short_length(PyBytes_GET_SIZE(method), "method", error_type) < 0 ||
         check_short_length(PyBytes_GET_SIZE(target), "target", error_type) < 0 ||
@@ -346,7 +390,7 @@ wreath_http_exchange_encode(PyObject *Py_UNUSED(self), PyObject *args)
                         "outbound exchange body exceeds the 4 GiB wire limit");
         goto error;
     }
-    object = PyObject_GetAttrString(exchange, "sequence");
+    object = replay_getattr(exchange, REPLAY_ATTR_SEQUENCE);
     if (object == NULL) goto error;
     uint64_t sequence = PyLong_AsUnsignedLongLong(object);
     Py_DECREF(object);
@@ -355,7 +399,7 @@ wreath_http_exchange_encode(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(error_type, "outbound exchange sequence exceeds uint64");
         goto error;
     }
-    object = PyObject_GetAttrString(exchange, "headers_redacted");
+    object = replay_getattr(exchange, REPLAY_ATTR_HEADERS_REDACTED);
     if (object == NULL) goto error;
     int already_redacted = PyObject_IsTrue(object);
     Py_DECREF(object);
@@ -497,9 +541,7 @@ decode_replay_headers(const uint8_t *data, Py_ssize_t length,
             (const char *)data + *offset, name_length);
         PyObject *value = name == NULL ? NULL : PyBytes_FromStringAndSize(
             (const char *)data + *offset + name_length, value_length);
-        PyObject *pair = value == NULL ? NULL : PyTuple_Pack(2, name, value);
-        Py_XDECREF(name);
-        Py_XDECREF(value);
+        PyObject *pair = wreath_tuple2_from_owned(name, value);
         if (pair == NULL) goto error;
         PyTuple_SET_ITEM(headers, i, pair);
         *offset += (Py_ssize_t)pair_length;
@@ -680,10 +722,7 @@ wreath_http_exchange_decode(PyObject *Py_UNUSED(self), PyObject *args)
         Py_DECREF(kwargs);
         goto error_text;
     }
-    PyObject *empty = PyTuple_New(0);
-    PyObject *result = empty == NULL ? NULL
-        : PyObject_Call(record_type, empty, kwargs);
-    Py_XDECREF(empty);
+    PyObject *result = PyObject_VectorcallDict(record_type, NULL, 0, kwargs);
     Py_DECREF(kwargs);
     Py_DECREF(method); Py_DECREF(target); Py_DECREF(version); Py_DECREF(idempotency);
     return result;

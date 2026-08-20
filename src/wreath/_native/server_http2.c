@@ -1134,7 +1134,7 @@ stream_send(PyObject *op, PyObject *message)
     Http2Stream *self = (Http2Stream *)op;
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
     if (proto == NULL || self->state == S_CLOSED) return completed_none();
-    PyObject *type = PyDict_GetItemString(message, "type");
+    PyObject *type = PyDict_GetItem(message, s_type);
     if (type == NULL) {
         PyErr_SetString(PyExc_KeyError, "message has no 'type'");
         return NULL;
@@ -1142,17 +1142,17 @@ stream_send(PyObject *op, PyObject *message)
     const char *t = PyUnicode_AsUTF8(type);
     if (t == NULL) return NULL;
     if (strcmp(t, "http.response.start") == 0) {
-        PyObject *trailers = PyDict_GetItemString(message, "trailers");
+        PyObject *trailers = PyDict_GetItem(message, s_trailers);
         int has_trailers = trailers != NULL && PyObject_IsTrue(trailers);
         return h2_response_start(
-            self, PyDict_GetItemString(message, "status"),
-            PyDict_GetItemString(message, "headers"), has_trailers, 1
+            self, PyDict_GetItem(message, s_status),
+            PyDict_GetItem(message, s_headers), has_trailers, 1
         );
     }
     if (strcmp(t, "http.response.body") == 0) {
-        PyObject *more = PyDict_GetItemString(message, "more_body");
+        PyObject *more = PyDict_GetItem(message, s_more_body);
         return h2_response_body(
-            self, PyDict_GetItemString(message, "body"),
+            self, PyDict_GetItem(message, s_body),
             more != NULL && PyObject_IsTrue(more), 1
         );
     }
@@ -1161,7 +1161,7 @@ stream_send(PyObject *op, PyObject *message)
             PyErr_SetString(PyExc_RuntimeError, "HTTP/2 send already pending");
             return NULL;
         }
-        PyObject *headers = PyDict_GetItemString(message, "headers");
+        PyObject *headers = PyDict_GetItem(message, s_headers);
         PyObject *block = PyByteArray_FromStringAndSize("", 0);
         if (block == NULL) {
             return NULL;
@@ -2087,10 +2087,10 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     if (self->policy.descriptor != NULL) {
         PyObject *policy_headers = wreath_request_context_headers(scope);
         Py_XINCREF(policy_headers);
-        PyObject *policy_method = PyObject_GetAttrString(scope, "method");
-        PyObject *policy_path = PyObject_GetAttrString(scope, "path");
-        PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
-        PyObject *policy_client = PyObject_GetAttrString(scope, "client");
+        PyObject *policy_method = PyObject_GetAttr(scope, k_method);
+        PyObject *policy_path = PyObject_GetAttr(scope, k_path);
+        PyObject *policy_scheme = PyObject_GetAttr(scope, k_scheme);
+        PyObject *policy_client = PyObject_GetAttr(scope, k_client);
         WreathPolicyReply reply = {0};
         if (policy_headers == NULL || policy_method == NULL || policy_path == NULL ||
             policy_scheme == NULL || policy_client == NULL) {

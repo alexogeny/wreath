@@ -3,17 +3,60 @@
 
 enum { G_PUNCT, G_NAME, G_NUMBER, G_STRING, G_SPREAD, G_EOF };
 
+typedef enum {
+    GP_ATTR_SELECTIONS,
+    GP_ATTR_NAME,
+    GP_ATTR_SELECTION_SET,
+    GP_ATTR_MAX_DOCUMENT_BYTES,
+    GP_ATTR_MAX_ALIASES,
+    GP_ATTR_MAX_COMPLEXITY,
+    GP_ATTR_MAX_DEPTH,
+    GP_ATTR_MAX_STEPS,
+    GP_ATTR_COUNT,
+} GraphqlParserAttr;
+
+static PyObject *graphql_parser_attr_names[GP_ATTR_COUNT];
+
+int
+wreath_graphql_parser_ready(void)
+{
+    static const char *names[GP_ATTR_COUNT] = {
+        "selections", "name", "selection_set", "max_document_bytes",
+        "max_aliases", "max_complexity", "max_depth", "max_steps",
+    };
+    for (int index = 0; index < GP_ATTR_COUNT; index++) {
+        graphql_parser_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (graphql_parser_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(graphql_parser_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+g_getattr(PyObject *object, GraphqlParserAttr attribute)
+{
+    return PyObject_GetAttr(object, graphql_parser_attr_names[attribute]);
+}
+
 typedef struct {
     int *kinds;
     PyObject **values;
     Py_ssize_t *starts;
     Py_ssize_t count, at;
     PyObject *source;
+    const void *source_data;
+    int source_kind;
     PyObject *config;
     PyObject *limits;
     PyObject *aliases;
     Py_ssize_t complexity, depth;
+    Py_ssize_t max_aliases, max_complexity, max_depth, max_steps;
 } GParser;
+
+#define G_SOURCE_CHAR(p, index) \
+    PyUnicode_READ((p)->source_kind, (p)->source_data, (index))
 
 #define GC(p, i) PyTuple_GET_ITEM((p)->config, (i))
 enum { C_ARGUMENT, C_DOCUMENT, C_FIELD, C_FRAGMENT_DEF, C_FRAGMENT_SPREAD,
@@ -36,21 +79,24 @@ static PyObject *
 g_unescape(GParser *p, PyObject *raw)
 {
     Py_ssize_t length = PyUnicode_GET_LENGTH(raw);
+    int raw_kind = PyUnicode_KIND(raw);
+    const void *raw_data = PyUnicode_DATA(raw);
     Py_UCS4 *output;
     Py_ssize_t written = 0;
     if ((size_t)length > SIZE_MAX / sizeof(*output) - 1) return PyErr_NoMemory();
     output = PyMem_Malloc(((size_t)length + 1) * sizeof(*output));
     if (output == NULL) return PyErr_NoMemory();
     for (Py_ssize_t i = 0; i < length; i++) {
-        Py_UCS4 ch = PyUnicode_READ_CHAR(raw, i);
+        Py_UCS4 ch = PyUnicode_READ(raw_kind, raw_data, i);
         if (ch != '\\') { output[written++] = ch; continue; }
         if (++i >= length) { PyMem_Free(output); return g_error(p, "invalid escape '\\\\'", "syntax", 0); }
-        ch = PyUnicode_READ_CHAR(raw, i);
+        ch = PyUnicode_READ(raw_kind, raw_data, i);
         if (ch == 'u' && i + 4 < length) {
             int value = 0;
             int valid = 1;
             for (int digit = 1; digit <= 4; digit++) {
-                int nibble = g_hex(PyUnicode_READ_CHAR(raw, i + digit));
+                int nibble = g_hex(PyUnicode_READ(
+                    raw_kind, raw_data, i + digit));
                 if (nibble < 0) { valid = 0; break; }
                 value = (value << 4) | nibble;
             }
@@ -172,30 +218,28 @@ static PyObject *
 g_error(GParser *p, const char *message, const char *code, Py_ssize_t position)
 {
     PyObject *text = PyUnicode_FromString(message);
-    PyObject *args;
     PyObject *kwargs;
     PyObject *code_obj;
     PyObject *position_obj;
     PyObject *error;
     if (text == NULL) return NULL;
-    args = PyTuple_Pack(1, text);
     kwargs = PyDict_New();
     code_obj = PyUnicode_FromString(code);
     position_obj = PyLong_FromSsize_t(position);
-    Py_DECREF(text);
-    if (args == NULL || kwargs == NULL || code_obj == NULL || position_obj == NULL) {
-        Py_XDECREF(args); Py_XDECREF(kwargs); Py_XDECREF(code_obj);
+    if (kwargs == NULL || code_obj == NULL || position_obj == NULL) {
+        Py_DECREF(text); Py_XDECREF(kwargs); Py_XDECREF(code_obj);
         Py_XDECREF(position_obj);
         return NULL;
     }
     if (PyDict_SetItemString(kwargs, "code", code_obj) < 0 ||
         PyDict_SetItemString(kwargs, "position", position_obj) < 0) {
-        Py_DECREF(args); Py_DECREF(kwargs); Py_DECREF(code_obj); Py_DECREF(position_obj);
+        Py_DECREF(text); Py_DECREF(kwargs); Py_DECREF(code_obj); Py_DECREF(position_obj);
         return NULL;
     }
     Py_DECREF(code_obj); Py_DECREF(position_obj);
-    error = PyObject_Call(GC(p, C_ERROR), args, kwargs);
-    Py_DECREF(args); Py_DECREF(kwargs);
+    PyObject *call_args[] = {text};
+    error = PyObject_VectorcallDict(GC(p, C_ERROR), call_args, 1, kwargs);
+    Py_DECREF(text); Py_DECREF(kwargs);
     if (error == NULL) return NULL;
     PyErr_SetObject(GC(p, C_ERROR), error);
     Py_DECREF(error);
@@ -234,13 +278,8 @@ g_head_in(Py_UCS4 ch, const char *ascii)
 static int
 g_tokenize(GParser *p, PyObject *source)
 {
-    PyObject *max_steps_object = PyObject_GetAttrString(p->limits, "max_steps");
-    Py_ssize_t max_steps = max_steps_object == NULL ? -1 :
-        PyLong_AsSsize_t(max_steps_object);
     Py_ssize_t length = PyUnicode_GET_LENGTH(source);
     Py_ssize_t position = 0, capacity;
-    Py_XDECREF(max_steps_object);
-    if (max_steps < 0 && PyErr_Occurred()) return -1;
     if ((size_t)length > SIZE_MAX / sizeof(*p->values) ||
         (size_t)length > SIZE_MAX / sizeof(*p->starts) ||
         (size_t)length > SIZE_MAX / sizeof(*p->kinds)) {
@@ -255,8 +294,10 @@ g_tokenize(GParser *p, PyObject *source)
         PyErr_NoMemory(); return -1;
     }
     p->source = source;
+    p->source_kind = PyUnicode_KIND(source);
+    p->source_data = PyUnicode_DATA(source);
     while (position < length) {
-        Py_UCS4 head = PyUnicode_READ_CHAR(source, position);
+        Py_UCS4 head = G_SOURCE_CHAR(p, position);
         Py_ssize_t start = position;
         Py_ssize_t end;
         if (g_head_in(head, " \t\r\n\f\v,") || head == 0xfeff) {
@@ -266,13 +307,13 @@ g_tokenize(GParser *p, PyObject *source)
         if (head == '#') {
             do position++;
             while (position < length &&
-                   PyUnicode_READ_CHAR(source, position) != '\r' &&
-                   PyUnicode_READ_CHAR(source, position) != '\n');
+                   G_SOURCE_CHAR(p, position) != '\r' &&
+                   G_SOURCE_CHAR(p, position) != '\n');
             continue;
         }
-        if (p->count >= max_steps) {
+        if (p->count >= p->max_steps) {
             PyObject *message = PyUnicode_FromFormat(
-                "document exceeded the %zd-token parse budget", max_steps);
+                "document exceeded the %zd-token parse budget", p->max_steps);
             const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
             if (text != NULL) g_error(p, text, "steps", start);
             Py_XDECREF(message); return -1;
@@ -281,7 +322,7 @@ g_tokenize(GParser *p, PyObject *source)
         if ((head >= 'A' && head <= 'Z') || (head >= 'a' && head <= 'z') || head == '_') {
             position++;
             while (position < length) {
-                Py_UCS4 ch = PyUnicode_READ_CHAR(source, position);
+                Py_UCS4 ch = G_SOURCE_CHAR(p, position);
                 if (!((ch >= 'A' && ch <= 'Z') ||
                       (ch >= 'a' && ch <= 'z') ||
                       (ch >= '0' && ch <= '9') || ch == '_')) break;
@@ -298,39 +339,39 @@ g_tokenize(GParser *p, PyObject *source)
             if (head == '-') {
                 position++;
                 if (position >= length ||
-                    PyUnicode_READ_CHAR(source, position) < '0' ||
-                    PyUnicode_READ_CHAR(source, position) > '9') {
+                    G_SOURCE_CHAR(p, position) < '0' ||
+                    G_SOURCE_CHAR(p, position) > '9') {
                     g_error(p, "expected a number after '-'", "syntax", start);
                     return -1;
                 }
             }
             while (position < length &&
-                   PyUnicode_READ_CHAR(source, position) >= '0' &&
-                   PyUnicode_READ_CHAR(source, position) <= '9') position++;
-            if (position < length && PyUnicode_READ_CHAR(source, position) == '.' &&
+                   G_SOURCE_CHAR(p, position) >= '0' &&
+                   G_SOURCE_CHAR(p, position) <= '9') position++;
+            if (position < length && G_SOURCE_CHAR(p, position) == '.' &&
                 position + 1 < length &&
-                PyUnicode_READ_CHAR(source, position + 1) >= '0' &&
-                PyUnicode_READ_CHAR(source, position + 1) <= '9') {
+                G_SOURCE_CHAR(p, position + 1) >= '0' &&
+                G_SOURCE_CHAR(p, position + 1) <= '9') {
                 position += 2;
                 while (position < length &&
-                       PyUnicode_READ_CHAR(source, position) >= '0' &&
-                       PyUnicode_READ_CHAR(source, position) <= '9') position++;
+                       G_SOURCE_CHAR(p, position) >= '0' &&
+                       G_SOURCE_CHAR(p, position) <= '9') position++;
             }
             if (position < length &&
-                (PyUnicode_READ_CHAR(source, position) == 'e' ||
-                 PyUnicode_READ_CHAR(source, position) == 'E')) {
+                (G_SOURCE_CHAR(p, position) == 'e' ||
+                 G_SOURCE_CHAR(p, position) == 'E')) {
                 Py_ssize_t exponent = position++;
                 if (position < length &&
-                    (PyUnicode_READ_CHAR(source, position) == '+' ||
-                     PyUnicode_READ_CHAR(source, position) == '-')) position++;
+                    (G_SOURCE_CHAR(p, position) == '+' ||
+                     G_SOURCE_CHAR(p, position) == '-')) position++;
                 if (position >= length ||
-                    PyUnicode_READ_CHAR(source, position) < '0' ||
-                    PyUnicode_READ_CHAR(source, position) > '9') position = exponent;
+                    G_SOURCE_CHAR(p, position) < '0' ||
+                    G_SOURCE_CHAR(p, position) > '9') position = exponent;
                 else {
                     do position++;
                     while (position < length &&
-                           PyUnicode_READ_CHAR(source, position) >= '0' &&
-                           PyUnicode_READ_CHAR(source, position) <= '9');
+                           G_SOURCE_CHAR(p, position) >= '0' &&
+                           G_SOURCE_CHAR(p, position) <= '9');
                 }
             }
             end = position;
@@ -350,15 +391,15 @@ g_tokenize(GParser *p, PyObject *source)
         }
         else if (head == '"') {
             int block = position + 2 < length &&
-                PyUnicode_READ_CHAR(source, position + 1) == '"' &&
-                PyUnicode_READ_CHAR(source, position + 2) == '"';
+                G_SOURCE_CHAR(p, position + 1) == '"' &&
+                G_SOURCE_CHAR(p, position + 2) == '"';
             p->kinds[p->count] = G_STRING;
             if (block) {
                 position += 3;
                 while (position + 2 < length &&
-                       !(PyUnicode_READ_CHAR(source, position) == '"' &&
-                         PyUnicode_READ_CHAR(source, position + 1) == '"' &&
-                         PyUnicode_READ_CHAR(source, position + 2) == '"'))
+                       !(G_SOURCE_CHAR(p, position) == '"' &&
+                         G_SOURCE_CHAR(p, position + 1) == '"' &&
+                         G_SOURCE_CHAR(p, position + 2) == '"'))
                     position++;
                 if (position + 2 >= length) {
                     g_error(p, "unterminated string", "syntax", start);
@@ -372,19 +413,19 @@ g_tokenize(GParser *p, PyObject *source)
             else {
                 position++;
                 while (position < length &&
-                       PyUnicode_READ_CHAR(source, position) != '"') {
-                    Py_UCS4 ch = PyUnicode_READ_CHAR(source, position);
+                       G_SOURCE_CHAR(p, position) != '"') {
+                    Py_UCS4 ch = G_SOURCE_CHAR(p, position);
                     if (ch == '\r' || ch == '\n') break;
                     if (ch == '\\') {
                         if (position + 1 >= length ||
-                            PyUnicode_READ_CHAR(source, position + 1) == '\r' ||
-                            PyUnicode_READ_CHAR(source, position + 1) == '\n') break;
+                            G_SOURCE_CHAR(p, position + 1) == '\r' ||
+                            G_SOURCE_CHAR(p, position + 1) == '\n') break;
                         position += 2;
                     }
                     else position++;
                 }
                 if (position >= length ||
-                    PyUnicode_READ_CHAR(source, position) != '"') {
+                    G_SOURCE_CHAR(p, position) != '"') {
                     g_error(p, "unterminated string", "syntax", start);
                     return -1;
                 }
@@ -395,8 +436,8 @@ g_tokenize(GParser *p, PyObject *source)
             }
         }
         else if (head == '.' && position + 2 < length &&
-                 PyUnicode_READ_CHAR(source, position + 1) == '.' &&
-                 PyUnicode_READ_CHAR(source, position + 2) == '.') {
+                 G_SOURCE_CHAR(p, position + 1) == '.' &&
+                 G_SOURCE_CHAR(p, position + 2) == '.') {
             position += 3;
             p->kinds[p->count] = G_SPREAD;
         }
@@ -423,7 +464,7 @@ static int
 g_peek(GParser *p, char ch)
 {
     return p->at < p->count && p->kinds[p->at] == G_PUNCT &&
-           PyUnicode_READ_CHAR(p->source, p->starts[p->at]) == (Py_UCS4)ch;
+           G_SOURCE_CHAR(p, p->starts[p->at]) == (Py_UCS4)ch;
 }
 static int
 g_expect(GParser *p, char ch)
@@ -529,6 +570,33 @@ g_directives(GParser *p)
     return 0;
 }
 
+static int
+g_record_alias(GParser *p, PyObject *name)
+{
+    PyObject *old = PyDict_GetItemWithError(p->aliases, name);
+    if (old == NULL && PyErr_Occurred()) return -1;
+    long count = 1;
+    if (old != NULL) {
+        long previous = PyLong_AsLong(old);
+        if (previous == -1 && PyErr_Occurred()) return -1;
+        count = previous + 1;
+    }
+    PyObject *count_obj = PyLong_FromLong(count);
+    if (count_obj == NULL ||
+        PyDict_SetItem(p->aliases, name, count_obj) < 0) {
+        Py_XDECREF(count_obj);
+        return -1;
+    }
+    Py_DECREF(count_obj);
+    if (count <= p->max_aliases) return 0;
+    PyObject *message = PyUnicode_FromFormat(
+        "field %R is aliased more than %zd times", name, p->max_aliases);
+    const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
+    if (text != NULL) g_error(p, text, "aliases", g_position(p));
+    Py_XDECREF(message);
+    return -1;
+}
+
 static PyObject *
 g_selection(GParser *p, Py_ssize_t depth)
 {
@@ -564,43 +632,25 @@ g_selection(GParser *p, Py_ssize_t depth)
     PyObject *arguments;
     PyObject *set = NULL;
     PyObject *node;
+    int aliased = 0;
     if (name == NULL) return NULL;
     key = Py_NewRef(name);
     if (g_maybe(p, ':')) {
         PyObject *field = g_name(p);
         if (field == NULL) { Py_DECREF(name); Py_DECREF(key); return NULL; }
         Py_SETREF(name, field);
+        aliased = 1;
     }
     p->complexity++;
-    PyObject *limit_obj = PyObject_GetAttrString(p->limits, "max_complexity");
-    Py_ssize_t limit = limit_obj == NULL ? -1 : PyLong_AsSsize_t(limit_obj);
-    Py_XDECREF(limit_obj);
-    if (limit < 0 && PyErr_Occurred()) { Py_DECREF(name); Py_DECREF(key); return NULL; }
-    if (p->complexity > limit) {
-        PyObject *message = PyUnicode_FromFormat("document selects more than %zd fields", limit);
+    if (p->complexity > p->max_complexity) {
+        PyObject *message = PyUnicode_FromFormat(
+            "document selects more than %zd fields", p->max_complexity);
         const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
         if (text != NULL) g_error(p, text, "complexity", g_position(p));
         Py_XDECREF(message); Py_DECREF(name); Py_DECREF(key); return NULL;
     }
-    if (PyObject_RichCompareBool(key, name, Py_NE) == 1) {
-        PyObject *old = PyDict_GetItemWithError(p->aliases, name);
-        long count = old == NULL ? 1 : PyLong_AsLong(old) + 1;
-        PyObject *count_obj = PyLong_FromLong(count);
-        PyObject *alias_limit_obj = PyObject_GetAttrString(p->limits, "max_aliases");
-        Py_ssize_t alias_limit = alias_limit_obj == NULL ? -1 : PyLong_AsSsize_t(alias_limit_obj);
-        Py_XDECREF(alias_limit_obj);
-        if (count_obj == NULL || (alias_limit < 0 && PyErr_Occurred()) ||
-            PyDict_SetItem(p->aliases, name, count_obj) < 0) {
-            Py_XDECREF(count_obj); Py_DECREF(name); Py_DECREF(key); return NULL;
-        }
-        Py_DECREF(count_obj);
-        if (count > alias_limit) {
-            PyObject *message = PyUnicode_FromFormat(
-                "field %R is aliased more than %zd times", name, alias_limit);
-            const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
-            if (text != NULL) g_error(p, text, "aliases", g_position(p));
-            Py_XDECREF(message); Py_DECREF(name); Py_DECREF(key); return NULL;
-        }
+    if (aliased && g_record_alias(p, name) < 0) {
+        Py_DECREF(name); Py_DECREF(key); return NULL;
     }
     arguments = g_arguments(p);
     if (arguments == NULL || g_directives(p) < 0) {
@@ -619,16 +669,12 @@ g_selection(GParser *p, Py_ssize_t depth)
 static PyObject *
 g_selection_set(GParser *p, Py_ssize_t depth)
 {
-    PyObject *limit_obj = PyObject_GetAttrString(p->limits, "max_depth");
-    Py_ssize_t limit = limit_obj == NULL ? -1 : PyLong_AsSsize_t(limit_obj);
     PyObject *items;
     PyObject *tuple;
     PyObject *result;
-    Py_XDECREF(limit_obj);
-    if (limit < 0 && PyErr_Occurred()) return NULL;
-    if (depth > limit) {
+    if (depth > p->max_depth) {
         PyObject *message = PyUnicode_FromFormat(
-            "selection nesting exceeds the maximum depth of %zd", limit);
+            "selection nesting exceeds the maximum depth of %zd", p->max_depth);
         const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
         if (text != NULL) g_error(p, text, "depth", g_position(p));
         Py_XDECREF(message); return NULL;
@@ -663,7 +709,7 @@ g_variables(GParser *p)
     PyObject *items = PyList_New(0);
     if (items == NULL) return NULL;
     while (!g_peek(p, ')')) {
-        PyObject *name, *type, *def = NULL, *node, *flags[3];
+        PyObject *name, *type, *def = NULL, *node;
         int is_list, inner_non_null, non_null, has_default = 0;
         if (g_end(p)) { Py_DECREF(items); return g_error(p, "unterminated variable definitions", "syntax", g_position(p)); }
         if (g_expect(p, '$') < 0) { Py_DECREF(items); return NULL; }
@@ -678,17 +724,15 @@ g_variables(GParser *p)
         non_null = g_maybe(p, '!') || (inner_non_null && !is_list);
         if (g_maybe(p, '=')) { def = g_value(p); has_default = 1; }
         else def = Py_NewRef(Py_None);
-        flags[0] = PyBool_FromLong(non_null); flags[1] = PyBool_FromLong(is_list);
-        flags[2] = PyBool_FromLong(has_default);
-        if (def == NULL || flags[0] == NULL || flags[1] == NULL || flags[2] == NULL) {
-            Py_DECREF(name); Py_DECREF(type); Py_XDECREF(def);
-            Py_XDECREF(flags[0]); Py_XDECREF(flags[1]); Py_XDECREF(flags[2]);
+        if (def == NULL) {
+            Py_DECREF(name); Py_DECREF(type);
             Py_DECREF(items); return NULL;
         }
         node = PyObject_CallFunctionObjArgs(GC(p, C_VARIABLE_DEF), name, type,
-            flags[0], flags[1], def, flags[2], NULL);
+            non_null ? Py_True : Py_False,
+            is_list ? Py_True : Py_False,
+            def, has_default ? Py_True : Py_False, NULL);
         Py_DECREF(name); Py_DECREF(type); Py_DECREF(def);
-        Py_DECREF(flags[0]); Py_DECREF(flags[1]); Py_DECREF(flags[2]);
         if (node == NULL || PyList_Append(items, node) < 0) {
             Py_XDECREF(node); Py_DECREF(items); return NULL;
         }
@@ -741,7 +785,7 @@ g_clear(GParser *p)
 static int
 g_collect_spreads(GParser *p, PyObject *selection_set, PyObject *found)
 {
-    PyObject *selections = PyObject_GetAttrString(selection_set, "selections");
+    PyObject *selections = g_getattr(selection_set, GP_ATTR_SELECTIONS);
     PyObject *fast;
     if (selections == NULL) return -1;
     fast = PySequence_Fast(selections, "selections must be a sequence");
@@ -752,14 +796,14 @@ g_collect_spreads(GParser *p, PyObject *selection_set, PyObject *found)
         int spread = PyObject_IsInstance(selection, GC(p, C_FRAGMENT_SPREAD));
         if (spread < 0) { Py_DECREF(fast); return -1; }
         if (spread) {
-            PyObject *name = PyObject_GetAttrString(selection, "name");
+            PyObject *name = g_getattr(selection, GP_ATTR_NAME);
             if (name == NULL || PyList_Append(found, name) < 0) {
                 Py_XDECREF(name); Py_DECREF(fast); return -1;
             }
             Py_DECREF(name);
             continue;
         }
-        PyObject *child = PyObject_GetAttrString(selection, "selection_set");
+        PyObject *child = g_getattr(selection, GP_ATTR_SELECTION_SET);
         if (child == NULL) { Py_DECREF(fast); return -1; }
         if (child != Py_None && g_collect_spreads(p, child, found) < 0) {
             Py_DECREF(child); Py_DECREF(fast); return -1;
@@ -809,23 +853,21 @@ g_visit_fragment(GParser *p, PyObject *fragments, PyObject *state,
         return -1;
     }
     PyObject *definition = PyDict_GetItemWithError(fragments, name);
-    PyObject *zero;
     PyObject *next_path;
     PyObject *found;
     PyObject *set;
     if (definition == NULL) return PyErr_Occurred() ? -1 : 0;
-    zero = PyLong_FromLong(0);
     next_path = PyList_GetSlice(path, 0, PyList_GET_SIZE(path));
     found = PyList_New(0);
-    set = PyObject_GetAttrString(definition, "selection_set");
-    if (zero == NULL || next_path == NULL || found == NULL || set == NULL ||
-        PyDict_SetItem(state, name, zero) < 0 ||
+    set = g_getattr(definition, GP_ATTR_SELECTION_SET);
+    if (next_path == NULL || found == NULL || set == NULL ||
+        PyDict_SetItem(state, name, Py_False) < 0 ||
         PyList_Append(next_path, name) < 0 ||
         g_collect_spreads(p, set, found) < 0) {
-        Py_XDECREF(zero); Py_XDECREF(next_path); Py_XDECREF(found); Py_XDECREF(set);
+        Py_XDECREF(next_path); Py_XDECREF(found); Py_XDECREF(set);
         return -1;
     }
-    Py_DECREF(zero); Py_DECREF(set);
+    Py_DECREF(set);
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(found); i++) {
         if (g_visit_fragment(p, fragments, state,
                              PyList_GET_ITEM(found, i), next_path) < 0) {
@@ -833,31 +875,83 @@ g_visit_fragment(GParser *p, PyObject *fragments, PyObject *state,
         }
     }
     Py_DECREF(next_path); Py_DECREF(found);
-    PyObject *one = PyLong_FromLong(1);
-    int failed;
-    if (one == NULL) return -1;
-    failed = PyDict_SetItem(state, name, one) < 0;
-    Py_DECREF(one);
-    return failed ? -1 : 0;
+    return PyDict_SetItem(state, name, Py_True);
 }
 
 static int
 g_reject_cycles(GParser *p, PyObject *fragments)
 {
     PyObject *state = PyDict_New();
-    PyObject *names = PyDict_Keys(fragments);
     PyObject *path = PyList_New(0);
-    if (state == NULL || names == NULL || path == NULL) {
-        Py_XDECREF(state); Py_XDECREF(names); Py_XDECREF(path); return -1;
+    if (state == NULL || path == NULL) {
+        Py_XDECREF(state); Py_XDECREF(path); return -1;
     }
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(names); i++) {
-        if (g_visit_fragment(p, fragments, state,
-                             PyList_GET_ITEM(names, i), path) < 0) {
-            Py_DECREF(state); Py_DECREF(names); Py_DECREF(path); return -1;
+    Py_ssize_t position = 0;
+    PyObject *name, *definition;
+    while (PyDict_Next(fragments, &position, &name, &definition)) {
+        (void)definition;
+        if (g_visit_fragment(p, fragments, state, name, path) < 0) {
+            Py_DECREF(state); Py_DECREF(path); return -1;
         }
     }
-    Py_DECREF(state); Py_DECREF(names); Py_DECREF(path);
+    Py_DECREF(state); Py_DECREF(path);
     return 0;
+}
+
+static int
+g_read_limit(PyObject *limits, GraphqlParserAttr attribute, Py_ssize_t *value)
+{
+    PyObject *object = g_getattr(limits, attribute);
+    if (object == NULL) return -1;
+    *value = PyLong_AsSsize_t(object);
+    Py_DECREF(object);
+    return *value == -1 && PyErr_Occurred() ? -1 : 0;
+}
+
+static int
+g_fragment_definition(GParser *p, PyObject *fragments)
+{
+    PyObject *name = g_name(p);
+    PyObject *on = g_name(p);
+    PyObject *condition = NULL;
+    PyObject *set = NULL;
+    PyObject *definition = NULL;
+    if (name == NULL || on == NULL) goto error;
+    if (PyUnicode_CompareWithASCIIString(on, "on") != 0) {
+        g_error(p, "a fragment needs an `on` type condition",
+                "syntax", g_position(p));
+        goto error;
+    }
+    condition = g_name(p);
+    if (condition == NULL || g_directives(p) < 0) goto error;
+    int contains = PyDict_Contains(fragments, name);
+    if (contains < 0) goto error;
+    if (contains) {
+        PyObject *message = PyUnicode_FromFormat(
+            "fragment %R is defined twice", name);
+        const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
+        if (text != NULL) g_error(p, text, "syntax", g_position(p));
+        Py_XDECREF(message);
+        goto error;
+    }
+    set = g_selection_set(p, 1);
+    if (set != NULL) definition = PyObject_CallFunctionObjArgs(
+        GC(p, C_FRAGMENT_DEF), name, condition, set, NULL);
+    if (definition == NULL ||
+        PyDict_SetItem(fragments, name, definition) < 0) goto error;
+    Py_DECREF(definition);
+    Py_DECREF(set);
+    Py_DECREF(condition);
+    Py_DECREF(on);
+    Py_DECREF(name);
+    return 0;
+error:
+    Py_XDECREF(definition);
+    Py_XDECREF(set);
+    Py_XDECREF(condition);
+    Py_XDECREF(on);
+    Py_XDECREF(name);
+    return -1;
 }
 
 PyObject *
@@ -874,10 +968,8 @@ wreath_graphql_parse(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     parser.config = config;
     parser.limits = limits;
-    PyObject *size_obj = PyObject_GetAttrString(limits, "max_document_bytes");
-    Py_ssize_t maximum = size_obj == NULL ? -1 : PyLong_AsSsize_t(size_obj);
-    Py_XDECREF(size_obj);
-    if (maximum < 0 && PyErr_Occurred()) return NULL;
+    Py_ssize_t maximum;
+    if (g_read_limit(limits, GP_ATTR_MAX_DOCUMENT_BYTES, &maximum) < 0) return NULL;
     if (PyUnicode_GET_LENGTH(source) > maximum) {
         PyObject *message = PyUnicode_FromFormat(
             "document is longer than %zd characters", maximum);
@@ -885,6 +977,10 @@ wreath_graphql_parse(PyObject *Py_UNUSED(self), PyObject *args)
         if (text != NULL) g_error(&parser, text, "document_size", 0);
         Py_XDECREF(message); return NULL;
     }
+    if (g_read_limit(limits, GP_ATTR_MAX_ALIASES, &parser.max_aliases) < 0 ||
+        g_read_limit(limits, GP_ATTR_MAX_COMPLEXITY, &parser.max_complexity) < 0 ||
+        g_read_limit(limits, GP_ATTR_MAX_DEPTH, &parser.max_depth) < 0 ||
+        g_read_limit(limits, GP_ATTR_MAX_STEPS, &parser.max_steps) < 0) return NULL;
     parser.aliases = PyDict_New();
     if (parser.aliases == NULL || g_tokenize(&parser, source) < 0) goto done;
     operations = PyList_New(0);
@@ -902,37 +998,8 @@ wreath_graphql_parse(PyObject *Py_UNUSED(self), PyObject *args)
         PyObject *word = g_name(&parser);
         if (word == NULL) goto done;
         if (PyUnicode_CompareWithASCIIString(word, "fragment") == 0) {
-            PyObject *name = g_name(&parser);
-            PyObject *on = g_name(&parser);
-            PyObject *condition = NULL;
-            PyObject *set = NULL;
-            PyObject *definition = NULL;
             Py_DECREF(word);
-            if (name == NULL || on == NULL) { Py_XDECREF(name); Py_XDECREF(on); goto done; }
-            if (PyUnicode_CompareWithASCIIString(on, "on") != 0) {
-                Py_DECREF(name); Py_DECREF(on);
-                g_error(&parser, "a fragment needs an `on` type condition",
-                        "syntax", g_position(&parser)); goto done;
-            }
-            Py_DECREF(on);
-            condition = g_name(&parser);
-            if (condition == NULL || g_directives(&parser) < 0) {
-                Py_DECREF(name); Py_XDECREF(condition); goto done;
-            }
-            if (PyDict_Contains(fragments, name) == 1) {
-                PyObject *message = PyUnicode_FromFormat("fragment %R is defined twice", name);
-                const char *text = message == NULL ? NULL : PyUnicode_AsUTF8(message);
-                if (text != NULL) g_error(&parser, text, "syntax", g_position(&parser));
-                Py_XDECREF(message); Py_DECREF(name); Py_DECREF(condition); goto done;
-            }
-            set = g_selection_set(&parser, 1);
-            if (set != NULL) definition = PyObject_CallFunctionObjArgs(
-                GC(&parser, C_FRAGMENT_DEF), name, condition, set, NULL);
-            if (definition == NULL || PyDict_SetItem(fragments, name, definition) < 0) {
-                Py_XDECREF(definition); Py_XDECREF(set);
-                Py_DECREF(name); Py_DECREF(condition); goto done;
-            }
-            Py_DECREF(definition); Py_DECREF(set); Py_DECREF(name); Py_DECREF(condition);
+            if (g_fragment_definition(&parser, fragments) < 0) goto done;
             continue;
         }
         Py_DECREF(word);

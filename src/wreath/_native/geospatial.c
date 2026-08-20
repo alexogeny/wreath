@@ -565,9 +565,7 @@ wreath_geo_trajectory_grid_summary(PyObject *Py_UNUSED(self), PyObject *args)
             }
         }
     }
-    PyObject *result = PyTuple_Pack(2, cells, speed);
-    Py_DECREF(cells);
-    Py_DECREF(speed);
+    PyObject *result = wreath_tuple2_from_owned(cells, speed);
     PyMem_Free(occupied);
     return result;
 

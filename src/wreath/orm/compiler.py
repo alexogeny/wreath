@@ -44,30 +44,59 @@ from .schema import ColumnSpec, ModelSpec, RelationshipSpec
 
 # Only these operator tokens can reach SQL text. Anything else is a bug in a
 # node constructor rather than user input, and must not be rendered.
-_BINARY_OPERATORS = frozenset({
-    "=", "<>", "<", "<=", ">", ">=", "LIKE", "ILIKE",
-    # jsonb / array operators; "= ANY"/"= ALL" render specially (see below).
-    "@>", "<@", "?", "?|", "?&", "#>>", "#>", "&&", "= ANY", "= ALL",
-    # pgvector distances. These yield a number rather than a boolean, so they
-    # reach SQL as an ORDER BY key or as the left side of a comparison; `where()`
-    # refuses one on its own. The last two are the `bit` distances, which differ
-    # only in the column type they are declared over.
-    "<->", "<=>", "<#>", "<+>", "<~>", "<%>",
-    # Full-text search. Each token names its tsquery parser as well as its
-    # operation, so the allowlist still decides every byte reaching SQL.
-    "@@ websearch_to_tsquery", "@@ to_tsquery",
-    "ts_rank websearch_to_tsquery", "ts_rank to_tsquery",
-    # Geospatial. `point` and `box` are two-argument function calls that build
-    # the right operand of a `<@`; `geo_distance` yields metres, so like the
-    # pgvector distances it reaches SQL as an ORDER BY key or the left side of a
-    # comparison and never as a predicate on its own.
-    "point", "box", "geo_distance",
-    # PostGIS. `geo_knn` is the same two characters pgvector's `<->` renders and
-    # a different token on purpose -- see `expressions.GEO_KNN`. The other two
-    # are function calls that yield a boolean, so they are predicates and only
-    # predicates.
-    "geo_knn", "geo_dwithin", "geo_covers",
-})
+_BINARY_OPERATORS = frozenset(
+    {
+        "=",
+        "<>",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "LIKE",
+        "ILIKE",
+        # jsonb / array operators; "= ANY"/"= ALL" render specially (see below).
+        "@>",
+        "<@",
+        "?",
+        "?|",
+        "?&",
+        "#>>",
+        "#>",
+        "&&",
+        "= ANY",
+        "= ALL",
+        # pgvector distances. These yield a number rather than a boolean, so they
+        # reach SQL as an ORDER BY key or as the left side of a comparison; `where()`
+        # refuses one on its own. The last two are the `bit` distances, which differ
+        # only in the column type they are declared over.
+        "<->",
+        "<=>",
+        "<#>",
+        "<+>",
+        "<~>",
+        "<%>",
+        # Full-text search. Each token names its tsquery parser as well as its
+        # operation, so the allowlist still decides every byte reaching SQL.
+        "@@ websearch_to_tsquery",
+        "@@ to_tsquery",
+        "ts_rank websearch_to_tsquery",
+        "ts_rank to_tsquery",
+        # Geospatial. `point` and `box` are two-argument function calls that build
+        # the right operand of a `<@`; `geo_distance` yields metres, so like the
+        # pgvector distances it reaches SQL as an ORDER BY key or the left side of a
+        # comparison and never as a predicate on its own.
+        "point",
+        "box",
+        "geo_distance",
+        # PostGIS. `geo_knn` is the same two characters pgvector's `<->` renders and
+        # a different token on purpose -- see `expressions.GEO_KNN`. The other two
+        # are function calls that yield a boolean, so they are predicates and only
+        # predicates.
+        "geo_knn",
+        "geo_dwithin",
+        "geo_covers",
+    }
+)
 #: Two-argument SQL function calls rendered from both operands, in the shape
 #: `name(left, right)`. `ts_rank` predates this table and keeps its own path
 #: because it also has to build a tsquery from its right operand.
@@ -233,14 +262,16 @@ def _write_shape_key(registry: Any, spec: ModelSpec, op: bytes, mask: int) -> by
     models (or two registries) from colliding.
     """
     width = (mask.bit_length() + 7) // 8
-    return b"".join((
-        registry.fingerprint,
-        b"w",
-        op,
-        _model_shape(spec.model_type),
-        b"|",
-        mask.to_bytes(width, "big"),
-    ))
+    return b"".join(
+        (
+            registry.fingerprint,
+            b"w",
+            op,
+            _model_shape(spec.model_type),
+            b"|",
+            mask.to_bytes(width, "big"),
+        )
+    )
 
 
 def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
@@ -258,9 +289,7 @@ def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
 
     if _write_sql_builds is not None:
         _write_sql_builds[0] += 1
-    columns = tuple(
-        item for position, item in enumerate(spec.columns) if mask & (1 << position)
-    )
+    columns = tuple(item for position, item in enumerate(spec.columns) if mask & (1 << position))
     returning = tuple(
         item for position, item in enumerate(spec.columns) if not mask & (1 << position)
     )
@@ -269,12 +298,8 @@ def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
     sql = f"INSERT INTO {qualified(spec)}"
     sql += f" ({names}) VALUES ({placeholders})" if columns else " DEFAULT VALUES"
     if returning:
-        sql += " RETURNING " + ", ".join(
-            quote(item.database_name) for item in returning
-        )
-    return registry.store_plan(
-        key, WritePlan(sql=sql, columns=columns, returning=returning)
-    )
+        sql += " RETURNING " + ", ".join(quote(item.database_name) for item in returning)
+    return registry.store_plan(key, WritePlan(sql=sql, columns=columns, returning=returning))
 
 
 def compile_update(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
@@ -285,12 +310,9 @@ def compile_update(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
 
     if _write_sql_builds is not None:
         _write_sql_builds[0] += 1
-    columns = tuple(
-        item for position, item in enumerate(spec.columns) if mask & (1 << position)
-    )
+    columns = tuple(item for position, item in enumerate(spec.columns) if mask & (1 << position))
     assignments = ", ".join(
-        f"{quote(item.database_name)} = ${index}"
-        for index, item in enumerate(columns, start=1)
+        f"{quote(item.database_name)} = ${index}" for index, item in enumerate(columns, start=1)
     )
     predicate = _key_predicate_sql(spec, len(columns) + 1)
     sql = f"UPDATE {qualified(spec)} SET {assignments} WHERE {predicate}"
@@ -469,26 +491,20 @@ def compile_declared_values(
         types.append(pg_type)
         if kind == "parameter":
             if not isinstance(value, str) or not value.isidentifier():
-                raise ValueError(
-                    f"refusing to generate a binder for parameter {value!r}"
-                )
+                raise ValueError(f"refusing to generate a binder for parameter {value!r}")
             lines.extend(
                 (
                     "    try:",
                     f"        value_{index} = _types[{type_index}].coerce(values[{value!r}])",
                     "    except (TypeError, ValueError, OverflowError) as error:",
-                    f"        raise type(error)(\"parameter {value!r}: \" + str(error)) from error",
+                    f'        raise type(error)("parameter {value!r}: " + str(error)) from error',
                 )
             )
-            expressions.append(
-                f"_types[{type_index}].to_wire(value_{index})"
-            )
+            expressions.append(f"_types[{type_index}].to_wire(value_{index})")
         else:
             literal_index = len(literals)
             literals.append(value)
-            expressions.append(
-                f"_types[{type_index}].to_wire(_literals[{literal_index}])"
-            )
+            expressions.append(f"_types[{type_index}].to_wire(_literals[{literal_index}])")
     if select.limit_ is not None:
         expressions.append(repr(select.limit_))
     if select.offset_ is not None:
@@ -502,7 +518,6 @@ def compile_declared_values(
         "\n".join(lines), namespace
     )
     return cast(Callable[[dict[str, Any]], tuple[Any, ...]], namespace["extract"])
-
 
 
 def _generated_names(body: str) -> list[str]:
@@ -533,9 +548,7 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
         # After the predicates and before the limit, matching the order the
         # renderer emits placeholders in.
         for index, item in enumerate(select.orderings):
-            _append_bind_paths(
-                item.expression, ("orderings", index, "expression"), paths
-            )
+            _append_bind_paths(item.expression, ("orderings", index, "expression"), paths)
 
     expressions: list[str] = []
     for path in paths:
@@ -683,8 +696,7 @@ def compile_rebind(
     if isinstance(node, InSubqueryExpr):
         left = compile_rebind(node.left, placeholder, found)
         inner = tuple(
-            compile_rebind(predicate, placeholder, found)
-            for predicate in node.select.predicates
+            compile_rebind(predicate, placeholder, found) for predicate in node.select.predicates
         )
         if left is None and not any(inner):
             return None
@@ -704,9 +716,7 @@ def compile_rebind(
 
         return rebind_in_subquery
     if isinstance(node, BooleanExpr):
-        programs = tuple(
-            compile_rebind(operand, placeholder, found) for operand in node.operands
-        )
+        programs = tuple(compile_rebind(operand, placeholder, found) for operand in node.operands)
         if not any(programs):
             return None
         operator, originals = node.operator, node.operands
@@ -816,9 +826,7 @@ def compile_update_where(
         raise ORMError("update_where() needs at least one column value")
     unknown = values.keys() - spec.by_name.keys()
     if unknown:
-        raise ORMError(
-            f"{spec.model_type.__name__} has no column(s) {', '.join(sorted(unknown))}"
-        )
+        raise ORMError(f"{spec.model_type.__name__} has no column(s) {', '.join(sorted(unknown))}")
     columns = tuple(item for item in spec.columns if item.python_name in values)
     for column in columns:
         if column.primary_key:
@@ -848,9 +856,7 @@ def compile_update_where(
         assignments.append(f"{quote(column.database_name)} = {placeholder}")
     builder.text(", ".join(assignments))
     builder.text(" WHERE ")
-    render_predicate(
-        conjoin(select.predicates), builder, "t0", joins, registry=registry
-    )
+    render_predicate(conjoin(select.predicates), builder, "t0", joins, registry=registry)
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
@@ -869,9 +875,7 @@ def compile_delete_where(
         )
     builder = SqlBuilder()
     builder.text(f"DELETE FROM {qualified(spec)} AS {quote('t0')} WHERE ")
-    render_predicate(
-        conjoin(select.predicates), builder, "t0", joins, registry=registry
-    )
+    render_predicate(conjoin(select.predicates), builder, "t0", joins, registry=registry)
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
@@ -976,16 +980,12 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
         bind_program=_compile_bind_program(select),
         result_model=spec,
         selected_columns=tuple(selected),
-        load_plan=LoadPlan(
-            columns=tuple(columns), joined=joined_steps, selectin=tuple(selectin)
-        ),
+        load_plan=LoadPlan(columns=tuple(columns), joined=joined_steps, selectin=tuple(selectin)),
         projected_columns=tuple(projected),
     )
 
 
-def _filter_paths(
-    node: Expression, out: list[tuple[Any, ...]], seen: set[tuple[Any, ...]]
-) -> None:
+def _filter_paths(node: Expression, out: list[tuple[Any, ...]], seen: set[tuple[Any, ...]]) -> None:
     """Collect each distinct relationship path a predicate reaches through.
 
     `seen` deduplicates in O(1); a plain `not in out` list scan would be
@@ -1079,9 +1079,7 @@ def plan_filter_joins(
             condition = " AND ".join(
                 f"{quote(alias)}.{quote(remote.database_name)} = "
                 f"{quote(parent_alias)}.{quote(local.database_name)}"
-                for local, remote in zip(
-                    related.local_columns, related.remote_columns, strict=True
-                )
+                for local, remote in zip(related.local_columns, related.remote_columns, strict=True)
             )
             clauses.append(
                 f" INNER JOIN {qualified(related.target)} AS {quote(alias)} ON {condition}"
@@ -1165,9 +1163,7 @@ def _projection(spec: ModelSpec, select: Select) -> tuple[ColumnSpec, ...]:
     return tuple(seen.values())
 
 
-def _with_primary_key(
-    spec: ModelSpec, columns: tuple[ColumnSpec, ...]
-) -> tuple[ColumnSpec, ...]:
+def _with_primary_key(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[ColumnSpec, ...]:
     """Add any missing primary-key columns; identity cannot be built without them."""
     present = {item.python_name for item in columns}
     missing = [item for item in spec.primary_key if item.python_name not in present]
@@ -1206,7 +1202,8 @@ def _resolve_loads(
     selectin: list[SelectinStep] = []
     for name, option in chosen.items():
         relationship = spec.relationship(name)
-        assert relationship is not None
+        if relationship is None:
+            raise ORMError(f"{spec.model_type.__name__} has no relationship named {name!r}")
         strategy = option.strategy
         if relationship.cardinality == "many":
             if strategy == "joined":
@@ -1343,9 +1340,7 @@ def render_predicate(
     raise ORMError(f"cannot render {type(node).__name__} as a predicate")
 
 
-def _render_subquery(
-    select: Any, builder: SqlBuilder, outer_alias: str, registry: Any
-) -> None:
+def _render_subquery(select: Any, builder: SqlBuilder, outer_alias: str, registry: Any) -> None:
     """Render a validated one-column subquery inside an enclosing statement.
 
     The alias is derived from the enclosing one (`t0` -> `t0s`) rather than
@@ -1515,9 +1510,7 @@ def _render_geo_dwithin(
     coarse filter, and two spellings of one rule is how they drift apart.
     """
     if not isinstance(node.left, ColumnExpr) or not isinstance(node.right, BinaryExpr):
-        raise ORMError(
-            "a geography proximity test needs a Geography column, a centre and a radius"
-        )
+        raise ORMError("a geography proximity test needs a Geography column, a centre and a radius")
     builder.text("ST_DWithin(")
     _render_operand(node.left, builder, alias, joins)
     builder.text(", ")
@@ -1717,9 +1710,7 @@ def _shape_expression(node: Expression, out: list[bytes]) -> None:
         return
     if isinstance(node, InExpr):
         # The operand count changes the SQL text, so it belongs in the key.
-        out.append(
-            b"i" + node.operator.encode("ascii") + str(len(node.values)).encode("ascii")
-        )
+        out.append(b"i" + node.operator.encode("ascii") + str(len(node.values)).encode("ascii"))
         _shape_expression(node.left, out)
         for item in node.values:
             _shape_expression(item, out)
@@ -1731,9 +1722,7 @@ def _shape_expression(node: Expression, out: list[bytes]) -> None:
         # filtering the same columns share a plan; two over different tables
         # must not, and this is the only place that distinguishes them.
         out.append(
-            b"q"
-            + node.operator.encode("ascii")
-            + str(len(node.select.predicates)).encode("ascii")
+            b"q" + node.operator.encode("ascii") + str(len(node.select.predicates)).encode("ascii")
         )
         _shape_expression(node.left, out)
         out.append(_model_shape(node.select.model))
@@ -1742,9 +1731,7 @@ def _shape_expression(node: Expression, out: list[bytes]) -> None:
             _shape_expression(predicate, out)
         return
     if isinstance(node, BooleanExpr):
-        out.append(
-            b"l" + node.operator.encode("ascii") + str(len(node.operands)).encode("ascii")
-        )
+        out.append(b"l" + node.operator.encode("ascii") + str(len(node.operands)).encode("ascii"))
         for operand in node.operands:
             _shape_expression(operand, out)
         return
@@ -1789,9 +1776,7 @@ def _shape_of_walk(registry: Any, select: Select) -> bytes:
         if isinstance(expression, ColumnExpr):
             # One element, byte-for-byte what `orm_shape.c` emits for the same
             # ordering. The parity test pins it.
-            out.append(
-                b"o" + expression.column.shape_ref + item.direction.encode("ascii")
-            )
+            out.append(b"o" + expression.column.shape_ref + item.direction.encode("ascii"))
             continue
         # A distance ordering keys through the whole expression: the operator
         # and the bound type both change the SQL text, and two searches over one

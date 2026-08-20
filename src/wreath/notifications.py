@@ -52,7 +52,6 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from ._userkit import MailClass, Message, SuppressedError, Unsubscribe
 from ._webpush import (
     MAX_PAYLOAD_BYTES,
     PushError,
@@ -63,6 +62,7 @@ from ._webpush import (
     encrypt,
     vapid_headers,
 )
+from .email import MailClass, Message, SuppressedError, Unsubscribe
 from .temporal import Duration
 
 __all__ = [

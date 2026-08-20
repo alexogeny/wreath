@@ -424,7 +424,16 @@ wreath_headers_materialize(PyObject *headers)
                 ? Py_NewRef(self->values[i])
                 : PyBytes_FromStringAndSize(raw + span->value_offset, span->value_size);
         }
-        PyObject *pair = value != NULL ? PyTuple_Pack(2, name, value) : NULL;
+        PyObject *pair = NULL;
+        if (name != NULL && value != NULL) {
+            pair = PyTuple_New(2);
+            if (pair != NULL) {
+                PyTuple_SET_ITEM(pair, 0, name);
+                PyTuple_SET_ITEM(pair, 1, value);
+                name = NULL;
+                value = NULL;
+            }
+        }
         Py_XDECREF(name);
         Py_XDECREF(value);
         if (pair == NULL) {

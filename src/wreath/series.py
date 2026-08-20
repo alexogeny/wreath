@@ -1730,7 +1730,8 @@ class Series(_Builder):
         copies of "what is sealed here" is how the watermark starts meaning two
         things.
         """
-        assert self._seal is not None
+        if self._seal is None:
+            raise SeriesError("sealed span evaluation requires seal()")
         edge = watermark(
             instant,
             bucket=self._bucket,
@@ -1806,7 +1807,8 @@ class Series(_Builder):
         `SeriesResult.segments`, is which grain answered where: that is
         reporting, not something they have to handle.
         """
-        assert self._tiers is not None
+        if self._tiers is None:
+            raise SeriesError("tiered reads require retain()")
         instant = _instant(now) if now is not None else _now()
         start, end = _instant(range.start), _instant(range.end)
         stored_zone = _zone_name(self._stored_in) if self._stored_in is not None else zone_name
@@ -1926,7 +1928,8 @@ class Series(_Builder):
             raise SeriesError(
                 "rollup() needs retain(): with no ladder there is no coarser grain to materialise"
             )
-        assert self._seal is not None  # retain() refuses coarser tiers without it
+        if self._seal is None:  # retain() refuses coarser tiers without it
+            raise SeriesError("rollup() requires seal() before coarser retention tiers")
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         instant = _instant(now) if now is not None else _now()
         await self.reconcile(session, range=range, zone=zone, now=now, **values)
@@ -1936,7 +1939,8 @@ class Series(_Builder):
         written: dict[str, tuple[Any, ...]] = {}
         for tier in self._tiers.materialised:
             grain = tier.grain
-            assert grain is not None
+            if grain is None:
+                raise SeriesError("a materialised retention tier requires a grain")
             edge = watermark(instant, bucket=grain, zone_name=zone_name, after=self._seal.after)
             end = min(_instant(range.end), edge)
             if end <= start:
@@ -2122,7 +2126,8 @@ class Series(_Builder):
     async def _markers(self, session: Any, range: Range, zone_name: str) -> tuple[SeriesEvent, ...]:
         """The annotation layer, over the same range and in the same zone."""
         declared = self._events
-        assert declared is not None
+        if declared is None:
+            raise SeriesError("marker reads require events()")
         sql, args, _oids = compile_events(
             session.registry,
             declared.model,
@@ -2363,7 +2368,8 @@ def _refuse_unreopenable(seal: Seal | None, ladder: Ladder | None, bucket: Bucke
     if ladder is None or not ladder.raw_bounded:
         return
     keep = ladder.raw.keep
-    assert keep is not None  # raw_bounded
+    if keep is None:  # pragma: no cover - raw_bounded means a finite value
+        raise SeriesError("bounded raw retention requires a finite keep duration")
     needed = seal.after + _grain_width(bucket)
     if keep >= needed:
         return

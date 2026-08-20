@@ -41,6 +41,29 @@ wreath_read_ssize_attr(PyObject *config, const char *name, Py_ssize_t *out)
     return 0;
 }
 
+/* Build a two-cell tuple from new references without the INCREF/DECREF round
+ * trip imposed by PyTuple_Pack. Output adapters repeatedly materialize pairs
+ * immediately after allocating both cells; stealing them is the exact ownership
+ * transfer those callers need. */
+static inline PyObject *
+wreath_tuple2_from_owned(PyObject *first, PyObject *second)
+{
+    if (first == NULL || second == NULL) {
+        Py_XDECREF(first);
+        Py_XDECREF(second);
+        return NULL;
+    }
+    PyObject *tuple = PyTuple_New(2);
+    if (tuple == NULL) {
+        Py_DECREF(first);
+        Py_DECREF(second);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(tuple, 0, first);
+    PyTuple_SET_ITEM(tuple, 1, second);
+    return tuple;
+}
+
 /* Parse an HTTP qvalue into thousandths. Both the public web-policy selector
  * and the server policy executor consume this grammar. */
 static inline int
@@ -122,6 +145,27 @@ PyObject *wreath_sigv4_canonical(PyObject *self, PyObject *args);
 PyObject *wreath_zip_entry_count(PyObject *self, PyObject *args);
 PyObject *wreath_http_exchange_encode(PyObject *self, PyObject *args);
 PyObject *wreath_http_exchange_decode(PyObject *self, PyObject *args);
+int wreath_http_replay_ready(void);
+
+/* gzip_codec.c: independent RFC 1951/1952 encode/decode kernels. */
+PyObject *wreath_gzip_encoder_new(PyObject *self, PyObject *ignored);
+PyObject *wreath_gzip_compress(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *wreath_gzip_compress_with(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *wreath_gzip_compress_workspace(PyObject *workspace, PyObject *data,
+                                         int level, PyObject *format);
+PyObject *wreath_gzip_fragment_compress_with(PyObject *self, PyObject *const *args,
+                                             Py_ssize_t nargs);
+PyObject *wreath_gzip_fragment_compress_workspace(
+    PyObject *workspace, PyObject *data, int level, PyObject *format,
+    PyObject *fragments);
+int wreath_gzip_format_object(PyObject *value, int *format);
+PyObject *wreath_gzip_decoder_new(PyObject *self, PyObject *ignored);
+PyObject *wreath_gzip_decompress(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *wreath_gzip_decompress_with(PyObject *self, PyObject *const *args,
+                                      Py_ssize_t nargs);
+PyObject *wreath_gzip_decompress_workspace(PyObject *workspace, PyObject *data,
+                                           Py_ssize_t maximum, PyObject *format);
+PyObject *wreath_gzip_codec_info(PyObject *self, PyObject *ignored);
 
 /* data_kernels.c */
 PyObject *wreath_first_duplicate(PyObject *self, PyObject *arg);
@@ -182,6 +226,7 @@ int wreath_jose_ready(void);
 int wreath_register_grpc(PyObject *module);
 
 /* graphql.c: bulk row projection and relationship layout. */
+int wreath_graphql_ready(void);
 PyObject *wreath_graphql_new_results(PyObject *self, PyObject *instances);
 PyObject *wreath_graphql_finish_results(PyObject *self, PyObject *builder);
 PyObject *wreath_graphql_project_plain(PyObject *self, PyObject *args);
@@ -196,6 +241,7 @@ PyObject *wreath_graphql_flatten_relationship(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_restore_layout(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_restore_values(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_parse(PyObject *self, PyObject *args);
+int wreath_graphql_parser_ready(void);
 PyObject *wreath_graphql_policy_schema(PyObject *self, PyObject *args);
 PyObject *wreath_graphql_policy_state(PyObject *self, PyObject *schema);
 PyObject *wreath_graphql_policy_prepare(PyObject *self, PyObject *args);
@@ -233,6 +279,7 @@ PyObject *wreath_curve_p256_verify(PyObject *self, PyObject *args);
 PyObject *wreath_curve_p256_sign(PyObject *self, PyObject *args);
 
 /* observability.c */
+int wreath_observability_ready(void);
 PyObject *wreath_request_id_valid(PyObject *self, PyObject *args);
 PyObject *wreath_format_server_timing(PyObject *self, PyObject *args);
 PyObject *wreath_prometheus_route_blocks(PyObject *self, PyObject *args);
@@ -266,6 +313,7 @@ PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_data(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart_text(PyObject *self, PyObject *args);
+int wreath_series_ready(void);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
 int wreath_register_proxy(PyObject *module);
@@ -322,6 +370,7 @@ PyObject *wreath_dkim_canonicalize_body(PyObject *self, PyObject *body);
 PyObject *wreath_recording_event_cells(PyObject *self, PyObject *args);
 
 /* scim.c */
+int wreath_scim_ready(void);
 PyObject *wreath_scim_parse(PyObject *self, PyObject *args);
 PyObject *wreath_scim_values_at(PyObject *self, PyObject *args);
 PyObject *wreath_scim_matches(PyObject *self, PyObject *args);
@@ -365,6 +414,14 @@ typedef struct {
     int (*user_agent_blocked)(PyObject *database, PyObject *value,
                               PyObject *table, int *blocked);
     int (*user_agent_database_check)(PyObject *database);
+    /* Reuse application-owned encoder workspace without crossing through a
+     * Python callable from the sibling server extensions. */
+    PyObject *(*gzip_compress)(PyObject *workspace, PyObject *data,
+                               int level, PyObject *format);
+    PyObject *(*gzip_fragment_compress)(PyObject *workspace, PyObject *data,
+                                        int level, PyObject *format,
+                                        PyObject *fragments);
+    int (*gzip_format)(PyObject *value, int *format);
 } WreathCoreCAPI;
 
 #define WREATH_CORE_CAPI_NAME "wreath._native._core._C_API"
@@ -405,6 +462,7 @@ PyObject *wreath_geo_trajectory_info(PyObject *self, PyObject *capsule);
 PyObject *wreath_geo_trajectory_between(PyObject *self, PyObject *args);
 
 /* protobuf.c */
+int wreath_protobuf_ready(void);
 PyObject *wreath_protobuf_compile(PyObject *self, PyObject *args);
 PyObject *wreath_protobuf_encode(PyObject *self, PyObject *args);
 PyObject *wreath_protobuf_decode(PyObject *self, PyObject *args);

@@ -296,8 +296,7 @@ class Log:
         parts = [
             f"CREATE TABLE IF NOT EXISTS {table} (\n{body}\n)",
             # The global feed: every reader that follows the whole log.
-            f"CREATE INDEX IF NOT EXISTS {self.table}_cursor_idx\n"
-            f"    ON {table} (xid, seq)",
+            f"CREATE INDEX IF NOT EXISTS {self.table}_cursor_idx\n    ON {table} (xid, seq)",
             # One partition's feed. Leading with the stream is what turns
             # "everything after C for stream K" into a range scan rather than a
             # filter over the whole log.
@@ -312,9 +311,7 @@ class Log:
         if self.retain is not None:
             # Retention deletes by age, so the age column needs its own index or
             # every purge is a sequential scan of a table that only ever grows.
-            parts.append(
-                f"CREATE INDEX IF NOT EXISTS {self.table}_at_idx\n    ON {table} (at)"
-            )
+            parts.append(f"CREATE INDEX IF NOT EXISTS {self.table}_at_idx\n    ON {table} (at)")
         return tuple(parts)
 
     def schema_claim(self, name: str) -> Any:
@@ -416,9 +413,7 @@ class PostgresLog(_Statements):
 
     _statement_owner = "log"
 
-    def __init__(
-        self, database: Any, declaration: Log, *, read_workload: str = "write"
-    ) -> None:
+    def __init__(self, database: Any, declaration: Log, *, read_workload: str = "write") -> None:
         self._database = database
         self._declaration = declaration
         self._init_statements()
@@ -462,8 +457,11 @@ class PostgresLog(_Statements):
             "LIMIT $3",
             workload=read_workload,
         )
-        self.define("horizon", "SELECT pg_snapshot_xmin(pg_current_snapshot())::text",
-                    workload=read_workload)
+        self.define(
+            "horizon",
+            "SELECT pg_snapshot_xmin(pg_current_snapshot())::text",
+            workload=read_workload,
+        )
         self.define(
             "latest",
             f"SELECT coalesce(max(xid)::text, '0') FROM {table} AS {ALIAS}",
@@ -538,9 +536,7 @@ class PostgresLog(_Statements):
 
     # -- appending -----------------------------------------------------------
 
-    async def append(
-        self, stream: str, /, *, connection: Any = None, **values: Any
-    ) -> Cursor:
+    async def append(self, stream: str, /, *, connection: Any = None, **values: Any) -> Cursor:
         """Append one row to `stream`, returning where it landed.
 
         The returned cursor is *this row's* position, not a resume point: a
@@ -586,9 +582,7 @@ class PostgresLog(_Statements):
                 f"{self.table} was declared without dedup=True, so there is no "
                 "unique index to conflict on; append_once cannot be honoured"
             )
-        row = await self.statement("append_once").fetchrow(
-            *self._bind(stream, values), dedup
-        )
+        row = await self.statement("append_once").fetchrow(*self._bind(stream, values), dedup)
         return None if row is None else Cursor(int(row[0]), int(row[1]))
 
     def _batch_sql(self, rows: int) -> str:
@@ -606,10 +600,7 @@ class PostgresLog(_Statements):
             "(" + ", ".join(f"${row * width + index + 1}" for index in range(width)) + ")"
             for row in range(rows)
         )
-        return (
-            f"INSERT INTO {self.table} ({', '.join(self._batch_columns)})\n"
-            f"VALUES {groups}"
-        )
+        return f"INSERT INTO {self.table} ({', '.join(self._batch_columns)})\nVALUES {groups}"
 
     def _rung_for(self, remaining: int) -> int:
         """The largest batch statement that fits in `remaining` rows.
@@ -729,9 +720,7 @@ class PostgresLog(_Statements):
         if stream is None:
             rows = await self.statement("read_all").fetch(str(after.xid), after.seq, limit)
         else:
-            rows = await self.statement("read").fetch(
-                stream, str(after.xid), after.seq, limit
-            )
+            rows = await self.statement("read").fetch(stream, str(after.xid), after.seq, limit)
         return self._batch(rows, after)
 
     def _batch(self, rows: Sequence[Any], after: Cursor) -> Batch:
@@ -913,10 +902,8 @@ class _Buffer:
         if not batch:
             return 0
         try:
-            return await self._log.append_many(
-                [(self._stream, values) for values in batch]
-            )
-        except (PostgresError, OSError, RuntimeError, ValueError):
+            return await self._log.append_many([(self._stream, values) for values in batch])
+        except PostgresError, OSError, RuntimeError, ValueError:
             # Narrow on purpose, counted, and re-raised. The count is what makes
             # a log that is losing rows a number rather than a mystery; the
             # re-raise is what stops this deciding on the caller's behalf whether
@@ -1046,9 +1033,7 @@ def _rows_in(tag: Any) -> int:
     assumption this module made about its own SQL.
     """
     if not isinstance(tag, str):
-        raise RuntimeError(
-            f"expected a PostgreSQL command tag from a batched append, got {tag!r}"
-        )
+        raise RuntimeError(f"expected a PostgreSQL command tag from a batched append, got {tag!r}")
     # Parsed by `wreath.store.rows_affected` and *raised on* here rather than
     # defaulted: everywhere else an unreadable tag means "this backend does not
     # say", which is survivable. On this path it would mean reporting a batch
@@ -1068,9 +1053,7 @@ def _weigh(values: Mapping[str, Any]) -> int:
     """
     total = 0
     for value in values.values():
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            total += len(value)
-        elif isinstance(value, str):
+        if isinstance(value, (str, bytes, bytearray, memoryview)):
             total += len(value)
         else:
             total += 16

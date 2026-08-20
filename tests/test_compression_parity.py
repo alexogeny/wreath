@@ -4,6 +4,7 @@ import subprocess
 import sys
 import zlib
 from compression import zstd
+from random import Random
 
 import pytest
 
@@ -13,10 +14,20 @@ from wreath._compression import (
     ZSTD_MIN_LEVEL,
     GzipCompressor,
     ZstdCompressor,
+    _dcz_compress,
+    _dcz_decompress,
+    _gzip_compress_with,
+    _gzip_decoder_new,
+    _gzip_decompress_with,
+    _gzip_encoder_new,
+    _gzip_fragment_compress_with,
+    _prepare_dcz_dictionary,
     gzip_compress,
     gzip_decompress,
     zstd_compress,
 )
+from wreath._native import _core
+from wreath.policy import CompressionPolicy
 
 
 def test_wreath_imports_without_the_optional_cpython_zstd_module() -> None:
@@ -57,6 +68,142 @@ else:
 def test_pure_gzip_levels(level: int) -> None:
     payload = (b"abcdef" * 1000) + bytes(range(256))
     assert zlib.decompress(gzip_compress(payload, level), wbits=31) == payload
+
+
+def test_native_gzip_rejects_levels_before_narrowing_them_to_c_int() -> None:
+    workspace = _gzip_encoder_new()
+    for level in (-1, 1 << 40):
+        with pytest.raises(ValueError, match="between 0 and 9"):
+            _core.gzip_compress(b"payload", level, "unknown")
+        with pytest.raises(ValueError, match="between 0 and 9"):
+            _core.gzip_compress_with(workspace, b"payload", level, "unknown")
+
+
+@pytest.mark.parametrize(
+    "format",
+    ["unknown", "json", "chaotic-json", "html", "graphql", "log", "plaintext"],
+)
+def test_native_gzip_formats_remain_standard_members(format: str) -> None:
+    payload = (format.encode() + b':{"message":"wreath"}\n') * 1000
+    encoded = gzip_compress(payload, format=format)
+    assert zlib.decompress(encoded, wbits=31) == payload
+    assert gzip_decompress(encoded, max_output_bytes=len(payload), format=format) == payload
+
+
+def test_native_decoder_reads_a_zlib_member() -> None:
+    payload = b"independent decode" * 1000
+    encoded = zlib.compress(payload, level=6, wbits=31)
+    assert gzip_decompress(encoded, max_output_bytes=len(payload)) == payload
+
+
+def test_content_type_is_a_format_hint_not_a_wire_format() -> None:
+    payload = b'[{"id":1,"name":"one"},{"id":2,"name":"two"}]' * 1000
+    encoded = gzip_compress(payload, format=b"application/problem+json; charset=utf-8")
+    assert zlib.decompress(encoded, wbits=31) == payload
+
+
+def test_application_owned_encoder_workspace_is_reusable_across_formats() -> None:
+    workspace = _gzip_encoder_new()
+    cases = (
+        (b'{"message":"one"}\n' * 1000, b"application/json"),
+        (b"<p>two</p>\n" * 1000, b"text/html; charset=utf-8"),
+        (b"three words\n" * 1000, b"text/plain"),
+    )
+    for payload, content_type in cases * 3:
+        encoded = _gzip_compress_with(workspace, payload, 6, content_type)
+        assert zlib.decompress(encoded, wbits=31) == payload
+
+
+def test_prepared_gzip_fragment_is_standard_and_falls_back_on_mismatch() -> None:
+    stable = b"<main>" + (b"stable dashboard content\n" * 1_000) + b"</main>"
+    prepared_document = b"item=41\n" + stable
+    current_document = b"item=42\n" + stable
+    policy = CompressionPolicy(gzip_level=5)
+    policy._configure_gzip_fragment(
+        "html", prepared_document, prefix_bytes=8, suffix_bytes=0
+    )
+
+    fragmented = _gzip_fragment_compress_with(
+        policy._gzip_workspace,
+        current_document,
+        5,
+        b"text/html; charset=utf-8",
+        tuple(policy._gzip_fragments),
+    )
+    first = zlib.decompressobj(wbits=31)
+    assert first.decompress(fragmented) == current_document[:8]
+    assert first.eof and first.unused_data.startswith(b"\x1f\x8b")
+    assert zlib.decompress(first.unused_data, wbits=31) == stable
+
+    changed = current_document.replace(b"dashboard", b"dashboord", 1)
+    fallback = _gzip_fragment_compress_with(
+        policy._gzip_workspace,
+        changed,
+        5,
+        "html",
+        tuple(policy._gzip_fragments),
+    )
+    assert zlib.decompress(fallback, wbits=31) == changed
+    single = zlib.decompressobj(wbits=31)
+    assert single.decompress(fallback) == changed
+    assert single.eof and single.unused_data == b""
+
+
+def test_dcz_framing_hash_and_dictionary_round_trip() -> None:
+    dictionary = b'{"kind":"dashboard","rows":[' + (b'{"id":41},' * 1_000) + b"]}"
+    payload = dictionary.replace(b'"id":41', b'"id":42')
+    prepared = _prepare_dcz_dictionary(dictionary)
+    encoded = _dcz_compress(prepared, payload, 3)
+
+    assert encoded[:8] == b"\x5e\x2a\x4d\x18\x20\x00\x00\x00"
+    assert encoded[8:40] == prepared[1]
+    assert _dcz_decompress(
+        encoded, dictionary, max_output_bytes=len(payload)
+    ) == payload
+    with pytest.raises(ValueError, match="this dictionary"):
+        _dcz_decompress(encoded, dictionary + b"!", max_output_bytes=len(payload))
+
+
+def test_native_gzip_randomized_differential_against_zlib() -> None:
+    rng = Random(0xDEF1A7E)
+    formats = (
+        "unknown",
+        "json",
+        "chaotic-json",
+        "html",
+        "graphql",
+        "log",
+        "plaintext",
+    )
+    for case in range(64):
+        size = rng.randrange(0, 65_537)
+        seed = rng.randbytes(rng.randrange(1, 65))
+        payload = rng.randbytes(size) if case % 3 == 0 else (seed * (size // len(seed) + 1))[:size]
+        level = rng.randrange(10)
+        format = formats[case % len(formats)]
+
+        encoded = gzip_compress(payload, level, format)
+        assert zlib.decompress(encoded, wbits=31) == payload
+
+        foreign = zlib.compress(payload, level=level, wbits=31)
+        assert (
+            gzip_decompress(foreign, max_output_bytes=max(1, len(payload)), format=format)
+            == payload
+        )
+
+
+def test_stream_owned_decoder_workspace_is_reusable_across_formats_and_failures() -> None:
+    workspace = _gzip_decoder_new()
+    cases = (
+        (b'{"message":"one"}\n' * 1000, b"application/json"),
+        (b"<p>two</p>\n" * 1000, b"text/html; charset=utf-8"),
+        (b"three words\n" * 1000, b"text/plain"),
+    )
+    with pytest.raises(ValueError, match="not a readable gzip member"):
+        _gzip_decompress_with(workspace, b"not gzip", 1024)
+    for payload, content_type in cases * 3:
+        encoded = zlib.compress(payload, level=6, wbits=31)
+        assert _gzip_decompress_with(workspace, encoded, len(payload), content_type) == payload
 
 
 def test_pure_stream_empty() -> None:

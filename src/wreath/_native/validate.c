@@ -536,13 +536,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             Py_DECREF(kwargs);
             return Py_NewRef(value);
         }
-        PyObject *empty = PyTuple_New(0);
-        if (empty == NULL) {
-            Py_DECREF(kwargs);
-            return NULL;
-        }
-        PyObject *instance = PyObject_Call(cls, empty, kwargs);
-        Py_DECREF(empty);
+        PyObject *instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
         Py_DECREF(kwargs);
         return instance;
     }
@@ -698,10 +692,7 @@ wreath_run_validation(PyObject *self, PyObject *args)
         Py_DECREF(errors);
         return NULL;
     }
-    PyObject *pair = PyTuple_Pack(2, result, errors);
-    Py_DECREF(result);
-    Py_DECREF(errors);
-    return pair;
+    return wreath_tuple2_from_owned(result, errors);
 }
 
 /* run_validation_json(plan, value, loc) -> (body | None, errors)
@@ -748,10 +739,7 @@ wreath_run_validation_json(PyObject *self, PyObject *args)
                 Py_DECREF(body);
                 return NULL;
             }
-            PyObject *pair = PyTuple_Pack(2, body, errors);
-            Py_DECREF(body);
-            Py_DECREF(errors);
-            return pair;
+            return wreath_tuple2_from_owned(body, errors);
         }
     }
 
@@ -777,8 +765,7 @@ wreath_run_validation_json(PyObject *self, PyObject *args)
     else {
         body = Py_NewRef(Py_None);
     }
-    PyObject *pair = PyTuple_Pack(2, body, errors);
-    Py_DECREF(body);
+    PyObject *pair = wreath_tuple2_from_owned(body, Py_NewRef(errors));
     Py_DECREF(validated);
     return pair;
 }

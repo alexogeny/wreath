@@ -381,6 +381,11 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             description=rp.description,
             footer=_footer(rp.out_rel, prev, nxt, site),
             home_href=_relative(rp.out_rel, "index.html"),
+            map_href=(
+                _relative(rp.out_rel, _output_path(site.map_page))
+                if site.map_page
+                else ""
+            ),
             canonical=f"{site.base_url.rstrip('/')}/{rp.out_rel}" if site.base_url else "",
             repo_html=repo_html,
             links_html=links_html,
@@ -509,6 +514,11 @@ def _write_404(output_dir: Path, site: Site, repo_html: str, links_html: str) ->
         toc_html="", css_href=_relative("404.html", _CSS_PATH),
         js_href=_relative("404.html", _JS_PATH), palette=site.palette,
         feel=site.feel, search_root="", description="", footer="",
+        map_href=(
+            _relative("404.html", _output_path(site.map_page))
+            if site.map_page
+            else ""
+        ),
         repo_html=repo_html, links_html=links_html)
     (output_dir / "404.html").write_text(html, encoding="utf-8")
 

@@ -140,6 +140,7 @@ PyObject *s_body = NULL;
 PyObject *s_more_body = NULL;
 PyObject *s_status = NULL;
 PyObject *s_headers = NULL;
+PyObject *s_trailers = NULL;
 PyObject *s_http_request = NULL;      /* "http.request" */
 PyObject *s_http_disconnect = NULL;   /* "http.disconnect" */
 PyObject *s_resp_start = NULL;        /* "http.response.start" */
@@ -778,6 +779,7 @@ server_module_free(void *Py_UNUSED(module))
     Py_CLEAR(s_more_body);
     Py_CLEAR(s_status);
     Py_CLEAR(s_headers);
+    Py_CLEAR(s_trailers);
     Py_CLEAR(s_http_request);
     Py_CLEAR(s_http_disconnect);
     Py_CLEAR(s_resp_start);
@@ -827,6 +829,7 @@ init_cached_constants(void)
         (s_more_body = PyUnicode_InternFromString("more_body")) == NULL ||
         (s_status = PyUnicode_InternFromString("status")) == NULL ||
         (s_headers = PyUnicode_InternFromString("headers")) == NULL ||
+        (s_trailers = PyUnicode_InternFromString("trailers")) == NULL ||
         (s_http_request = PyUnicode_InternFromString("http.request")) == NULL ||
         (s_http_disconnect = PyUnicode_InternFromString("http.disconnect")) == NULL ||
         (s_resp_start = PyUnicode_InternFromString("http.response.start")) == NULL ||

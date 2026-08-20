@@ -236,8 +236,7 @@ signature_parse_inner(SignatureParser *parser)
         if (value == NULL) { Py_DECREF(items); return NULL; }
         params = signature_parse_params(parser);
         if (params == NULL) { Py_DECREF(value); Py_DECREF(items); return NULL; }
-        pair = PyTuple_Pack(2, value, params);
-        Py_DECREF(params); Py_DECREF(value);
+        pair = wreath_tuple2_from_owned(value, params);
         if (pair == NULL || PyList_Append(items, pair) < 0) {
             Py_XDECREF(pair); Py_DECREF(items); return NULL;
         }
@@ -290,9 +289,11 @@ wreath_signature_parse_dictionary(PyObject *Py_UNUSED(self), PyObject *args)
             value = inner_list ? PyTuple_New(0) : Py_NewRef(Py_True);
         }
         if (params == NULL || value == NULL) goto item_error;
-        entry = PyTuple_Pack(2, value, params);
+        entry = wreath_tuple2_from_owned(value, params);
+        value = NULL;
+        params = NULL;
         if (entry == NULL || PyDict_SetItem(output, key, entry) < 0) goto item_error;
-        Py_DECREF(entry); Py_DECREF(params); Py_DECREF(value); Py_DECREF(key);
+        Py_DECREF(entry); Py_DECREF(key);
         signature_skip_ws(&parser);
         if (parser.index < parser.length) {
             if (parser.text[parser.index] != ',') {
@@ -319,7 +320,7 @@ error:
 PyObject *
 wreath_signature_parse_string(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *text_object, *error_type, *value, *result;
+    PyObject *text_object, *error_type, *value;
     Py_ssize_t index;
     SignatureParser parser;
     if (!PyArg_ParseTuple(args, "OnO:signature_parse_string", &text_object,
@@ -331,9 +332,7 @@ wreath_signature_parse_string(PyObject *Py_UNUSED(self), PyObject *args)
     parser.max_components = PY_SSIZE_T_MAX;
     value = signature_parse_string_value(&parser);
     if (value == NULL) return NULL;
-    result = Py_BuildValue("On", value, parser.index);
-    Py_DECREF(value);
-    return result;
+    return wreath_tuple2_from_owned(value, PyLong_FromSsize_t(parser.index));
 }
 
 static int
@@ -431,46 +430,65 @@ signature_write_bare(WreathBytesWriter *writer, PyObject *value,
 static PyObject *
 signature_serialize_params(PyObject *params, PyObject *error_type)
 {
-    PyObject *items = PyMapping_Items(params);
-    PyObject *sequence;
     WreathBytesWriter writer = {0};
-    if (items == NULL) return NULL;
-    sequence = PySequence_Fast(items, "component parameters must be a mapping");
-    Py_DECREF(items);
-    if (sequence == NULL || wreath_writer_init(&writer, 64) < 0) {
-        Py_XDECREF(sequence);
-        return NULL;
-    }
-    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(sequence); index++) {
-        PyObject *pair = PySequence_Fast(
-            PySequence_Fast_GET_ITEM(sequence, index),
-            "mapping items must be pairs");
-        PyObject *key_text = NULL;
-        PyObject *value;
-        if (pair == NULL) goto error;
-        if (PySequence_Fast_GET_SIZE(pair) != 2) {
-            Py_DECREF(pair);
-            PyErr_SetString(PyExc_ValueError, "mapping items must be pairs");
-            goto error;
+    if (wreath_writer_init(&writer, 64) < 0) return NULL;
+    if (PyDict_CheckExact(params)) {
+        Py_ssize_t position = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(params, &position, &key, &value)) {
+            PyObject *key_text = PyUnicode_CheckExact(key) ?
+                Py_NewRef(key) : PyObject_Str(key);
+            if (key_text == NULL || wreath_writer_byte(&writer, ';') < 0 ||
+                signature_write_unicode(&writer, key_text) < 0 ||
+                (value != Py_True &&
+                 (wreath_writer_byte(&writer, '=') < 0 ||
+                  signature_write_bare(&writer, value, error_type) < 0))) {
+                Py_XDECREF(key_text);
+                goto error;
+            }
+            Py_DECREF(key_text);
         }
-        key_text = PyObject_Str(PySequence_Fast_GET_ITEM(pair, 0));
-        value = PySequence_Fast_GET_ITEM(pair, 1);
-        if (key_text == NULL || wreath_writer_byte(&writer, ';') < 0 ||
-            signature_write_unicode(&writer, key_text) < 0 ||
-            (value != Py_True &&
-             (wreath_writer_byte(&writer, '=') < 0 ||
-              signature_write_bare(&writer, value, error_type) < 0))) {
-            Py_XDECREF(key_text);
-            Py_DECREF(pair);
-            goto error;
-        }
-        Py_DECREF(key_text);
-        Py_DECREF(pair);
     }
-    Py_DECREF(sequence);
+    else {
+        PyObject *items = PyMapping_Items(params);
+        PyObject *sequence;
+        if (items == NULL) goto error;
+        sequence = PySequence_Fast(items, "component parameters must be a mapping");
+        Py_DECREF(items);
+        if (sequence == NULL) goto error;
+        for (Py_ssize_t index = 0;
+             index < PySequence_Fast_GET_SIZE(sequence); index++) {
+            PyObject *pair = PySequence_Fast(
+                PySequence_Fast_GET_ITEM(sequence, index),
+                "mapping items must be pairs");
+            PyObject *key_text = NULL;
+            PyObject *value;
+            if (pair == NULL) { Py_DECREF(sequence); goto error; }
+            if (PySequence_Fast_GET_SIZE(pair) != 2) {
+                Py_DECREF(pair);
+                Py_DECREF(sequence);
+                PyErr_SetString(PyExc_ValueError, "mapping items must be pairs");
+                goto error;
+            }
+            key_text = PyObject_Str(PySequence_Fast_GET_ITEM(pair, 0));
+            value = PySequence_Fast_GET_ITEM(pair, 1);
+            if (key_text == NULL || wreath_writer_byte(&writer, ';') < 0 ||
+                signature_write_unicode(&writer, key_text) < 0 ||
+                (value != Py_True &&
+                 (wreath_writer_byte(&writer, '=') < 0 ||
+                  signature_write_bare(&writer, value, error_type) < 0))) {
+                Py_XDECREF(key_text);
+                Py_DECREF(pair);
+                Py_DECREF(sequence);
+                goto error;
+            }
+            Py_DECREF(key_text);
+            Py_DECREF(pair);
+        }
+        Py_DECREF(sequence);
+    }
     return wreath_writer_finish(&writer);
 error:
-    Py_DECREF(sequence);
     Py_XDECREF(writer.bytes);
     return NULL;
 }
@@ -491,49 +509,100 @@ signature_identifier(PyObject *name, PyObject *serialized_params)
 }
 
 static int
-signature_component_params(PyObject *params, PyObject *error_type,
-                           PyObject *name_key, PyObject *req_key)
+signature_component_params(PyObject *params, PyObject *error_type)
 {
-    PyObject *keys = PyMapping_Keys(params);
-    PyObject *sequence;
-    if (keys == NULL) return -1;
+    PyObject *req = NULL;
+    if (PyDict_CheckExact(params)) {
+        Py_ssize_t probe = 0;
+        PyObject *probe_key, *probe_value;
+        while (PyDict_Next(params, &probe, &probe_key, &probe_value)) {
+            if (!PyUnicode_CheckExact(probe_key)) goto generic_mapping;
+        }
+        Py_ssize_t position = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(params, &position, &key, &value)) {
+            int is_name = PyUnicode_CheckExact(key) &&
+                PyUnicode_EqualToUTF8(key, "name");
+            int is_req = PyUnicode_CheckExact(key) &&
+                PyUnicode_EqualToUTF8(key, "req");
+            if (!is_name && !is_req) {
+                PyObject *representation = PyObject_Repr(key);
+                PyObject *message;
+                if (representation == NULL) return -1;
+                message = PyUnicode_FromFormat(
+                    "unsupported component parameter %U", representation);
+                Py_DECREF(representation);
+                if (message == NULL) return -1;
+                PyErr_SetObject(error_type, message);
+                Py_DECREF(message);
+                return -1;
+            }
+            if (is_req) req = value;
+        }
+        if (req == NULL) return 0;
+        int truth = PyObject_IsTrue(req);
+        if (truth < 0) return -1;
+        return truth ? signature_raise(
+            error_type, "request-response binding is not supported") : 0;
+    }
+generic_mapping:
+    PyObject *name_key = PyUnicode_FromString("name");
+    PyObject *req_key = PyUnicode_FromString("req");
+    PyObject *keys = NULL, *sequence = NULL;
+    if (name_key == NULL || req_key == NULL) goto error;
+    keys = PyMapping_Keys(params);
+    if (keys == NULL) goto error;
     sequence = PySequence_Fast(keys, "component parameters must be a mapping");
     Py_DECREF(keys);
-    if (sequence == NULL) return -1;
+    keys = NULL;
+    if (sequence == NULL) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(sequence); index++) {
         PyObject *key = PySequence_Fast_GET_ITEM(sequence, index);
         int is_name = PyObject_RichCompareBool(key, name_key, Py_EQ);
         int is_req = PyObject_RichCompareBool(key, req_key, Py_EQ);
-        if (is_name < 0 || is_req < 0) { Py_DECREF(sequence); return -1; }
+        if (is_name < 0 || is_req < 0) goto error;
         if (!is_name && !is_req) {
             PyObject *representation = PyObject_Repr(key);
             PyObject *message;
-            if (representation == NULL) { Py_DECREF(sequence); return -1; }
+            if (representation == NULL) goto error;
             message = PyUnicode_FromFormat("unsupported component parameter %U",
                                            representation);
             Py_DECREF(representation);
-            Py_DECREF(sequence);
-            if (message == NULL) return -1;
+            if (message == NULL) goto error;
             PyErr_SetObject(error_type, message);
             Py_DECREF(message);
-            return -1;
+            goto error;
         }
     }
     Py_DECREF(sequence);
+    sequence = NULL;
     {
-        PyObject *req = NULL;
         int found = PyMapping_GetOptionalItem(params, req_key, &req);
         int truth;
-        if (found < 0) return -1;
-        if (!found) return 0;
+        if (found < 0) goto error;
+        if (!found) {
+            Py_DECREF(req_key);
+            Py_DECREF(name_key);
+            return 0;
+        }
         truth = PyObject_IsTrue(req);
         Py_DECREF(req);
-        if (truth < 0) return -1;
-        if (truth)
-            return signature_raise(error_type,
-                                   "request-response binding is not supported");
+        if (truth < 0) goto error;
+        if (truth) {
+            signature_raise(error_type,
+                            "request-response binding is not supported");
+            goto error;
+        }
     }
+    Py_DECREF(req_key);
+    Py_DECREF(name_key);
     return 0;
+error:
+    Py_XDECREF(sequence);
+    Py_XDECREF(keys);
+    Py_XDECREF(req_key);
+    Py_XDECREF(name_key);
+    return -1;
 }
 
 PyObject *
@@ -543,7 +612,7 @@ wreath_signature_base(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *derived;
     Py_ssize_t max_components;
     PyObject *sequence = NULL, *covered = NULL, *seen = NULL;
-    PyObject *name_key = NULL, *req_key = NULL, *at = NULL;
+    PyObject *at = NULL;
     PyObject *space = NULL;
     PyObject *lower_name = NULL, *split_name = NULL, *header = NULL;
     PyObject *result = NULL;
@@ -563,15 +632,12 @@ wreath_signature_base(PyObject *Py_UNUSED(self), PyObject *args)
     }
     covered = PyList_New(PySequence_Fast_GET_SIZE(sequence));
     seen = PySet_New(NULL);
-    name_key = PyUnicode_FromString("name");
-    req_key = PyUnicode_FromString("req");
     at = PyUnicode_FromString("@");
     space = PyUnicode_FromString(" ");
     lower_name = PyUnicode_FromString("lower");
     split_name = PyUnicode_FromString("split");
     header = PyObject_GetAttrString(message, "header");
-    if (covered == NULL || seen == NULL || name_key == NULL ||
-        req_key == NULL || at == NULL || space == NULL ||
+    if (covered == NULL || seen == NULL || at == NULL || space == NULL ||
         lower_name == NULL || split_name == NULL || header == NULL) goto error;
     if (wreath_writer_init(&writer, 512) < 0) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(sequence); index++) {
@@ -596,11 +662,12 @@ wreath_signature_base(PyObject *Py_UNUSED(self), PyObject *args)
             signature_raise(error_type, "component identifiers must be lowercase");
             goto item_error;
         }
-        if (signature_component_params(component_params, error_type,
-                                       name_key, req_key) < 0) goto item_error;
+        if (signature_component_params(component_params, error_type) < 0)
+            goto item_error;
         serialized_params = signature_serialize_params(component_params, error_type);
         if (serialized_params == NULL) goto item_error;
-        key = PyTuple_Pack(2, name, serialized_params);
+        key = wreath_tuple2_from_owned(
+            Py_NewRef(name), Py_NewRef(serialized_params));
         if (key == NULL) goto item_error;
         duplicate = PySet_Contains(seen, key);
         if (duplicate < 0) goto item_error;
@@ -693,7 +760,6 @@ error:
     Py_XDECREF(writer.bytes);
     Py_XDECREF(header); Py_XDECREF(split_name); Py_XDECREF(lower_name);
     Py_XDECREF(space); Py_XDECREF(at);
-    Py_XDECREF(req_key); Py_XDECREF(name_key);
     Py_XDECREF(seen); Py_XDECREF(covered); Py_XDECREF(sequence);
     return result;
 }

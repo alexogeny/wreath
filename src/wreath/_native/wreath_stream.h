@@ -39,4 +39,30 @@ typedef struct {
     int (*is_closing)(PyObject *);
 } WreathTransportCAPI;
 
+/* Resolve the immutable reactor ABI without a process-global mutable cache.
+ * Kept inline because client HTTP and PostgreSQL are separate extensions: each
+ * retains the pointer on its connection, while the resolution and error-
+ * clearing contract has one source definition. */
+static inline const WreathTransportCAPI *
+wreath_transport_capi_resolve(void)
+{
+    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
+    PyObject *module = modules == NULL
+        ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
+    if (module == NULL) return NULL;
+    PyObject *capsule = PyObject_GetAttrString(module, "_TRANSPORT_C_API");
+    if (capsule == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    const WreathTransportCAPI *capi = PyCapsule_GetPointer(
+        capsule, WREATH_TRANSPORT_CAPI_NAME);
+    Py_DECREF(capsule);
+    if (capi == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    return capi->version == WREATH_TRANSPORT_CAPI_VERSION ? capi : NULL;
+}
+
 #endif

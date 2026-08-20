@@ -252,6 +252,27 @@ def test_prev_next_and_frontmatter_description(tmp_path) -> None:
     assert "nav-prev" in routing and "Home" in routing       # prev
 
 
+def test_a_declared_map_page_is_an_obvious_header_route(tmp_path) -> None:
+    base = _site(tmp_path)
+    site = dataclasses.replace(base, map_page="guides/routing.md")
+    build(site, root=tmp_path)
+    index = (tmp_path / "site" / "index.html").read_text()
+    routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
+    assert '<a class="browse" href="guides/routing.html">Browse</a>' in index
+    assert '<a class="browse" href="routing.html">Browse</a>' in routing
+
+
+def test_a_map_page_must_be_in_the_navigation() -> None:
+    with pytest.raises(ValueError, match="map_page.*is not in nav"):
+        Site(
+            "S",
+            "docs",
+            "out",
+            Nav(Page("Home", "index.md")),
+            map_page="map.md",
+        )
+
+
 def test_llms_txt_and_sitemap(tmp_path) -> None:
     site = Site("Demo", "docs", "site", _site(tmp_path).nav,
                 base_url="https://d.io", description="Demo docs.")

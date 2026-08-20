@@ -25,33 +25,54 @@ CONSUMER = Path(__file__).parent / "consumer"
 GENERATED = CONSUMER / "src" / "generated"
 EXPECTED = Path(__file__).parent / "expected"
 
-_node = shutil.which("node")
-_npx = shutil.which("npx")
+MIN_NODE = (22, 18)
 
 
-def _node_major() -> int:
-    """Major version of the node on PATH, or 0 if it can't be determined."""
-    if _node is None:
-        return 0
+def _node_version(command: tuple[str, ...]) -> tuple[int, int] | None:
+    """The runtime version, or None when this command is not usable."""
     try:
-        out = subprocess.run([_node, "--version"], capture_output=True,
-                             text=True, timeout=10).stdout.strip()
-        return int(out.lstrip("v").split(".", 1)[0])
+        completed = subprocess.run(
+            [*command, "--version"], capture_output=True, text=True, timeout=10
+        )
+        major, minor, *_rest = completed.stdout.strip().lstrip("v").split(".")
+        return int(major), int(minor)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return 0
+        return None
 
 
-# The consumer's mock harness is an ES module ``.mts`` file, which node only
-# executes directly from v18 (v16 raises ERR_UNKNOWN_FILE_EXTENSION), so an old
-# toolchain is treated the same as a missing one.
+def _node_command() -> tuple[str, ...] | None:
+    """Select a supported runtime, preferring PATH then the pinned FNM version."""
+    active = shutil.which("node")
+    if active is not None:
+        command = (active,)
+        version = _node_version(command)
+        if version is not None and version >= MIN_NODE:
+            return command
+    fnm = shutil.which("fnm")
+    if fnm is not None:
+        command = (fnm, "exec", "node")
+        version = _node_version(command)
+        if version is not None and version >= MIN_NODE:
+            return command
+    return None
+
+
+_node = _node_command()
+
+
+# The mock harness is a TypeScript ES module. Native type stripping is stable
+# from Node 22.18, so an EOL runtime is treated as missing rather than silently
+# becoming this repository's toolchain.
 pytestmark = pytest.mark.skipif(
-    _node is None or _npx is None or not (CONSUMER / "node_modules").exists()
-    or _node_major() < 18,
-    reason="node>=18 toolchain or consumer node_modules not available",
+    _node is None or not (CONSUMER / "node_modules").exists(),
+    reason="node>=22.18 toolchain or consumer node_modules not available",
 )
 
 
 def test_consumer_compiles_and_runs() -> None:
+    if _node is None:
+        raise RuntimeError("test ran without the node>=22.18 capability it requires")
+    node = _node
     code = main(
         [
             "typegen",
@@ -75,7 +96,7 @@ def test_consumer_compiles_and_runs() -> None:
 
         # Strict compile against real React + TanStack Query types.
         compiled = subprocess.run(
-            [_npx, "tsc", "--noEmit"],
+            [*node, "node_modules/typescript/bin/tsc", "--noEmit"],
             cwd=CONSUMER,
             capture_output=True,
             text=True,
@@ -85,7 +106,7 @@ def test_consumer_compiles_and_runs() -> None:
 
         # Runtime transport conventions under a mocked fetch.
         ran = subprocess.run(
-            [_node, "src/mock_fetch.mts"],
+            [*node, "src/mock_fetch.mts"],
             cwd=CONSUMER,
             capture_output=True,
             text=True,

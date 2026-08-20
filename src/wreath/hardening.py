@@ -232,10 +232,11 @@ def application_sources(app: Any) -> list[Path]:
     roots: dict[str, Path] = {}
     handlers = [route.endpoint for route in getattr(app, "_routes", ())]
     handlers += [handler for _path, handler in getattr(app, "_ws_routes", ())]
-    for handler in handlers:
+    for route_handler in handlers:
         # `@authenticated()` and friends wrap the endpoint, and a wrapper
         # defined in wreath would resolve to wreath's own tree -- which is
         # excluded below, so the application would silently scan nothing.
+        handler = route_handler
         while (wrapped := getattr(handler, "__wrapped__", None)) is not None:
             handler = wrapped
         # Coalesced rather than guarded: a handler with no `__module__` finds no

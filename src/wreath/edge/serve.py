@@ -90,7 +90,14 @@ class EdgeHandle:
     nothing more.
     """
 
-    __slots__ = ("_connections", "_endpoints", "_server", "_table", "_closed")
+    __slots__ = (
+        "_closed",
+        "_connections",
+        "_endpoints",
+        "_reopen_tasks",
+        "_server",
+        "_table",
+    )
 
     def __init__(
         self,
@@ -98,11 +105,13 @@ class EdgeHandle:
         table: Any,
         endpoints: list[tuple[str, int, bytes, bool]],
         connections: int,
+        reopen_tasks: set[asyncio.Task[None]],
     ) -> None:
         self._server = server
         self._table = table
         self._endpoints = endpoints
         self._connections = connections
+        self._reopen_tasks = reopen_tasks
         self._closed = False
 
     @property
@@ -132,6 +141,11 @@ class EdgeHandle:
         # that stops a dying connection from scheduling its own replacement,
         # which would otherwise race the shutdown it is being torn down by.
         self._table.close()
+        for task in self._reopen_tasks:
+            task.cancel()
+        if self._reopen_tasks:
+            await asyncio.gather(*self._reopen_tasks, return_exceptions=True)
+            self._reopen_tasks.clear()
         self._server.close()
         await self._server.wait_closed()
 
@@ -189,6 +203,7 @@ async def serve(
     loop = asyncio.get_running_loop()
     ejection = pool.ejection
     handle: EdgeHandle | None = None
+    reopen_tasks: set[asyncio.Task[None]] = set()
     # One context for every https upstream, built while the proxy is being
     # configured. Native where the reactor can provide it, so the handshake and
     # every record afterwards run in C on the same transport the inbound side
@@ -197,8 +212,7 @@ async def serve(
     if any(secure for *_rest, secure in endpoints):
         from ..reactor import metal_tls_client_context
 
-        upstream_tls = metal_tls_client_context(
-            cafile=upstream_cafile, verify=upstream_verify)
+        upstream_tls = metal_tls_client_context(cafile=upstream_cafile, verify=upstream_verify)
 
     def handle_closed() -> bool:
         return handle is not None and handle.closed
@@ -234,7 +248,9 @@ async def serve(
         """
         if handle_closed():
             return
-        loop.create_task(reopen(index))
+        task = loop.create_task(reopen(index))
+        reopen_tasks.add(task)
+        task.add_done_callback(reopen_tasks.discard)
 
     table = _edge.UpstreamTable(
         [authority for _host, _port, authority, _secure in endpoints],
@@ -248,8 +264,7 @@ async def serve(
         on_lost=on_lost,
     )
 
-    for index, (upstream_host, upstream_port, _authority, secure) in enumerate(
-            endpoints):
+    for index, (upstream_host, upstream_port, _authority, secure) in enumerate(endpoints):
         for _ in range(connections):
             await loop.create_connection(
                 lambda i=index: _edge.UpstreamConnection(table, i),
@@ -268,5 +283,5 @@ async def serve(
         ssl=ssl,
         start_serving=True,
     )
-    handle = EdgeHandle(server, table, endpoints, connections)
+    handle = EdgeHandle(server, table, endpoints, connections, reopen_tasks)
     return handle

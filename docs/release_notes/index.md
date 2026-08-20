@@ -1,13 +1,12 @@
 # Release notes
 
-Per-version release notes for wreath. Each release has a page at
-`release_notes/<version>.md`, generated with the **release-notes** agent skill
-(`skills/release-notes/`) and used verbatim as the body of the GitHub
-Release cut by `.github/workflows/publish.yml`.
-
-Versions are listed newest first.
+What changed, why it matters, and whether an existing application needs to do
+anything. Versions are newest first. The same text becomes the GitHub Release,
+so there is one account of a release rather than a site version and a second
+version elsewhere.
 
 <!-- releases:start -->
+- [v0.3.2](0.3.2.md) — 2026-08-20
 - [v0.3.1](0.3.1.md) — 2026-08-18
 - [v0.3.0](0.3.0.md) — 2026-08-16
 - [v0.2.1](0.2.1.md) — 2026-08-13

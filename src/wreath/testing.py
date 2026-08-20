@@ -142,9 +142,7 @@ class WebSocketTestSession:
         async def send(message: Message) -> None:
             await self._from_app.put(message)
 
-        self._task = asyncio.get_running_loop().create_task(
-            self._app(self._scope, receive, send)
-        )
+        self._task = asyncio.get_running_loop().create_task(self._app(self._scope, receive, send))
         self._to_app.put_nowait({"type": "websocket.connect"})
         first = await self._from_app.get()
         if first["type"] == "websocket.close":
@@ -387,10 +385,7 @@ class TestClient:
                 permissions=frozenset(permissions),
             )
         elif roles or permissions:
-            raise TypeError(
-                "pass roles/permissions with an id, or a complete Identity -- "
-                "not both"
-            )
+            raise TypeError("pass roles/permissions with an id, or a complete Identity -- not both")
         derived = TestClient(self.app, headers=self._headers, identity=principal)
         derived._root = self._root
         derived._lifespan_task = self._lifespan_task
@@ -465,8 +460,8 @@ class TestClient:
 
     async def __aexit__(self, *exc: Any) -> None:
         self._restore_auth_backend()
-        assert self._lifespan_to_app is not None
-        assert self._lifespan_from_app is not None
+        if self._lifespan_to_app is None or self._lifespan_from_app is None:
+            raise RuntimeError("TestClient lifespan has not been started")
         self._lifespan_to_app.put_nowait({"type": "lifespan.shutdown"})
         reply = await self._reply("shutdown")
         if self._lifespan_task is not None:
@@ -485,13 +480,11 @@ class TestClient:
         annotation, a missing table -- so the failure has to come back as the
         error it is rather than as a hang with no output.
         """
-        assert self._lifespan_task is not None
-        assert self._lifespan_from_app is not None
+        if self._lifespan_task is None or self._lifespan_from_app is None:
+            raise RuntimeError(f"TestClient lifespan {phase} has not been started")
         reply = asyncio.ensure_future(self._lifespan_from_app.get())
         try:
-            await asyncio.wait(
-                (reply, self._lifespan_task), return_when=asyncio.FIRST_COMPLETED
-            )
+            await asyncio.wait((reply, self._lifespan_task), return_when=asyncio.FIRST_COMPLETED)
         except BaseException:
             reply.cancel()
             raise
@@ -572,9 +565,7 @@ class TestClient:
         first = sent[0]
         if first["type"] == "wreath.response":
             return TestResponse(first["status"], list(first["headers"]), first.get("body", b""))
-        payload = b"".join(
-            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
-        )
+        payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
         return TestResponse(first["status"], list(first["headers"]), payload)
 
     def _scope(

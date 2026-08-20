@@ -209,7 +209,9 @@ def test_native_packets_match_the_independent_line_packetizer():
         _Src(snap), prefix="my service", dogstatsd=True, tags={"env": "prod"}
     )
     reading = types.SimpleNamespace(
-        subsystem="jobs", instance="work", values={"run_errors": 7}
+        subsystem="jobs",
+        instance="work",
+        values=types.MappingProxyType({"run_errors": 7}),
     )
     packets, count = statsd._core.statsd_packets(
         snap,

@@ -947,8 +947,8 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
         subclasses: list[tuple[type, Callable[[Any], Any]]] = []
         literals: list[tuple[tuple[Any, ...], Callable[[Any], Any]]] = []
         fallback = _jsonable_any
-        for option in args:
-            option, _option_field = _field_annotation(option)
+        for raw_option in args:
+            option, _option_field = _field_annotation(raw_option)
             convert = _compile_jsonable(option, seen | {annotation})
             if option is Any or option is object:
                 fallback = convert

@@ -512,6 +512,7 @@ class CedarAuthorizer:
         "_reads_now",
         "_resource",
         "_resource_entities",
+        "_schema_owners",
     )
 
     def __init__(
@@ -629,6 +630,7 @@ class CedarAuthorizer:
                 refusal=True,
             ),
         )
+        self._schema_owners = tuple(getattr(organizations, "schema_owners", ()))
         # Kept for `flags_for`/`regions_for`, which the permission manifest
         # calls, and because the two vocabularies are read in tests.
         self._flag_names = self._facts[0].vocabulary
@@ -640,6 +642,11 @@ class CedarAuthorizer:
         self._delegation_visible = bool(callable(reads) and (reads("delegated") or reads("actor")))
         self._reads_now = None if not callable(reads) else bool(reads("now"))
         _validate_org_roles(self._facts[3].vocabulary, organizations)
+
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """Stores delegated through the organisation fact provider."""
+        return self._schema_owners
 
     # --- policy identity, delegated from the engine -------------------------
     #
@@ -860,9 +867,8 @@ class CedarAuthorizer:
         decisions = []
         for raw_resource in resources:
             resource_entity = raw_resource if isinstance(raw_resource, CedarEntity) else None
-            if resource_entity is not None:
-                raw_resource = resource_entity.uid
-            resource = await _resolve(self._resource(raw_resource, request))
+            resource_ref = resource_entity.uid if resource_entity is not None else raw_resource
+            resource = await _resolve(self._resource(resource_ref, request))
             entities = _with_entities(base_entities, resource_entity)
             if self._resource_entities is not None:
                 additions = await _resolve(self._resource_entities(resource, request))

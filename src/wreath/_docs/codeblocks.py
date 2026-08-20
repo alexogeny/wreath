@@ -38,6 +38,7 @@ that silently has nothing to check, which is the failure it exists to prevent.
 
 from __future__ import annotations
 
+import annotationlib
 import ast
 import importlib
 import inspect
@@ -216,7 +217,7 @@ def _return_type(func: object) -> type | None:
         return None
     try:
         hints = typing.get_type_hints(func)
-    except (NameError, TypeError, AttributeError):
+    except NameError, TypeError, AttributeError:
         return None
     annotation = hints.get("return")
     if annotation is typing.Any or not isinstance(annotation, type):
@@ -475,7 +476,7 @@ def _rule_markers_in_a_dependency(tree: ast.AST, env: _Environment) -> Iterator[
             continue
         try:
             signature = inspect.signature(target)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         marked = [
             parameter.name
@@ -579,8 +580,7 @@ def _check_chains(
             yield Finding(
                 page,
                 line,
-                f"`{_dotted(node)}` -- {_describe(owner)} has no attribute "
-                f"`{node.attr}`",
+                f"`{_dotted(node)}` -- {_describe(owner)} has no attribute `{node.attr}`",
             )
         elif inspect.ismodule(owner) and not hasattr(owner, node.attr):
             yield Finding(
@@ -605,7 +605,7 @@ def _has_member(owner: type, name: str) -> bool:
             slots = (slots,)
         if name in tuple(slots):
             return True
-        annotations = klass.__dict__.get("__annotations__", {})
+        annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.STRING)
         if name in annotations:
             return True
     return False
@@ -653,9 +653,7 @@ def check_page(text: str, page: str = "") -> tuple[list[Finding], Coverage]:
         if reason is None:
             found = list(_check_chains(tree, local, page, block.line, stats))
             for rule in _RULES:
-                found.extend(
-                    Finding(page, block.line, message) for message in rule(tree, local)
-                )
+                found.extend(Finding(page, block.line, message) for message in rule(tree, local))
             findings.extend(found)
         _bind_block(tree, env)
     return findings, stats

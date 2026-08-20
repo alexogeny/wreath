@@ -56,7 +56,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     {
         'name': 'binding',
         'capability': 'Typed request and response contracts, rich stdlib scalars, reusable Field constraints and aliases, startup-compiled validation, and dependency injection with Depends',
-        'modules': ('wreath.binding', 'wreath.validation_errors'),
+        'modules': ('wreath.binding', 'wreath.contracts', 'wreath.validation_errors'),
         'guides': ('docs/guides/binding.md', 'docs/guides/forms.md'),
         'replaces': ('pydantic', 'marshmallow', 'dependency-injector', 'svcs'),
     },
@@ -84,7 +84,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     {
         'name': 'auth',
         'capability': 'Authentication (JWT, API keys, OAuth2 and OIDC login) and authorization on a built-in Cedar policy engine',
-        'modules': ('wreath.auth', 'wreath.authorization'),
+        'modules': ('wreath.auth', 'wreath.authorization', 'wreath.tokens'),
         'guides': ('docs/guides/auth.md', 'docs/guides/permissions.md'),
         'replaces': ('pyjwt', 'python-jose', 'authlib', 'casbin', 'django-guardian', 'openfga-sdk'),
     },
@@ -111,7 +111,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'organizations',
-        'capability': 'Tenancy at the identity layer: organisations, memberships, roles within them, invitations that survive the invitee having no account, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning with filtering, sorting and paging as an adapter onto exactly those stores',
+        'capability': 'Tenancy at the identity layer: durable organisations, memberships, roles within them, single-use invitations that survive both the invitee having no account and API restarts, the composed principal every authorization fact hangs off, and SCIM 2.0 provisioning with filtering, sorting and paging as an adapter onto exactly those stores',
         'modules': ('wreath.organizations',),
         'guides': ('docs/guides/organizations.md', 'docs/guides/scim.md'),
         'replaces': ('workos', 'scalekit', 'django-organizations', 'scim2-tooling'),
@@ -399,7 +399,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     {
         'name': 'notifications',
         'capability': 'Notifications as declared kinds over email and Web Push: DKIM signing, RFC 8058 one-click unsubscribe, a suppression list transactional mail deliberately bypasses, dependency-free VAPID and aes128gcm push, and a DNS deliverability check',
-        'modules': ('wreath.notifications',),
+        'modules': ('wreath.email', 'wreath.notifications'),
         'guides': ('docs/guides/notifications.md',),
         'replaces': ('pywebpush', 'dkimpy', 'django-anymail', 'celery-email', 'py-vapid'),
     },

@@ -330,10 +330,7 @@ wreath_sparsevector_parts(PyObject *Py_UNUSED(self), PyObject *args)
     }
     Py_DECREF(keys);
     Py_DECREF(mapping);
-    PyObject *result = PyTuple_Pack(2, indices, values);
-    Py_DECREF(indices);
-    Py_DECREF(values);
-    return result;
+    return wreath_tuple2_from_owned(indices, values);
 
 sparse_error:
     Py_XDECREF(indices);
@@ -651,15 +648,14 @@ wreath_parse_qs(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
 
+    const uint8_t *data = query.buf;
+    Py_ssize_t len = query.len;
+    Py_ssize_t start = 0;
     PyObject *pairs = PyList_New(0);
     if (pairs == NULL) {
         PyBuffer_Release(&query);
         return NULL;
     }
-
-    const uint8_t *data = query.buf;
-    Py_ssize_t len = query.len;
-    Py_ssize_t start = 0;
     for (Py_ssize_t i = 0; i <= len; i++) {
         if (i < len && data[i] != '&') {
             continue;
@@ -682,9 +678,7 @@ wreath_parse_qs(PyObject *Py_UNUSED(self), PyObject *args)
             PyObject *value = (eq < field_len)
                                   ? component_to_str(field + eq + 1, field_len - eq - 1)
                                   : PyUnicode_New(0, 127);
-            PyObject *pair = (key && value) ? PyTuple_Pack(2, key, value) : NULL;
-            Py_XDECREF(key);
-            Py_XDECREF(value);
+            PyObject *pair = wreath_tuple2_from_owned(key, value);
             if (pair == NULL || PyList_Append(pairs, pair) < 0) {
                 Py_XDECREF(pair);
                 Py_DECREF(pairs);
@@ -872,6 +866,8 @@ wreath_parse_form_urlencoded(PyObject *Py_UNUSED(self), PyObject *args)
             PyObject *key = NULL;
             PyObject *value = NULL;
             PyObject *values = NULL;
+            PyObject *inserted_values = NULL;
+            PyObject *first_value = NULL;
             Py_ssize_t eq = 0;
 
             if (max_fields > 0 && field_count >= max_fields) {
@@ -891,13 +887,12 @@ wreath_parse_form_urlencoded(PyObject *Py_UNUSED(self), PyObject *args)
                 goto done;
             }
 
-            if (PyDict_GetItemWithError(fields, key) == NULL) {
-                if (PyErr_Occurred() || PyDict_SetItem(fields, key, value) < 0) {
-                    Py_DECREF(key);
-                    Py_DECREF(value);
-                    goto done;
-                }
+            if (PyDict_SetDefaultRef(fields, key, value, &first_value) < 0) {
+                Py_DECREF(key);
+                Py_DECREF(value);
+                goto done;
             }
+            Py_DECREF(first_value);
             values = PyDict_GetItemWithError(every, key);
             if (values == NULL) {
                 if (PyErr_Occurred()) {
@@ -905,32 +900,31 @@ wreath_parse_form_urlencoded(PyObject *Py_UNUSED(self), PyObject *args)
                     Py_DECREF(value);
                     goto done;
                 }
-                values = PyList_New(0);
-                if (values == NULL || PyDict_SetItem(every, key, values) < 0) {
-                    Py_XDECREF(values);
+                inserted_values = PyList_New(0);
+                if (inserted_values == NULL ||
+                    PyDict_SetItem(every, key, inserted_values) < 0) {
+                    Py_XDECREF(inserted_values);
                     Py_DECREF(key);
                     Py_DECREF(value);
                     goto done;
                 }
-                Py_DECREF(values);
-                values = PyDict_GetItemWithError(every, key);
-                if (values == NULL) {
-                    Py_DECREF(key);
-                    Py_DECREF(value);
-                    goto done;
-                }
+                values = inserted_values;
             }
             if (PyList_Append(values, value) < 0) {
+                Py_XDECREF(inserted_values);
                 Py_DECREF(key);
                 Py_DECREF(value);
                 goto done;
             }
+            Py_XDECREF(inserted_values);
             Py_DECREF(key);
             Py_DECREF(value);
         }
         start = i + 1;
     }
-    result = PyTuple_Pack(2, fields, every);
+    result = wreath_tuple2_from_owned(fields, every);
+    fields = NULL;
+    every = NULL;
 
 done:
     Py_XDECREF(fields);
@@ -2100,9 +2094,7 @@ wreath_attempt_decode(PyObject *Py_UNUSED(self), PyObject *args)
             PyObject *name = read_attempt_text(data, length, &offset, error_type);
             PyObject *captured = name == NULL ? NULL
                 : read_attempt_text(data, length, &offset, error_type);
-            PyObject *pair = name != NULL && captured != NULL
-                ? PyTuple_Pack(2, name, captured) : NULL;
-            Py_XDECREF(name); Py_XDECREF(captured);
+            PyObject *pair = wreath_tuple2_from_owned(name, captured);
             if (pair == NULL) {
                 Py_DECREF(boundaries); Py_DECREF(argument_values);
                 goto decode_objects_error;
@@ -2489,10 +2481,8 @@ canonical_header_items(PyObject *headers)
         PyObject *clean_value = words == NULL ? NULL
             : PyUnicode_Join(space, words);
         Py_XDECREF(words);
-        PyObject *normalized = clean_key != NULL && clean_value != NULL
-            ? PyTuple_Pack(2, clean_key, clean_value) : NULL;
-        Py_XDECREF(clean_key);
-        Py_XDECREF(clean_value);
+        PyObject *normalized = wreath_tuple2_from_owned(
+            clean_key, clean_value);
         if (normalized == NULL) {
             Py_DECREF(space); Py_DECREF(items); Py_DECREF(source);
             return NULL;
@@ -2545,10 +2535,7 @@ render_headers(PyObject *items)
         : PyUnicode_DecodeUTF8(PyBytes_AS_STRING(signed_bytes),
                                PyBytes_GET_SIZE(signed_bytes), "strict");
     Py_XDECREF(canonical_bytes); Py_XDECREF(signed_bytes);
-    PyObject *result = canon != NULL && signed_text != NULL
-        ? PyTuple_Pack(2, canon, signed_text) : NULL;
-    Py_XDECREF(canon); Py_XDECREF(signed_text);
-    return result;
+    return wreath_tuple2_from_owned(canon, signed_text);
 }
 
 PyObject *
@@ -2591,9 +2578,8 @@ wreath_sigv4_canonical(PyObject *Py_UNUSED(self), PyObject *args)
         PyObject *encoded_key = key == NULL ? NULL : aws_encode(key, 0);
         PyObject *encoded_value = value == NULL ? NULL : aws_encode(value, 0);
         Py_XDECREF(key); Py_XDECREF(value);
-        PyObject *encoded_pair = encoded_key != NULL && encoded_value != NULL
-            ? PyTuple_Pack(2, encoded_key, encoded_value) : NULL;
-        Py_XDECREF(encoded_key); Py_XDECREF(encoded_value);
+        PyObject *encoded_pair = wreath_tuple2_from_owned(
+            encoded_key, encoded_value);
         if (encoded_pair == NULL) {
             Py_DECREF(encoded_params); Py_DECREF(param_source); Py_DECREF(rendered);
             return NULL;
@@ -2641,8 +2627,7 @@ wreath_sigv4_canonical(PyObject *Py_UNUSED(self), PyObject *args)
                                PyBytes_GET_SIZE(canonical_bytes), "strict");
     Py_XDECREF(canonical_bytes);
     PyObject *result = canonical == NULL ? NULL
-        : PyTuple_Pack(2, canonical, signed_headers);
-    Py_XDECREF(canonical);
+        : wreath_tuple2_from_owned(canonical, Py_NewRef(signed_headers));
     Py_DECREF(upper); Py_DECREF(encoded_path); Py_DECREF(encoded_params); Py_DECREF(rendered);
     return result;
 writer_error:

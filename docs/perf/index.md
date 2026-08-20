@@ -22,6 +22,62 @@ So the three bars isolate one variable at a time: ASGI → native is *the C serv
 native → metal is *the io_uring loop*. Competitor bars are a muted hatch — "the
 field" at a glance.
 
+## A production-shaped instruction account
+
+The broad comparison is a successful POST through a service stack, not a
+plaintext endpoint. Both arms route, apply CORS, validate a typed path, query and
+body, authenticate a bearer token, authorize through Cedar, query PostgreSQL,
+fetch an upstream HTTP resource, and emit the same verified JSON response.
+
+```text
+Retired userspace instructions/request — lower is better
+
+Wreath    ████                              269,110
+FastAPI   ████████████████████████████████  2,133,383
+```
+
+That is **7.93× fewer retired instructions** for Wreath on this workload. The
+comparison stack is deliberately pragmatic: FastAPI 0.139, its Starlette
+`CORSMiddleware`, Pydantic, Uvicorn with uvloop and httptools, `HTTPBearer`,
+`cedarpy`, `asyncpg`, and `aiohttp`. Wreath uses the corresponding built-in
+surfaces and has no mandatory third-party runtime dependencies.
+
+| Cumulative successful request | Wreath | FastAPI stack |
+|---|---:|---:|
+| route + JSON | 36,006 | 426,899 |
+| + CORS | 47,156 | 490,826 |
+| + binding and validation | 115,305 | 776,764 |
+| + bearer authentication | 122,448 | 867,935 |
+| + Cedar authorization | 173,902 | 1,597,272 |
+| + PostgreSQL | 225,857 | 1,809,675 |
+| + outbound HTTP | **269,110** | **2,133,383** |
+
+Each number is the median of five alternating N/N/2 slopes after 500 warm-up
+requests, with server and generator pinned separately. The complete-arm ranges
+are 268,866–269,510 and 2,118,638–2,153,023. Identical A/A rebuilds differ by
+0.06% and 0.29% at the median. Only `instructions:u` is collected: no wall
+clock, cycles, or IPC appears in the artifact.
+
+The database and HTTP clients speak their real wire protocols to the same
+deterministic in-process peers. That keeps driver work and orchestration in the
+request while excluding an external database daemon, DNS, disk, and network
+scheduling. `cedarpy` is called through its public stateless API; unlike
+Wreath's startup-compiled policy set, it exposes no reusable compiled handle in
+the measured version. A deployment using a Cedar sidecar would be a different
+workload and should be measured as one.
+
+Re-run the exact account with:
+
+```bash
+uv sync --inexact --group benchmark
+uv run python -m benchmarks.bench_e2e_instructions \
+  --requests 4000 --trials 5 --connections 32 --warmup 500 \
+  --output docs/perf/data/e2e-stack-instructions.json
+```
+
+Read the [raw samples](data/e2e-stack-instructions.json) or the
+[`bench_e2e_instructions` harness](../../benchmarks/bench_e2e_instructions.py).
+
 !!! note "Medians, on one machine"
     Every bar is the **median of three passes** on one workstation, with the
     run-to-run range kept in the underlying data. Wreath's contribution rules

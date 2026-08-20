@@ -37,7 +37,6 @@ from .compiler import (
     JoinedStep,
     LoadPlan,
     SelectinStep,
-    _count_write_sql_builds,
     compile_count,
     compile_delete,
     compile_delete_where,
@@ -47,6 +46,9 @@ from .compiler import (
     compile_update_where,
     qualified,
     quote,
+)
+from .compiler import (
+    _count_write_sql_builds as _count_write_sql_builds,
 )
 from .errors import (
     DetachedInstanceError,
@@ -247,11 +249,6 @@ def _count_key_map_builds() -> Iterator[list[int]]:
         yield counter
     finally:
         _key_map_builds = previous
-
-
-# Re-exported so write-path probes are reached the same way as the two above;
-# the counter itself lives in the compiler, beside the code it counts.
-_count_write_sql_builds = _count_write_sql_builds
 
 
 def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:

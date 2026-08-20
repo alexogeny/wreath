@@ -75,6 +75,96 @@
 #define PB_MAX_DEPTH 100
 #define PB_DESCRIPTOR_NAME "wreath.protobuf.descriptor"
 
+typedef enum {
+    PB_ATTR_ROUTES,
+    PB_ATTR_ROUTE_ID,
+    PB_ATTR_PATH,
+    PB_ATTR_COUNT,
+    PB_ATTR_ERRORS,
+    PB_ATTR_DURATION_US_SUM,
+    PB_ATTR_DURATION_US_MAX,
+    PB_ATTR_BUCKETS,
+    PB_ATTR_NAME,
+    PB_ATTR_ENTRY_ID,
+    PB_ATTR_FLAGS,
+    PB_ATTR_USER_AGENT_RULE_ID,
+    PB_ATTR_COUNTRY,
+    PB_ATTR_EFFECTIVE_IDS,
+    PB_ATTR_PLAN_ID,
+    PB_ATTR_TERMINAL,
+    PB_ATTR_PROTOCOL,
+    PB_ATTR_BYTES_IN,
+    PB_ATTR_BYTES_OUT,
+    PB_ATTR_STATUS,
+    PB_ATTR_ERROR_CLASS,
+    PB_ATTR_PARENT_SPAN_ID,
+    PB_ATTR_DURATION_US,
+    PB_ATTR_OBSERVED_UNIX_NANO,
+    PB_ATTR_IS_FAILURE,
+    PB_ATTR_CLIENT_FACTS,
+    PB_ATTR_METHOD,
+    PB_ATTR_PHASE_ID,
+    PB_ATTR_COVERAGE,
+    PB_ATTR_DEPENDENCY_ID,
+    PB_ATTR_SEQUENCE,
+    PB_ATTR_START_OFFSET_US,
+    PB_ATTR_PHASES,
+    PB_ATTR_TYPE,
+    PB_ATTR_TEXT_VALUE,
+    PB_ATTR_NUMBER,
+    PB_ATTR_FRACTION,
+    PB_ATTR_TEMPLATE,
+    PB_ATTR_FORMAT,
+    PB_ATTR_EVENT_NAME,
+    PB_ATTR_CELL,
+    PB_ATTR_TRACE_ID,
+    PB_ATTR_SPAN_ID,
+    PB_ATTR_SITE_ID,
+    PB_ATTR_SEVERITY,
+    PB_ATTR_ARGS,
+    PB_ATTR_DROPPED_SIBLINGS,
+    PB_ATTR_FIELDS,
+    PB_ATTR_BY_ID,
+    PB_ATTR_DESCRIPTOR,
+    PB_ATTR_UNKNOWN,
+    PB_ATTR_DUNDER_NAME,
+    PB_ATTR_COUNT_TOTAL,
+} ProtobufAttr;
+
+static PyObject *protobuf_attr_names[PB_ATTR_COUNT_TOTAL];
+
+int
+wreath_protobuf_ready(void)
+{
+    static const char *names[PB_ATTR_COUNT_TOTAL] = {
+        "routes", "route_id", "path", "count", "errors", "duration_us_sum",
+        "duration_us_max", "buckets", "name", "entry_id", "flags",
+        "user_agent_rule_id", "country", "effective_ids", "plan_id",
+        "terminal", "protocol", "bytes_in", "bytes_out", "status",
+        "error_class", "parent_span_id", "duration_us", "observed_unix_nano",
+        "is_failure", "client_facts", "method", "phase_id", "coverage",
+        "dependency_id", "sequence", "start_offset_us", "phases", "type",
+        "text_value", "number", "fraction", "template", "format",
+        "event_name", "cell", "trace_id", "span_id", "site_id", "severity",
+        "args", "dropped_siblings", "fields", "_by_id",
+        "__wreath_protobuf_descriptor__", "__wreath_protobuf_unknown__", "__name__",
+    };
+    for (int index = 0; index < PB_ATTR_COUNT_TOTAL; index++) {
+        protobuf_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (protobuf_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(protobuf_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+protobuf_getattr(PyObject *object, ProtobufAttr attribute)
+{
+    return PyObject_GetAttr(object, protobuf_attr_names[attribute]);
+}
+
 typedef struct {
     uint64_t number;
     int kind;
@@ -627,6 +717,44 @@ done:
  * sugar-free form is what makes a wreath map wire-identical to a declared
  * `map<k, v>`. */
 static int
+pb_encode_map_entry(WreathBytesWriter *w, uint64_t number, int key_kind,
+                    int value_kind, PyObject *value_sub, PyObject *key,
+                    PyObject *value, int depth)
+{
+    WreathBytesWriter entry;
+    if (wreath_writer_init(&entry, 256) < 0) return -1;
+    int failed = 0;
+    int key_default = pb_is_default(key_kind, key);
+    if (key_default < 0) failed = 1;
+    else if (!key_default)
+        failed = pb_encode_single(&entry, 1, key_kind, key) < 0;
+    if (!failed) {
+        if (value_kind == PB_KIND_MESSAGE) {
+            failed = pb_put_tag(&entry, 2, PB_WIRE_LEN) < 0 ||
+                     pb_encode_delimited(&entry, value_sub, value, depth) < 0;
+        }
+        else {
+            int value_default = pb_is_default(value_kind, value);
+            if (value_default < 0) failed = 1;
+            else if (!value_default)
+                failed = pb_encode_single(&entry, 2, value_kind, value) < 0;
+        }
+    }
+    if (failed) {
+        Py_XDECREF(entry.bytes);
+        return -1;
+    }
+    PyObject *encoded = wreath_writer_finish(&entry);
+    if (encoded == NULL) return -1;
+    failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0 ||
+             pb_put_varint(w, (uint64_t)PyBytes_GET_SIZE(encoded)) < 0 ||
+             pb_write(w, PyBytes_AS_STRING(encoded),
+                      PyBytes_GET_SIZE(encoded)) < 0;
+    Py_DECREF(encoded);
+    return failed ? -1 : 0;
+}
+
+static int
 pb_encode_map(WreathBytesWriter *w, uint64_t number, PyObject *subplan, PyObject *mapping,
               int depth)
 {
@@ -639,61 +767,26 @@ pb_encode_map(WreathBytesWriter *w, uint64_t number, PyObject *subplan, PyObject
     }
     PyObject *value_sub = PyTuple_GET_ITEM(value_row, 3);
 
-    PyObject *items = PyMapping_Items(mapping);
-    if (items == NULL) {
-        return -1;
+    if (PyDict_CheckExact(mapping)) {
+        Py_ssize_t position = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(mapping, &position, &key, &value)) {
+            if (pb_encode_map_entry(
+                    w, number, key_kind, value_kind, value_sub,
+                    key, value, depth) < 0) return -1;
+        }
+        return 0;
     }
+    PyObject *items = PyMapping_Items(mapping);
+    if (items == NULL) return -1;
     Py_ssize_t count = PyList_GET_SIZE(items);
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(items, i);
         PyObject *key = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
-
-        WreathBytesWriter entry;
-        if (wreath_writer_init(&entry, 256) < 0) {
-            Py_DECREF(items);
-            return -1;
-        }
-        int failed = 0;
-        int key_default = pb_is_default(key_kind, key);
-        if (key_default < 0) {
-            failed = 1;
-        }
-        else if (!key_default) {
-            failed = pb_encode_single(&entry, 1, key_kind, key) < 0;
-        }
-        if (!failed) {
-            if (value_kind == PB_KIND_MESSAGE) {
-                failed = pb_put_tag(&entry, 2, PB_WIRE_LEN) < 0
-                         || pb_encode_delimited(&entry, value_sub, value, depth) < 0;
-            }
-            else {
-                int value_default = pb_is_default(value_kind, value);
-                if (value_default < 0) {
-                    failed = 1;
-                }
-                else if (!value_default) {
-                    failed = pb_encode_single(&entry, 2, value_kind, value) < 0;
-                }
-            }
-        }
-        if (failed) {
-            Py_XDECREF(entry.bytes);
-            Py_DECREF(items);
-            return -1;
-        }
-        PyObject *encoded = wreath_writer_finish(&entry);
-        if (encoded == NULL) {
-            Py_DECREF(items);
-            return -1;
-        }
-        failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0
-                 || pb_put_varint(w, (uint64_t)PyBytes_GET_SIZE(encoded)) < 0
-                 || pb_write(w, PyBytes_AS_STRING(encoded),
-                             PyBytes_GET_SIZE(encoded))
-                        < 0;
-        Py_DECREF(encoded);
-        if (failed) {
+        if (pb_encode_map_entry(
+                w, number, key_kind, value_kind, value_sub,
+                key, value, depth) < 0) {
             Py_DECREF(items);
             return -1;
         }
@@ -793,6 +886,42 @@ pb_encode_object_delimited(WreathBytesWriter *w, PyObject *message, int depth)
 }
 
 static int
+pb_encode_object_map_entry(WreathBytesWriter *w, uint64_t number,
+                           int key_kind, int value_kind, PyObject *key,
+                           PyObject *value, int depth)
+{
+    WreathBytesWriter entry;
+    if (wreath_writer_init(&entry, 256) < 0) return -1;
+    int failed = 0;
+    int is_default = pb_is_default(key_kind, key);
+    if (is_default < 0) failed = 1;
+    else if (!is_default)
+        failed = pb_encode_single(&entry, 1, key_kind, key) < 0;
+    if (!failed && value_kind == PB_KIND_MESSAGE) {
+        failed = pb_put_tag(&entry, 2, PB_WIRE_LEN) < 0 ||
+                 pb_encode_object_delimited(&entry, value, depth) < 0;
+    }
+    else if (!failed) {
+        is_default = pb_is_default(value_kind, value);
+        if (is_default < 0) failed = 1;
+        else if (!is_default)
+            failed = pb_encode_single(&entry, 2, value_kind, value) < 0;
+    }
+    if (failed) {
+        Py_XDECREF(entry.bytes);
+        return -1;
+    }
+    PyObject *encoded = wreath_writer_finish(&entry);
+    if (encoded == NULL) return -1;
+    failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0 ||
+             pb_put_varint(w, (uint64_t)PyBytes_GET_SIZE(encoded)) < 0 ||
+             pb_write(w, PyBytes_AS_STRING(encoded),
+                      PyBytes_GET_SIZE(encoded)) < 0;
+    Py_DECREF(encoded);
+    return failed ? -1 : 0;
+}
+
+static int
 pb_encode_object_map(WreathBytesWriter *w, uint64_t number, PyObject *subplan,
                      PyObject *mapping, int depth)
 {
@@ -800,53 +929,26 @@ pb_encode_object_map(WreathBytesWriter *w, uint64_t number, PyObject *subplan,
     PyObject *value_row = PyTuple_GET_ITEM(subplan, 1);
     int key_kind = (int)PyLong_AsLong(PyTuple_GET_ITEM(key_row, 1));
     int value_kind = (int)PyLong_AsLong(PyTuple_GET_ITEM(value_row, 1));
-    PyObject *items;
-
     if (PyErr_Occurred()) return -1;
-    items = PyMapping_Items(mapping);
+    if (PyDict_CheckExact(mapping)) {
+        Py_ssize_t position = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(mapping, &position, &key, &value)) {
+            if (pb_encode_object_map_entry(
+                    w, number, key_kind, value_kind,
+                    key, value, depth) < 0) return -1;
+        }
+        return 0;
+    }
+    PyObject *items = PyMapping_Items(mapping);
     if (items == NULL) return -1;
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(items); i++) {
         PyObject *pair = PyList_GET_ITEM(items, i);
         PyObject *key = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        WreathBytesWriter entry;
-        PyObject *encoded;
-        int failed = 0;
-        int is_default;
-
-        if (wreath_writer_init(&entry, 256) < 0) {
-            Py_DECREF(items);
-            return -1;
-        }
-        is_default = pb_is_default(key_kind, key);
-        if (is_default < 0) failed = 1;
-        else if (!is_default) failed = pb_encode_single(&entry, 1, key_kind, key) < 0;
-        if (!failed && value_kind == PB_KIND_MESSAGE) {
-            failed = pb_put_tag(&entry, 2, PB_WIRE_LEN) < 0
-                     || pb_encode_object_delimited(&entry, value, depth) < 0;
-        }
-        else if (!failed) {
-            is_default = pb_is_default(value_kind, value);
-            if (is_default < 0) failed = 1;
-            else if (!is_default) {
-                failed = pb_encode_single(&entry, 2, value_kind, value) < 0;
-            }
-        }
-        if (failed) {
-            Py_XDECREF(entry.bytes);
-            Py_DECREF(items);
-            return -1;
-        }
-        encoded = wreath_writer_finish(&entry);
-        if (encoded == NULL) {
-            Py_DECREF(items);
-            return -1;
-        }
-        failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0
-                 || pb_put_varint(w, (uint64_t)PyBytes_GET_SIZE(encoded)) < 0
-                 || pb_write(w, PyBytes_AS_STRING(encoded), PyBytes_GET_SIZE(encoded)) < 0;
-        Py_DECREF(encoded);
-        if (failed) {
+        if (pb_encode_object_map_entry(
+                w, number, key_kind, value_kind,
+                key, value, depth) < 0) {
             Py_DECREF(items);
             return -1;
         }
@@ -865,15 +967,13 @@ pb_encode_object_repeated(WreathBytesWriter *w, uint64_t number, int kind, int f
     if (kind != PB_KIND_MESSAGE) {
         return pb_encode_repeated(w, number, kind, flags, subplan, items, depth);
     }
-    count = PySequence_Size(items);
-    if (count < 0) return -1;
     fast = PySequence_Fast(items, "repeated field must be a sequence");
     if (fast == NULL) return -1;
-    for (Py_ssize_t i = 0; i < count && i < PySequence_Fast_GET_SIZE(fast); i++) {
-        PyObject *item = Py_NewRef(PySequence_Fast_GET_ITEM(fast, i));
+    count = PySequence_Fast_GET_SIZE(fast);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(fast, i);
         int failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0
                      || pb_encode_object_delimited(w, item, depth) < 0;
-        Py_DECREF(item);
         if (failed) {
             Py_DECREF(fast);
             return -1;
@@ -931,7 +1031,7 @@ pb_encode_compiled_object(WreathBytesWriter *w, PyObject *message,
         Py_DECREF(value);
         if (failed) return -1;
     }
-    unknown = PyObject_GetAttrString(message, "__wreath_protobuf_unknown__");
+    unknown = protobuf_getattr(message, PB_ATTR_UNKNOWN);
     if (unknown == NULL) {
         if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return -1;
         PyErr_Clear();
@@ -954,8 +1054,8 @@ pb_encode_compiled_object(WreathBytesWriter *w, PyObject *message,
 static int
 pb_encode_object(WreathBytesWriter *w, PyObject *message, int depth)
 {
-    PyObject *descriptor_object = PyObject_GetAttrString(
-        (PyObject *)Py_TYPE(message), "__wreath_protobuf_descriptor__");
+    PyObject *descriptor_object = protobuf_getattr(
+        (PyObject *)Py_TYPE(message), PB_ATTR_DESCRIPTOR);
     PbDescriptor *descriptor;
     int result;
     if (descriptor_object == NULL) return -1;
@@ -1143,10 +1243,10 @@ pb_defaults(PyObject *plan)
             item = Py_NewRef(Py_None);
         }
         else if (kind == PB_KIND_STRING) {
-            item = PyUnicode_FromStringAndSize("", 0);
+            item = Py_GetConstant(Py_CONSTANT_EMPTY_STR);
         }
         else if (kind == PB_KIND_BYTES) {
-            item = PyBytes_FromStringAndSize("", 0);
+            item = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
         }
         else if (kind == PB_KIND_BOOL) {
             item = Py_NewRef(Py_False);
@@ -1155,7 +1255,7 @@ pb_defaults(PyObject *plan)
             item = PyFloat_FromDouble(0.0);
         }
         else {
-            item = PyLong_FromLong(0);
+            item = Py_GetConstant(Py_CONSTANT_ZERO);
         }
         if (item == NULL) {
             Py_DECREF(values);
@@ -1253,15 +1353,15 @@ pb_compiled_defaults(PbDescriptor *descriptor)
                  field->kind == PB_KIND_MESSAGE)
             item = Py_NewRef(Py_None);
         else if (field->kind == PB_KIND_STRING)
-            item = PyUnicode_FromStringAndSize("", 0);
+            item = Py_GetConstant(Py_CONSTANT_EMPTY_STR);
         else if (field->kind == PB_KIND_BYTES)
-            item = PyBytes_FromStringAndSize(NULL, 0);
+            item = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
         else if (field->kind == PB_KIND_BOOL)
             item = Py_NewRef(Py_False);
         else if (field->kind == PB_KIND_DOUBLE || field->kind == PB_KIND_FLOAT)
             item = PyFloat_FromDouble(0.0);
         else
-            item = PyLong_FromLong(0);
+            item = Py_GetConstant(Py_CONSTANT_ZERO);
         if (item == NULL) {
             pb_compiled_values_clear(values, descriptor->count);
             return NULL;
@@ -1289,12 +1389,12 @@ static PyObject *
 pb_declared_default(int kind)
 {
     if (kind == PB_KIND_MESSAGE) return Py_NewRef(Py_None);
-    if (kind == PB_KIND_STRING) return PyUnicode_FromStringAndSize("", 0);
-    if (kind == PB_KIND_BYTES) return PyBytes_FromStringAndSize(NULL, 0);
+    if (kind == PB_KIND_STRING) return Py_GetConstant(Py_CONSTANT_EMPTY_STR);
+    if (kind == PB_KIND_BYTES) return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     if (kind == PB_KIND_BOOL) return Py_NewRef(Py_False);
     if (kind == PB_KIND_DOUBLE || kind == PB_KIND_FLOAT)
         return PyFloat_FromDouble(0.0);
-    return PyLong_FromLong(0);
+    return Py_GetConstant(Py_CONSTANT_ZERO);
 }
 
 static PyObject *
@@ -1599,10 +1699,7 @@ pb_decode_values(PyObject *plan, const uint8_t *data, Py_ssize_t len, int depth)
         Py_DECREF(values);
         return NULL;
     }
-    PyObject *result = PyTuple_Pack(2, values, unknown_bytes);
-    Py_DECREF(values);
-    Py_DECREF(unknown_bytes);
-    return result;
+    return wreath_tuple2_from_owned(values, unknown_bytes);
 
 error:
     Py_XDECREF(unknown.bytes);
@@ -1937,8 +2034,7 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
                              "protobuf message field %zd has no holder", index);
                 goto error;
             }
-            field->nested_descriptor = PyObject_GetAttrString(
-                holder, "__wreath_protobuf_descriptor__");
+            field->nested_descriptor = protobuf_getattr(holder, PB_ATTR_DESCRIPTOR);
             if (field->nested_descriptor == NULL) goto error;
             if (pb_descriptor_from_object(field->nested_descriptor) == NULL)
                 goto error;
@@ -2073,8 +2169,7 @@ wreath_protobuf_decode_message(PyObject *Py_UNUSED(self), PyObject *args)
     Py_buffer view;
 
     if (!PyArg_ParseTuple(args, "Oy*:protobuf_decode_message", &cls, &view)) return NULL;
-    descriptor_object = PyObject_GetAttrString(
-        cls, "__wreath_protobuf_descriptor__");
+    descriptor_object = protobuf_getattr(cls, PB_ATTR_DESCRIPTOR);
     if (descriptor_object == NULL) {
         PyBuffer_Release(&view);
         return NULL;
@@ -2304,8 +2399,7 @@ pb_encode_otlp_json(WreathBytesWriter *writer, PyObject *cls,
         PyErr_SetString(PyExc_TypeError, "OTLP message value must be a dict");
         return -1;
     }
-    descriptor_object = PyObject_GetAttrString(
-        cls, "__wreath_protobuf_descriptor__");
+    descriptor_object = protobuf_getattr(cls, PB_ATTR_DESCRIPTOR);
     if (descriptor_object == NULL) return -1;
     descriptor = pb_descriptor_from_object(descriptor_object);
     if (descriptor == NULL) {
@@ -2324,7 +2418,7 @@ pb_encode_otlp_json(WreathBytesWriter *writer, PyObject *cls,
             }
         }
         if (found < 0) {
-            PyObject *name = PyObject_GetAttrString(cls, "__name__");
+            PyObject *name = protobuf_getattr(cls, PB_ATTR_DUNDER_NAME);
             if (name != NULL) {
                 PyErr_Format(PyExc_ValueError,
                              "%U has no field for OTLP/JSON key %R", name, key);
@@ -2389,13 +2483,12 @@ pb_otlp_from_json(PyObject *cls, PyObject *data, int depth)
         PyErr_SetString(PyExc_TypeError, "OTLP message value must be a dict");
         return NULL;
     }
-    descriptor_object = PyObject_GetAttrString(
-        cls, "__wreath_protobuf_descriptor__");
+    descriptor_object = protobuf_getattr(cls, PB_ATTR_DESCRIPTOR);
     if (descriptor_object == NULL) return NULL;
     descriptor = pb_descriptor_from_object(descriptor_object);
     if (descriptor == NULL) goto done;
     if (PyDict_GET_SIZE(data) > descriptor->count) {
-        PyObject *name = PyObject_GetAttrString(cls, "__name__");
+        PyObject *name = protobuf_getattr(cls, PB_ATTR_DUNDER_NAME);
         if (name != NULL) {
             PyErr_Format(
                 PyExc_ValueError,
@@ -2414,7 +2507,7 @@ pb_otlp_from_json(PyObject *cls, PyObject *data, int depth)
         if (index_object != NULL) index = PyLong_AsSsize_t(index_object);
         else if (PyErr_Occurred()) goto done;
         if (index < 0) {
-            PyObject *name = PyObject_GetAttrString(cls, "__name__");
+            PyObject *name = protobuf_getattr(cls, PB_ATTR_DUNDER_NAME);
             if (name != NULL) {
                 PyErr_Format(PyExc_ValueError,
                              "%U has no field for OTLP/JSON key %R", name, key);
@@ -2616,6 +2709,19 @@ otlp_attribute_bool(WreathBytesWriter *writer, uint64_t field,
 }
 
 static int
+otlp_resource_attribute(WreathBytesWriter *writer, PyObject *key,
+                        PyObject *value)
+{
+    int is_service = PyUnicode_Check(key) &&
+        PyUnicode_CompareWithASCIIString(key, "service.name") == 0;
+    if (is_service) return 0;
+    Py_ssize_t key_length;
+    const char *key_data = PyUnicode_AsUTF8AndSize(key, &key_length);
+    return key_data == NULL || otlp_attribute_string(
+        writer, 1, key_data, key_length, value) < 0 ? -1 : 0;
+}
+
+static int
 otlp_resource(WreathBytesWriter *writer, PyObject *attributes)
 {
     PyObject *service = NULL;
@@ -2635,25 +2741,27 @@ otlp_resource(WreathBytesWriter *writer, PyObject *attributes)
     } else if (otlp_attribute_text(
                    writer, 1, "service.name", "wreath") < 0) return -1;
     if (attributes != Py_None) {
-        PyObject *items = PyMapping_Items(attributes);
-        if (items == NULL) return -1;
-        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(items); index++) {
-            PyObject *pair = PyList_GET_ITEM(items, index);
-            PyObject *key = PyTuple_GET_ITEM(pair, 0);
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            Py_ssize_t key_length;
-            const char *key_data;
-            int is_service = PyUnicode_Check(key) &&
-                PyUnicode_CompareWithASCIIString(key, "service.name") == 0;
-            if (is_service) continue;
-            key_data = PyUnicode_AsUTF8AndSize(key, &key_length);
-            if (key_data == NULL || otlp_attribute_string(
-                    writer, 1, key_data, key_length, value) < 0) {
-                Py_DECREF(items);
-                return -1;
+        if (PyDict_CheckExact(attributes)) {
+            Py_ssize_t position = 0;
+            PyObject *key, *value;
+            while (PyDict_Next(attributes, &position, &key, &value)) {
+                if (otlp_resource_attribute(writer, key, value) < 0) return -1;
             }
         }
-        Py_DECREF(items);
+        else {
+            PyObject *items = PyMapping_Items(attributes);
+            if (items == NULL) return -1;
+            for (Py_ssize_t index = 0; index < PyList_GET_SIZE(items); index++) {
+                PyObject *pair = PyList_GET_ITEM(items, index);
+                if (otlp_resource_attribute(
+                        writer, PyTuple_GET_ITEM(pair, 0),
+                        PyTuple_GET_ITEM(pair, 1)) < 0) {
+                    Py_DECREF(items);
+                    return -1;
+                }
+            }
+            Py_DECREF(items);
+        }
     }
     return otlp_end(writer, &resource);
 }
@@ -2664,15 +2772,15 @@ otlp_route_paths(PyObject *image)
     PyObject *result = PyDict_New();
     PyObject *rows_object = NULL, *rows = NULL;
     if (result == NULL || image == Py_None) return result;
-    rows_object = PyObject_GetAttrString(image, "routes");
+    rows_object = protobuf_getattr(image, PB_ATTR_ROUTES);
     if (rows_object == NULL) goto error;
     rows = PySequence_Fast(rows_object, "metadata routes must be a sequence");
     Py_DECREF(rows_object);
     if (rows == NULL) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(rows); index++) {
         PyObject *row = PySequence_Fast_GET_ITEM(rows, index);
-        PyObject *route_id = PyObject_GetAttrString(row, "route_id");
-        PyObject *path = PyObject_GetAttrString(row, "path");
+        PyObject *route_id = protobuf_getattr(row, PB_ATTR_ROUTE_ID);
+        PyObject *path = protobuf_getattr(row, PB_ATTR_PATH);
         if (route_id == NULL || path == NULL ||
             PyDict_SetItem(result, route_id, path) < 0) {
             Py_XDECREF(path);
@@ -2785,7 +2893,7 @@ wreath_protobuf_encode_otlp_metrics(PyObject *Py_UNUSED(self), PyObject *args)
                           &attributes)) return NULL;
     if (pb_read_int(start_object, PB_KIND_FIXED64, &start_ns) < 0 ||
         pb_read_int(now_object, PB_KIND_FIXED64, &now_ns) < 0) return NULL;
-    routes_object = PyObject_GetAttrString(snapshot, "routes");
+    routes_object = protobuf_getattr(snapshot, PB_ATTR_ROUTES);
     if (routes_object == NULL) return NULL;
     routes = PySequence_Fast(routes_object, "snapshot routes must be a sequence");
     Py_DECREF(routes_object);
@@ -2805,12 +2913,12 @@ wreath_protobuf_encode_otlp_metrics(PyObject *Py_UNUSED(self), PyObject *args)
         PyObject *route = PySequence_Fast_GET_ITEM(routes, index);
         PyObject *count_object = NULL, *errors_object = NULL;
         PyObject *sum_object = NULL, *max_object = NULL, *buckets_object = NULL;
-        metrics[index].route_id = PyObject_GetAttrString(route, "route_id");
-        count_object = PyObject_GetAttrString(route, "count");
-        errors_object = PyObject_GetAttrString(route, "errors");
-        sum_object = PyObject_GetAttrString(route, "duration_us_sum");
-        max_object = PyObject_GetAttrString(route, "duration_us_max");
-        buckets_object = PyObject_GetAttrString(route, "buckets");
+        metrics[index].route_id = protobuf_getattr(route, PB_ATTR_ROUTE_ID);
+        count_object = protobuf_getattr(route, PB_ATTR_COUNT);
+        errors_object = protobuf_getattr(route, PB_ATTR_ERRORS);
+        sum_object = protobuf_getattr(route, PB_ATTR_DURATION_US_SUM);
+        max_object = protobuf_getattr(route, PB_ATTR_DURATION_US_MAX);
+        buckets_object = protobuf_getattr(route, PB_ATTR_BUCKETS);
         if (metrics[index].route_id == NULL || count_object == NULL ||
             errors_object == NULL || sum_object == NULL || max_object == NULL ||
             buckets_object == NULL ||
@@ -2937,7 +3045,7 @@ otlp_u64_bytes(WreathBytesWriter *writer, uint64_t field, uint64_t value)
 static PyObject *
 otlp_enum_lower(PyObject *value)
 {
-    PyObject *name = PyObject_GetAttrString(value, "name");
+    PyObject *name = protobuf_getattr(value, PB_ATTR_NAME);
     PyObject *lower;
     if (name == NULL) return NULL;
     lower = PyObject_CallMethod(name, "lower", NULL);
@@ -2957,14 +3065,14 @@ otlp_trace_maps(PyObject *image, PyObject **routes_out, PyObject **names_out)
         *names_out = names;
         return 0;
     }
-    rows_object = PyObject_GetAttrString(image, "routes");
+    rows_object = protobuf_getattr(image, PB_ATTR_ROUTES);
     if (rows_object == NULL) goto error;
     rows = PySequence_Fast(rows_object, "metadata routes must be a sequence");
     Py_CLEAR(rows_object);
     if (rows == NULL) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(rows); index++) {
         PyObject *row = PySequence_Fast_GET_ITEM(rows, index);
-        PyObject *route_id = PyObject_GetAttrString(row, "route_id");
+        PyObject *route_id = protobuf_getattr(row, PB_ATTR_ROUTE_ID);
         if (route_id == NULL || PyDict_SetItem(routes, route_id, row) < 0) {
             Py_XDECREF(route_id);
             goto error;
@@ -2982,13 +3090,13 @@ otlp_trace_maps(PyObject *image, PyObject **routes_out, PyObject **names_out)
             if (rows == NULL) goto error;
             for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(rows); index++) {
                 PyObject *row = PySequence_Fast_GET_ITEM(rows, index);
-                PyObject *entry_id = PyObject_GetAttrString(row, "entry_id");
+                PyObject *entry_id = protobuf_getattr(row, PB_ATTR_ENTRY_ID);
                 int contains;
                 if (entry_id == NULL) goto error;
                 contains = PyDict_Contains(names, entry_id);
                 if (contains < 0) { Py_DECREF(entry_id); goto error; }
                 if (!contains) {
-                    PyObject *name = PyObject_GetAttrString(row, "name");
+                    PyObject *name = protobuf_getattr(row, PB_ATTR_NAME);
                     if (name == NULL || PyDict_SetItem(names, entry_id, name) < 0) {
                         Py_XDECREF(name); Py_DECREF(entry_id); goto error;
                     }
@@ -3025,9 +3133,9 @@ otlp_client_fact_attributes(WreathBytesWriter *writer, PyObject *facts)
     PyObject *flags_object = NULL, *rule_object = NULL, *country = NULL;
     uint64_t flags, rule_id;
     int failed = -1;
-    flags_object = PyObject_GetAttrString(facts, "flags");
-    rule_object = PyObject_GetAttrString(facts, "user_agent_rule_id");
-    country = PyObject_GetAttrString(facts, "country");
+    flags_object = protobuf_getattr(facts, PB_ATTR_FLAGS);
+    rule_object = protobuf_getattr(facts, PB_ATTR_USER_AGENT_RULE_ID);
+    country = protobuf_getattr(facts, PB_ATTR_COUNTRY);
     if (flags_object == NULL || rule_object == NULL || country == NULL ||
         pb_read_int(flags_object, PB_KIND_UINT64, &flags) < 0 ||
         pb_read_int(rule_object, PB_KIND_UINT64, &rule_id) < 0) goto done;
@@ -3073,20 +3181,20 @@ otlp_server_span(WreathBytesWriter *writer, PyObject *trace,
     uint64_t end, duration_us, start, span_raw, parent_raw = 0;
     long protocol, status_code, error_code;
     int failure;
-    effective = PyObject_GetAttrString(trace, "effective_ids");
-    route_id = PyObject_GetAttrString(trace, "route_id");
-    plan_id = PyObject_GetAttrString(trace, "plan_id");
-    terminal = PyObject_GetAttrString(trace, "terminal");
-    protocol_object = PyObject_GetAttrString(trace, "protocol");
-    bytes_in = PyObject_GetAttrString(trace, "bytes_in");
-    bytes_out = PyObject_GetAttrString(trace, "bytes_out");
-    status = PyObject_GetAttrString(trace, "status");
-    error_class = PyObject_GetAttrString(trace, "error_class");
-    parent_span = PyObject_GetAttrString(trace, "parent_span_id");
-    duration = PyObject_GetAttrString(trace, "duration_us");
-    observed = PyObject_GetAttrString(trace, "observed_unix_nano");
-    failure_object = PyObject_GetAttrString(trace, "is_failure");
-    client_facts = PyObject_GetAttrString(trace, "client_facts");
+    effective = protobuf_getattr(trace, PB_ATTR_EFFECTIVE_IDS);
+    route_id = protobuf_getattr(trace, PB_ATTR_ROUTE_ID);
+    plan_id = protobuf_getattr(trace, PB_ATTR_PLAN_ID);
+    terminal = protobuf_getattr(trace, PB_ATTR_TERMINAL);
+    protocol_object = protobuf_getattr(trace, PB_ATTR_PROTOCOL);
+    bytes_in = protobuf_getattr(trace, PB_ATTR_BYTES_IN);
+    bytes_out = protobuf_getattr(trace, PB_ATTR_BYTES_OUT);
+    status = protobuf_getattr(trace, PB_ATTR_STATUS);
+    error_class = protobuf_getattr(trace, PB_ATTR_ERROR_CLASS);
+    parent_span = protobuf_getattr(trace, PB_ATTR_PARENT_SPAN_ID);
+    duration = protobuf_getattr(trace, PB_ATTR_DURATION_US);
+    observed = protobuf_getattr(trace, PB_ATTR_OBSERVED_UNIX_NANO);
+    failure_object = protobuf_getattr(trace, PB_ATTR_IS_FAILURE);
+    client_facts = protobuf_getattr(trace, PB_ATTR_CLIENT_FACTS);
     if (effective == NULL || !PyTuple_Check(effective) ||
         PyTuple_GET_SIZE(effective) != 2 || route_id == NULL || plan_id == NULL ||
         terminal == NULL || protocol_object == NULL || bytes_in == NULL ||
@@ -3112,8 +3220,8 @@ otlp_server_span(WreathBytesWriter *writer, PyObject *trace,
     if (PyErr_Occurred() || failure < 0 || terminal_text == NULL) goto error;
     if (PyDict_GetItemRef(routes, route_id, &route) < 0) goto error;
     if (route != NULL) {
-        method = PyObject_GetAttrString(route, "method");
-        path = PyObject_GetAttrString(route, "path");
+        method = protobuf_getattr(route, PB_ATTR_METHOD);
+        path = protobuf_getattr(route, PB_ATTR_PATH);
         if (method == NULL || path == NULL) goto error;
         name = PyUnicode_FromFormat("%U %U", method, path);
     } else {
@@ -3195,12 +3303,12 @@ otlp_phase_span(WreathBytesWriter *writer, PyObject *phase,
     uint64_t dependency_raw, sequence_raw, offset_raw, duration_raw;
     uint64_t start, end, child;
     long phase_kind;
-    phase_id = PyObject_GetAttrString(phase, "phase_id");
-    coverage = PyObject_GetAttrString(phase, "coverage");
-    dependency = PyObject_GetAttrString(phase, "dependency_id");
-    sequence = PyObject_GetAttrString(phase, "sequence");
-    start_offset = PyObject_GetAttrString(phase, "start_offset_us");
-    duration = PyObject_GetAttrString(phase, "duration_us");
+    phase_id = protobuf_getattr(phase, PB_ATTR_PHASE_ID);
+    coverage = protobuf_getattr(phase, PB_ATTR_COVERAGE);
+    dependency = protobuf_getattr(phase, PB_ATTR_DEPENDENCY_ID);
+    sequence = protobuf_getattr(phase, PB_ATTR_SEQUENCE);
+    start_offset = protobuf_getattr(phase, PB_ATTR_START_OFFSET_US);
+    duration = protobuf_getattr(phase, PB_ATTR_DURATION_US);
     if (phase_id == NULL || coverage == NULL || dependency == NULL || sequence == NULL ||
         start_offset == NULL || duration == NULL ||
         pb_read_int(dependency, PB_KIND_UINT64, &dependency_raw) < 0 ||
@@ -3287,7 +3395,7 @@ wreath_protobuf_encode_otlp_traces(PyObject *Py_UNUSED(self), PyObject *args)
         uint64_t span_raw, parent_start;
         if (otlp_server_span(&writer, trace, routes, &trace_id, &span_id,
                              &span_raw, &parent_start) < 0) goto error;
-        phases_object = PyObject_GetAttrString(trace, "phases");
+        phases_object = protobuf_getattr(trace, PB_ATTR_PHASES);
         if (phases_object == NULL) {
             Py_DECREF(span_id); Py_DECREF(trace_id); goto error;
         }
@@ -3316,17 +3424,17 @@ error:
 static PyObject *
 otlp_log_display(PyObject *argument, int known)
 {
-    PyObject *type = PyObject_GetAttrString(argument, "type");
+    PyObject *type = protobuf_getattr(argument, PB_ATTR_TYPE);
     long kind;
     if (type == NULL) return NULL;
     kind = PyLong_AsLong(type);
     Py_DECREF(type);
     if (kind == -1 && PyErr_Occurred()) return NULL;
-    if (kind == 4) return PyObject_GetAttrString(argument, "text_value");
-    if (kind == 2) return PyObject_GetAttrString(argument, "number");
-    if (kind == 3) return PyObject_GetAttrString(argument, "fraction");
+    if (kind == 4) return protobuf_getattr(argument, PB_ATTR_TEXT_VALUE);
+    if (kind == 2) return protobuf_getattr(argument, PB_ATTR_NUMBER);
+    if (kind == 3) return protobuf_getattr(argument, PB_ATTR_FRACTION);
     if (kind == 1) {
-        PyObject *number = PyObject_GetAttrString(argument, "number");
+        PyObject *number = protobuf_getattr(argument, PB_ATTR_NUMBER);
         int truth;
         if (number == NULL) return NULL;
         truth = PyObject_IsTrue(number);
@@ -3334,7 +3442,7 @@ otlp_log_display(PyObject *argument, int known)
         return truth < 0 ? NULL : Py_NewRef(truth ? Py_True : Py_False);
     }
     if (kind == 5 || kind == 6) {
-        PyObject *number = PyObject_GetAttrString(argument, "number");
+        PyObject *number = protobuf_getattr(argument, PB_ATTR_NUMBER);
         PyObject *text;
         unsigned long long value;
         if (number == NULL) return NULL;
@@ -3381,14 +3489,12 @@ otlp_attribute_object(WreathBytesWriter *writer, uint64_t field,
 static PyObject *
 otlp_log_render(PyObject *site, PyObject *values)
 {
-    PyObject *template = PyObject_GetAttrString(site, "template");
-    PyObject *method = NULL, *empty = NULL, *rendered = NULL;
+    PyObject *template = protobuf_getattr(site, PB_ATTR_TEMPLATE);
+    PyObject *method = NULL, *rendered = NULL;
     if (template == NULL) return NULL;
-    method = PyObject_GetAttrString(template, "format");
-    empty = PyTuple_New(0);
-    if (method != NULL && empty != NULL)
-        rendered = PyObject_Call(method, empty, values);
-    Py_XDECREF(empty);
+    method = protobuf_getattr(template, PB_ATTR_FORMAT);
+    if (method != NULL)
+        rendered = PyObject_VectorcallDict(method, NULL, 0, values);
     Py_XDECREF(method);
     Py_DECREF(template);
     if (rendered != NULL) return rendered;
@@ -3397,7 +3503,7 @@ otlp_log_render(PyObject *site, PyObject *values)
         !PyErr_ExceptionMatches(PyExc_ValueError)) return NULL;
     PyErr_Clear();
     {
-        PyObject *event_name = PyObject_GetAttrString(site, "event_name");
+        PyObject *event_name = protobuf_getattr(site, PB_ATTR_EVENT_NAME);
         if (event_name == NULL) return NULL;
         rendered = PyUnicode_FromFormat("%U %R", event_name, values);
         Py_DECREF(event_name);
@@ -3418,11 +3524,11 @@ otlp_log_record(WreathBytesWriter *writer, PyObject *record, PyObject *sites)
     uint64_t stamp, route_raw, dropped_raw;
     long severity_number;
     int trace_truth, span_truth, correlated;
-    cell = PyObject_GetAttrString(record, "cell");
-    observed = PyObject_GetAttrString(record, "observed_unix_nano");
-    trace_id = PyObject_GetAttrString(record, "trace_id");
-    span_id = PyObject_GetAttrString(record, "span_id");
-    route_id = PyObject_GetAttrString(record, "route_id");
+    cell = protobuf_getattr(record, PB_ATTR_CELL);
+    observed = protobuf_getattr(record, PB_ATTR_OBSERVED_UNIX_NANO);
+    trace_id = protobuf_getattr(record, PB_ATTR_TRACE_ID);
+    span_id = protobuf_getattr(record, PB_ATTR_SPAN_ID);
+    route_id = protobuf_getattr(record, PB_ATTR_ROUTE_ID);
     if (cell == NULL || observed == NULL || trace_id == NULL ||
         span_id == NULL || route_id == NULL ||
         pb_read_int(observed, PB_KIND_FIXED64, &stamp) < 0 ||
@@ -3430,10 +3536,10 @@ otlp_log_record(WreathBytesWriter *writer, PyObject *record, PyObject *sites)
     trace_truth = PyObject_IsTrue(trace_id);
     span_truth = PyObject_IsTrue(span_id);
     if (trace_truth < 0 || span_truth < 0) goto error;
-    site_id = PyObject_GetAttrString(cell, "site_id");
-    severity = PyObject_GetAttrString(cell, "severity");
-    args_object = PyObject_GetAttrString(cell, "args");
-    dropped = PyObject_GetAttrString(cell, "dropped_siblings");
+    site_id = protobuf_getattr(cell, PB_ATTR_SITE_ID);
+    severity = protobuf_getattr(cell, PB_ATTR_SEVERITY);
+    args_object = protobuf_getattr(cell, PB_ATTR_ARGS);
+    dropped = protobuf_getattr(cell, PB_ATTR_DROPPED_SIBLINGS);
     if (site_id == NULL || severity == NULL || args_object == NULL || dropped == NULL ||
         pb_read_int(dropped, PB_KIND_INT64, &dropped_raw) < 0) goto error;
     site_index = PyLong_AsSsize_t(site_id);
@@ -3449,12 +3555,12 @@ otlp_log_record(WreathBytesWriter *writer, PyObject *record, PyObject *sites)
     if (arguments == NULL) goto error;
     argument_count = PySequence_Fast_GET_SIZE(arguments);
     if (site != NULL) {
-        fields_object = PyObject_GetAttrString(site, "fields");
+        fields_object = protobuf_getattr(site, PB_ATTR_FIELDS);
         if (fields_object == NULL) goto error;
         fields = PySequence_Fast(fields_object, "log fields must be a sequence");
         if (fields == NULL) goto error;
         field_count = PySequence_Fast_GET_SIZE(fields);
-        event_name = PyObject_GetAttrString(site, "event_name");
+        event_name = protobuf_getattr(site, PB_ATTR_EVENT_NAME);
         if (event_name == NULL) goto error;
     }
     values = PyDict_New();
@@ -3465,7 +3571,8 @@ otlp_log_record(WreathBytesWriter *writer, PyObject *record, PyObject *sites)
         PyObject *key, *value;
         int known = site != NULL && index < field_count;
         if (known) {
-            key = PyObject_GetAttrString(PySequence_Fast_GET_ITEM(fields, index), "name");
+            key = protobuf_getattr(
+                PySequence_Fast_GET_ITEM(fields, index), PB_ATTR_NAME);
         } else {
             key = PyUnicode_FromFormat("arg%zd", index);
         }
@@ -3477,8 +3584,8 @@ otlp_log_record(WreathBytesWriter *writer, PyObject *record, PyObject *sites)
     }
     if (site != NULL) {
         for (Py_ssize_t index = 0; index < field_count; index++) {
-            PyObject *key = PyObject_GetAttrString(
-                PySequence_Fast_GET_ITEM(fields, index), "name");
+            PyObject *key = protobuf_getattr(
+                PySequence_Fast_GET_ITEM(fields, index), PB_ATTR_NAME);
             int contains;
             if (key == NULL) goto error;
             contains = PyDict_Contains(values, key);
@@ -3565,7 +3672,7 @@ wreath_protobuf_encode_otlp_logs(PyObject *Py_UNUSED(self), PyObject *args)
     if (records == NULL) return NULL;
     count = PySequence_Fast_GET_SIZE(records);
     if (count == 0) { Py_DECREF(records); return PyBytes_FromStringAndSize(NULL, 0); }
-    sites = PyObject_GetAttrString(registry, "_by_id");
+    sites = protobuf_getattr(registry, PB_ATTR_BY_ID);
     if (sites == NULL || !PyList_Check(sites)) {
         if (sites != NULL) PyErr_SetString(
             PyExc_TypeError, "log registry must own a site list");

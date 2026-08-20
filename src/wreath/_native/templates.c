@@ -262,15 +262,14 @@ raise_render(int line, PyObject *message)
         return;
     }
     PyObject *kwargs = Py_BuildValue("{s:i}", "line", line);
-    PyObject *args = PyTuple_Pack(1, message);
-    if (kwargs != NULL && args != NULL) {
-        PyObject *exc = PyObject_Call(RenderError, args, kwargs);
+    if (kwargs != NULL) {
+        PyObject *call_args[] = {message};
+        PyObject *exc = PyObject_VectorcallDict(RenderError, call_args, 1, kwargs);
         if (exc != NULL) {
             PyErr_SetObject(RenderError, exc);
             Py_DECREF(exc);
         }
     }
-    Py_XDECREF(args);
     Py_XDECREF(kwargs);
     Py_DECREF(message);
 }

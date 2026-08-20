@@ -14,6 +14,8 @@ from wreath.organizations import (
     Invitation,
     Membership,
     Organization,
+    OrganizationStore,
+    PostgresOrganizationStore,
 )
 
 ROLES = frozenset({"admin", "member", "billing"})
@@ -156,9 +158,7 @@ async def test_an_invitation_is_single_use() -> None:
 @pytest.mark.asyncio
 async def test_an_expired_invitation_is_refused_distinctly() -> None:
     store = _store()
-    invitation = await store.invite(
-        "acme", "new@example.com", roles={"member"}, ttl=60, now=1000.0
-    )
+    invitation = await store.invite("acme", "new@example.com", roles={"member"}, ttl=60, now=1000.0)
     with pytest.raises(ValueError) as caught:
         await store.accept(invitation.token, "alice", now=1061.0)
     assert str(caught.value) == "invitation has expired"
@@ -263,3 +263,144 @@ async def test_invite_and_accept_default_their_clock_to_the_wall_clock() -> None
     assert invitation.expires_at is not None
     membership = await store.accept(invitation.token, "alice")
     assert membership.organization == "acme"
+
+
+# --- durable PostgreSQL store -----------------------------------------------
+
+
+class _Statement:
+    def __init__(self, database: _Database, name: str, sql: str, workload: str) -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.database = database
+        self.name = name
+        self.sql = sql
+        self.workload = workload
+
+    async def fetchrow(self, *args: object) -> object:
+        self.calls.append(args)
+        return self.database.rows.get(self.name)
+
+    async def fetch(self, *args: object) -> tuple[object, ...]:
+        self.calls.append(args)
+        result = self.database.rows.get(self.name, ())
+        return result if isinstance(result, tuple) else ()
+
+    async def execute(self, *args: object) -> str:
+        self.calls.append(args)
+        return self.database.statuses.get(self.name, "UPDATE 0")
+
+
+class _Database:
+    def __init__(self) -> None:
+        self.rows: dict[str, object] = {}
+        self.statements: dict[str, _Statement] = {}
+        self.statuses: dict[str, str] = {}
+
+    def statement(self, name: str, sql: str, *, workload: str) -> _Statement:
+        prepared = _Statement(self, name, sql, workload)
+        self.statements[name] = prepared
+        return prepared
+
+
+def _postgres(database: _Database | None = None) -> PostgresOrganizationStore:
+    return PostgresOrganizationStore(database or _Database(), roles=ROLES)
+
+
+def test_the_postgres_store_satisfies_the_public_protocol() -> None:
+    assert isinstance(_postgres(), OrganizationStore)
+
+
+def test_the_postgres_store_offers_all_three_durable_tables() -> None:
+    store = _postgres()
+    claim = store.component()
+    assert claim.relations == (
+        "wreath_organization",
+        "wreath_organization_membership",
+        "wreath_organization_invitation",
+    )
+    sql = store.schema_sql()
+    assert "PRIMARY KEY (organization_id, user_id)" in sql
+    assert "token_hash bytea PRIMARY KEY" in sql
+    assert "accepted_by text" in sql
+    assert "CREATE INDEX" in sql
+
+
+async def test_postgres_statements_are_lazy_and_reads_use_the_read_pool() -> None:
+    database = _Database()
+    store = _postgres(database)
+    assert database.statements == {}
+
+    assert await store.organization("missing") is None
+
+    statement = database.statements["wreath_organization_organization"]
+    assert statement.workload == "read"
+    assert statement.calls == [("missing",)]
+
+
+async def test_acceptance_consumes_and_writes_membership_in_one_statement() -> None:
+    database = _Database()
+    database.rows["wreath_organization_accept"] = (
+        "acme",
+        "alice",
+        '["member"]',
+    )
+    store = _postgres(database)
+
+    membership = await store.accept("secret-token", "alice")
+
+    assert membership == Membership("acme", "alice", frozenset({"member"}))
+    statement = database.statements["wreath_organization_accept"]
+    assert "UPDATE wreath_organization_invitation" in statement.sql
+    assert "INSERT INTO wreath_organization_membership" in statement.sql
+    assert "SELECT organization_id, $2::text, roles FROM accepted" in statement.sql
+    digest, subject = statement.calls[0]
+    assert digest != b"secret-token"
+    assert isinstance(digest, bytes) and len(digest) == 32
+    assert subject == "alice"
+
+
+async def test_an_accepted_postgres_invitation_stays_consumed_for_a_new_store() -> None:
+    """A fresh object represents the API process after a restart."""
+    database = _Database()
+    database.rows["wreath_organization_invitation_state"] = ("alice", False)
+
+    with pytest.raises(ValueError, match="already been accepted"):
+        await _postgres(database).accept("spent", "mallory")
+
+    statement = database.statements["wreath_organization_invitation_state"]
+    assert statement.workload == "write"
+
+
+@pytest.mark.parametrize("roles", ["{}", '["member", 1]', '["undeclared"]'])
+async def test_postgres_roles_refuse_malformed_or_undeclared_database_rows(
+    roles: str,
+) -> None:
+    database = _Database()
+    database.rows["wreath_organization_accept"] = ("acme", "alice", roles)
+
+    with pytest.raises(ValueError, match="roles"):
+        await _postgres(database).accept("secret-token", "alice")
+
+
+def test_a_configured_authorizer_registers_the_durable_organization_schema() -> None:
+    from wreath import Wreath
+    from wreath.authorization import CedarAuthorizer, CedarPolicies
+    from wreath.organizations import Memberships
+
+    database = _Database()
+    store = _postgres(database)
+    app = Wreath()
+    app.configure_auth(
+        object(),
+        CedarAuthorizer(
+            engine=CedarPolicies(
+                "permit (principal, action, resource) when { context.organizations "
+                '.contains("acme") };'
+            ),
+            organizations=Memberships(store),
+        ),
+    )
+
+    assert [claim.name for claim in app.schema_components()] == ["organizations"]
+    grouped = app._components_by_database(app.schema_components())
+    assert grouped == {database: [store.component()]}

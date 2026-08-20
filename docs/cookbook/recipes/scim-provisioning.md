@@ -9,12 +9,16 @@ model you already have, not a second copy of it:
 from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, CedarPolicies
-from wreath.organizations import InMemoryOrganizationStore, Memberships, scim_router
-from wreath.users import InMemoryUserStore
+from wreath.organizations import Memberships, PostgresOrganizationStore, scim_router
+from wreath.users import OrmUserStore, default_user_model
 
 app = Wreath()
-users = InMemoryUserStore()
-organizations = InMemoryOrganizationStore(roles={"admin", "member", "billing"})
+database = app.postgres("main", dsn=SETTINGS.database_url)
+User = default_user_model()
+users = OrmUserStore(session, User)
+organizations = PostgresOrganizationStore(
+    database, roles={"admin", "member", "billing"}
+)
 
 POLICY = """
 permit(principal == User::"acme-directory",
@@ -33,6 +37,12 @@ app.configure_auth(
 app.include_router(scim_router(app, users=users, organizations=organizations,
                                organization="acme"))
 ```
+
+Here `session` is the application transaction serving the user model; include
+`User` in the application's migrations. The organisation tables are discovered
+through the configured authorizer and applied at lifespan startup. Neither
+accepted accounts nor memberships then depend on the lifetime of the API
+process.
 
 Give the customer the base URL `https://your.app/scim/v2` and a bearer token
 whose identity is the one the policy names. The directory discovers the rest

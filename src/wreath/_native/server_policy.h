@@ -46,6 +46,7 @@ typedef struct {
     PyObject *client;      /* owned effective client tuple/None */
     PyObject *scheme;      /* owned effective scheme str */
     PyObject *origin;      /* owned inbound Origin bytes, or NULL */
+    PyObject *available_dictionary; /* owned RFC 9842 byte-sequence field */
     PyObject *request_id;  /* owned bytes, or NULL */
     PyObject *csrf_token;  /* owned unicode token, or NULL */
     PyObject *csrf_config; /* borrowed through program descriptor */
@@ -55,7 +56,8 @@ typedef struct {
     unsigned char csrf_issue;
     unsigned char csrf_minter;
     unsigned char native;
-    unsigned char compression_coding; /* 0 none, 1 gzip, 2 zstd */
+    unsigned char compression_coding; /* 0 none, 1 gzip, 2 zstd, 3 dcz */
+    unsigned char compression_fallback; /* ordinary coding when dcz cannot apply */
     unsigned char method_is_head;
 } WreathPolicyState;
 
@@ -65,6 +67,8 @@ typedef struct {
     PyObject *headers; /* owned list */
     PyObject *body;    /* owned bytes */
 } WreathPolicyReply;
+
+int wreath_policy_ready(void);
 
 int wreath_policy_program_load(WreathPolicyProgram *, PyObject *app);
 void wreath_policy_program_clear(WreathPolicyProgram *);

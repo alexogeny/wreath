@@ -79,9 +79,7 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end,
         }
         PyObject *value =
             PyBytes_FromStringAndSize((const char *)value_start, value_end - value_start);
-        PyObject *pair = (value != NULL) ? PyTuple_Pack(2, name, value) : NULL;
-        Py_DECREF(name);
-        Py_XDECREF(value);
+        PyObject *pair = wreath_tuple2_from_owned(name, value);
         if (pair == NULL || PyList_Append(headers, pair) < 0) {
             Py_XDECREF(pair);
             Py_DECREF(headers);
@@ -371,11 +369,16 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
                 disposition, disposition_length);
         }
         else if (content != NULL) {
-            part = part_factory == Py_None
-                ? PyTuple_Pack(2, headers, content)
-                : PyObject_CallFunctionObjArgs(part_factory, headers, content, NULL);
+            if (part_factory == Py_None) {
+                part = wreath_tuple2_from_owned(headers, content);
+                headers = NULL;
+                content = NULL;
+            }
+            else {
+                part = PyObject_CallFunctionObjArgs(part_factory, headers, content, NULL);
+            }
         }
-        Py_DECREF(headers);
+        Py_XDECREF(headers);
         Py_XDECREF(content);
         if (part == NULL || PyList_Append(parts, part) < 0) {
             Py_XDECREF(part);

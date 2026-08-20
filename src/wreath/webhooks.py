@@ -75,9 +75,7 @@ _HEADER_RELAY_PATH = b"wreath-webhook-relay-path"
 _RELAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
-def _schema_component(
-    name: str, table: str, statements: tuple[str, ...]
-) -> Any:
+def _schema_component(name: str, table: str, statements: tuple[str, ...]) -> Any:
     """Build the one schema-claim shape shared by inbox and outbox."""
     from .schema import Component, Step
 
@@ -136,8 +134,7 @@ class WebhookEnvelope:
         # body) split -- the fields stop being unambiguously recoverable from
         # what was signed. Refused here rather than escaped, because no real
         # event id or type contains a control character.
-        for name, value in (("id", self.id), ("type", self.type),
-                            ("version", self.version)):
+        for name, value in (("id", self.id), ("type", self.type), ("version", self.version)):
             if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
                 raise ValueError(f"webhook {name} contains a control character")
         if self.timestamp.tzinfo is None:
@@ -176,12 +173,15 @@ class WebhookLimits:
     max_event_id_bytes: int = 256
 
     def __post_init__(self) -> None:
-        if min(
-            self.max_body_bytes,
-            self.max_headers,
-            self.max_header_bytes,
-            self.max_event_id_bytes,
-        ) <= 0:
+        if (
+            min(
+                self.max_body_bytes,
+                self.max_headers,
+                self.max_header_bytes,
+                self.max_event_id_bytes,
+            )
+            <= 0
+        ):
             raise ValueError("webhook limits must be positive")
 
 
@@ -417,8 +417,11 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
         # Checked before the MAC is computed, for the reason in
         # `WebhookEnvelope.__post_init__`: a framing character in a signed field
         # makes the split ambiguous, so it must not reach `_signature_base`.
-        for name, value in (("id", event_id_text), ("type", event_type_text),
-                            ("version", version_text)):
+        for name, value in (
+            ("id", event_id_text),
+            ("type", event_type_text),
+            ("version", version_text),
+        ):
             if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
                 raise ValueError(f"webhook {name} contains a control character")
         try:
@@ -445,9 +448,7 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
         ).hexdigest().encode("ascii")
         if not hmac.compare_digest(expected, supplied):
             raise ValueError("invalid webhook signature")
-        content_type = headers.get(b"content-type", b"application/json").decode(
-            "latin-1"
-        )
+        content_type = headers.get(b"content-type", b"application/json").decode("latin-1")
         return WebhookEnvelope(
             id=event_id_text,
             type=event_type_text,
@@ -492,9 +493,7 @@ def _unix_timestamp(value: bytes, now: datetime | None, max_age: float) -> datet
     return timestamp
 
 
-def _constant_time_signature_match(
-    expected: Iterable[bytes], supplied: Iterable[bytes]
-) -> bool:
+def _constant_time_signature_match(expected: Iterable[bytes], supplied: Iterable[bytes]) -> bool:
     """Match two signature collections without their Cartesian product.
 
     SHA-256 is only an index: a hit is still authenticated with
@@ -529,9 +528,7 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
     ) -> None:
         supplied = secrets if isinstance(secrets, tuple) else (secrets,)
         if not supplied:
-            raise ValueError(
-                "at least one non-empty Standard Webhooks secret is required"
-            )
+            raise ValueError("at least one non-empty Standard Webhooks secret is required")
         decoded: list[bytes] = []
         for secret in supplied:
             if isinstance(secret, str):
@@ -648,9 +645,7 @@ class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
 
     __slots__ = ("_secret", "max_age")
 
-    def __init__(
-        self, secret: bytes | str, *, replay_ttl: float = 86_400.0
-    ) -> None:
+    def __init__(self, secret: bytes | str, *, replay_ttl: float = 86_400.0) -> None:
         if not secret:
             raise ValueError("GitHub webhook secret cannot be empty")
         if replay_ttl <= 0:
@@ -662,9 +657,9 @@ class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
         self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
     ) -> WebhookEnvelope:
         supplied = _required_header(headers, b"x-hub-signature-256")
-        expected = b"sha256=" + hmac.new(
-            self._secret, body, hashlib.sha256
-        ).hexdigest().encode("ascii")
+        expected = b"sha256=" + hmac.new(self._secret, body, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
         if not hmac.compare_digest(expected, supplied):
             raise ValueError("invalid GitHub webhook signature")
         try:
@@ -685,11 +680,7 @@ class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
 
 def _format_timestamp(value: datetime) -> bytes:
     utc = value.astimezone(UTC)
-    return (
-        utc.isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-        .encode("ascii")
-    )
+    return utc.isoformat(timespec="microseconds").replace("+00:00", "Z").encode("ascii")
 
 
 def _parse_timestamp(value: bytes) -> datetime:
@@ -885,8 +876,7 @@ def _retention_purge_pass(
     # `unique=True` on the last one: the walk's boundary is the whole tuple, and
     # it is the whole tuple that identifies a row.
     tiebreakers = tuple(
-        Key(name, "text", unique=(index == len(key) - 1))
-        for index, name in enumerate(key)
+        Key(name, "text", unique=(index == len(key) - 1)) for index, name in enumerate(key)
     )
     return ChunkedPass(
         f"purge_{table}",
@@ -1013,9 +1003,7 @@ class PostgresWebhookInbox:
 
     def component(self) -> Any:
         """The inbox's claim on the wreath schema."""
-        return _schema_component(
-            "webhook-inbox", self.table, self.statements()
-        )
+        return _schema_component("webhook-inbox", self.table, self.statements())
 
     def schema_sql(self) -> str:
         """The inbox DDL, semicolon-joined. A derivation of `component()`."""
@@ -1208,7 +1196,7 @@ class PostgresWebhookInbox:
 def _row_value(row: Any, key: str, index: int) -> Any:
     try:
         return row[key]
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return row[index]
 
 
@@ -1296,8 +1284,7 @@ class PostgresWebhookOutbox:
             "    completed_at timestamptz,\n"
             "    retention_until timestamptz\n"
             ")",
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS relay_path "
-            "text NOT NULL DEFAULT ''",
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS relay_path text NOT NULL DEFAULT ''",
             f"CREATE INDEX IF NOT EXISTS {table}_ready_idx ON {table} "
             "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait')",
             # Retention has always been read by both purges and never had an
@@ -1310,9 +1297,7 @@ class PostgresWebhookOutbox:
 
     def component(self) -> Any:
         """The outbox's claim on the wreath schema."""
-        return _schema_component(
-            "webhook-outbox", self.table, self.statements()
-        )
+        return _schema_component("webhook-outbox", self.table, self.statements())
 
     def schema_sql(self) -> str:
         """The outbox DDL, semicolon-joined. A derivation of `component()`."""
@@ -1500,9 +1485,7 @@ class PostgresWebhookOutbox:
         row = await session.raw(sql, lease_owner, lease_seconds).fetchrow()
         return None if row is None else _outbox_delivery(row)
 
-    async def mark_sending(
-        self, session: Any, delivery: OutboxDelivery
-    ) -> None:
+    async def mark_sending(self, session: Any, delivery: OutboxDelivery) -> None:
         """Move a leased delivery to `sending`, just before the request goes out.
 
         The state a recovering worker reads as "this may already have reached the
@@ -1742,19 +1725,17 @@ def _outbox_delivery(row: Any) -> OutboxDelivery:
         ordering_key=_row_value(row, "ordering_key", 11),
         correlation_id=_row_value(row, "correlation_id", 12),
         causation_id=_row_value(row, "causation_id", 13),
-        relay_path=_parse_stored_relay_path(
-            _optional_row_value(row, "relay_path", 14, "")
-        ),
+        relay_path=_parse_stored_relay_path(_optional_row_value(row, "relay_path", 14, "")),
     )
 
 
 def _optional_row_value(row: Any, key: str, index: int, default: Any) -> Any:
     try:
         return row[key]
-    except (IndexError, KeyError, TypeError):
+    except IndexError, KeyError, TypeError:
         try:
             return row[index]
-        except (IndexError, KeyError, TypeError):
+        except IndexError, KeyError, TypeError:
             return default
 
 
@@ -1911,7 +1892,7 @@ class WebhookSource:
             return Response(status=413)
         try:
             envelope = self._verifier.verify(body=body, headers=headers)
-        except (UnicodeDecodeError, ValueError):
+        except UnicodeDecodeError, ValueError:
             return Response(status=401)
         if len(envelope.id.encode("utf-8")) > self._limits.max_event_id_bytes:
             return Response(status=400)
@@ -1930,7 +1911,8 @@ class WebhookSource:
             return Response(status=400)
         payload = payload_validator(decoded, ("body",))
         if self._inbox is not None:
-            assert self._session_factory is not None
+            if self._session_factory is None:
+                raise RuntimeError("a webhook inbox requires a session factory")
             async with self._session_factory() as session:
                 async with session.begin():
                     claim = await self._inbox.claim(
@@ -1944,9 +1926,7 @@ class WebhookSource:
                         return Response(status=claim.result_status or 204)
                     if claim.outcome in {"active", "failed"}:
                         return Response(status=409)
-                    await handler(
-                        WebhookContext(self._name, envelope, request, session), payload
-                    )
+                    await handler(WebhookContext(self._name, envelope, request, session), payload)
                     await self._inbox.complete(
                         session,
                         source=self._name,
@@ -2106,9 +2086,7 @@ class WebhookDestination:
                 idempotency_key=envelope.id,
             )
         except ClientError as error:
-            return WebhookDeliveryResult(
-                "unknown", envelope.id, failure=type(error).__name__
-            )
+            return WebhookDeliveryResult("unknown", envelope.id, failure=type(error).__name__)
         if 200 <= response.status < 300:
             return WebhookDeliveryResult("delivered", envelope.id, response.status)
         return WebhookDeliveryResult("failed", envelope.id, response.status)
@@ -2388,9 +2366,7 @@ class WebhookDispatcher:
         max_attempts: int = 6,
         retry_delay: float = 1.0,
         retry_cap: float = 3600.0,
-        retry_statuses: frozenset[int] = frozenset(
-            {408, 425, 429, 500, 502, 503, 504}
-        ),
+        retry_statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504}),
     ) -> None:
         if not worker_id:
             raise ValueError("webhook dispatcher worker_id cannot be empty")
@@ -2505,9 +2481,7 @@ class WebhookDispatcher:
         try:
             while not stopping.is_set():
                 async with session_factory() as session:
-                    result = await self.run_once(
-                        session, renewal_session_factory=session_factory
-                    )
+                    result = await self.run_once(session, renewal_session_factory=session_factory)
                 if result is None and not stopping.is_set():
                     try:
                         async with asyncio.timeout(idle_delay):
@@ -2528,9 +2502,7 @@ class WebhookDispatcher:
         self,
         session: Any,
         *,
-        renewal_session_factory: Callable[
-            [], AbstractAsyncContextManager[Any]
-        ] | None = None,
+        renewal_session_factory: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
     ) -> WebhookDeliveryResult | None:
         """Claim, send, and settle at most one delivery. The unit `run` repeats.
 
@@ -2607,18 +2579,12 @@ class WebhookDispatcher:
                 with suppress(asyncio.CancelledError):
                     await renewal
         if result.outcome == "delivered":
-            assert result.status is not None
-            await self._outbox.mark_delivered(
-                session, delivery, status=result.status
-            )
+            if result.status is None:
+                raise RuntimeError("a delivered webhook result requires an HTTP status")
+            await self._outbox.mark_delivered(session, delivery, status=result.status)
         elif result.outcome == "unknown":
-            await self._outbox.mark_unknown(
-                session, delivery, failure=result.failure
-            )
-        elif (
-            delivery.attempts < self._max_attempts
-            and result.status in self._retry_statuses
-        ):
+            await self._outbox.mark_unknown(session, delivery, failure=result.failure)
+        elif delivery.attempts < self._max_attempts and result.status in self._retry_statuses:
             await self._outbox.mark_retry(
                 session,
                 delivery,
@@ -2655,9 +2621,7 @@ class WebhookDispatcher:
         while True:
             await asyncio.sleep(interval)
             async with session_factory() as session:
-                await self._outbox.renew_lease(
-                    session, delivery, lease_seconds=self._lease_seconds
-                )
+                await self._outbox.renew_lease(session, delivery, lease_seconds=self._lease_seconds)
 
 
 class WebhookHub:

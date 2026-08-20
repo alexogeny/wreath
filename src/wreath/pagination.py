@@ -72,6 +72,9 @@ __all__ = [
     "MAX_CURSOR_COLUMNS",
     "MAX_SIZE",
     "InvalidPagination",
+    "FilterField",
+    "FilterSet",
+    "Listing",
     "Page",
     "PageParams",
     "CursorPage",
@@ -85,6 +88,228 @@ __all__ = [
     "parse_sort",
     "sortable_fields",
 ]
+
+
+_FILTER_OPERATORS = frozenset(
+    {
+        "eq",
+        "ne",
+        "lt",
+        "lte",
+        "gt",
+        "gte",
+        "in",
+        "not_in",
+        "like",
+        "ilike",
+        "is_null",
+        "is_not_null",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FilterField:
+    """One public filter name compiled to a model column and allowed operators."""
+
+    column: str | None = None
+    operators: tuple[str, ...] = ("eq",)
+
+    def __post_init__(self) -> None:
+        if self.column is not None and (not isinstance(self.column, str) or not self.column):
+            raise ValueError("FilterField column must be a non-empty string or None")
+        if not self.operators:
+            raise ValueError("FilterField operators must not be empty")
+        unknown = set(self.operators) - _FILTER_OPERATORS
+        if unknown:
+            raise ValueError(
+                f"FilterField operators {sorted(unknown)!r} are unsupported; "
+                f"use one of {sorted(_FILTER_OPERATORS)!r}"
+            )
+        if len(set(self.operators)) != len(self.operators):
+            raise ValueError("FilterField operators must not contain duplicates")
+
+
+class FilterSet:
+    """A bounded declarative map from public filter names to ORM predicates.
+
+    Scalar values mean equality. Rich operators use a nested mapping, for
+    example `{"created": {"gte": start, "lt": end}, "state": {"in": states}}`.
+    No lookup suffix or relationship path is interpreted.
+    """
+
+    __slots__ = ("_fields", "max_terms", "model")
+
+    def __init__(
+        self,
+        model: type,
+        fields: Mapping[str, FilterField | Iterable[str]],
+        *,
+        max_terms: int = 16,
+    ) -> None:
+        columns = getattr(model, "__wreath_column_map__", None)
+        if not isinstance(columns, dict):
+            raise TypeError(f"FilterSet model must be a mapped Wreath model, got {model!r}")
+        if isinstance(max_terms, bool) or not isinstance(max_terms, int) or max_terms < 1:
+            raise ValueError("FilterSet max_terms must be a positive integer")
+        typed_columns = cast("dict[str, Any]", columns)
+        column_names = frozenset(typed_columns)
+        compiled: dict[str, tuple[Any, frozenset[str]]] = {}
+        for public_name, declaration in fields.items():
+            if not isinstance(public_name, str) or not public_name:
+                raise ValueError("FilterSet public names must be non-empty strings")
+            if isinstance(declaration, str):
+                raise TypeError(
+                    f"FilterSet field {public_name!r} operators must be an iterable "
+                    f"such as ({declaration!r},), not a bare string"
+                )
+            field = declaration if isinstance(declaration, FilterField) else FilterField(
+                operators=tuple(declaration)
+            )
+            compiled[public_name] = _compile_filter_field(
+                model, typed_columns, column_names, public_name, field
+            )
+        self.model = model
+        self.max_terms = max_terms
+        self._fields = compiled
+
+    def apply(self, query: Select, values: Mapping[str, Any]) -> Select:
+        """Apply validated values to `query` in one immutable `where` copy."""
+        if query.model is not self.model:
+            raise TypeError(
+                f"FilterSet for {self.model.__name__} cannot apply to {query.model.__name__}"
+            )
+        predicates = []
+        remaining = self.max_terms
+        for public_name, supplied in values.items():
+            declaration = self._fields.get(public_name)
+            if declaration is None:
+                raise InvalidPagination(
+                    f"filter {public_name!r} is not allowed; use one of "
+                    f"{', '.join(self._fields) or 'none'}"
+                )
+            column, allowed = declaration
+            operations = supplied if isinstance(supplied, Mapping) else {"eq": supplied}
+            for operator, operand in operations.items():
+                remaining -= 1
+                if remaining < 0:
+                    raise InvalidPagination(
+                        f"filters contain more than max_terms={self.max_terms} predicates"
+                    )
+                if operator not in allowed:
+                    raise InvalidPagination(
+                        f"filter {public_name!r} does not allow operator {operator!r}; "
+                        f"use one of {', '.join(sorted(allowed))}"
+                    )
+                predicates.append(_filter_predicate(column, operator, operand, public_name))
+        return query.where(*predicates) if predicates else query
+
+
+class Listing:
+    """One reusable declaration for filtering and sorting a model listing."""
+
+    __slots__ = ("_sort", "default_sort", "filters", "model")
+
+    def __init__(
+        self,
+        filters: FilterSet,
+        *,
+        sort: Iterable[str] = (),
+        default_sort: Iterable[str] = (),
+    ) -> None:
+        if not isinstance(filters, FilterSet):
+            raise TypeError(f"Listing filters must be a FilterSet, got {filters!r}")
+        allowed_sort = frozenset(sort)
+        model = filters.model
+        columns = frozenset(_as_model(model).__wreath_column_map__)
+        for name in allowed_sort:
+            if name not in columns:
+                raise ValueError(
+                    f"Listing sort field {name!r} is not a column of {model.__name__}"
+                )
+        defaults = tuple(default_sort)
+        allowed_names = ", ".join(sorted(allowed_sort)) or "none"
+        for token in defaults:
+            name = token[1:] if token.startswith("-") else token
+            if name not in allowed_sort:
+                raise ValueError(
+                    f"Listing default sort {token!r} is not allowed; use one of "
+                    f"{allowed_names}"
+                )
+        self.filters = filters
+        self.model = model
+        self._sort = allowed_sort
+        self.default_sort = defaults
+
+    def apply(
+        self,
+        query: Select,
+        *,
+        filters: Mapping[str, Any] | None = None,
+        sort: Iterable[str] | None = None,
+    ) -> Select:
+        """Apply both declarations without issuing a database query."""
+        shaped = self.filters.apply(query, filters or {})
+        order = self.default_sort if sort is None else tuple(sort)
+        return apply_sort(shaped, order, allow=self._sort)
+
+
+def _filter_predicate(column: Any, operator: str, operand: Any, name: str) -> Any:
+    if operator == "eq":
+        return column == operand
+    if operator == "ne":
+        return column != operand
+    if operator == "lt":
+        return column < operand
+    if operator == "lte":
+        return column <= operand
+    if operator == "gt":
+        return column > operand
+    if operator == "gte":
+        return column >= operand
+    if operator == "in":
+        return column.in_(operand)
+    if operator == "not_in":
+        return column.not_in(operand)
+    if operator == "like":
+        return column.like(operand)
+    if operator == "ilike":
+        return column.ilike(operand)
+    if operand is not True:
+        raise InvalidPagination(
+            f"filter {name!r} operator {operator!r} takes the literal true"
+        )
+    if operator == "is_null":
+        return column.is_null()
+    return column.is_not_null()
+
+
+def _compile_filter_field(
+    model: type,
+    columns: Mapping[str, Any],
+    column_names: frozenset[str],
+    public_name: str,
+    field: FilterField,
+) -> tuple[Any, frozenset[str]]:
+    """Compile one declaration outside `FilterSet.__init__`'s field loop."""
+    column_name = field.column or public_name
+    if column_name not in column_names:
+        raise ValueError(
+            f"FilterSet field {public_name!r} names {column_name!r}, but "
+            f"{model.__name__} declares {', '.join(columns) or 'no columns'}"
+        )
+    column = columns[column_name]
+    operators = frozenset(field.operators)
+    if not operators.isdisjoint({"like", "ilike"}) and column.pg_type.name not in {
+        "text",
+        "varchar",
+    }:
+        raise ValueError(
+            f"FilterSet field {public_name!r} allows a text pattern operator, "
+            f"but {model.__name__}.{column_name} is {column.pg_type.name}; "
+            "use a Text or Varchar column"
+        )
+    return getattr(model, column_name), operators
 
 
 @dataclass(frozen=True, slots=True)

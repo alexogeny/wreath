@@ -1,19 +1,13 @@
-"""Response compression: a thin facade over the stdlib's C `zlib` and `zstd`.
-
-**Do not write a `compression.c`.** Every byte of compression below already
-runs in C -- `zlib` and, when built, `compression.zstd` are CPython extensions -- so a
-hand-written one would replace a mature, fuzzed, widely-deployed implementation
-with one of ours and be strictly worse at it. What this module adds is Wreath's
-policy: a mandatory output bound on decompression, a level range asked of
-libzstd rather than restated, and a `finish()` that raises rather than emitting
-a second empty frame.
-"""
+"""Response compression on Wreath's native gzip and CPython's native zstd."""
 
 from __future__ import annotations
 
 import importlib
-import zlib
+from base64 import b64encode
+from hashlib import sha256
 from typing import Any
+
+from ._native import _core
 
 _zstd: Any = None
 try:
@@ -37,10 +31,10 @@ if _zstd is None:
     ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = -131072, 22
     ZSTD_DEFAULT_LEVEL = 3
 else:
-    ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = (
-        _zstd.CompressionParameter.compression_level.bounds()
-    )
+    ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = _zstd.CompressionParameter.compression_level.bounds()
     ZSTD_DEFAULT_LEVEL = _zstd.COMPRESSION_LEVEL_DEFAULT
+
+_DCZ_MAGIC = b"\x5e\x2a\x4d\x18\x20\x00\x00\x00"
 
 
 def require_zstd() -> Any:
@@ -53,26 +47,100 @@ def require_zstd() -> Any:
     return _zstd
 
 
-def gzip_compress(data: bytes, level: int = 5) -> bytes:
+def _gzip_encoder_new() -> object:
+    """Allocate workspace owned by one compression policy or stream."""
+    return _core.gzip_encoder_new()
+
+
+def _gzip_compress_with(workspace: object, data: bytes, level: int, format: str | bytes) -> bytes:
+    """Encode with application-owned workspace, keeping dispatch inside C."""
+    return _core.gzip_compress_with(workspace, data, level, format)
+
+
+def _gzip_fragment_compress_with(
+    workspace: object,
+    data: bytes,
+    level: int,
+    format: str | bytes,
+    fragments: tuple[object | None, ...],
+) -> bytes:
+    """Use an exact prepared gzip member when this format's stable span matches."""
+    return _core.gzip_fragment_compress_with(workspace, data, level, format, fragments)
+
+
+def _prepare_dcz_dictionary(dictionary: bytes) -> tuple[bytes, bytes, Any]:
+    """Prepare one raw RFC 9842 dictionary outside the request path."""
+    codec = require_zstd()
+    content = bytes(dictionary)
+    digest = sha256(content).digest()
+    prepared = codec.ZstdDict(content, is_raw=True)
+    return b":" + b64encode(digest) + b":", digest, prepared
+
+
+def _dcz_compress(prepared: tuple[bytes, bytes, Any], data: bytes, level: int) -> bytes:
+    """Emit one RFC 9842 Dictionary-Compressed Zstandard stream."""
+    _token, digest, dictionary = prepared
+    payload = require_zstd().compress(
+        data,
+        level=level,
+        zstd_dict=dictionary.as_digested_dict,
+    )
+    return _DCZ_MAGIC + digest + payload
+
+
+def _dcz_decompress(data: bytes, dictionary: bytes, *, max_output_bytes: int) -> bytes:
+    """Decode one DCZ stream for tests and benchmark verification."""
+    if max_output_bytes < 1:
+        raise ValueError(f"max_output_bytes must be positive, got {max_output_bytes}")
+    prepared = _prepare_dcz_dictionary(dictionary)
+    _token, digest, zstd_dictionary = prepared
+    if len(data) < 40 or data[:8] != _DCZ_MAGIC or data[8:40] != digest:
+        raise ValueError("not a readable dcz stream for this dictionary")
+    decoder = require_zstd().ZstdDecompressor(zstd_dict=zstd_dictionary)
+    output = decoder.decompress(data[40:], max_output_bytes)
+    if not decoder.eof or decoder.unused_data:
+        raise ValueError(f"dcz stream expands past the {max_output_bytes}-byte limit")
+    return output
+
+
+def _gzip_decoder_new() -> object:
+    """Allocate workspace owned by one compressed-input stream."""
+    return _core.gzip_decoder_new()
+
+
+def _gzip_decompress_with(
+    workspace: object,
+    data: bytes,
+    max_output_bytes: int,
+    format: str | bytes = "unknown",
+) -> bytes:
+    """Decode with stream-owned workspace, retaining native table state."""
+    if max_output_bytes < 1:
+        raise ValueError(f"max_output_bytes must be positive, got {max_output_bytes}")
+    return _core.gzip_decompress_with(workspace, data, max_output_bytes, format)
+
+
+def gzip_compress(data: bytes, level: int = 5, format: str | bytes = "unknown") -> bytes:
     """One complete gzip member for `data`, header and trailer included.
 
-    The whole-buffer form: hand it the bytes you have and get back something a
-    client can decompress on its own. Use `GzipCompressor` instead when the body
-    arrives in pieces and you do not want to hold all of it.
+    `format` is optional out-of-band knowledge: `json`, `chaotic-json`, `html`,
+    `graphql`, `log`, `plaintext`, or an HTTP Content-Type. It selects a native
+    parser policy but never changes the standard gzip wire format.
 
     `level` runs from 0 (store, no compression) to 9 (smallest, slowest), and
-    defaults to 5. Compression itself is CPython's `zlib`, a C extension in
-    every supported build.
+    defaults to 5. Compression is Wreath's independent native encoder.
 
     Raises:
         ValueError: `level` is outside 0-9.
     """
     if not 0 <= level <= 9:
         raise ValueError("gzip level must be between 0 and 9")
-    return zlib.compress(data, level=level, wbits=31)
+    return _core.gzip_compress(data, level, format)
 
 
-def gzip_decompress(data: bytes, *, max_output_bytes: int) -> bytes:
+def gzip_decompress(
+    data: bytes, *, max_output_bytes: int, format: str | bytes = "unknown"
+) -> bytes:
     """The inverse of `gzip_compress`, refusing an output past `max_output_bytes`.
 
     **The bound is not optional, which is why it has no default.** A gzip
@@ -85,9 +153,9 @@ def gzip_decompress(data: bytes, *, max_output_bytes: int) -> bytes:
     Args:
         data: One complete gzip member, header and trailer included.
         max_output_bytes: The largest decoded result to produce, in bytes. Must
-            be positive: `zlib` reads a `max_length` of zero as *unbounded*, so
-            a caller that computed a limit of zero would silently get the
-            opposite of the guarantee this function exists to make.
+            be positive.
+        format: Optional content knowledge, with the same values as
+            `gzip_compress`. It is not read from the member or written to it.
 
     Returns:
         The decoded bytes.
@@ -96,42 +164,15 @@ def gzip_decompress(data: bytes, *, max_output_bytes: int) -> bytes:
         ValueError: `max_output_bytes` is not positive; the member expands past
             it; the member is truncated; bytes follow it; or it is not a gzip
             member at all. One exception type, because every one of these is
-            "the bytes were not what the caller was promised", and `zlib.error`
-            is not something a caller of this facade should have to know about.
+            "the bytes were not what the caller was promised".
     """
     if max_output_bytes < 1:
-        raise ValueError(
-            f"max_output_bytes must be positive, got {max_output_bytes}: zlib "
-            "reads a limit of zero as unbounded"
-        )
-    decompressor = zlib.decompressobj(wbits=31)
-    try:
-        # One byte of headroom, then a length check: asking for exactly the
-        # limit can leave the member's own trailer sitting in `unconsumed_tail`
-        # for a payload that is *exactly* the size allowed, which would refuse a
-        # message the caller said was acceptable.
-        #
-        # The length is the whole test. `unconsumed_tail` is non-empty only when
-        # the output limit was hit, and hitting a limit of `max + 1` means the
-        # length check has already fired -- so testing both is one check written
-        # twice. (A mutation pass found that second clause redundant, which is
-        # how it came to be deleted rather than tested.)
-        out = decompressor.decompress(data, max_output_bytes + 1)
-        if len(out) > max_output_bytes:
-            raise ValueError(
-                f"gzip member expands past the {max_output_bytes}-byte limit"
-            )
-        if not decompressor.eof:
-            raise ValueError("gzip member is truncated")
-        if decompressor.unused_data:
-            raise ValueError("trailing bytes follow the gzip member")
-    except zlib.error as error:
-        raise ValueError(f"not a readable gzip member: {error}") from error
-    return out
+        raise ValueError(f"max_output_bytes must be positive, got {max_output_bytes}")
+    return _core.gzip_decompress(data, max_output_bytes, format)
 
 
 class GzipCompressor:
-    """The streaming form of `gzip_compress`: feed it chunks, then finish.
+    """Collect one response body and encode one gzip member at `finish()`.
 
     One instance encodes exactly one gzip member, and it is a small state
     machine with three states — open, finished, closed — of which only *open*
@@ -160,13 +201,16 @@ class GzipCompressor:
         ValueError: `level` is outside 0-9.
     """
 
-    __slots__ = ("_compressor", "_state")
+    __slots__ = ("_chunks", "_format", "_level", "_state", "_workspace")
 
-    def __init__(self, level: int = 5) -> None:
+    def __init__(self, level: int = 5, format: str | bytes = "unknown") -> None:
         if not 0 <= level <= 9:
             raise ValueError("gzip level must be between 0 and 9")
-        self._compressor = zlib.compressobj(level, zlib.DEFLATED, 31)
+        self._chunks: list[bytes] | None = []
+        self._format = format
+        self._level = level
         self._state = "open"
+        self._workspace = _gzip_encoder_new()
 
     def compress(self, data: bytes) -> bytes:
         """Encode one chunk, returning whatever is ready to send.
@@ -179,11 +223,12 @@ class GzipCompressor:
         Raises:
             RuntimeError: this compressor has already been finished or closed.
         """
-        if self._state != "open":
+        chunks = self._chunks
+        if self._state != "open" or chunks is None:
             raise RuntimeError("gzip compressor is not open")
-        compressor = self._compressor
-        assert compressor is not None
-        return compressor.compress(data)
+        if data:
+            chunks.append(data)
+        return b""
 
     def finish(self) -> bytes:
         """Flush what is still buffered, plus the gzip trailer, and close the member.
@@ -196,12 +241,12 @@ class GzipCompressor:
         Raises:
             RuntimeError: this compressor has already been finished or closed.
         """
-        if self._state != "open":
+        chunks = self._chunks
+        if self._state != "open" or chunks is None:
             raise RuntimeError("gzip compressor is not open")
         self._state = "finished"
-        compressor = self._compressor
-        assert compressor is not None
-        return compressor.flush(zlib.Z_FINISH)
+        self._chunks = None
+        return _gzip_compress_with(self._workspace, b"".join(chunks), self._level, self._format)
 
     def close(self) -> None:
         """Abandon a still-open compressor without emitting a trailer.
@@ -217,7 +262,7 @@ class GzipCompressor:
         """
         if self._state == "open":
             self._state = "closed"
-            self._compressor = None
+            self._chunks = None
 
 
 def zstd_compress(data: bytes, level: int = ZSTD_DEFAULT_LEVEL) -> bytes:
@@ -251,7 +296,7 @@ class ZstdCompressor:
     """The streaming form of `zstd_compress`: feed it chunks, then finish.
 
     The same three-state machine as `GzipCompressor` — open, finished, closed,
-    and only *open* accepts work — over `compression.zstd` instead of `zlib`, so
+    and only *open* accepts work — over `compression.zstd`, so
     the two are interchangeable to a caller that only compresses a body:
 
     ```python
@@ -305,10 +350,9 @@ class ZstdCompressor:
         Raises:
             RuntimeError: this compressor has already been finished or closed.
         """
-        if self._state != "open":
-            raise RuntimeError("zstd compressor is not open")
         compressor = self._compressor
-        assert compressor is not None
+        if self._state != "open" or compressor is None:
+            raise RuntimeError("zstd compressor is not open")
         return compressor.compress(data)
 
     def finish(self) -> bytes:
@@ -323,11 +367,10 @@ class ZstdCompressor:
         Raises:
             RuntimeError: this compressor has already been finished or closed.
         """
-        if self._state != "open":
+        compressor = self._compressor
+        if self._state != "open" or compressor is None:
             raise RuntimeError("zstd compressor is not open")
         self._state = "finished"
-        compressor = self._compressor
-        assert compressor is not None
         codec = require_zstd()
         return compressor.flush(codec.ZstdCompressor.FLUSH_FRAME)
 

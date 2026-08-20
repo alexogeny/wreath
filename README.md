@@ -15,34 +15,30 @@
 ![Runtime dependencies: zero](https://img.shields.io/badge/runtime_dependencies-zero-16a34a?style=flat-square)
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-64748b?style=flat-square)](https://github.com/alexogeny/wreath/blob/main/LICENSE)
 
-A Python 3.14-first ASGI framework with an ORM over its own PostgreSQL driver,
-durable jobs, authentication and policy, OpenAPI with typed clients — and a
-native HTTP/1.1, HTTP/2 and HTTP/3 server underneath, when you want it.
+A Python 3.14-first ASGI framework, PostgreSQL stack, job system, policy engine,
+and native HTTP server. One package; no mandatory runtime dependencies.
 
 **[Documentation](https://alexogeny.github.io/wreath/)** ·
-[Getting started](https://alexogeny.github.io/wreath/getting-started/index.html) ·
-[From FastAPI](https://alexogeny.github.io/wreath/from-fastapi/index.html) ·
+[Browse by task](https://alexogeny.github.io/wreath/map.html) ·
+[Install](https://alexogeny.github.io/wreath/getting-started/index.html) ·
 [Issues](https://github.com/alexogeny/wreath/issues)
 
 </div>
 
 ---
 
-A wreath is a circle of separate things — leaves, branches, small flowers —
-gathered and woven until they hold a single shape. That is the idea behind this
-framework. A web application is made of many parts: routing, validation,
-authentication, data access, and the server that carries it all. Wreath gathers
-those parts into one coherent whole and gives each of them a clear, honest place
-to live.
+## One system. One obvious home.
 
-**The brand is allowed to be poetic. The API is not.** A middleware is called a
-middleware. A dependency is a dependency. Routes are routes, startup is startup,
-a connection pool is a connection pool. You should be able to guess where a
-feature lives without first learning our vocabulary — `wreath.pagination` is
-pagination, `wreath.jobs` is jobs.
+A production web service needs more than a router. It needs validation and data
+access. It also needs identity, policy, background work, observability, and a server.
+Wreath ships those parts together and names each module after the job it does:
+`wreath.pagination` paginates, `wreath.jobs` runs jobs, and `wreath.email` sends
+mail.
+
+The imagery belongs to the name. The API stays literal.
 
 ```python
-from wreath import Wreath, Request
+from wreath import Request, Wreath
 
 app = Wreath()
 
@@ -52,290 +48,224 @@ async def hello(request: Request, name: str) -> dict:
 ```
 
 ```bash
-wreath run app:app          # the native Wreath server
-wreath dev app:app          # ... with autoreload while you develop
-uvicorn app:app             # ... or any ASGI server you already run
+wreath run app:app          # native HTTP server
+wreath dev app:app          # native server with reload
+uvicorn app:app             # or any conforming ASGI server
 ```
 
-> **Status:** pre-1.0. Everything described below is implemented and tested;
-> expect additions, and expect what already works to keep working as it grows.
-> What is deliberately *not* shipped yet lives in one file:
-> [`docs/reference/roadmap.md`](https://github.com/alexogeny/wreath/blob/main/docs/reference/roadmap.md).
+Wreath is pre-1.0. Shipped surfaces are implemented and tested. Work that is
+named but not finished lives only in the
+[roadmap](https://alexogeny.github.io/wreath/reference/roadmap.html).
 
-## Why it feels different
+## Choose your route
 
-| | Wreath |
+| You want to… | Start here |
 |---|---|
-| **Weaves the whole circle** | Routing, binding, auth, ORM, migrations, jobs, OpenAPI, and a server — one project, one release, one set of docs that agree with each other. |
-| **Asks for nothing underneath** | The framework core has no mandatory runtime dependency. The Postgres driver, the JWT implementation, the template engine, the docs generator: all Wreath's own code. |
-| **Fast where it matters, honest about it** | The hot path is C — routing, HTTP parsing, the codecs, validation — and the wheel ships it prebuilt. No performance claim comes from a single run. |
-| **Speaks plain** | The imagery lives in the story we tell; the code uses conventional names. Nothing is themed — no threads, roots, kindling, or leaves in the API. |
-| **Runs where you already run** | Any conforming ASGI server serves a Wreath app unchanged. The native server is an upgrade, never a requirement. |
-| **Tests what you declared** | `wreath mutant` deletes one *declared control* at a time — a policy, a refusal, a rate limit — and reports the ones your tests would not have noticed. |
+| build your first service | [Installation and first app](https://alexogeny.github.io/wreath/getting-started/index.html) |
+| find one feature or concept | [Documentation map](https://alexogeny.github.io/wreath/map.html) |
+| complete a concrete task | [Cookbook](https://alexogeny.github.io/wreath/cookbook/index.html) |
+| look up a class or function | [API reference](https://alexogeny.github.io/wreath/reference/app.html) |
+| move from FastAPI, Pydantic, SQLModel, or Alembic | [Migration path](https://alexogeny.github.io/wreath/from-fastapi/index.html) |
+| evaluate the dependency or performance claim | [Capability map](https://alexogeny.github.io/wreath/capabilities.html) and [measurements](https://alexogeny.github.io/wreath/perf/index.html) |
 
-## What's in the circle
+The published site keeps **Browse** in its header on every page. Search is
+`Ctrl K` or `/`.
 
-Each part keeps to its own clearly-named module, so the whole stays easy to hold
-in your head.
+## What ships
 
-**Serving a request**
-
-| Module | What it gives you |
+| Part of the service | Wreath owns |
 |---|---|
-| `wreath.app`, `wreath.router` | The application, composable routers, app state, lifespan, and errors rendered as RFC 9457 problem details |
-| `wreath.request`, `wreath.response` | JSON, text, HTML, streaming and server-sent events, file uploads, background tasks, content negotiation over JSON, MessagePack and Protocol Buffers |
-| `wreath.binding` | Typed request and response contracts, reusable `Field` constraints, validation compiled at startup, and dependency injection with `Depends` |
-| `wreath.middleware` | Rate limiting, CORS, CSRF, sessions, security headers, compression, request IDs, idempotency keys, cache-control policy |
-| `wreath.openapi`, `wreath.typegen` | A strict OpenAPI 3.1 contract derived from the runtime validators, a self-contained docs UI, and generated typed clients |
-| `wreath.templates`, `wreath.staticfiles` | A template engine that compiles at startup and escapes by default; static files with ETags, conditional and range requests |
-| `wreath.graphql`, `wreath.mcp` | A GraphQL surface derived from the same model specs the REST routes use, and a Model Context Protocol server for your callables |
+| request path | ASGI application, routing, binding, validation, middleware, responses, OpenAPI, typed clients |
+| identity and policy | sessions, JWT and API keys, OAuth/OIDC, users, TOTP, passkeys, Cedar authorization |
+| data | native PostgreSQL driver, ORM, migrations, safe SQL, vector and full-text search, pagination |
+| long-running work | durable jobs, schedules, messaging, workflows, resumable streams, progress |
+| service boundaries | outbound HTTP, webhooks, MCP, object storage, signatures, provenance, email |
+| operations | native HTTP/1.1, HTTP/2 and HTTP/3 server, health, telemetry, logging, replay, testing |
 
-**Knowing who is asking**
+The full generated inventory says what each part replaces and links to its
+guide: [what you do not have to install](https://alexogeny.github.io/wreath/capabilities.html).
 
-| Module | What it gives you |
+## Native gzip, shaped to the document
+
+Wreath owns both halves of gzip. The encoder and decoder are independent native
+kernels: they share the RFC 1951/1952 wire format, not one duplex algorithm.
+When `Content-Type` is known, JSON, GraphQL, HTML, logs, plain text, and
+high-entropy JSON take separately compiled policies. The result is still
+ordinary gzip readable by browsers, zlib, zlib-ng, and libdeflate.
+
+Retired userspace instructions per uncompressed byte at level 6, lower is
+better. Each cell is **Wreath / libdeflate / zlib-ng**:
+
+| Document | Encode instr/B | Decode instr/B | Wreath encode L1D hit | Wreath encode LLC hit |
+|---|---:|---:|---:|---:|
+| JSON | **52.94** / 64.58 / 67.79 | **6.13** / 7.40 / 9.17 | 91.50% | 85.62% |
+| GraphQL | **32.31** / 49.76 / 46.45 | **3.04** / 3.56 / 4.37 | 89.18% | 90.38% |
+| HTML | **45.37** / 59.27 / 61.27 | **4.54** / 5.57 / 6.85 | 89.70% | 87.75% |
+| plain text | **71.55** / 92.56 / 101.70 | **6.84** / 7.82 / 9.63 | 88.56% | 93.45% |
+| logs | **50.37** / 62.97 / 67.06 | **6.12** / 7.55 / 9.33 | 92.22% | 82.79% |
+| high-entropy JSON | **57.00** / 89.78 / 124.37 | **10.46** / 14.23 / 18.03 | 97.80% | 99.03% |
+| **weighted corpus** | **50.88** / 67.18 / 71.96 | **5.62** / 6.82 / 8.44 | — | — |
+
+That is fewer encode and decode instructions in every document row. The cache
+figures are the 500 kB representatives: the high-entropy encoder retires only
+4.13 LLC misses/kB, while the regular-document decoder stays at 1.79–2.22 LLC
+misses/kB with a 97.86–98.17% LLC hit rate. Across the corpus, Wreath's output
+is 0.33% larger than zlib-ng's and 0.80% larger than libdeflate's—the ratio cost
+kept beside the instruction win rather than hidden.
+
+The comparison uses repository-native boundaries, application- or stream-owned
+warm contexts, six document sizes from 10 kB through 1 MB (the high-entropy
+case is 500 kB), and hardware performance counters on Linux x86-64 / Ryzen 7
+7730U. A subsequent cache sweep over 30 JSON, GraphQL, HTML, text, and log
+documents chose the 32 Ki-entry format hash table and shallower per-format
+search limits: encode instructions fell **4.79%**, L1D misses **12.87%**, and
+LLC misses **52.07%** on the same corpus. The shipped balance retires 49.04
+encode instructions/byte with 91.62% L1D and 93.92% LLC hit rates; output is
+23.71% of input. No elapsed time, cycles, or IPC enters either result. The
+repository retains the [measurement data](docs/perf/data/gzip-native-instructions.json).
+
+## One real request, all the way through
+
+This is not a plaintext race or a synthetic JSON payload. All three
+configurations render the same operations-intelligence dashboard from one
+successful request:
+HTTP policy and sessions, nested typed input, bearer authentication, Cedar,
+overlapping PostgreSQL and HTTP wire calls, a sparse-to-dense 730-day ×
+48-tenant × 6-measure projection, eleven chart paths, temporal, geospatial and
+vector work, ranked pagination, protobuf and MessagePack exports, an escaped
+template, compression, and HTML emission.
+
+Retired userspace instructions per request, lower is better:
+
+```text
+Wreath: DCZ + fragment gzip  ▌                                               2,426,742
+Wreath: format-aware gzip    █                                               4,690,494
+FastAPI: gzip                ████████████████████████████████████████████████  226,270,075
+```
+
+Format-aware Wreath retired **48.24× fewer instructions** than FastAPI in this
+run. The dictionary-aware configuration retired **93.24× fewer instructions**,
+removing **2,263,752 instructions per request**—a further **48.26%** from Wreath's full
+request path. Its selected response is RFC 9842 `dcz`: a real response for
+neighbouring resource 41 is the client-held dictionary for resource 42, whose
+35,805-byte body differs at only two bytes. The same configuration falls back
+to standard concatenated gzip members for ordinary clients, recompressing the
+249-byte dynamic prefix while reusing the independently readable stable member.
+It does not claim that DCZ and gzip are nested in one response.
+
+All three rows use TLS 1.3 over HTTP/1.1 and are medians of five alternating
+30/15-request slopes. Ranges were 4,673,133–4,696,949 for format-aware Wreath,
+2,416,962–2,447,953 for the dictionary-aware configuration, and
+226,205,485–226,918,987 for FastAPI. The unchanged A/A controls differed from
+their medians by 0.03%, 0.10%, and 0.11%, respectively. The harness accepts a
+DCZ sample only after checking its dictionary hash, decoded response facts,
+secure transport, and both required `Vary` fields; it separately exercises and
+decodes the fragment-gzip fallback before attaching counters.
+
+The FastAPI implementation is not a slow pure-Python foil. It uses the
+ecosystem stack a pragmatic service would assemble: Starlette policy
+middleware, Pydantic, Uvicorn/uvloop/httptools, `HTTPBearer`, `cedarpy`,
+`asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec. Wreath performs the
+corresponding transaction through its dependency-free declarative surfaces and
+native data kernels.
+
+To make the framework layers independently auditable, a smaller companion
+request removes the dashboard calculations while keeping the same successful
+routing, CORS, validation, auth, Cedar, PostgreSQL, HTTP, and JSON path:
+
+The cumulative decomposition shows where work enters:
+
+| Successful request includes | Wreath | FastAPI stack |
+|---|---:|---:|
+| route + JSON response | 36,006 | 426,899 |
+| + CORS | 47,156 | 490,826 |
+| + typed binding and validation | 115,305 | 776,764 |
+| + bearer authentication | 122,448 | 867,935 |
+| + Cedar authorization | 173,902 | 1,597,272 |
+| + PostgreSQL query | 225,857 | 1,809,675 |
+| + outbound HTTP | **269,110** | **2,133,383** |
+
+On this stripped companion, Wreath retired **7.93× fewer instructions**. Its
+purpose is decomposition; the holistic request above is the headline system
+comparison.
+
+| Arm | Installed stack |
 |---|---|
-| `wreath.auth` | Authentication: JWT, API keys, OAuth2 and OIDC login |
-| `wreath.authorization` | Authorization on a built-in Cedar policy engine — kept firmly apart from identity |
-| `wreath.users` | Registration, login, email verification, password reset, scrypt hashing, TOTP with hashed recovery codes, and WebAuthn passkeys |
+| Wreath | Wreath 0.3.2 for the holistic arm (0.3.1 for the retained cumulative control): metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
+| FastAPI | FastAPI 0.139, Starlette, Pydantic/pydantic-core, Uvicorn, uvloop, httptools, `HTTPBearer`, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
 
-**Data**
+CORS is Starlette's `CORSMiddleware`, which FastAPI already brings in. It is not
+padded into the stack as another package. `cedarpy` 4.8.7 has a stateless public
+authorization call and no reusable compiled-policy handle. The measured request
+therefore includes that public lifecycle.
 
-| Module | What it gives you |
-|---|---|
-| `wreath.postgres` | A native PostgreSQL driver: pooling, prepared statements, parameter type inference, `COPY`, and cluster-wide advisory locks |
-| `wreath.orm` | An async ORM with explicit loading, first-class JSONB and array columns, vector similarity and full-text search without a second datastore, transactions, and tenant-scoped sessions |
-| `wreath.migrations` | Schema diffing, migration artifacts, apply, and a derived inverse that refuses to strand live code |
-| `wreath.queries`, `wreath.series` | Named compiled reads and hybrid vector/full-text search; chart data as a declaration, bucketed in the database in the reader's own timezone |
-| `wreath.pagination`, `wreath.crud` | Page, size, sort and filter turned into safe queries over an allow-list; generated REST CRUD routes, off until you opt in twice |
-| `wreath.cache`, `wreath.response_cache` | An in-process snapshot cache for read-mostly data, and HTTP response caching invalidated by the ORM writes behind it |
-| `wreath.objects`, `wreath.temporal`, `wreath.geospatial` | S3-compatible or on-disk object storage with presigned URLs; timezone-correct dates and durations; great-circle distance and index-answerable proximity |
+Both clients speak their real wire protocols to the same deterministic,
+in-process PostgreSQL and HTTP peers. The verifier rejects a sample unless the
+security, CORS, session, compression, and business response facts agree.
+Imports, startup, compilation, pool creation, and warm-up cancel through N/N/2
+slopes. Server and generator are pinned separately with `PYTHONHASHSEED=0`.
+The result contains no elapsed time, cycles, or IPC. It was recorded on CPython
+3.14.7 and Linux x86-64, on a Ryzen 7 7730U. SIMD dispatch can make another
+architecture retire a different count.
 
-**Work that outlives the request**
+Reproduce it:
 
-| Module | What it gives you |
-|---|---|
-| `wreath.jobs`, `wreath.messaging` | Durable Postgres-backed jobs and schedules, pub/sub, WebSocket rooms, task progress, and supervised background services |
-| `wreath.workflows` | Durable multi-step sagas: each step's result recorded before the next starts, resume from the first unrecorded step, compensation newest-first |
-| `wreath.passes` | Backfills, rollups, and reindexes as a durable, resumable, paced walk over a big table |
+```bash
+uv sync --inexact --group benchmark
+uv run python -m benchmarks.bench_holistic_stack_instructions \
+  --requests 30 --trials 5 --connections 8 --warmup 16 \
+  --output docs/perf/data/e2e-holistic-stack-instructions.json
 
-**Running it**
+# The cumulative framework-layer control
+uv run python -m benchmarks.bench_e2e_instructions \
+  --requests 4000 --trials 5 --connections 32 --warmup 500 \
+  --output docs/perf/data/e2e-stack-instructions.json
+```
 
-| Module or command | What it gives you |
-|---|---|
-| `wreath.server` | HTTP/1.1, HTTP/2 and optional HTTP/3, with WebSockets, TLS, and a development runner |
-| `wreath.telemetry`, `wreath.logging` | Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, and replay |
-| `wreath.health`, `wreath.flags`, `wreath.versioning` | Liveness and readiness, feature flags with deterministic percentage rollouts, and API versioning |
-| `wreath.testing` | An in-process test client that runs the real lifespan, WebSocket sessions included, plus a pytest plugin |
-| `wreath doctor` | Diagnostics for your own handlers, including the N+1 query you did not know you had |
-| `wreath audit` | An offline accessibility (WCAG 2.1 A/AA) and performance auditor for the HTML and responses your app returns |
-| `wreath port` | A codemod that reads an existing FastAPI, Pydantic, or SQLModel project and reports exactly what maps onto Wreath and what does not |
-
-A fuller table — including what each part means you don't have to install — is
-on [the capability map](https://alexogeny.github.io/wreath/capabilities.html).
+The repository retains the holistic [raw samples](docs/perf/data/e2e-holistic-stack-instructions.json),
+[Wreath application](benchmarks/holistic_e2e.py),
+[FastAPI application](benchmarks/holistic_fastapi.py), and
+[counter harness](benchmarks/bench_holistic_stack_instructions.py), plus the
+[cumulative control samples](docs/perf/data/e2e-stack-instructions.json).
 
 ## Install
-
-Wreath targets Python 3.14 and newer.
 
 ```bash
 pip install wreath
 # or
 uv add wreath
 
-# Linux io_uring event loop and native TLS transport
-uv add 'wreath[linux]'
-
-# HTTP/3 (the h3 and http3 names are aliases)
-uv add 'wreath[h3]'
+uv add 'wreath[linux]'     # io_uring reactor and native TLS on Linux
+uv add 'wreath[h3]'        # HTTP/3; `http3` is an alias
 ```
 
-The base wheel always ships Wreath's portable C implementation and needs no
-compiler or runtime package. The `linux` extra adds Wreath's io_uring reactor;
-`h3`/`http3` adds the HTTP/3 extension with its pinned QUIC/TLS libraries
-bundled into the wheel. Neither extra changes the framework API.
+The base wheel includes Wreath's portable C implementation. The framework
+remains a conforming ASGI application when you use another server.
 
-## Your first few minutes
+## The engineering rule
 
-Declare where each value comes from, and Wreath compiles a validator for it at
-startup. Bad input becomes a clear `422` before your handler runs:
+Wreath moves repeated work out of requests and moves byte-heavy work into native
+kernels. It does not call an idea faster because it was rewritten in C. Every
+performance change starts with a measurement, keeps its controls, and reports
+the machine and method that produced the result.
 
-```python
-from typing import Annotated
+The same refusal applies to correctness. Unsupported declarations fail at
+startup. Hot-path complexity has executable probes. The test runner samples
+declared controls and asks whether the suite notices when one disappears.
 
-from wreath import Request
-from wreath.binding import Query
-from wreath.response import JSONResponse
+Read the [request path](https://alexogeny.github.io/wreath/internals/index.html)
+for the design and [performance](https://alexogeny.github.io/wreath/perf/index.html)
+for the numbers.
 
-@app.get("/search")
-async def search(
-    request: Request,
-    q: str,
-    limit: Annotated[int, Query(minimum=1, maximum=100)] = 20,
-) -> JSONResponse:
-    return JSONResponse({"q": q, "limit": limit})
-```
-
-A model earns its keep twice — it describes a table, and its columns *are* the
-validator for a request body, so the two cannot drift apart:
-
-```python
-from wreath.orm import Mapped, Model, column
-from wreath.orm.types import Int64, Text
-
-class Widget(Model, table="widgets"):
-    id: Mapped[int] = column(Int64, primary_key=True)
-    name: Mapped[str] = column(Text)
-```
-
-And you never need a socket to test any of it:
-
-```python
-from wreath.testing import TestClient
-
-async def test_index():
-    async with TestClient(app) as client:
-        response = await client.get("/")
-        assert response.status == 200
-```
-
-Here is the shape of the path that carries it, and where the language boundary
-sits when the native build is in use:
-
-```text
-   request
-      │
-      ▼
-   ingress ─▶ middleware ─▶ routing ─▶ authentication ─▶ authorization
-                                                               │
-   ═══ into Python ════════════════════════════════════════════╪══════
-                                                               ▼
-                                                         your handler
-                                                               │
-   ═══ back to native ═════════════════════════════════════════╪══════
-                                                               │
-   response ◀───────────────── egress ◀────────────────────────╯
-```
-
-The intended shape is that everything before the handler stays native, and
-Python is entered when a route is *activated*. That is a measured property, not
-an aspiration: `uv run wreath-request-trace` counts every boundary crossing for
-a whole request against a realistic app, attributes each to a lifecycle phase,
-and compares the total to a baseline checked into the repository.
-
-## The command line
-
-| Command | Result |
-|---|---|
-| `wreath new shop` | Write a project that already runs and whose own tests are already green. |
-| `wreath capabilities celery` | What already ships that answers a word you know — before you install anything. |
-| `wreath run app:app` | Serve an application in one foreground process. |
-| `wreath dev app:app` | Serve it and reload after source changes. |
-| `wreath docs` | Build a documentation site from markdown — no third-party toolchain. |
-| `wreath migrations` | Inspect and run PostgreSQL migrations. |
-| `wreath typegen` | Generate consumer type contracts from typed routes. |
-| `wreath port` | Port an existing FastAPI app: report, or emit Wreath source. |
-| `wreath mutant` | Remove one declared control at a time and see whether the tests notice. |
-| `wreath test` | Run pytest behind an animated file heat map, duration profiling, and optional mutation confidence. |
-| `wreath audit` | Audit generated HTML and responses for accessibility and performance. |
-| `wreath doctor` | Diagnose defects a green test suite cannot see — including `preflight`, one report of everything checkable before a deploy. |
-| `wreath inspect` | Query a running server's read-only telemetry inspector. |
-| `wreath flight` | Read a flight recorder ring file left behind by a crash. |
-
-`wreath --help` lists the rest — `mcp`, `capture`, `replay`, `passes`, `schema`.
-
-## Documentation
-
-The published site is <https://alexogeny.github.io/wreath/>.
-
-- [**Getting started**](https://alexogeny.github.io/wreath/getting-started/index.html)
-  — install and build your first app, start to finish.
-- [**Wreath for FastAPI developers**](https://alexogeny.github.io/wreath/from-fastapi/index.html)
-  — the same application in both dialects, with every habit mapped to its home.
-- [**Guides**](https://alexogeny.github.io/wreath/guides/routing.html) — a page
-  for each part of the framework, with the reasoning behind it.
-- [**Cookbook**](https://alexogeny.github.io/wreath/cookbook/index.html) —
-  recipes for developers, and a set written for coding agents.
-- [**API reference**](https://alexogeny.github.io/wreath/reference/app.html) —
-  every public module, generated from the source.
-- [**Performance**](https://alexogeny.github.io/wreath/perf/index.html) and
-  [**internals**](https://alexogeny.github.io/wreath/internals/index.html) — how
-  it measures up, with the methodology, and what makes it quick.
-- [**Release notes**](https://alexogeny.github.io/wreath/release_notes/index.html)
-  — what changed in each version.
-
-Build them locally — there is no mkdocs and no Sphinx here, Wreath renders its
-own site:
+## Work on Wreath
 
 ```bash
-uv run wreath-docs            # strict build; --serve to watch
+uv sync
+uv run wreath-check
+uv run wreath-check --docs
+uv run wreath test
 ```
 
-## Development
-
-```bash
-uv sync                       # dev group; builds the native extensions
-uv run wreath-check           # ruff, ty, pytest, native lints, map lint, trace baseline
-uv run wreath-check --docs    # ... and a strict docs build
-uv run wreath test            # live grid, timing outliers, 192-control confidence sample
-uv run wreath test --mutant full  # complete mutation sweep, overlapping green tests
-uv run pytest                 # the default suite, serially
-uv run pytest -m '' -n 6      # everything, including network, fuzz, and performance
-```
-
-The test grid keeps one tile per file: green means passed, purple `▣` means its
-tests are currently probing a mutant, and solid gold `▰` means one of those tests
-caught the removed control. A surviving mutant is reported as a finding and
-never earns the gold state.
-
-> [!IMPORTANT]
-> Prefer the task entry points over a bare `uv sync --group X`. `uv sync`
-> reconciles the venv to exactly the groups you name and **removes everything
-> else**, so syncing one group uninstalls the last one's tools. The task
-> runners use `uv sync --inexact`, which adds without evicting.
-
-Contributing — the invariants a change must preserve, how to verify one, and why
-each rule exists — is documented in
-[`AGENTS.md`](https://github.com/alexogeny/wreath/blob/main/AGENTS.md) and the
-cookbook's
-[section for coding agents](https://alexogeny.github.io/wreath/cookbook/agents/index.html).
-If you are a coding agent, start there:
-[`docs/agents/manifest.json`](https://github.com/alexogeny/wreath/blob/main/docs/agents/manifest.json)
-maps every subsystem to its sources, tests, and invariants so you can find one
-without reading the tree.
-
-## Benchmarks
-
-Wreath ships equivalent applications across several frameworks and a renderer
-that reports medians with their run-to-run range, so a real win can be told from
-noise. Results are regenerated locally:
-
-```bash
-uv run wreath-bench-report    # one report across every benchmark family
-```
-
-See [`benchmarks/README.md`](https://github.com/alexogeny/wreath/blob/main/benchmarks/README.md)
-for methodology. A single run is not a result, and no number here comes from one.
-
-## License
-
-Wreath is licensed under the
-[Mozilla Public License 2.0](https://github.com/alexogeny/wreath/blob/main/LICENSE)
-(MPL-2.0).
-
-In practice: use it freely, commercially, as a dependency of anything —
-proprietary applications and closed-source SaaS included. Your own code is
-never affected. The only obligation is that if you ship a product containing
-*modified copies of wreath's own files*, those file changes must remain
-source-available to your recipients.
-
-**The spirit of this release** (a request, not a license term): if you make
-substantial improvements to wreath — bug fixes, features, performance work —
-we'd love to see them upstream rather than living in a fork. Massive divergent
-forks are legal; they're just not the point. The MPL grants no rights to the
-"wreath" name (§2.3), so a fork should pick its own.
-
-<div align="center">
-
-**Many parts. One shape.**
-
-</div>
+The repository's [`AGENTS.md`](AGENTS.md) is the engineering contract. The
+[agent cookbook](https://alexogeny.github.io/wreath/cookbook/agents/index.html)
+turns it into task-shaped routes through the tree.

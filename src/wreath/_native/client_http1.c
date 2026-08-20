@@ -14,7 +14,6 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <structmember.h>
-#include <time.h>
 
 typedef struct {
     PyObject_HEAD
@@ -250,8 +249,6 @@ typedef struct {
     int response_framed;
 } WreathClientStream;
 
-static const WreathTransportCAPI *cs_transport_capi_resolve(void);
-
 static PyTypeObject *client_stream_type = NULL;
 static PyObject *cs_incomplete_read_error = NULL;  /* asyncio classes */
 static PyObject *cs_limit_overrun_error = NULL;
@@ -481,12 +478,11 @@ cs_cancel_response_timer(WreathClientStream *self)
 static double
 cs_monotonic(void)
 {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
-        PyErr_SetFromErrno(PyExc_OSError);
+    PyTime_t now;
+    if (PyTime_Monotonic(&now) < 0) {
         return -1.0;
     }
-    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+    return PyTime_AsSecondsDouble(now);
 }
 
 static void
@@ -1367,6 +1363,7 @@ static PyObject *client_str_close = NULL;
 static PyObject *client_str_context = NULL;
 static PyObject *client_str_is_closing = NULL;
 static PyObject *client_str_write = NULL;
+static PyObject *client_str_upper = NULL;
 static PyObject *client_context_names = NULL;
 
 static int
@@ -2281,7 +2278,7 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
         Py_DECREF(key);
         return NULL;
     } else if (key != NULL) {
-        method_upper = PyObject_CallMethod(method, "upper", NULL);
+        method_upper = PyObject_CallMethodNoArgs(method, client_str_upper);
         if (method_upper == NULL) {
             Py_DECREF(key);
             return NULL;
@@ -2304,16 +2301,11 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
                             "request target must be ASCII/percent-encoded");
             return NULL;
         }
-        PyObject *empty_headers = PyTuple_New(0);
-        PyObject *empty_body = PyBytes_FromStringAndSize(NULL, 0);
-        PyObject *serialize_args = empty_headers != NULL && empty_body != NULL
-            ? PyTuple_Pack(
-                5, method_upper, target_bytes,
-                FAST_SLOT(client, fast_client_off.authority_bytes),
-                empty_headers, empty_body)
-            : NULL;
-        Py_XDECREF(empty_headers);
-        Py_XDECREF(empty_body);
+        PyObject *serialize_args = PyTuple_Pack(
+            5, method_upper, target_bytes,
+            FAST_SLOT(client, fast_client_off.authority_bytes),
+            Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_TUPLE),
+            Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_BYTES));
         if (serialize_args == NULL) {
             Py_DECREF(key);
             Py_DECREF(method_upper);
@@ -2456,7 +2448,7 @@ cs_connection_made(WreathClientStream *self, PyObject *transport)
     self->over_ssl = sslcontext != Py_None;
     Py_DECREF(sslcontext);
     Py_XSETREF(self->transport, Py_NewRef(transport));
-    const WreathTransportCAPI *capi = cs_transport_capi_resolve();
+    const WreathTransportCAPI *capi = wreath_transport_capi_resolve();
     self->transport_capi =
         capi != NULL && capi->check(transport) ? capi : NULL;
     self->connected = 1;
@@ -2721,30 +2713,6 @@ static const WreathStreamCAPI cs_stream_capi = {
     cs_stream_feed,
 };
 
-/* Resolve the immutable reactor ABI for this connection.  The stream retains
-   the pointer it uses; no process-global mutable cache is involved. */
-static const WreathTransportCAPI *
-cs_transport_capi_resolve(void)
-{
-    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
-    PyObject *module = modules == NULL
-        ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
-    if (module == NULL) return NULL;
-    PyObject *capsule = PyObject_GetAttrString(module, "_TRANSPORT_C_API");
-    if (capsule == NULL) {
-        PyErr_Clear();
-        return NULL;
-    }
-    const WreathTransportCAPI *capi = PyCapsule_GetPointer(
-        capsule, WREATH_TRANSPORT_CAPI_NAME);
-    Py_DECREF(capsule);
-    if (capi == NULL) {
-        PyErr_Clear();
-        return NULL;
-    }
-    return capi->version == WREATH_TRANSPORT_CAPI_VERSION ? capi : NULL;
-}
-
 /* --- lifecycle ---------------------------------------------------------- */
 
 static PyObject *
@@ -2946,6 +2914,7 @@ wreath_register_http_client_protocol(PyObject *module)
     client_str_context = PyUnicode_InternFromString("context");
     client_str_is_closing = PyUnicode_InternFromString("is_closing");
     client_str_write = PyUnicode_InternFromString("write");
+    client_str_upper = PyUnicode_InternFromString("upper");
     client_context_names = client_str_context != NULL
         ? PyTuple_Pack(1, client_str_context) : NULL;
     if (base == NULL || cs_incomplete_read_error == NULL ||
@@ -2954,7 +2923,7 @@ wreath_register_http_client_protocol(PyObject *module)
         cs_str_cancel == NULL || client_cancelled_error == NULL ||
         client_str_close == NULL ||
         client_str_context == NULL || client_str_is_closing == NULL ||
-        client_str_write == NULL ||
+        client_str_write == NULL || client_str_upper == NULL ||
         client_context_names == NULL) {
         Py_XDECREF(base);
         return -1;

@@ -18,7 +18,7 @@ scrape trustworthy rather than merely present:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -159,6 +159,16 @@ def test_counters_reach_the_exposition() -> None:
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
     assert "wreath_jobs_run_errors{instance=\"work\"} 0" in text
     assert "wreath_entity_lost{instance=\"wreath_entity\"} 0" in text
+
+
+def test_prometheus_counter_values_retain_the_mapping_protocol() -> None:
+    source = SimpleNamespace(
+        counters=lambda: Counters(
+            "readonly", "one", MappingProxyType({"completed": 7})
+        )
+    )
+    text = PrometheusBridge(FakeProjector(), counter_sources=(source,)).render()
+    assert 'wreath_readonly_completed{instance="one"} 7' in text
 
 
 def test_explicit_counter_sources_reach_prometheus_and_dogstatsd() -> None:
