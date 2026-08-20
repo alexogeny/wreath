@@ -1,10 +1,17 @@
-"""First-class response compression, backed by the stdlib's native codecs."""
+"""First-class response compression on Wreath gzip and CPython zstd."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator
 
-from .._compression import require_zstd
+from .._compression import (
+    _dcz_compress,
+    _gzip_compress_with,
+    _gzip_encoder_new,
+    _gzip_fragment_compress_with,
+    _prepare_dcz_dictionary,
+    require_zstd,
+)
 from .._webpolicy import (
     NO_TRANSFORM,
     append_vary,
@@ -20,7 +27,6 @@ from ..compression import (
     ZSTD_MIN_LEVEL,
     GzipCompressor,
     ZstdCompressor,
-    gzip_compress,
     zstd_compress,
 )
 from ..request import Request
@@ -28,12 +34,89 @@ from ..response import FileResponse, Response, StreamingResponse
 
 _BODYLESS = {204, 304}
 
-# Keyed by what `select_content_encoding` returns, so adding a coding is one
-# entry in each map plus the selector -- and a coding the selector can return but
-# a map cannot serve would be a KeyError at the one line that knows both names.
-_STREAMING = {"gzip": GzipCompressor, "zstd": ZstdCompressor}
-_WHOLE_BUFFER = {"gzip": gzip_compress, "zstd": zstd_compress}
-_ETAG_SUFFIX = {"gzip": b"--gzip", "zstd": b"--zstd"}
+_ETAG_SUFFIX = {"dcz": b"--dcz", "gzip": b"--gzip", "zstd": b"--zstd"}
+_FORMAT_COUNT = 7
+
+
+def _format_index(value: str | bytes) -> int:
+    text = value.decode("ascii", "ignore") if isinstance(value, bytes) else value
+    media = text.partition(";")[0].strip().lower()
+    if media in {"json", "application/json"} or media.endswith("+json"):
+        return 1
+    if media == "chaotic-json":
+        return 2
+    if media in {"html", "text/html"}:
+        return 3
+    if media in {"graphql", "application/graphql", "application/graphql-query"}:
+        return 4
+    if media in {
+        "log",
+        "application/x-ndjson",
+        "application/jsonlines",
+        "text/x-log",
+    }:
+        return 5
+    if media in {"plaintext", "text/plain"}:
+        return 6
+    return 0
+
+
+def _coding_qualities(value: bytes) -> dict[bytes, int]:
+    """Parse only the codings needed by the prepared-response path."""
+    qualities: dict[bytes, int] = {}
+    for raw_item in value.lower().split(b","):
+        token, *parameters = raw_item.strip().split(b";")
+        quality = 1000
+        for parameter in parameters:
+            name, separator, raw_quality = parameter.strip().partition(b"=")
+            if name.strip() != b"q":
+                continue
+            if not separator:
+                quality = 0
+                continue
+            raw_quality = raw_quality.strip()
+            if raw_quality == b"0":
+                quality = 0
+            elif raw_quality == b"1":
+                quality = 1000
+            elif (
+                3 <= len(raw_quality) <= 5
+                and raw_quality[1:2] == b"."
+                and raw_quality[:1] in (b"0", b"1")
+                and raw_quality[2:].isdigit()
+                and (raw_quality[:1] == b"0" or not raw_quality[2:].strip(b"0"))
+            ):
+                quality = int(raw_quality[2:].ljust(3, b"0")) if raw_quality[:1] == b"0" else 1000
+            else:
+                quality = 0
+        qualities[token.strip()] = quality
+    return qualities
+
+
+def _select_prepared_coding(
+    accepted: bytes,
+    *,
+    dcz_available: bool,
+) -> str | None:
+    """Select DCZ first, then the gzip ladder, without overriding client q-values."""
+    ordinary = select_content_encoding(accepted)
+    qualities = _coding_qualities(accepted)
+    gzip_quality = qualities[b"gzip"] if b"gzip" in qualities else qualities.get(b"*", 0)
+    zstd_quality = qualities.get(b"zstd", 0)
+    dcz_quality = qualities.get(b"dcz", 0)
+    ordinary_quality = max(gzip_quality, zstd_quality)
+
+    # A client that made DCZ at least as desirable as every ordinary coding is
+    # asking for the prepared-response ladder.  An exact dictionary match takes
+    # the first rung.  If it misses, gzip wins an ordinary tie so its prepared
+    # fragment gets the next attempt; the gzip codec itself falls through to
+    # the format-aware encoder when the stable span does not match.
+    if dcz_quality > 0 and dcz_quality >= ordinary_quality:
+        if dcz_available:
+            return "dcz"
+        if gzip_quality > 0 and gzip_quality >= zstd_quality:
+            return "gzip"
+    return ordinary
 
 
 def _encoded_etag(value: bytes, coding: str) -> bytes | None:
@@ -47,9 +130,9 @@ def _encoded_etag(value: bytes, coding: str) -> bytes | None:
 
 
 async def _compressed_stream(
-    source: AsyncIterable[bytes], coding: str, level: int
+    source: AsyncIterable[bytes], coding: str, level: int, content_type: bytes
 ) -> AsyncIterator[bytes]:
-    compressor = _STREAMING[coding](level)
+    compressor = GzipCompressor(level, content_type) if coding == "gzip" else ZstdCompressor(level)
     try:
         async for chunk in source:
             if not isinstance(chunk, bytes):
@@ -66,14 +149,14 @@ async def _compressed_stream(
 
 
 class CompressionPolicy:
-    """Compress eligible in-memory and streaming responses with zstd or gzip.
+    """Compress eligible responses with DCZ, fragment gzip, gzip, or zstd.
 
     Global policy, so static files and error responses are compressed on the
     same terms as routed ones. A client that accepts neither coding — by naming
     both with `q=0`, or by offering neither `zstd`, `gzip`, nor a usable `*` —
     gets the response uncompressed.
 
-    **The two codings are not offered on equal terms, deliberately.** `zstd` is
+    **The ordinary codings are not offered on equal terms, deliberately.** `zstd` is
     served only to a client that named it; `gzip` is served to a client that
     named it *or* that sent a bare `*`. RFC 9110 would allow reading `*` as
     consent to zstd, but a request carrying `*` and no explicit list is far more
@@ -82,7 +165,13 @@ class CompressionPolicy:
     a client accepts both, the higher `q` wins and a tie goes to zstd, which
     decodes faster and smaller at every level offered here. The practical effect
     is that no request that used to receive gzip receives a coding it did not ask
-    for by name.
+    for by name. For an eligible HTTPS response whose exact registered
+    dictionary appears in `Available-Dictionary`, DCZ is preferred when its
+    client quality is at least as high as every ordinary coding. If that exact
+    match is unavailable, an equal-quality client that advertised DCZ falls
+    through to gzip: an exact prepared fragment is attempted first and the
+    format-aware gzip encoder is the final gzip fallback. Explicitly higher
+    client quality values are always honoured.
 
     zstd is available when this Python 3.14 build includes the optional `_zstd`
     extension. Construction refuses immediately when it does not, naming the
@@ -102,9 +191,10 @@ class CompressionPolicy:
 
     An in-memory response is compressed only when its body is at least
     `minimum_size` bytes, and its `Content-Length` is rewritten. A streaming
-    response is compressed chunk by chunk as it is produced, and loses its
-    `Content-Length`; `minimum_size` cannot apply to it, because the length is
-    not known when the decision is made. A `FileResponse` is never compressed.
+    response loses its `Content-Length`; zstd emits incrementally, while gzip
+    holds the member until finish so its format-aware parser sees the complete
+    body. `minimum_size` cannot apply because the length is not known when the
+    decision is made. A `FileResponse` is never compressed.
 
     A compressed response gains `Content-Encoding` naming the coding used, gains
     `Accept-Encoding` in its `Vary`, and has its `ETag` suffixed with `--gzip` or
@@ -115,12 +205,12 @@ class CompressionPolicy:
 
     Args:
         minimum_size: Smallest in-memory body to compress, in bytes.
-        gzip_level: zlib compression level from 0 to 9.
+        gzip_level: Wreath gzip compression level from 0 to 9.
         zstd_level: zstd compression level, from `ZSTD_MIN_LEVEL` to
             `ZSTD_MAX_LEVEL`; 3 by default, the level whose speed is comparable
             to gzip's default while compressing appreciably better. There is no
             zstd store mode — levels below 1 are libzstd's *fast* modes.
-        compress_streaming: Compress streaming responses as chunks are produced.
+        compress_streaming: Compress streaming response iterables.
         compress_authenticated: Opt identified callers into compression despite
             the response-length side channel. False by default.
 
@@ -131,9 +221,12 @@ class CompressionPolicy:
     """
 
     __slots__ = (
+        "_dcz_dictionaries",
+        "_gzip_fragments",
         "compress_authenticated",
         "compress_streaming",
         "gzip_level",
+        "_gzip_workspace",
         "minimum_size",
         "zstd_level",
     )
@@ -156,9 +249,48 @@ class CompressionPolicy:
             raise ValueError(f"zstd_level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
         self.minimum_size = minimum_size
         self.gzip_level = gzip_level
+        self._gzip_workspace = _gzip_encoder_new()
+        self._dcz_dictionaries: list[tuple[bytes, bytes, object] | None] = [None] * _FORMAT_COUNT
+        self._gzip_fragments: list[tuple[int, int, bytes, bytes, int] | None] = [
+            None
+        ] * _FORMAT_COUNT
         self.zstd_level = zstd_level
         self.compress_streaming = compress_streaming
         self.compress_authenticated = compress_authenticated
+
+    def _configure_dcz_dictionary(self, format: str | bytes, dictionary: bytes) -> bytes:
+        """Install one private, format-owned raw dictionary; return its wire token."""
+        prepared = _prepare_dcz_dictionary(dictionary)
+        self._dcz_dictionaries[_format_index(format)] = prepared
+        return prepared[0]
+
+    def _configure_gzip_fragment(
+        self,
+        format: str | bytes,
+        document: bytes,
+        *,
+        prefix_bytes: int,
+        suffix_bytes: int,
+    ) -> None:
+        """Prepare one exact stable span as an independently readable gzip member."""
+        if prefix_bytes < 0 or suffix_bytes < 0:
+            raise ValueError("gzip fragment prefix_bytes and suffix_bytes must be non-negative")
+        if prefix_bytes + suffix_bytes >= len(document):
+            raise ValueError("gzip fragment must leave a non-empty stable span")
+        middle = bytes(document[prefix_bytes : len(document) - suffix_bytes])
+        cached = _gzip_compress_with(
+            self._gzip_workspace,
+            middle,
+            self.gzip_level,
+            format,
+        )
+        self._gzip_fragments[_format_index(format)] = (
+            prefix_bytes,
+            suffix_bytes,
+            middle,
+            cached,
+            self.gzip_level,
+        )
 
     def describe(self):
         """What negotiation this policy takes part in.
@@ -210,8 +342,7 @@ class CompressionPolicy:
             return response
         headers = response.headers
         accepted = request._header_bytes(b"accept-encoding")
-        coding = select_content_encoding(accepted) if accepted is not None else None
-        if coding is None:
+        if accepted is None:
             return response
         if (
             find_response_header(headers, b"content-encoding") is not None
@@ -224,19 +355,41 @@ class CompressionPolicy:
         content_type = find_response_header(headers, b"content-type")
         if content_type is None or not is_compressible_content_type(content_type):
             return response
+        dcz_entry = self._dcz_dictionaries[_format_index(content_type)]
+        dcz_available = (
+            dcz_entry is not None
+            and request.scheme == "https"
+            and isinstance(response, Response)
+            and request._header_bytes(b"available-dictionary") == dcz_entry[0]
+        )
+        coding = _select_prepared_coding(accepted, dcz_available=dcz_available)
+        if coding is None:
+            return response
         etag = find_response_header(headers, b"etag")
         compressed_etag = _encoded_etag(etag, coding) if etag is not None else None
         if etag is not None and compressed_etag is None:
             return response
 
-        level = self.zstd_level if coding == "zstd" else self.gzip_level
+        level = self.zstd_level if coding in {"dcz", "zstd"} else self.gzip_level
         if isinstance(response, Response):
             if len(response.body) < self.minimum_size:
                 return response
-            response.body = _WHOLE_BUFFER[coding](response.body, level)
+            response.body = (
+                _dcz_compress(dcz_entry, response.body, level)
+                if coding == "dcz" and dcz_entry is not None
+                else _gzip_fragment_compress_with(
+                    self._gzip_workspace,
+                    response.body,
+                    level,
+                    content_type,
+                    tuple(self._gzip_fragments),
+                )
+                if coding == "gzip"
+                else zstd_compress(response.body, level)
+            )
             replace_content_length(headers, len(response.body))
         elif isinstance(response, StreamingResponse) and self.compress_streaming:
-            response.body = _compressed_stream(response.body, coding, level)
+            response.body = _compressed_stream(response.body, coding, level, content_type)
             replace_content_length(headers, None)
         elif isinstance(response, FileResponse):
             return response
@@ -245,6 +398,8 @@ class CompressionPolicy:
 
         headers.append((b"content-encoding", coding.encode("ascii")))
         append_vary(headers, b"accept-encoding")
+        if coding == "dcz":
+            append_vary(headers, b"available-dictionary")
         if compressed_etag is not None:
             for index, (name, _value) in enumerate(headers):
                 if name.lower() == b"etag":

@@ -160,15 +160,17 @@ class Select:
         distance in a `WHERE` is not, and the index will not be used for it.
         """
         orderings = []
-        for item in expressions:
-            if isinstance(item, ColumnExpr):
-                item = item.asc()
-            elif isinstance(item, BinaryExpr):
-                item = item.asc()  # raises unless it is a distance
-            elif not isinstance(item, OrderExpr):
+        for expression in expressions:
+            if isinstance(expression, ColumnExpr):
+                item = expression.asc()
+            elif isinstance(expression, BinaryExpr):
+                item = expression.asc()  # raises unless it is a distance
+            elif isinstance(expression, OrderExpr):
+                item = expression
+            else:
                 raise TypeError(
                     f"order_by() takes columns, .asc()/.desc(), or a vector "
-                    f"distance, got {item!r}"
+                    f"distance, got {expression!r}"
                 )
             _check_ordering(self.model, item.expression)
             orderings.append(item)

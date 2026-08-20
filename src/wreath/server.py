@@ -17,7 +17,6 @@ review work is complete.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import importlib.util
 import os
 import signal
@@ -1010,9 +1009,7 @@ class Server:
                     # with ssl") and otherwise falls back to its own 30-second
                     # SSL_SHUTDOWN_TIMEOUT, which is what this field exists to
                     # replace.
-                    ssl_shutdown_timeout=(
-                        None if ssl is None else config.ssl_shutdown_timeout
-                    ),
+                    ssl_shutdown_timeout=(None if ssl is None else config.ssl_shutdown_timeout),
                     reuse_address=True,
                     reuse_port=bool(getattr(self._loop, "_wreath_reuse_port", False)),
                 )
@@ -1020,7 +1017,8 @@ class Server:
                 if wants_udp and self.sockets:
                     port = self.sockets[0].getsockname()[1]
             if wants_udp:
-                assert tls is not None  # enforced by _resolve_tls
+                if tls is None:  # pragma: no cover - enforced by _resolve_tls
+                    raise RuntimeError("HTTP/3 requires resolved TLS configuration")
                 self._datagram_transport = await self._bind_datagram(tls, port)
             if self._recorder is not None:
                 self._log_pipeline, self._log_previous_runtime = _create_logging(

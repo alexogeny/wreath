@@ -95,8 +95,13 @@ class Command(IntEnum):
 #: Commands answered even without a projector attached.
 _CORE_COMMANDS = frozenset(
     {
-        Command.HELLO, Command.WORKERS, Command.ACTIVE_REQUESTS, Command.PRESSURE,
-        Command.EXPLAIN_ROUTE, Command.EXPLAIN_PLAN, Command.METADATA,
+        Command.HELLO,
+        Command.WORKERS,
+        Command.ACTIVE_REQUESTS,
+        Command.PRESSURE,
+        Command.EXPLAIN_ROUTE,
+        Command.EXPLAIN_PLAN,
+        Command.METADATA,
     }
 )
 #: Commands that require the off-path projector (recent traces / failures /
@@ -106,13 +111,20 @@ _PROJECTION_COMMANDS = frozenset(
 )
 #: Capture-control commands. Every one requires the capability token and an arm
 #: registry; they are advertised only when both are configured.
-_CAPTURE_COMMANDS = frozenset(
-    {Command.ARM_CAPTURE, Command.DISARM_CAPTURE, Command.CAPTURE_STATUS}
-)
+_CAPTURE_COMMANDS = frozenset({Command.ARM_CAPTURE, Command.DISARM_CAPTURE, Command.CAPTURE_STATUS})
 
 _METADATA_TABLES = (
-    "routes", "plans", "dependencies", "middleware", "auth_policies",
-    "serializers", "validators", "limits", "clients", "databases", "models",
+    "routes",
+    "plans",
+    "dependencies",
+    "middleware",
+    "auth_policies",
+    "serializers",
+    "validators",
+    "limits",
+    "clients",
+    "databases",
+    "models",
     "components",
 )
 
@@ -185,9 +197,7 @@ def _worker_payload(recorder: Any) -> dict[str, Any]:
         "phase_capacity": recorder.phase_capacity,
         "phase_in_use": recorder.phase_in_use,
         "phase_high_water": recorder.phase_high_water,
-        "losses": {
-            reason.name.lower(): recorder.loss(int(reason)) for reason in LossReason
-        },
+        "losses": {reason.name.lower(): recorder.loss(int(reason)) for reason in LossReason},
     }
 
 
@@ -321,14 +331,10 @@ class InspectorServer:
         if self._arm_registry is None or not self._config.capture_token:
             raise InspectorError("capture control is not enabled on this server")
         token = payload.get("token")
-        if not isinstance(token, str) or not hmac.compare_digest(
-            token, self._config.capture_token
-        ):
+        if not isinstance(token, str) or not hmac.compare_digest(token, self._config.capture_token):
             raise InspectorError("invalid or missing capture token")
 
-    def _capture_command(
-        self, command: int, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _capture_command(self, command: int, payload: dict[str, Any]) -> dict[str, Any]:
         self._authorize_capture(payload)
         if command == Command.CAPTURE_STATUS:
             return self._capture_status()
@@ -491,9 +497,7 @@ class InspectorServer:
             "plan_id": route.plan_id,
             "tags": list(route.tags),
             "coverage": route.coverage,
-            "dependencies": [
-                dependencies.get(i, str(i)) for i in route.dependency_ids
-            ],
+            "dependencies": [dependencies.get(i, str(i)) for i in route.dependency_ids],
             "middleware": [middleware.get(i, str(i)) for i in route.middleware_ids],
             "auth_policy": auth_policies.get(route.auth_policy_id),
         }
@@ -524,8 +528,13 @@ class InspectorServer:
         image = self._metadata_image()
         if table == "routes":
             rows = [
-                {"id": r.route_id, "method": r.method, "path": r.path,
-                 "operation_id": r.operation_id, "plan_id": r.plan_id}
+                {
+                    "id": r.route_id,
+                    "method": r.method,
+                    "path": r.path,
+                    "operation_id": r.operation_id,
+                    "plan_id": r.plan_id,
+                }
                 for r in image.routes
             ]
         elif table == "plans":
@@ -549,11 +558,7 @@ def _trace_payload(trace: Any) -> dict[str, Any]:
     hex strings (OTLP's form) so no JSON integer precision is assumed."""
     disposition = None
     if trace.flags & FLAG_POLICY_REFUSED:
-        disposition = (
-            "ai_scraping"
-            if trace.flags & FLAG_AI_SCRAPING_REFUSED
-            else "refused"
-        )
+        disposition = "ai_scraping" if trace.flags & FLAG_AI_SCRAPING_REFUSED else "refused"
     return {
         "request_id": trace.request_id,
         "connection_id": trace.connection_id,
@@ -677,7 +682,9 @@ class _InspectorProtocol(asyncio.Protocol):
         if not _peer_authorized(transport):
             transport.close()
             return
-        assert isinstance(transport, asyncio.Transport)
+        if not isinstance(transport, asyncio.Transport):
+            transport.close()
+            return
         self._transport = transport
         self._reset_idle_timer()
 
@@ -691,9 +698,7 @@ class _InspectorProtocol(asyncio.Protocol):
         if self._idle_handle is not None:
             self._idle_handle.cancel()
         loop = asyncio.get_running_loop()
-        self._idle_handle = loop.call_later(
-            self._server._config.idle_timeout, self._idle_expired
-        )
+        self._idle_handle = loop.call_later(self._server._config.idle_timeout, self._idle_expired)
 
     def _idle_expired(self) -> None:
         if self._transport is not None:
@@ -750,16 +755,12 @@ class _InspectorProtocol(asyncio.Protocol):
             return
         self._send(command, flags, request_id, body)
 
-    def _send(
-        self, command: int, flags: int, request_id: int, body: dict[str, Any]
-    ) -> None:
+    def _send(self, command: int, flags: int, request_id: int, body: dict[str, Any]) -> None:
         transport = self._transport
         if transport is None:
             return
         payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        header = HEADER.pack(
-            MAGIC, PROTOCOL_VERSION, command, flags, request_id, len(payload)
-        )
+        header = HEADER.pack(MAGIC, PROTOCOL_VERSION, command, flags, request_id, len(payload))
         transport.write(header + payload)
 
     def _fail(self, request_id: int, message: str) -> None:
@@ -778,9 +779,7 @@ def _peer_authorized(transport: asyncio.BaseTransport) -> bool:
         return False
     if hasattr(socket, "SO_PEERCRED"):
         try:
-            creds = sock.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-            )
+            creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
             _pid, uid, _gid = struct.unpack("3i", creds)
         except OSError:
             return False
@@ -813,7 +812,7 @@ class InspectorClient:
             self._writer.close()
             try:
                 await self._writer.wait_closed()
-            except (ConnectionError, OSError):
+            except ConnectionError, OSError:
                 pass
             self._writer = None
             self._reader = None
@@ -826,9 +825,7 @@ class InspectorClient:
         self._request_id += 1
         request_id = self._request_id
         raw = json.dumps(payload or {}, separators=(",", ":")).encode("utf-8")
-        header = HEADER.pack(
-            MAGIC, PROTOCOL_VERSION, int(command), 0, request_id, len(raw)
-        )
+        header = HEADER.pack(MAGIC, PROTOCOL_VERSION, int(command), 0, request_id, len(raw))
         self._writer.write(header + raw)
         await self._writer.drain()
         reply = await self._reader.readexactly(HEADER.size)
@@ -855,11 +852,16 @@ class InspectorClient:
         body = await self.call(Command.WORKERS)
         return [
             WorkerSnapshot(
-                mode=w["mode"], requests=w["requests"], completions=w["completions"],
-                active_count=w["active_count"], ring_occupancy=w["ring_occupancy"],
+                mode=w["mode"],
+                requests=w["requests"],
+                completions=w["completions"],
+                active_count=w["active_count"],
+                ring_occupancy=w["ring_occupancy"],
                 ring_high_water=w["ring_high_water"],
-                phase_capacity=w["phase_capacity"], phase_in_use=w["phase_in_use"],
-                phase_high_water=w["phase_high_water"], losses=w["losses"],
+                phase_capacity=w["phase_capacity"],
+                phase_in_use=w["phase_in_use"],
+                phase_high_water=w["phase_high_water"],
+                losses=w["losses"],
             )
             for w in body["workers"]
         ]
@@ -867,13 +869,13 @@ class InspectorClient:
     async def active_requests(
         self, *, offset: int = 0, limit: int = MAX_PAGE_ROWS
     ) -> list[ActiveRequest]:
-        body = await self.call(
-            Command.ACTIVE_REQUESTS, {"offset": offset, "limit": limit}
-        )
+        body = await self.call(Command.ACTIVE_REQUESTS, {"offset": offset, "limit": limit})
         return [
             ActiveRequest(
-                request_id=r["request_id"], age_us=r["age_us"],
-                protocol=r["protocol"], route_id=r["route_id"],
+                request_id=r["request_id"],
+                age_us=r["age_us"],
+                protocol=r["protocol"],
+                route_id=r["route_id"],
             )
             for r in body["requests"]
         ]
@@ -882,7 +884,10 @@ class InspectorClient:
         return await self.call(Command.PRESSURE)
 
     async def explain_route(
-        self, *, route_id: int | None = None, method: str | None = None,
+        self,
+        *,
+        route_id: int | None = None,
+        method: str | None = None,
         path: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -900,21 +905,15 @@ class InspectorClient:
     async def metadata(
         self, table: str, *, offset: int = 0, limit: int = MAX_PAGE_ROWS
     ) -> dict[str, Any]:
-        return await self.call(
-            Command.METADATA, {"table": table, "offset": offset, "limit": limit}
-        )
+        return await self.call(Command.METADATA, {"table": table, "offset": offset, "limit": limit})
 
-    async def timeline(
-        self, *, offset: int = 0, limit: int = MAX_PAGE_ROWS
-    ) -> dict[str, Any]:
+    async def timeline(self, *, offset: int = 0, limit: int = MAX_PAGE_ROWS) -> dict[str, Any]:
         return await self.call(Command.TIMELINE, {"offset": offset, "limit": limit})
 
     async def recent_failures(
         self, *, offset: int = 0, limit: int = MAX_PAGE_ROWS
     ) -> dict[str, Any]:
-        return await self.call(
-            Command.RECENT_FAILURES, {"offset": offset, "limit": limit}
-        )
+        return await self.call(Command.RECENT_FAILURES, {"offset": offset, "limit": limit})
 
     async def route_distributions(self) -> dict[str, Any]:
         return await self.call(Command.ROUTE_DISTRIBUTIONS)
@@ -942,9 +941,7 @@ class InspectorClient:
         return await self.call(Command.ARM_CAPTURE, payload)
 
     async def disarm_capture(self, *, token: str, arm_id: int) -> dict[str, Any]:
-        return await self.call(
-            Command.DISARM_CAPTURE, {"token": token, "arm_id": arm_id}
-        )
+        return await self.call(Command.DISARM_CAPTURE, {"token": token, "arm_id": arm_id})
 
     async def capture_status(self, *, token: str) -> dict[str, Any]:
         return await self.call(Command.CAPTURE_STATUS, {"token": token})
@@ -965,9 +962,7 @@ async def serve_inspector(
     commands (ARM_CAPTURE, DISARM_CAPTURE, CAPTURE_STATUS) become available behind
     that token.
     """
-    server = InspectorServer(
-        recorder, app, config, projector=projector, arm_registry=arm_registry
-    )
+    server = InspectorServer(recorder, app, config, projector=projector, arm_registry=arm_registry)
     await server.start()
     return server
 

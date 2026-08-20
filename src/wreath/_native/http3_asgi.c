@@ -240,6 +240,15 @@ static PyObject *k_status = NULL;
 static PyObject *k_headers = NULL;
 static PyObject *k_body = NULL;
 static PyObject *k_more_body = NULL;
+static PyObject *k_method = NULL;
+static PyObject *k_path = NULL;
+static PyObject *k_scheme = NULL;
+static PyObject *k_client = NULL;
+static PyObject *k_receive = NULL;
+static PyObject *k_send = NULL;
+static PyObject *k_done = NULL;
+static PyObject *k_wreath_flight = NULL;
+static PyObject *k_default_response_headers = NULL;
 static PyObject *k_host_name = NULL;  /* b"host", synthesized once per absence */
 
 int
@@ -254,6 +263,16 @@ wreath_h3_init_message_keys(void)
         (k_headers = PyUnicode_InternFromString("headers")) == NULL ||
         (k_body = PyUnicode_InternFromString("body")) == NULL ||
         (k_more_body = PyUnicode_InternFromString("more_body")) == NULL ||
+        (k_method = PyUnicode_InternFromString("method")) == NULL ||
+        (k_path = PyUnicode_InternFromString("path")) == NULL ||
+        (k_scheme = PyUnicode_InternFromString("scheme")) == NULL ||
+        (k_client = PyUnicode_InternFromString("client")) == NULL ||
+        (k_receive = PyUnicode_InternFromString("_receive")) == NULL ||
+        (k_send = PyUnicode_InternFromString("_send")) == NULL ||
+        (k_done = PyUnicode_InternFromString("_done")) == NULL ||
+        (k_wreath_flight = PyUnicode_InternFromString("_wreath_flight")) == NULL ||
+        (k_default_response_headers =
+            PyUnicode_InternFromString("_default_response_headers")) == NULL ||
         (k_host_name = PyBytes_FromString("host")) == NULL) {
         return -1;
     }
@@ -574,10 +593,9 @@ submit_response(WreathH3Stream *s, int default_status)
     PyOS_snprintf(status_buf, sizeof(status_buf), "%d", status);
 
     Py_ssize_t hcount = s->resp_headers ? PySequence_Fast_GET_SIZE(s->resp_headers) : 0;
-    PyObject *defaults = PyObject_GetAttrString(
-        s->conn->endpoint->config, "_default_response_headers"
-    );
-    PyObject *default_headers = defaults ? PyObject_GetAttrString(defaults, "headers") : NULL;
+    PyObject *defaults = PyObject_GetAttr(
+        s->conn->endpoint->config, k_default_response_headers);
+    PyObject *default_headers = defaults ? PyObject_GetAttr(defaults, k_headers) : NULL;
     Py_XDECREF(defaults);
     if (default_headers == NULL) {
         return -1;
@@ -705,7 +723,7 @@ h3_stream_done(PyObject *op, PyObject *task)
         /* Route/plan attribution stamped by Python dispatch into the scope dict
          * as a (route_id, plan_id) tuple; left as None for unattributed routes. */
         if (s->scope != NULL && PyDict_Check(s->scope)) {
-            PyObject *attr = PyDict_GetItemString(s->scope, "_wreath_flight");
+            PyObject *attr = PyDict_GetItemWithError(s->scope, k_wreath_flight);
             if (attr != NULL && PyTuple_CheckExact(attr) &&
                 PyTuple_GET_SIZE(attr) == 2) {
                 unsigned long rid = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(attr, 0));
@@ -1306,12 +1324,12 @@ start_request(WreathH3Stream *s)
 
     if (c->endpoint->policy.descriptor != NULL) {
         if (policy_headers == NULL) {
-            policy_headers = PyObject_GetAttrString(scope, "headers");
+            policy_headers = PyObject_GetAttr(scope, k_headers);
         }
-        PyObject *policy_method = PyObject_GetAttrString(scope, "method");
-        PyObject *policy_path = PyObject_GetAttrString(scope, "path");
-        PyObject *policy_scheme = PyObject_GetAttrString(scope, "scheme");
-        PyObject *policy_client = PyObject_GetAttrString(scope, "client");
+        PyObject *policy_method = PyObject_GetAttr(scope, k_method);
+        PyObject *policy_path = PyObject_GetAttr(scope, k_path);
+        PyObject *policy_scheme = PyObject_GetAttr(scope, k_scheme);
+        PyObject *policy_client = PyObject_GetAttr(scope, k_client);
         WreathPolicyReply reply = {0};
         if (policy_headers == NULL || policy_method == NULL || policy_path == NULL ||
             policy_scheme == NULL || policy_client == NULL) {
@@ -1363,9 +1381,9 @@ start_request(WreathH3Stream *s)
     }
     Py_CLEAR(policy_headers);
 
-    s->receive_callable = PyObject_GetAttrString((PyObject *)s, "_receive");
-    s->send_callable = PyObject_GetAttrString((PyObject *)s, "_send");
-    s->done_callable = PyObject_GetAttrString((PyObject *)s, "_done");
+    s->receive_callable = PyObject_GetAttr((PyObject *)s, k_receive);
+    s->send_callable = PyObject_GetAttr((PyObject *)s, k_send);
+    s->done_callable = PyObject_GetAttr((PyObject *)s, k_done);
     if (!s->receive_callable || !s->send_callable || !s->done_callable) return -1;
 
     /* Begin the recorder context now the request is committed to running; it is

@@ -10,10 +10,11 @@ from __future__ import annotations
 from os import urandom as _urandom
 from typing import Any
 
+from .._compression import _dcz_compress
 from .._webpolicy import origin_matches as _native_origin_matches
 from .._webpolicy import replace_cookie as _native_replace_cookie
 from .cache import CachePolicy
-from .compression import CompressionPolicy, gzip_compress, zstd_compress
+from .compression import CompressionPolicy, zstd_compress
 from .cors import CorsPolicy
 from .csrf import CsrfPolicy, csrf_token
 from .csrf import _csrf_new_token as _native_csrf_new_token
@@ -498,8 +499,11 @@ class HttpPolicy:
                 compression.gzip_level,
                 compression.zstd_level,
                 compression.compress_authenticated,
-                gzip_compress,
                 zstd_compress,
+                compression._gzip_workspace,
+                tuple(compression._dcz_dictionaries),
+                _dcz_compress,
+                tuple(compression._gzip_fragments),
             )
 
         return (

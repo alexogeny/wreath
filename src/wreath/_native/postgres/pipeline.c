@@ -954,7 +954,6 @@ finish_operation(PyObject *self, PyObject *operation)
         {
             PyObject *plans = SLOT_BORROW(self, conn_off.plans, "_plans");
             PyObject *kwargs = PyDict_New();
-            PyObject *args = NULL;
             PyObject *outcome = NULL;
             PyObject *setter = NULL;
             if (plans == NULL || kwargs == NULL ||
@@ -964,11 +963,12 @@ finish_operation(PyObject *self, PyObject *operation)
                 Py_DECREF(plan);
                 return -1;
             }
-            args = PyTuple_Pack(2, sql, plan);
-            setter = args == NULL ? NULL : PyObject_GetAttr(plans, str_set);
-            if (setter != NULL) outcome = PyObject_Call(setter, args, kwargs);
+            setter = PyObject_GetAttr(plans, str_set);
+            if (setter != NULL) {
+                PyObject *call_args[] = {sql, plan};
+                outcome = PyObject_VectorcallDict(setter, call_args, 2, kwargs);
+            }
             Py_XDECREF(setter);
-            Py_XDECREF(args);
             Py_DECREF(kwargs);
             Py_DECREF(cost);
             Py_DECREF(plan);
@@ -1856,18 +1856,18 @@ submit(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
                `_build_cold` takes five positional arguments and adding a sixth
                means changing both builders to serve a path that runs once per
                connection, off the hot path, only for migration reads. */
-            PyObject *call_args = PyTuple_Pack(
-                5, SLOT(operation, op_off.statement_name), sql, args,
-                SLOT(operation, op_off.parameter_oids), mode);
             PyObject *call_kwargs = PyDict_New();
-            if (call_args == NULL || call_kwargs == NULL ||
+            if (call_kwargs == NULL ||
                 PyDict_SetItem(call_kwargs, str_binary_results, Py_True) < 0) {
-                Py_XDECREF(call_args);
                 Py_XDECREF(call_kwargs);
                 goto error;
             }
-            packet = PyObject_Call(fn_build_cold_query_packet, call_args, call_kwargs);
-            Py_DECREF(call_args);
+            PyObject *call_args[] = {
+                SLOT(operation, op_off.statement_name), sql, args,
+                SLOT(operation, op_off.parameter_oids), mode,
+            };
+            packet = PyObject_VectorcallDict(
+                fn_build_cold_query_packet, call_args, 5, call_kwargs);
             Py_DECREF(call_kwargs);
         }
         if (packet == NULL) goto error;
@@ -2390,22 +2390,24 @@ statement_generic_query(StatementAwait *self, PyObject *sql)
 {
     PyObject *method = PyObject_GetAttr(self->connection, self->mode);
     Py_ssize_t count = PyTuple_GET_SIZE(self->args);
-    PyObject *call_args;
+    PyObject *small_args[8];
+    PyObject **call_args = small_args;
     PyObject *awaitable;
     if (method == NULL) return NULL;
-    call_args = PyTuple_New(count + 1);
-    if (call_args == NULL) {
-        Py_DECREF(method);
-        return NULL;
+    if (count >= 8) {
+        call_args = PyMem_Malloc((size_t)(count + 1) * sizeof *call_args);
+        if (call_args == NULL) {
+            Py_DECREF(method);
+            return PyErr_NoMemory();
+        }
     }
-    PyTuple_SET_ITEM(call_args, 0, Py_NewRef(sql));
+    call_args[0] = sql;
     for (Py_ssize_t index = 0; index < count; index++) {
-        PyTuple_SET_ITEM(
-            call_args, index + 1, Py_NewRef(PyTuple_GET_ITEM(self->args, index)));
+        call_args[index + 1] = PyTuple_GET_ITEM(self->args, index);
     }
-    awaitable = PyObject_Call(method, call_args, NULL);
+    awaitable = PyObject_Vectorcall(method, call_args, (size_t)count + 1, NULL);
+    if (call_args != small_args) PyMem_Free(call_args);
     Py_DECREF(method);
-    Py_DECREF(call_args);
     return awaitable;
 }
 

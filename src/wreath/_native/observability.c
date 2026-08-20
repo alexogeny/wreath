@@ -13,6 +13,51 @@
 #include <math.h>
 #include <stdint.h>
 
+typedef enum {
+    OBS_SUBSYSTEM,
+    OBS_INSTANCE,
+    OBS_VALUES,
+    OBS_ROUTE_ID,
+    OBS_COUNT,
+    OBS_ERRORS,
+    OBS_DURATION_US_SUM,
+    OBS_DURATION_US_MAX,
+    OBS_BUCKETS,
+    OBS_ROUTES,
+    OBS_ASSEMBLED,
+    OBS_PENDING,
+    OBS_LOSS,
+    OBS_NAME,
+    OBS_GAUGES,
+    OBS_ATTR_COUNT,
+} ObservabilityAttr;
+
+static PyObject *observability_attr_names[OBS_ATTR_COUNT];
+
+int
+wreath_observability_ready(void)
+{
+    static const char *names[OBS_ATTR_COUNT] = {
+        "subsystem", "instance", "values", "route_id", "count", "errors",
+        "duration_us_sum", "duration_us_max", "buckets", "routes",
+        "assembled", "pending", "loss", "name", "gauges",
+    };
+    for (int index = 0; index < OBS_ATTR_COUNT; index++) {
+        observability_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (observability_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(observability_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+observability_getattr(PyObject *object, ObservabilityAttr attribute)
+{
+    return PyObject_GetAttr(object, observability_attr_names[attribute]);
+}
+
 /* Unreserved characters only: enough for UUIDs, W3C trace ids, and ULIDs, while
  * excluding every byte with meaning in a header, a log line, or a shell. */
 static inline int
@@ -548,6 +593,46 @@ prom_sanitize_metric(PyObject *text)
     return result;
 }
 
+static int
+prometheus_counter_sample(PyObject *groups, PyObject *namespace,
+                          PyObject *subsystem, PyObject *instance,
+                          PyObject *raw_name, PyObject *raw_number)
+{
+    PyObject *name_text = PyObject_Str(raw_name);
+    PyObject *name = name_text != NULL
+        ? prom_sanitize_metric(name_text) : NULL;
+    PyObject *family = name != NULL
+        ? PyUnicode_FromFormat("%U_%U_%U", namespace, subsystem, name)
+        : NULL;
+    PyObject *number = family != NULL ? PyNumber_Long(raw_number) : NULL;
+    PyObject *samples = NULL;
+    PyObject *inserted_samples = NULL;
+    PyObject *sample = NULL;
+    int status = -1;
+    Py_XDECREF(name_text);
+    Py_XDECREF(name);
+    if (number == NULL) goto done;
+    samples = PyDict_GetItemWithError(groups, family);
+    if (samples == NULL) {
+        if (PyErr_Occurred()) goto done;
+        inserted_samples = PyList_New(0);
+        if (inserted_samples == NULL ||
+            PyDict_SetItem(groups, family, inserted_samples) < 0) goto done;
+        samples = inserted_samples;
+    }
+    sample = wreath_tuple2_from_owned(Py_NewRef(instance), number);
+    number = NULL;
+    if (sample == NULL || PyList_Append(samples, sample) < 0) goto done;
+    status = 0;
+
+done:
+    Py_XDECREF(sample);
+    Py_XDECREF(inserted_samples);
+    Py_XDECREF(number);
+    Py_XDECREF(family);
+    return status;
+}
+
 PyObject *
 wreath_prometheus_counter_block(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -566,9 +651,9 @@ wreath_prometheus_counter_block(PyObject *Py_UNUSED(self), PyObject *args)
     for (Py_ssize_t reading_index = 0;
          reading_index < reading_count; reading_index++) {
         PyObject *reading = PySequence_Fast_GET_ITEM(readings, reading_index);
-        PyObject *subsystem_value = PyObject_GetAttrString(reading, "subsystem");
-        PyObject *instance_value = PyObject_GetAttrString(reading, "instance");
-        PyObject *values = PyObject_GetAttrString(reading, "values");
+        PyObject *subsystem_value = observability_getattr(reading, OBS_SUBSYSTEM);
+        PyObject *instance_value = observability_getattr(reading, OBS_INSTANCE);
+        PyObject *values = observability_getattr(reading, OBS_VALUES);
         PyObject *subsystem_text = NULL, *subsystem = NULL, *instance = NULL;
         PyObject *items = NULL;
         if (subsystem_value == NULL || instance_value == NULL || values == NULL)
@@ -578,54 +663,30 @@ wreath_prometheus_counter_block(PyObject *Py_UNUSED(self), PyObject *args)
         if (subsystem_text == NULL || instance == NULL) goto reading_error;
         subsystem = prom_sanitize_metric(subsystem_text);
         if (subsystem == NULL) goto reading_error;
-        items = PyMapping_Items(values);
-        if (items == NULL) goto reading_error;
-
-        Py_ssize_t item_count = PyList_GET_SIZE(items);
-        for (Py_ssize_t item_index = 0; item_index < item_count; item_index++) {
-            PyObject *item = PyList_GET_ITEM(items, item_index);
-            PyObject *name_text = PyObject_Str(PyTuple_GET_ITEM(item, 0));
-            PyObject *name = name_text != NULL
-                ? prom_sanitize_metric(name_text) : NULL;
-            PyObject *family = name != NULL
-                ? PyUnicode_FromFormat("%U_%U_%U", namespace, subsystem, name)
-                : NULL;
-            PyObject *number = family != NULL
-                ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
-            PyObject *samples = NULL, *sample = NULL;
-            Py_XDECREF(name_text);
-            Py_XDECREF(name);
-            if (number == NULL) {
-                Py_XDECREF(family);
-                goto reading_error;
+        if (PyDict_CheckExact(values)) {
+            Py_ssize_t position = 0;
+            PyObject *raw_name;
+            PyObject *raw_number;
+            while (PyDict_Next(values, &position, &raw_name, &raw_number)) {
+                if (prometheus_counter_sample(
+                    groups, namespace, subsystem, instance,
+                    raw_name, raw_number) < 0) goto reading_error;
             }
-            samples = PyDict_GetItemWithError(groups, family);
-            if (samples == NULL) {
-                if (PyErr_Occurred()) {
-                    Py_DECREF(number);
-                    Py_DECREF(family);
-                    goto reading_error;
-                }
-                samples = PyList_New(0);
-                if (samples == NULL || PyDict_SetItem(groups, family, samples) < 0) {
-                    Py_XDECREF(samples);
-                    Py_DECREF(number);
-                    Py_DECREF(family);
-                    goto reading_error;
-                }
-                Py_DECREF(samples);
-                samples = PyDict_GetItem(groups, family);
-            }
-            sample = PyTuple_Pack(2, instance, number);
-            Py_DECREF(number);
-            Py_DECREF(family);
-            if (sample == NULL || PyList_Append(samples, sample) < 0) {
-                Py_XDECREF(sample);
-                goto reading_error;
-            }
-            Py_DECREF(sample);
         }
-        Py_DECREF(items);
+        else {
+            items = PyMapping_Items(values);
+            if (items == NULL) goto reading_error;
+            Py_ssize_t item_count = PyList_GET_SIZE(items);
+            for (Py_ssize_t item_index = 0; item_index < item_count; item_index++) {
+                PyObject *item = PyList_GET_ITEM(items, item_index);
+                if (prometheus_counter_sample(
+                    groups, namespace, subsystem, instance,
+                    PyTuple_GET_ITEM(item, 0), PyTuple_GET_ITEM(item, 1)) < 0)
+                    goto reading_error;
+            }
+        }
+        Py_XDECREF(items);
+        items = NULL;
         Py_DECREF(subsystem);
         Py_DECREF(subsystem_text);
         Py_DECREF(instance);
@@ -735,7 +796,7 @@ wreath_prometheus_route_blocks(PyObject *Py_UNUSED(self), PyObject *args)
     }
     for (Py_ssize_t index = 0; index < count; index++) {
         PyObject *route = PySequence_Fast_GET_ITEM(routes, index);
-        PyObject *route_id = PyObject_GetAttrString(route, "route_id");
+        PyObject *route_id = observability_getattr(route, OBS_ROUTE_ID);
         if (route_id == NULL) goto error;
         if (prom_route_labels(
                 &plan[index], route_id, resolver, resolver_is_mapping) < 0) {
@@ -743,11 +804,11 @@ wreath_prometheus_route_blocks(PyObject *Py_UNUSED(self), PyObject *args)
             goto error;
         }
         Py_DECREF(route_id);
-        plan[index].count = PyObject_GetAttrString(route, "count");
-        plan[index].errors = PyObject_GetAttrString(route, "errors");
-        plan[index].duration_sum = PyObject_GetAttrString(route, "duration_us_sum");
-        plan[index].duration_max = PyObject_GetAttrString(route, "duration_us_max");
-        plan[index].buckets = PyObject_GetAttrString(route, "buckets");
+        plan[index].count = observability_getattr(route, OBS_COUNT);
+        plan[index].errors = observability_getattr(route, OBS_ERRORS);
+        plan[index].duration_sum = observability_getattr(route, OBS_DURATION_US_SUM);
+        plan[index].duration_max = observability_getattr(route, OBS_DURATION_US_MAX);
+        plan[index].buckets = observability_getattr(route, OBS_BUCKETS);
         if (plan[index].count == NULL || plan[index].errors == NULL ||
             plan[index].duration_sum == NULL ||
             plan[index].duration_max == NULL || plan[index].buckets == NULL) goto error;
@@ -1745,9 +1806,10 @@ statsd_emit_counter(StatsdSink *sink, PyObject *prefix, int dogstatsd,
 }
 
 static PyObject *
-statsd_optional_attr(PyObject *object, const char *name, PyObject *fallback)
+statsd_optional_attr(PyObject *object, ObservabilityAttr attribute,
+                     PyObject *fallback)
 {
-    PyObject *value = PyObject_GetAttrString(object, name);
+    PyObject *value = observability_getattr(object, attribute);
     if (value != NULL) return value;
     if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
     PyErr_Clear();
@@ -1755,9 +1817,9 @@ statsd_optional_attr(PyObject *object, const char *name, PyObject *fallback)
 }
 
 static PyObject *
-statsd_int_attr(PyObject *object, const char *name)
+statsd_int_attr(PyObject *object, ObservabilityAttr attribute)
 {
-    PyObject *value = statsd_optional_attr(object, name, Py_False);
+    PyObject *value = statsd_optional_attr(object, attribute, Py_False);
     if (value == NULL) return NULL;
     PyObject *integer = PyNumber_Long(value);
     Py_DECREF(value);
@@ -1765,9 +1827,20 @@ statsd_int_attr(PyObject *object, const char *name)
 }
 
 static PyObject *
-statsd_ms_attr(PyObject *object, const char *name)
+statsd_int_attr_string(PyObject *object, const char *name)
 {
-    PyObject *value = PyObject_GetAttrString(object, name);
+    PyObject *value;
+    if (PyObject_GetOptionalAttrString(object, name, &value) < 0) return NULL;
+    if (value == NULL) value = Py_NewRef(Py_False);
+    PyObject *integer = PyNumber_Long(value);
+    Py_DECREF(value);
+    return integer;
+}
+
+static PyObject *
+statsd_ms_attr(PyObject *object, ObservabilityAttr attribute)
+{
+    PyObject *value = observability_getattr(object, attribute);
     if (value == NULL) return NULL;
     double number = PyFloat_AsDouble(value);
     Py_DECREF(value);
@@ -1777,7 +1850,7 @@ statsd_ms_attr(PyObject *object, const char *name)
 static PyObject *
 statsd_reason_name(PyObject *reason)
 {
-    PyObject *name = PyObject_GetAttrString(reason, "name");
+    PyObject *name = observability_getattr(reason, OBS_NAME);
     if (name == NULL) {
         if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
         PyErr_Clear();
@@ -1797,7 +1870,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
     PyObject *empty_labels = PyDict_New();
     PyObject *empty_routes = PyTuple_New(0);
     PyObject *routes_value = empty_routes != NULL
-        ? statsd_optional_attr(snapshot, "routes", empty_routes) : NULL;
+        ? statsd_optional_attr(snapshot, OBS_ROUTES, empty_routes) : NULL;
     PyObject *routes = NULL;
     if (routes_value != NULL) {
         int truth = PyObject_IsTrue(routes_value);
@@ -1811,10 +1884,10 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
     Py_ssize_t route_count = PyTuple_GET_SIZE(routes);
     for (Py_ssize_t index = 0; index < route_count; index++) {
         PyObject *route = PyTuple_GET_ITEM(routes, index);
-        PyObject *route_id = PyObject_GetAttrString(route, "route_id");
+        PyObject *route_id = observability_getattr(route, OBS_ROUTE_ID);
         PyObject *labels = route_id != NULL
             ? statsd_route_labels(route_resolver, route_id) : NULL;
-        PyObject *value = route_id != NULL ? statsd_int_attr(route, "count") : NULL;
+        PyObject *value = route_id != NULL ? statsd_int_attr(route, OBS_COUNT) : NULL;
         value = value != NULL ? statsd_delta(state, 1, route_id, value) : NULL;
         if (labels == NULL || value == NULL || statsd_emit(
                 sink, prefix, dogstatsd, static_tags, "http.requests",
@@ -1822,7 +1895,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
             Py_XDECREF(value); Py_XDECREF(labels); Py_XDECREF(route_id); goto error;
         }
         Py_DECREF(value);
-        value = statsd_int_attr(route, "errors");
+        value = statsd_int_attr(route, OBS_ERRORS);
         value = value != NULL ? statsd_delta(state, 2, route_id, value) : NULL;
         if (value == NULL || statsd_emit(
                 sink, prefix, dogstatsd, static_tags, "http.errors",
@@ -1830,7 +1903,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
             Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
         }
         Py_DECREF(value);
-        value = statsd_ms_attr(route, "duration_us_sum");
+        value = statsd_ms_attr(route, OBS_DURATION_US_SUM);
         value = value != NULL ? statsd_delta(state, 3, route_id, value) : NULL;
         if (value == NULL || statsd_emit(
                 sink, prefix, dogstatsd, static_tags, "http.duration.sum_ms",
@@ -1838,7 +1911,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
             Py_XDECREF(value); Py_DECREF(labels); Py_DECREF(route_id); goto error;
         }
         Py_DECREF(value);
-        value = statsd_ms_attr(route, "duration_us_max");
+        value = statsd_ms_attr(route, OBS_DURATION_US_MAX);
         if (value == NULL || statsd_emit(
                 sink, prefix, dogstatsd, static_tags, "http.duration.max_ms",
                 value, 'g', labels) < 0) {
@@ -1851,7 +1924,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
     }
     Py_DECREF(routes); routes = NULL;
 
-    PyObject *value = statsd_int_attr(snapshot, "assembled");
+    PyObject *value = statsd_int_attr(snapshot, OBS_ASSEMBLED);
     value = value != NULL ? statsd_delta(state, 4, NULL, value) : NULL;
     if (value == NULL || statsd_emit(
             sink, prefix, dogstatsd, static_tags, "flight.assembled",
@@ -1859,7 +1932,7 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
         Py_XDECREF(value); goto error;
     }
     Py_DECREF(value);
-    value = statsd_int_attr(snapshot, "pending");
+    value = statsd_int_attr(snapshot, OBS_PENDING);
     if (value == NULL || statsd_emit(
             sink, prefix, dogstatsd, static_tags, "flight.pending",
             value, 'g', empty_labels) < 0) {
@@ -1871,11 +1944,11 @@ statsd_render(StatsdSink *sink, PyObject *snapshot, PyObject *recorder_loss,
         "orphan_phase", "orphan_correlation", "pending_evicted",
         "decode_error", "export_error", "recent_evicted",
     };
-    PyObject *loss = statsd_optional_attr(snapshot, "loss", Py_None);
+    PyObject *loss = statsd_optional_attr(snapshot, OBS_LOSS, Py_None);
     if (loss == NULL) goto error;
     for (int index = 0; index < 6; index++) {
         PyObject *labels = Py_BuildValue("{s:s}", "reason", loss_fields[index]);
-        value = statsd_int_attr(loss, loss_fields[index]);
+        value = statsd_int_attr_string(loss, loss_fields[index]);
         value = value != NULL
             ? statsd_delta(state, (unsigned char)(10 + index), NULL, value) : NULL;
         if (labels == NULL || value == NULL || statsd_emit(
@@ -1926,6 +1999,24 @@ error:
 }
 
 static int
+statsd_render_counter_item(StatsdSink *sink, PyObject *prefix, int dogstatsd,
+                           PyObject *static_tags, PyObject *subsystem,
+                           PyObject *labels, PyObject *raw_name,
+                           PyObject *raw_value)
+{
+    PyObject *name = PyObject_Str(raw_name);
+    PyObject *value = name != NULL ? PyNumber_Long(raw_value) : NULL;
+    int status = name != NULL && value != NULL
+        ? statsd_emit_counter(
+            sink, prefix, dogstatsd, static_tags, subsystem,
+            name, value, labels)
+        : -1;
+    Py_XDECREF(value);
+    Py_XDECREF(name);
+    return status;
+}
+
+static int
 statsd_render_counters(StatsdSink *sink, PyObject *readings, PyObject *prefix,
                        int dogstatsd, PyObject *static_tags)
 {
@@ -1933,49 +2024,61 @@ statsd_render_counters(StatsdSink *sink, PyObject *readings, PyObject *prefix,
     for (Py_ssize_t reading_index = 0;
          reading_index < reading_count; reading_index++) {
         PyObject *reading = PyTuple_GET_ITEM(readings, reading_index);
-        PyObject *subsystem_raw = PyObject_GetAttrString(reading, "subsystem");
-        PyObject *instance_raw = PyObject_GetAttrString(reading, "instance");
-        PyObject *values = PyObject_GetAttrString(reading, "values");
+        PyObject *subsystem_raw = observability_getattr(reading, OBS_SUBSYSTEM);
+        PyObject *instance_raw = observability_getattr(reading, OBS_INSTANCE);
+        PyObject *values = observability_getattr(reading, OBS_VALUES);
         PyObject *subsystem = subsystem_raw != NULL
             ? PyObject_Str(subsystem_raw) : NULL;
         PyObject *instance = instance_raw != NULL
             ? PyObject_Str(instance_raw) : NULL;
         PyObject *labels = instance != NULL
             ? Py_BuildValue("{s:O}", "instance", instance) : NULL;
-        PyObject *items = values != NULL ? PyMapping_Items(values) : NULL;
+        PyObject *items = NULL;
         Py_XDECREF(subsystem_raw);
         Py_XDECREF(instance_raw);
         Py_XDECREF(instance);
-        Py_XDECREF(values);
-        if (subsystem == NULL || labels == NULL || items == NULL) {
-            Py_XDECREF(items);
+        if (subsystem == NULL || labels == NULL || values == NULL) {
+            Py_XDECREF(values);
             Py_XDECREF(labels);
             Py_XDECREF(subsystem);
             return -1;
         }
-        Py_ssize_t value_count = PyList_GET_SIZE(items);
-        for (Py_ssize_t value_index = 0; value_index < value_count; value_index++) {
-            PyObject *item = PyList_GET_ITEM(items, value_index);
-            PyObject *name = PyObject_Str(PyTuple_GET_ITEM(item, 0));
-            PyObject *value = name != NULL
-                ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
-            if (name == NULL || value == NULL || statsd_emit_counter(
-                    sink, prefix, dogstatsd, static_tags, subsystem,
-                    name, value, labels) < 0) {
-                Py_XDECREF(value);
-                Py_XDECREF(name);
-                Py_DECREF(items);
-                Py_DECREF(labels);
-                Py_DECREF(subsystem);
-                return -1;
+        if (PyDict_CheckExact(values)) {
+            Py_ssize_t position = 0;
+            PyObject *raw_name;
+            PyObject *raw_value;
+            while (PyDict_Next(values, &position, &raw_name, &raw_value)) {
+                if (statsd_render_counter_item(
+                        sink, prefix, dogstatsd, static_tags, subsystem,
+                        labels, raw_name, raw_value) < 0) goto reading_error;
             }
-            Py_DECREF(value);
-            Py_DECREF(name);
         }
-        Py_DECREF(items);
+        else {
+            items = PyMapping_Items(values);
+            if (items == NULL) goto reading_error;
+            Py_ssize_t value_count = PyList_GET_SIZE(items);
+            for (Py_ssize_t value_index = 0;
+                 value_index < value_count; value_index++) {
+                PyObject *item = PyList_GET_ITEM(items, value_index);
+                if (statsd_render_counter_item(
+                        sink, prefix, dogstatsd, static_tags, subsystem, labels,
+                        PyTuple_GET_ITEM(item, 0),
+                        PyTuple_GET_ITEM(item, 1)) < 0) goto reading_error;
+            }
+        }
+        Py_XDECREF(items);
+        Py_DECREF(values);
         Py_DECREF(labels);
         Py_DECREF(subsystem);
         if ((reading_index & 63) == 63 && PyErr_CheckSignals() < 0) return -1;
+        continue;
+
+reading_error:
+        Py_XDECREF(items);
+        Py_DECREF(values);
+        Py_DECREF(labels);
+        Py_DECREF(subsystem);
+        return -1;
     }
     return 0;
 }
@@ -2037,10 +2140,7 @@ wreath_statsd_packets(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *packets = PyList_AsTuple(sink.out);
     PyObject *line_count = packets != NULL
         ? PyLong_FromSsize_t(sink.line_count) : NULL;
-    PyObject *result = line_count != NULL
-        ? PyTuple_Pack(2, packets, line_count) : NULL;
-    Py_XDECREF(line_count);
-    Py_XDECREF(packets);
+    PyObject *result = wreath_tuple2_from_owned(packets, line_count);
     statsd_sink_clear(&sink);
     return result;
 }
@@ -2375,11 +2475,12 @@ emf_write_document(WreathBytesWriter *writer, const MetricLabelTape *base,
 }
 
 static int
-metric_u64_attr(PyObject *object, const char *name, int optional, uint64_t *result)
+metric_u64_attr(PyObject *object, ObservabilityAttr attribute, int optional,
+                uint64_t *result)
 {
     PyObject *value = optional
-        ? statsd_optional_attr(object, name, Py_False)
-        : PyObject_GetAttrString(object, name);
+        ? statsd_optional_attr(object, attribute, Py_False)
+        : observability_getattr(object, attribute);
     if (value == NULL) return -1;
     PyObject *integer = PyNumber_Long(value);
     Py_DECREF(value);
@@ -2390,9 +2491,19 @@ metric_u64_attr(PyObject *object, const char *name, int optional, uint64_t *resu
 }
 
 static int
-metric_double_attr(PyObject *object, const char *name, double *result)
+metric_u64_attr_string(PyObject *object, const char *name, uint64_t *result)
 {
-    PyObject *value = PyObject_GetAttrString(object, name);
+    PyObject *integer = statsd_int_attr_string(object, name);
+    if (integer == NULL) return -1;
+    *result = PyLong_AsUnsignedLongLong(integer);
+    Py_DECREF(integer);
+    return PyErr_Occurred() ? -1 : 0;
+}
+
+static int
+metric_double_attr(PyObject *object, ObservabilityAttr attribute, double *result)
+{
+    PyObject *value = observability_getattr(object, attribute);
     if (value == NULL) return -1;
     *result = PyFloat_AsDouble(value);
     Py_DECREF(value);
@@ -2523,22 +2634,22 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
     for (Py_ssize_t reading_index = 0;
          reading_index < reading_count; reading_index++) {
         PyObject *reading = PyTuple_GET_ITEM(readings, reading_index);
-        PyObject *subsystem_raw = PyObject_GetAttrString(reading, "subsystem");
-        PyObject *instance_raw = PyObject_GetAttrString(reading, "instance");
-        PyObject *values = PyObject_GetAttrString(reading, "values");
-        PyObject *gauges = PyObject_GetAttrString(reading, "gauges");
+        PyObject *subsystem_raw = observability_getattr(reading, OBS_SUBSYSTEM);
+        PyObject *instance_raw = observability_getattr(reading, OBS_INSTANCE);
+        PyObject *values = observability_getattr(reading, OBS_VALUES);
+        PyObject *gauges = observability_getattr(reading, OBS_GAUGES);
         PyObject *subsystem = subsystem_raw != NULL
             ? PyObject_Str(subsystem_raw) : NULL;
         PyObject *instance = instance_raw != NULL
             ? PyObject_Str(instance_raw) : NULL;
-        PyObject *items = values != NULL ? PyMapping_Items(values) : NULL;
+        PyObject *items = NULL;
         MetricLabelTape labels = {0};
         Py_XDECREF(subsystem_raw);
         Py_XDECREF(instance_raw);
-        Py_XDECREF(values);
-        if (subsystem == NULL || instance == NULL || gauges == NULL ||
-            items == NULL || emf_instance_labels(instance, &labels) < 0) {
+        if (subsystem == NULL || instance == NULL || values == NULL ||
+            gauges == NULL || emf_instance_labels(instance, &labels) < 0) {
             Py_XDECREF(items);
+            Py_XDECREF(values);
             Py_XDECREF(gauges);
             Py_XDECREF(instance);
             Py_XDECREF(subsystem);
@@ -2546,7 +2657,21 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
             return -1;
         }
 
-        Py_ssize_t value_count = PyList_GET_SIZE(items);
+        Py_ssize_t value_count;
+        Py_ssize_t dict_position = 0;
+        if (PyDict_CheckExact(values)) {
+            value_count = PyDict_GET_SIZE(values);
+        }
+        else {
+            items = PyMapping_Items(values);
+            if (items == NULL) {
+                Py_DECREF(values); Py_DECREF(gauges);
+                Py_DECREF(instance); Py_DECREF(subsystem);
+                metric_labels_clear(&labels);
+                return -1;
+            }
+            value_count = PyList_GET_SIZE(items);
+        }
         for (Py_ssize_t offset = 0; offset < value_count;
              offset += max_metrics) {
             Py_ssize_t batch_count = value_count - offset;
@@ -2555,18 +2680,34 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
                 (size_t)batch_count, sizeof(*metrics));
             if (metrics == NULL) {
                 PyErr_NoMemory();
-                Py_DECREF(items); Py_DECREF(gauges);
+                Py_XDECREF(items); Py_DECREF(values); Py_DECREF(gauges);
                 Py_DECREF(instance); Py_DECREF(subsystem);
                 metric_labels_clear(&labels);
                 return -1;
             }
             Py_ssize_t built = 0;
             for (; built < batch_count; built++) {
-                PyObject *item = PyList_GET_ITEM(items, offset + built);
-                PyObject *name_raw = PyTuple_GET_ITEM(item, 0);
+                PyObject *name_raw;
+                PyObject *value_raw;
+                if (items != NULL) {
+                    PyObject *item = PyList_GET_ITEM(items, offset + built);
+                    name_raw = PyTuple_GET_ITEM(item, 0);
+                    value_raw = PyTuple_GET_ITEM(item, 1);
+                }
+                else if (!PyDict_Next(
+                             values, &dict_position, &name_raw, &value_raw)) {
+                    PyErr_SetString(PyExc_RuntimeError,
+                                    "counter mapping changed during rendering");
+                    emf_metrics_clear(metrics, built);
+                    PyMem_Free(metrics);
+                    Py_DECREF(values); Py_DECREF(gauges);
+                    Py_DECREF(instance); Py_DECREF(subsystem);
+                    metric_labels_clear(&labels);
+                    return -1;
+                }
                 PyObject *name = PyObject_Str(name_raw);
                 PyObject *integer = name != NULL
-                    ? PyNumber_Long(PyTuple_GET_ITEM(item, 1)) : NULL;
+                    ? PyNumber_Long(value_raw) : NULL;
                 int gauge = integer != NULL
                     ? PySet_Contains(gauges, name_raw) : -1;
                 PyObject *emitted = integer != NULL ? Py_NewRef(integer) : NULL;
@@ -2584,7 +2725,7 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
                     Py_XDECREF(name);
                     emf_metrics_clear(metrics, built);
                     PyMem_Free(metrics);
-                    Py_DECREF(items); Py_DECREF(gauges);
+                    Py_XDECREF(items); Py_DECREF(values); Py_DECREF(gauges);
                     Py_DECREF(instance); Py_DECREF(subsystem);
                     metric_labels_clear(&labels);
                     return -1;
@@ -2598,7 +2739,7 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
                     namespace, namespace_length, timestamp) < 0) {
                 emf_metrics_clear(metrics, batch_count);
                 PyMem_Free(metrics);
-                Py_DECREF(items); Py_DECREF(gauges);
+                Py_XDECREF(items); Py_DECREF(values); Py_DECREF(gauges);
                 Py_DECREF(instance); Py_DECREF(subsystem);
                 metric_labels_clear(&labels);
                 return -1;
@@ -2606,7 +2747,8 @@ emf_render_counters(WreathBytesWriter *writer, const MetricLabelTape *base,
             emf_metrics_clear(metrics, batch_count);
             PyMem_Free(metrics);
         }
-        Py_DECREF(items);
+        Py_XDECREF(items);
+        Py_DECREF(values);
         Py_DECREF(gauges);
         Py_DECREF(instance);
         Py_DECREF(subsystem);
@@ -2641,7 +2783,7 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
 
     PyObject *empty = PyTuple_New(0);
     PyObject *routes_object = empty != NULL
-        ? statsd_optional_attr(snapshot, "routes", empty) : NULL;
+        ? statsd_optional_attr(snapshot, OBS_ROUTES, empty) : NULL;
     PyObject *iterator = NULL;
     if (routes_object != NULL) {
         int truth = PyObject_IsTrue(routes_object);
@@ -2653,7 +2795,7 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *route;
     Py_ssize_t route_index = 0;
     while ((route = PyIter_Next(iterator)) != NULL) {
-        PyObject *route_id_object = PyObject_GetAttrString(route, "route_id");
+        PyObject *route_id_object = observability_getattr(route, OBS_ROUTE_ID);
         uint64_t route_id, count, errors;
         double duration_sum, duration_max;
         MetricLabelTape labels = {0};
@@ -2661,10 +2803,10 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
             (route_id = PyLong_AsUnsignedLongLong(route_id_object), PyErr_Occurred()) ||
             metric_route_label_tape(
                 resolver, route_id_object, route_id, &labels) < 0 ||
-            metric_u64_attr(route, "count", 0, &count) < 0 ||
-            metric_u64_attr(route, "errors", 0, &errors) < 0 ||
-            metric_double_attr(route, "duration_us_sum", &duration_sum) < 0 ||
-            metric_double_attr(route, "duration_us_max", &duration_max) < 0) {
+            metric_u64_attr(route, OBS_COUNT, 0, &count) < 0 ||
+            metric_u64_attr(route, OBS_ERRORS, 0, &errors) < 0 ||
+            metric_double_attr(route, OBS_DURATION_US_SUM, &duration_sum) < 0 ||
+            metric_double_attr(route, OBS_DURATION_US_MAX, &duration_max) < 0) {
             metric_labels_clear(&labels);
             Py_XDECREF(route_id_object);
             Py_DECREF(route);
@@ -2709,8 +2851,8 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
     if (global == NULL) { PyErr_NoMemory(); goto error; }
     Py_ssize_t global_count = 0;
     uint64_t assembled, pending;
-    if (metric_u64_attr(snapshot, "assembled", 1, &assembled) < 0 ||
-        metric_u64_attr(snapshot, "pending", 1, &pending) < 0) goto global_error;
+    if (metric_u64_attr(snapshot, OBS_ASSEMBLED, 1, &assembled) < 0 ||
+        metric_u64_attr(snapshot, OBS_PENDING, 1, &pending) < 0) goto global_error;
     uint64_t assembled_value = assembled;
     if (!cumulative && metric_delta_u64(
             state, 4, 0, NULL, 0, assembled, &assembled_value) < 0) goto global_error;
@@ -2724,12 +2866,12 @@ wreath_emf_render(PyObject *Py_UNUSED(self), PyObject *args)
         "orphan_phase", "orphan_correlation", "pending_evicted",
         "decode_error", "export_error", "recent_evicted",
     };
-    PyObject *loss = statsd_optional_attr(snapshot, "loss", Py_None);
+    PyObject *loss = statsd_optional_attr(snapshot, OBS_LOSS, Py_None);
     if (loss == NULL) goto global_error;
     for (int index = 0; index < 6; index++) {
         uint64_t value, delta;
         PyObject *suffix = PyUnicode_FromString(loss_fields[index]);
-        if (metric_u64_attr(loss, loss_fields[index], 1, &value) < 0 ||
+        if (metric_u64_attr_string(loss, loss_fields[index], &value) < 0 ||
             (!cumulative && metric_delta_u64(
                 state, (unsigned char)(10 + index), 0, NULL, 0, value, &delta) < 0) ||
             suffix == NULL || emf_dynamic_metric(

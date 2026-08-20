@@ -301,12 +301,11 @@ class _Builder:
     def _literal_ref(self, args: tuple[Any, ...]) -> TypeRef:
         values: list[Any] = []
         for arg in args:
-            if isinstance(arg, enum.Enum):
-                arg = arg.value
-            if isinstance(arg, (str, int, float, bool)) or arg is None:
-                values.append(arg)
+            value = arg.value if isinstance(arg, enum.Enum) else arg
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                values.append(value)
             else:
-                return self._unsupported(arg)
+                return self._unsupported(value)
         return TypeRef("literal", literals=tuple(values))
 
     def _union_ref(self, args: tuple[Any, ...]) -> TypeRef:

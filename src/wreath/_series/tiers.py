@@ -65,7 +65,8 @@ def width(grain: Bucket) -> float:
     """
     if grain.months:
         return grain.months * _MEAN_MONTH
-    assert grain.delta is not None
+    if grain.delta is None:
+        raise ValueError("a non-calendar bucket requires a fixed delta")
     return grain.delta.total_seconds()
 
 
@@ -214,13 +215,32 @@ def build(spec: dict[str, Any], *, refuse: Any) -> Ladder:
 #: as strict as it should be.
 _UNITS: dict[str, float] = {
     "ms": 0.001,
-    "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
-    "m": 60.0, "min": 60.0, "mins": 60.0, "minute": 60.0, "minutes": 60.0,
-    "h": 3600.0, "hr": 3600.0, "hrs": 3600.0, "hour": 3600.0, "hours": 3600.0,
-    "d": 86400.0, "day": 86400.0, "days": 86400.0,
-    "w": 604800.0, "week": 604800.0, "weeks": 604800.0,
-    "month": _MEAN_MONTH, "months": _MEAN_MONTH,
-    "y": 31557600.0, "year": 31557600.0, "years": 31557600.0,
+    "s": 1.0,
+    "sec": 1.0,
+    "secs": 1.0,
+    "second": 1.0,
+    "seconds": 1.0,
+    "m": 60.0,
+    "min": 60.0,
+    "mins": 60.0,
+    "minute": 60.0,
+    "minutes": 60.0,
+    "h": 3600.0,
+    "hr": 3600.0,
+    "hrs": 3600.0,
+    "hour": 3600.0,
+    "hours": 3600.0,
+    "d": 86400.0,
+    "day": 86400.0,
+    "days": 86400.0,
+    "w": 604800.0,
+    "week": 604800.0,
+    "weeks": 604800.0,
+    "month": _MEAN_MONTH,
+    "months": _MEAN_MONTH,
+    "y": 31557600.0,
+    "year": 31557600.0,
+    "years": 31557600.0,
 }
 
 
@@ -262,9 +282,7 @@ def _window(value: Any, name: str, refuse: Any) -> float | None:
 # -- which tier answers, and for which zones ----------------------------------
 
 
-def serves_zone(
-    grain: Bucket | None, stored_zone: str, read_zone: str, *, at: Any
-) -> bool:
+def serves_zone(grain: Bucket | None, stored_zone: str, read_zone: str, *, at: Any) -> bool:
     """Whether a tier cut in `stored_zone` can answer for `read_zone`.
 
     §7.4's rule, and the non-obvious half of tiering: **a materialised tier is
@@ -396,10 +414,7 @@ def _authoritative(
     zone_ok = [
         tier
         for tier in ladder
-        if all(
-            serves_zone(tier.grain, stored_zone, read_zone, at=moment)
-            for moment in span
-        )
+        if all(serves_zone(tier.grain, stored_zone, read_zone, at=moment) for moment in span)
     ]
     covering = [tier for tier in zone_ok if tier.covers(oldest, now=now)]
 

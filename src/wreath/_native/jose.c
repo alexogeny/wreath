@@ -24,6 +24,12 @@
 #include <string.h>
 
 static PyObject *jose_hmac_digest_fn = NULL;   /* _hashlib.hmac_digest */
+static PyObject *jose_name_digest = NULL;
+static PyObject *jose_claim_exp = NULL;
+static PyObject *jose_claim_nbf = NULL;
+static PyObject *jose_claim_iat = NULL;
+static PyObject *jose_claim_iss = NULL;
+static PyObject *jose_claim_aud = NULL;
 /* The HS256 signing key's block states; see hmac_sha256.h. */
 static WreathHmacKey jose_hs256_key = {NULL};
 
@@ -61,7 +67,7 @@ jose_hash(PyObject *constructor, const unsigned char *data, Py_ssize_t length)
     object = PyObject_CallOneArg(constructor, input);
     Py_DECREF(input);
     if (object == NULL) return NULL;
-    digest = PyObject_CallMethod(object, "digest", NULL);
+    digest = PyObject_CallMethodNoArgs(object, jose_name_digest);
     Py_DECREF(object);
     return digest;
 }
@@ -495,9 +501,10 @@ wreath_jose_verify_hs(PyObject *Py_UNUSED(self), PyObject *args)
  * JWT NumericDate is seconds; we accept int and reject float/other for exp/nbf/
  * iat to avoid ambiguity (the facade may pre-coerce if it wants float support). */
 static int
-claim_as_ll(PyObject *claims, const char *name, long long *out, int *present)
+claim_as_ll(PyObject *claims, PyObject *name, long long *out, int *present)
 {
-    PyObject *value = PyDict_GetItemString(claims, name);  /* borrowed */
+    PyObject *value = PyDict_GetItemWithError(claims, name);  /* borrowed */
+    if (value == NULL && PyErr_Occurred()) return -1;
     *present = 0;
     if (value == NULL) {
         return 0;
@@ -561,21 +568,21 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
     int present;
 
     /* exp: reject when now - leeway >= exp (token no longer valid). */
-    if (claim_as_ll(claims, "exp", &value, &present) < 0) {
+    if (claim_as_ll(claims, jose_claim_exp, &value, &present) < 0) {
         return PyLong_FromLong(JOSE_CLAIMS_MALFORMED);
     }
     if (present && now - leeway >= value) {
         return PyLong_FromLong(JOSE_CLAIMS_EXPIRED);
     }
     /* nbf: reject when nbf > now + leeway. */
-    if (claim_as_ll(claims, "nbf", &value, &present) < 0) {
+    if (claim_as_ll(claims, jose_claim_nbf, &value, &present) < 0) {
         return PyLong_FromLong(JOSE_CLAIMS_MALFORMED);
     }
     if (present && value > now + leeway) {
         return PyLong_FromLong(JOSE_CLAIMS_NOT_YET);
     }
     /* iat: reject when iat is implausibly in the future. */
-    if (claim_as_ll(claims, "iat", &value, &present) < 0) {
+    if (claim_as_ll(claims, jose_claim_iat, &value, &present) < 0) {
         return PyLong_FromLong(JOSE_CLAIMS_MALFORMED);
     }
     if (present && value > now + leeway) {
@@ -584,7 +591,8 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
 
     /* iss: exact string match when an issuer is pinned. */
     if (issuer != Py_None) {
-        PyObject *claim_iss = PyDict_GetItemString(claims, "iss");  /* borrowed */
+        PyObject *claim_iss = PyDict_GetItemWithError(claims, jose_claim_iss);
+        if (claim_iss == NULL && PyErr_Occurred()) return NULL;
         if (claim_iss == NULL || !PyUnicode_Check(claim_iss)) {
             return PyLong_FromLong(JOSE_CLAIMS_BAD_ISS);
         }
@@ -600,7 +608,8 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
     /* aud: the claim is a string or a list of strings; require a non-empty
      * intersection with the accepted audiences. */
     if (PyTuple_GET_SIZE(audiences) > 0) {
-        PyObject *claim_aud = PyDict_GetItemString(claims, "aud");  /* borrowed */
+        PyObject *claim_aud = PyDict_GetItemWithError(claims, jose_claim_aud);
+        if (claim_aud == NULL && PyErr_Occurred()) return NULL;
         if (claim_aud == NULL) {
             return PyLong_FromLong(JOSE_CLAIMS_BAD_AUD);
         }
@@ -664,7 +673,16 @@ wreath_jose_ready(void)
     if (jose_hmac_digest_fn == NULL) {
         return -1;
     }
-    if (wreath_hmac_sha256_ready() < 0) {
+    jose_name_digest = PyUnicode_InternFromString("digest");
+    jose_claim_exp = PyUnicode_InternFromString("exp");
+    jose_claim_nbf = PyUnicode_InternFromString("nbf");
+    jose_claim_iat = PyUnicode_InternFromString("iat");
+    jose_claim_iss = PyUnicode_InternFromString("iss");
+    jose_claim_aud = PyUnicode_InternFromString("aud");
+    if (jose_name_digest == NULL || jose_claim_exp == NULL ||
+        jose_claim_nbf == NULL || jose_claim_iat == NULL ||
+        jose_claim_iss == NULL || jose_claim_aud == NULL ||
+        wreath_hmac_sha256_ready() < 0) {
         return -1;
     }
     return 0;

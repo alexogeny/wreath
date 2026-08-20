@@ -194,8 +194,8 @@ def physical_cores() -> dict[int, list[int]]:
 def _parse_cpu_list(text: str) -> set[int]:
     """Parse a sysfs CPU list (`0,6` or `0-3,8`) into a set of CPU numbers."""
     cpus: set[int] = set()
-    for part in text.split(","):
-        part = part.strip()
+    for raw_part in text.split(","):
+        part = raw_part.strip()
         if not part:
             continue
         if "-" in part:

@@ -61,6 +61,7 @@ __all__ = [
 #: thing redaction is for.
 REDACTED = "[erased]"
 
+
 #: The same rule `wreath.passes.Table` applies to a table name, for the same
 #: reason: the name is interpolated into statement text rather than bound.
 class ErasureBlocked(RuntimeError):
@@ -158,8 +159,7 @@ def prepare(
         )
     graph = build_graph(orm_registry)
     by_table = {
-        (graph.nodes[model].schema, graph.nodes[model].table): model
-        for model in graph.nodes
+        (graph.nodes[model].schema, graph.nodes[model].table): model for model in graph.nodes
     }
     steps: list[tuple[TableAction, Any]] = []
     for action in plan.tables:
@@ -168,8 +168,15 @@ def prepare(
             (
                 action,
                 _pass_for(
-                    action, model, graph, registry, subject_id,
-                    limit=limit, within=within, schema=schema, workload=workload,
+                    action,
+                    model,
+                    graph,
+                    registry,
+                    subject_id,
+                    limit=limit,
+                    within=within,
+                    schema=schema,
+                    workload=workload,
                 ),
             )
         )
@@ -222,9 +229,7 @@ async def record_erasure(prepared: PreparedErasure, database: Any) -> bool:
         await database.release(prepared.workload, connection)
 
 
-async def _ledger_rows(
-    tx: Any, schema: str, names: tuple[str, ...]
-) -> dict[str, tuple[Any, ...]]:
+async def _ledger_rows(tx: Any, schema: str, names: tuple[str, ...]) -> dict[str, tuple[Any, ...]]:
     """This erasure's ledger rows by pass name, read in the caller's transaction.
 
     An empty `names` is answered without a query rather than with a `WHERE name
@@ -237,22 +242,21 @@ async def _ledger_rows(
 
     placeholders = ", ".join(f"${index}" for index in range(1, len(names) + 1))
     records = await tx.fetch(
-        f"SELECT {_LEDGER_COLUMNS} FROM {table_name(schema)} "
-        f"WHERE name IN ({placeholders})",
+        f"SELECT {_LEDGER_COLUMNS} FROM {table_name(schema)} WHERE name IN ({placeholders})",
         *names,
     )
-    return {str(tuple(row)[0]): tuple(row) for row in records or ()}
+    rows: dict[str, tuple[Any, ...]] = {}
+    for record in records or ():
+        row = tuple(record)
+        rows[str(row[0])] = row
+    return rows
 
 
 def _require_complete(
     plan: ErasurePlan, names: tuple[str, ...], rows: dict[str, tuple[Any, ...]]
 ) -> None:
     """Refuse to record an erasure the ledger does not say finished."""
-    unfinished = [
-        name
-        for name in names
-        if name not in rows or str(rows[name][1]) != "done"
-    ]
+    unfinished = [name for name in names if name not in rows or str(rows[name][1]) != "done"]
     if not unfinished:
         return
     raise ErasureIncomplete(
@@ -371,14 +375,10 @@ def predicate_for(
     if not path or _declares_subject(action, registry, graph):
         return _Predicate(f"{_identifier(action.match_column)} = ?", (subject_id,))
     inner = _select_keys(path, len(path) - 1, registry.subject_key, graph)
-    return _Predicate(
-        f"{_identifier(path[-1].from_column)} IN ({inner})", (subject_id,)
-    )
+    return _Predicate(f"{_identifier(path[-1].from_column)} IN ({inner})", (subject_id,))
 
 
-def _select_keys(
-    path: tuple[Any, ...], index: int, subject_column: str, graph: Graph
-) -> str:
+def _select_keys(path: tuple[Any, ...], index: int, subject_column: str, graph: Graph) -> str:
     """The values `path[index].from_column` must match, as a subquery.
 
     `path[index].to_table` is the parent of the table at `index`, and -- for
@@ -391,10 +391,7 @@ def _select_keys(
     parent_table = _table_sql(edge.to_table, graph)
     referenced = _identifier(edge.to_column)
     if index == 0:
-        return (
-            f"SELECT {referenced} FROM {parent_table} "
-            f"WHERE {_identifier(subject_column)} = ?"
-        )
+        return f"SELECT {referenced} FROM {parent_table} WHERE {_identifier(subject_column)} = ?"
     above = path[index - 1]
     return (
         f"SELECT {referenced} FROM {parent_table} "
@@ -425,9 +422,7 @@ def _table_sql(qualified: str, graph: Graph) -> str:
     )
 
 
-def _declares_subject(
-    action: TableAction, registry: PrivacyRegistry, graph: Graph
-) -> bool:
+def _declares_subject(action: TableAction, registry: PrivacyRegistry, graph: Graph) -> bool:
     for model, item in registry.classifications.items():
         node = graph.nodes.get(model)
         if node is None:

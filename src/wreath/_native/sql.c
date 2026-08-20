@@ -53,6 +53,93 @@ unicode_append_object(UnicodeBuffer *buffer, PyObject *text)
 }
 
 
+static int
+unicode_append_ssize(UnicodeBuffer *buffer, Py_ssize_t value)
+{
+    char reversed[sizeof(Py_ssize_t) * 3 + 1];
+    size_t magnitude;
+    Py_ssize_t count = 0;
+
+    if (value < 0) {
+        magnitude = (size_t)(-(value + 1)) + 1;
+    }
+    else {
+        magnitude = (size_t)value;
+    }
+    do {
+        reversed[count++] = (char)('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude != 0);
+    if (unicode_reserve(buffer, count + (value < 0)) < 0) return -1;
+    if (value < 0) buffer->data[buffer->length++] = '-';
+    while (count > 0) {
+        buffer->data[buffer->length++] = (Py_UCS4)reversed[--count];
+    }
+    return 0;
+}
+
+
+static int
+unicode_append_renumbered_slow(UnicodeBuffer *buffer, PyObject *text,
+                               Py_ssize_t start, Py_ssize_t end,
+                               Py_ssize_t offset)
+{
+    PyObject *digits = PyUnicode_Substring(text, start, end);
+    PyObject *number = NULL;
+    PyObject *shift = NULL;
+    PyObject *renumbered = NULL;
+    int result = -1;
+
+    if (digits == NULL) return -1;
+    number = PyLong_FromUnicodeObject(digits, 10);
+    Py_DECREF(digits);
+    if (number == NULL) return -1;
+    shift = PyLong_FromSsize_t(offset);
+    if (shift == NULL) goto done;
+    renumbered = PyNumber_Add(number, shift);
+    if (renumbered == NULL) goto done;
+    digits = PyObject_Str(renumbered);
+    if (digits == NULL) goto done;
+    result = unicode_append_object(buffer, digits);
+    Py_DECREF(digits);
+
+done:
+    Py_XDECREF(renumbered);
+    Py_XDECREF(shift);
+    Py_DECREF(number);
+    return result;
+}
+
+
+static int
+unicode_append_renumbered(UnicodeBuffer *buffer, PyObject *text,
+                          Py_ssize_t start, Py_ssize_t end,
+                          Py_ssize_t offset)
+{
+    Py_ssize_t number = 0;
+
+    for (Py_ssize_t index = start; index < end; index++) {
+        Py_UCS4 ch = PyUnicode_READ_CHAR(text, index);
+        if (ch < '0' || ch > '9') {
+            return unicode_append_renumbered_slow(
+                buffer, text, start, end, offset);
+        }
+        Py_ssize_t digit = (Py_ssize_t)(ch - '0');
+        if (number > (PY_SSIZE_T_MAX - digit) / 10) {
+            return unicode_append_renumbered_slow(
+                buffer, text, start, end, offset);
+        }
+        number = number * 10 + digit;
+    }
+    if ((offset > 0 && number > PY_SSIZE_T_MAX - offset) ||
+        (offset < 0 && number < PY_SSIZE_T_MIN - offset)) {
+        return unicode_append_renumbered_slow(
+            buffer, text, start, end, offset);
+    }
+    return unicode_append_ssize(buffer, number + offset);
+}
+
+
 PyObject *
 wreath_sql_renumber(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -69,10 +156,6 @@ wreath_sql_renumber(PyObject *Py_UNUSED(self), PyObject *args)
     for (Py_ssize_t index = 0; index < length;) {
         Py_UCS4 ch = PyUnicode_READ_CHAR(text, index);
         Py_ssize_t end;
-        PyObject *digits = NULL;
-        PyObject *number = NULL;
-        PyObject *shift = NULL;
-        PyObject *renumbered = NULL;
 
         if (ch != '$' || index + 1 >= length ||
                 !Py_UNICODE_ISDIGIT(PyUnicode_READ_CHAR(text, index + 1))) {
@@ -84,33 +167,12 @@ wreath_sql_renumber(PyObject *Py_UNUSED(self), PyObject *args)
         while (end < length && Py_UNICODE_ISDIGIT(PyUnicode_READ_CHAR(text, end))) {
             end++;
         }
-        digits = PyUnicode_Substring(text, index + 1, end);
-        if (digits == NULL) goto error;
-        number = PyLong_FromUnicodeObject(digits, 10);
-        Py_DECREF(digits);
-        if (number == NULL) goto error;
-        shift = PyLong_FromSsize_t(offset);
-        if (shift == NULL) {
-            Py_DECREF(number);
-            goto error;
-        }
-        renumbered = PyNumber_Add(number, shift);
-        Py_DECREF(number);
-        Py_DECREF(shift);
-        if (renumbered == NULL) goto error;
-        digits = PyObject_Str(renumbered);
-        Py_DECREF(renumbered);
-        if (digits == NULL) goto error;
         if (unicode_reserve(&output, 1) < 0) {
-            Py_DECREF(digits);
             goto error;
         }
         output.data[output.length++] = '$';
-        if (unicode_append_object(&output, digits) < 0) {
-            Py_DECREF(digits);
-            goto error;
-        }
-        Py_DECREF(digits);
+        if (unicode_append_renumbered(
+                &output, text, index + 1, end, offset) < 0) goto error;
         index = end;
     }
 

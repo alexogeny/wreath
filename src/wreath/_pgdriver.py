@@ -75,6 +75,7 @@ def _parse_notification(payload: bytes) -> Notification | None:
         body.decode("utf-8", "replace"),
     )
 
+
 _BOOL = 16
 _BYTEA = 17
 _INT8 = 20
@@ -152,9 +153,7 @@ def _register_extension_type(name: str, oid: int, kind: int) -> None:
             )
         return
     if len(_extension_kinds) >= _MAX_EXTENSION_TYPES:
-        raise ValueError(
-            f"at most {_MAX_EXTENSION_TYPES} extension types can be registered"
-        )
+        raise ValueError(f"at most {_MAX_EXTENSION_TYPES} extension types can be registered")
     _extension_kinds[oid] = kind
 
 
@@ -168,9 +167,7 @@ def _encode_vector(value: object) -> bytes:
     return struct.pack(f"!HH{count}f", count, 0, *value)
 
 
-def _decode_dense_vector(
-    data: bytes, *, kind: str, width: int, format_code: str
-) -> list[float]:
+def _decode_dense_vector(data: bytes, *, kind: str, width: int, format_code: str) -> list[float]:
     if len(data) < 4:
         raise ProtocolError(f"binary {kind} header is truncated")
     count, unused = struct.unpack_from("!HH", data, 0)
@@ -203,8 +200,7 @@ def _encode_halfvec(value: object) -> bytes:
     for index, number in enumerate(numbers):
         if number != number or number in (float("inf"), float("-inf")):
             raise ValueError(
-                f"halfvec element {index} is {number!r}; pgvector stores neither NaN "
-                "nor infinity"
+                f"halfvec element {index} is {number!r}; pgvector stores neither NaN nor infinity"
             )
         if not -_MAX_HALF <= number <= _MAX_HALF:
             raise ValueError(
@@ -280,20 +276,15 @@ def _decode_sparsevec(data: bytes) -> SparseVector:
     values = struct.unpack_from(f"!{count}f", data, 12 + count * 4)
     for index in indices:
         if not 0 <= index < dim:
-            raise ProtocolError(
-                f"binary sparsevec index {index} is outside 0..{dim - 1}"
-            )
-    return SparseVector(
-        dim, dict(zip((index + 1 for index in indices), values, strict=True))
-    )
+            raise ProtocolError(f"binary sparsevec index {index} is outside 0..{dim - 1}")
+    return SparseVector(dim, dict(zip((index + 1 for index in indices), values, strict=True)))
 
 
 def _encode_sparsevec_text(value: object) -> bytes:
     """pgvector's text `sparsevec`: `{1:1.5,3:3.5}/5`, with 1-based indices."""
     sparse = _as_sparsevec(value)
     body = ",".join(
-        f"{index}:{number!r}"
-        for index, number in zip(sparse.indices, sparse.values, strict=True)
+        f"{index}:{number!r}" for index, number in zip(sparse.indices, sparse.values, strict=True)
     )
     return f"{{{body}}}/{sparse.dim}".encode("ascii")
 
@@ -311,8 +302,9 @@ def _decode_sparsevec_text(data: bytes) -> SparseVector:
             for item in inner.split(","):
                 index, colon, number = item.partition(":")
                 if not colon:
-                    raise ProtocolError(f"text-format sparsevec element {item!r} "
-                                        "is not 'index:value'")
+                    raise ProtocolError(
+                        f"text-format sparsevec element {item!r} is not 'index:value'"
+                    )
                 elements[int(index)] = float(number)
     except ValueError as error:
         raise ProtocolError(f"malformed text-format sparsevec: {error}") from error
@@ -675,34 +667,24 @@ def _encode_numeric_reference(value: object) -> bytes:
         exponent = 0
     dscale = -exponent
     if dscale > 0xFFFF:
-        raise ValueError(
-            f"numeric display scale {dscale} exceeds PostgreSQL's 65535 limit"
-        )
+        raise ValueError(f"numeric display scale {dscale} exceeds PostgreSQL's 65535 limit")
 
     # Pad the fractional part out to a whole number of base-10000 groups so the
     # split lands on a group boundary.
     padding = (-dscale) % 4
     digits = "0" * ((-len(digits) - padding) % 4) + digits + "0" * padding
     fraction_groups = (dscale + padding) // 4
-    groups = [
-        int(chunk)
-        for (chunk,) in struct.iter_unpack("!4s", digits.encode("ascii"))
-    ]
+    groups = [int(chunk) for (chunk,) in struct.iter_unpack("!4s", digits.encode("ascii"))]
     if len(groups) > 32767:
-        raise ValueError(
-            f"numeric needs {len(groups)} base-10000 groups; PostgreSQL permits 32767"
-        )
+        raise ValueError(f"numeric needs {len(groups)} base-10000 groups; PostgreSQL permits 32767")
 
     weight = len(groups) - 1 - fraction_groups
     # PostgreSQL sends no leading or trailing zero groups; dscale still records
     # the display scale, so stripping them cannot lose the value's precision.
-    lead = next(
-        (index for index, group in enumerate(groups) if group != 0), len(groups)
-    )
+    lead = next((index for index, group in enumerate(groups) if group != 0), len(groups))
     weight -= lead
     tail = next(
-        (index + 1 for index in range(len(groups) - 1, lead - 1, -1)
-         if groups[index] != 0),
+        (index + 1 for index in range(len(groups) - 1, lead - 1, -1) if groups[index] != 0),
         lead,
     )
     groups = groups[lead:tail]
@@ -713,9 +695,7 @@ def _encode_numeric_reference(value: object) -> bytes:
         weight = 0
         sign = 0
     if not -32768 <= weight <= 32767:
-        raise ValueError(
-            f"numeric weight {weight} exceeds PostgreSQL's signed 16-bit limit"
-        )
+        raise ValueError(f"numeric weight {weight} exceeds PostgreSQL's signed 16-bit limit")
 
     header = struct.pack(
         "!hhHH", len(groups), weight, _NUMERIC_NEG if sign else _NUMERIC_POS, dscale
@@ -1822,9 +1802,7 @@ class Connection:
                     except StopIteration:
                         exhausted = True
                         break
-                    in_flight.append(
-                        asyncio.ensure_future(self._submit(method, sql, tuple(args)))
-                    )
+                    in_flight.append(asyncio.ensure_future(self._submit(method, sql, tuple(args))))
                 if not in_flight:
                     break
                 # Await in submission order, so results stay input-ordered even
@@ -1857,9 +1835,7 @@ class Connection:
         unchanged. Only a backend that installs that hook supports this.
         """
         if self._decode_dest is None:
-            raise InterfaceError(
-                "this PostgreSQL backend cannot decode into a custom destination"
-            )
+            raise InterfaceError("this PostgreSQL backend cannot decode into a custom destination")
         return await self._submit("fetch", sql, args, dest=dest)
 
     async def _submit(
@@ -1884,9 +1860,7 @@ class Connection:
 
         self._sequence += 1
         future: asyncio.Future[Any] = self._loop.create_future()
-        operation = self._operation_type(
-            self._sequence, sql, args, mode, future, None
-        )
+        operation = self._operation_type(self._sequence, sql, args, mode, future, None)
         operation.dest = dest
         plan = self._plans.get(sql)  # a hit is also the recency update
         operation.plan = plan
@@ -2011,25 +1985,17 @@ class Connection:
             try:
                 if self._register_operations is not None:
                     self._register_operations(tuple(operations))
-                payload = (
-                    packets[0]
-                    if len(packets) == 1
-                    else self._join_packets(tuple(packets))
-                )
+                payload = packets[0] if len(packets) == 1 else self._join_packets(tuple(packets))
                 if self._write_with_backpressure is None:
                     self._writer.write(payload)
                     pending = self._writer.drain()
                 else:
                     pending = self._write_with_backpressure(payload)
             except OSError as error:
-                self._fail_connection(
-                    OperationalError("PostgreSQL connection lost"), error
-                )
+                self._fail_connection(OperationalError("PostgreSQL connection lost"), error)
                 return
             self._write_count += 1
-            if pending is not None and not (
-                isinstance(pending, asyncio.Future) and pending.done()
-            ):
+            if pending is not None and not (isinstance(pending, asyncio.Future) and pending.done()):
                 self._write_blocked = True
                 task = self._loop.create_task(self._drain(pending))
                 self._track_background(task)
@@ -2179,9 +2145,7 @@ class Connection:
                     operation.result_formats,
                     operation.result_names,
                 )
-                operation.field_tape = self._field_tape_type(
-                    len(operation.result_oids)
-                )
+                operation.field_tape = self._field_tape_type(len(operation.result_oids))
         elif kind == b"D" and operation.error is None and not operation.discarded:
             if self._batch_decode:
                 self._tape_data_row(operation, payload)
@@ -2208,11 +2172,10 @@ class Connection:
             elif operation.mode == "fetch":
                 values = tuple(
                     self._decode(oid, fmt, field)
-                    for oid, fmt, field in zip(
-                        operation.result_oids, formats, fields, strict=True
-                    )
+                    for oid, fmt, field in zip(operation.result_oids, formats, fields, strict=True)
                 )
-                assert operation.rows is not None
+                if operation.rows is None:
+                    raise RuntimeError("fetch operation has no result-row buffer")
                 operation.rows.append(self._record_type(operation.result_names, values))
         elif kind == b"C":
             operation.command = payload.rstrip(b"\x00").decode("utf-8", "replace")
@@ -2262,18 +2225,14 @@ class Connection:
         if operation.dest is not None:
             if operation.rows is None:
                 raise ProtocolError("fetch destination has no result collection")
-            self._decode_dest(
-                operation.decoder_plan, tape, operation.dest, 256, operation.rows
-            )
+            self._decode_dest(operation.decoder_plan, tape, operation.dest, 256, operation.rows)
             return
         if operation.mode == "fetch_batch" and self._decode_fetch_extend is not None:
             if operation.rows is None:
                 raise ProtocolError("fetch batch has no result collection")
             self._decode_fetch_extend(operation.decoder_plan, tape, 256, operation.rows)
             return
-        decoded = self._decode_tape(
-            operation.decoder_plan, tape, operation.mode, 256
-        )
+        decoded = self._decode_tape(operation.decoder_plan, tape, operation.mode, 256)
         if operation.mode == "fetch":
             if operation.rows is None:
                 raise ProtocolError("fetch has no result collection")
@@ -2386,16 +2345,12 @@ class Connection:
                     )
 
     async def _send_cancel_request(self) -> None:
-        packet = struct.pack(
-            "!IIII", 16, 80877102, self._backend_pid, self._backend_key
-        )
+        packet = struct.pack("!IIII", 16, 80877102, self._backend_pid, self._backend_key)
         try:
             if self._info.unix:
                 _, writer = await asyncio.open_unix_connection(self._info.host)
             else:
-                _, writer = await asyncio.open_connection(
-                    self._info.host, int(self._info.port)
-                )
+                _, writer = await asyncio.open_connection(self._info.host, int(self._info.port))
             writer.write(packet)
             await writer.drain()
             writer.close()
@@ -2405,9 +2360,7 @@ class Connection:
                 OperationalError("PostgreSQL cancellation state is uncertain"), error
             )
 
-    def _fail_connection(
-        self, error: PostgresError, cause: BaseException | None = None
-    ) -> None:
+    def _fail_connection(self, error: PostgresError, cause: BaseException | None = None) -> None:
         if self._closed:
             return
         self._closed = True
@@ -2564,7 +2517,11 @@ async def _connect_with_type(
             writer.close()
         raise OperationalError("could not connect to PostgreSQL") from error
     return connection_type(
-        reader, writer, info, backend_pid, backend_key,
+        reader,
+        writer,
+        info,
+        backend_pid,
+        backend_key,
         statement_cache_size=statement_cache_size,
         statement_cache_bytes=statement_cache_bytes,
     )
@@ -2605,12 +2562,12 @@ async def _connect_buffered(
     if info.unix:
         transport, _ = await loop.create_unix_connection(lambda: protocol, info.host)
     else:
-        transport, _ = await loop.create_connection(
-            lambda: protocol, info.host, int(info.port)
-        )
+        transport, _ = await loop.create_connection(lambda: protocol, info.host, int(info.port))
     try:
         backend_pid, backend_key = await _authenticate(
-            _BufferedStartupReader(protocol), protocol, info,
+            _BufferedStartupReader(protocol),
+            protocol,
+            info,
             transport.get_extra_info("peername"),
         )
     except BaseException:

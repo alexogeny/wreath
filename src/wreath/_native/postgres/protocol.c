@@ -1355,28 +1355,6 @@ static const WreathStreamCAPI stream_capi = {
     stream_feed_external,
 };
 
-static const WreathTransportCAPI *
-transport_capi_resolve(void)
-{
-    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
-    PyObject *module = modules == NULL
-        ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
-    if (module == NULL) return NULL;
-    PyObject *capsule = PyObject_GetAttrString(module, "_TRANSPORT_C_API");
-    if (capsule == NULL) {
-        PyErr_Clear();
-        return NULL;
-    }
-    const WreathTransportCAPI *capi =
-        PyCapsule_GetPointer(capsule, WREATH_TRANSPORT_CAPI_NAME);
-    Py_DECREF(capsule);
-    if (capi == NULL) {
-        PyErr_Clear();
-        return NULL;
-    }
-    return capi->version == WREATH_TRANSPORT_CAPI_VERSION ? capi : NULL;
-}
-
 static PyObject *
 buffered_connection_made(WreathPgBufferedProtocol *self, PyObject *transport)
 {
@@ -1385,7 +1363,7 @@ buffered_connection_made(WreathPgBufferedProtocol *self, PyObject *transport)
     Py_XSETREF(self->transport, Py_NewRef(transport));
     Py_XSETREF(self->transport_write, write);
     self->connection_closed = 0;
-    const WreathTransportCAPI *capi = transport_capi_resolve();
+    const WreathTransportCAPI *capi = wreath_transport_capi_resolve();
     self->transport_capi =
         capi != NULL && capi->check(transport) ? capi : NULL;
     Py_RETURN_NONE;

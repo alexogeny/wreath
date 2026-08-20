@@ -145,9 +145,7 @@ class Registry:
         # was the same fifteen lines the PostgreSQL driver's statement cache
         # also carried, differing only in what it did with the evicted entry.
         # This one wants nothing done with it, so it does not ask.
-        self._cache: Any = KV(
-            max_entries=query_cache_size, max_bytes=query_cache_bytes
-        )
+        self._cache: Any = KV(max_entries=query_cache_size, max_bytes=query_cache_bytes)
         # Declared-query identity -> its registry-specific shape key. The plan
         # itself remains in the bounded LRU above; this small index lets a hot
         # declaration reach it without rebuilding a Select or hashing its tree.
@@ -181,8 +179,7 @@ class Registry:
 
         for model, spec in self._specs.items():
             relationships = tuple(
-                self._build_relationship(spec, item)
-                for item in model.__wreath_relationships__
+                self._build_relationship(spec, item) for item in model.__wreath_relationships__
             )
             # Relationship graphs are cyclic (User.posts <-> Post.author), so
             # the specs are completed in place here and never mutated again.
@@ -219,7 +216,10 @@ class Registry:
 
     def _build_columns(self, model: type[Model]) -> ModelSpec:
         table = model.__wreath_table__
-        assert table is not None, "compile() rejects table-less models before this point"
+        if table is None:
+            raise DeclarationError(
+                f"{model.__name__} has no table; decorate it with @model(table=...)"
+            )
         columns: list[ColumnSpec] = []
         seen_database_names: dict[str, str] = {}
         for position, item in enumerate(model.__wreath_columns__):
@@ -317,19 +317,20 @@ class Registry:
         self, schema: SchemaRef
     ) -> tuple[str, Literal["qualified", "tenant_search_path"]]:
         if schema.kind == "fixed":
-            assert schema.name is not None
+            if schema.name is None:
+                raise DeclarationError("a fixed schema reference requires a schema name")
             return schema.name, "qualified"
         if self.schema_mode.kind == "single":
-            assert self.schema_mode.schema is not None
+            if self.schema_mode.schema is None:
+                raise DeclarationError("single-schema mode requires a schema name")
             return self.schema_mode.schema, "qualified"
         if schema.kind == "central":
-            assert self.schema_mode.central is not None
+            if self.schema_mode.central is None:
+                raise DeclarationError("a central model requires a central schema")
             return self.schema_mode.central, "qualified"
         return "", "tenant_search_path"
 
-    def _build_relationship(
-        self, owner: ModelSpec, item: Relationship
-    ) -> RelationshipSpec:
+    def _build_relationship(self, owner: ModelSpec, item: Relationship) -> RelationshipSpec:
         target = self._resolve_target(owner, item)
         if owner.schema_ref.kind == "central" and target.schema_ref.kind == "tenant":
             raise DeclarationError(
@@ -416,8 +417,7 @@ class Registry:
             resolved.append(self._resolve_key_column(owner, target, item, key))
         if not resolved:
             raise DeclarationError(
-                f"{owner.model_type.__name__}.{item.python_name} declares an empty "
-                "foreign_key"
+                f"{owner.model_type.__name__}.{item.python_name} declares an empty foreign_key"
             )
         return tuple(resolved)
 
@@ -548,9 +548,7 @@ class Registry:
                 # Another thread compiled the same shape; keep one plan so
                 # callers cannot observe two objects for one key.
                 return existing
-            self._cache.set(
-                shape_key, plan, cost=_cache_entry_bytes(shape_key, plan)
-            )
+            self._cache.set(shape_key, plan, cost=_cache_entry_bytes(shape_key, plan))
             return plan
 
     def cached_prepared_plan(self, declaration: Any) -> tuple[bytes, Any] | None:
@@ -599,8 +597,7 @@ def _column_ref(item: Column) -> ColumnRef | None:
     owner = target.owner
     if owner is None or owner.__wreath_table__ is None:
         raise DeclarationError(
-            f"column {item.python_name!r} references {target.python_name!r} on an "
-            "unmapped class"
+            f"column {item.python_name!r} references {target.python_name!r} on an unmapped class"
         )
     return ColumnRef(
         schema=owner.__wreath_schema__,

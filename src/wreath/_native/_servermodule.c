@@ -102,7 +102,7 @@ PyInit__server(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (wreath_request_context_ready(module) < 0) {
+    if (wreath_policy_ready() < 0 || wreath_request_context_ready(module) < 0) {
         server_module_free(NULL);
         Py_DECREF(module);
         return NULL;

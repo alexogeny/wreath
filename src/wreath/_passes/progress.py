@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from .keyset import Key, PassDeclarationError
 
@@ -71,10 +71,10 @@ class Denominator:
     __slots__ = ()
 
     #: What the ledger records beside the number, and what the CLI prints.
-    kind = "estimated"
+    kind: ClassVar[str] = "estimated"
 
     #: Whether an ETA can be derived from a rows-per-second rate.
-    counts_rows = True
+    counts_rows: ClassVar[bool] = True
 
     def refuse(self, keys: tuple[Key, ...], *, table: str) -> None:
         """Reject a key this denominator cannot measure, where it was declared."""
@@ -92,8 +92,8 @@ class Estimated(Denominator):
     progress bar prettier while the operator waits for the work.
     """
 
-    kind = "estimated"
-    counts_rows = True
+    kind: ClassVar[str] = "estimated"
+    counts_rows: ClassVar[bool] = True
 
     async def measure(self, executor: Any, *, table: str, keys: tuple[Key, ...]) -> int | None:
         # `to_regclass($1)` rather than `$1::regclass`: the cast makes PostgreSQL
@@ -118,8 +118,8 @@ class Estimated(Denominator):
 class Exact(Denominator):
     """`SELECT count(*)` once, at launch. Never wrong, and never free."""
 
-    kind = "exact"
-    counts_rows = True
+    kind: ClassVar[str] = "exact"
+    counts_rows: ClassVar[bool] = True
 
     async def measure(self, executor: Any, *, table: str, keys: tuple[Key, ...]) -> int | None:
         total = await executor.fetchval(f"SELECT count(*) FROM {table}")
@@ -141,8 +141,8 @@ class Keyspace(Denominator):
     field is absent and the state says why.
     """
 
-    kind = "keyspace"
-    counts_rows = False
+    kind: ClassVar[str] = "keyspace"
+    counts_rows: ClassVar[bool] = False
 
     def refuse(self, keys: tuple[Key, ...], *, table: str) -> None:
         if position(keys[0], _EXAMPLE.get(keys[0].type.lower())) is not None:
@@ -163,8 +163,17 @@ class Keyspace(Denominator):
 #: One value per SQL type the keyspace arithmetic can place on a line, used only
 #: to answer "could this column be measured?" at declaration time.
 _EXAMPLE: dict[str, Any] = {
-    "int2": 0, "int4": 0, "int8": 0, "smallint": 0, "integer": 0, "bigint": 0,
-    "float4": 0.0, "float8": 0.0, "real": 0.0, "double precision": 0.0, "numeric": 0.0,
+    "int2": 0,
+    "int4": 0,
+    "int8": 0,
+    "smallint": 0,
+    "integer": 0,
+    "bigint": 0,
+    "float4": 0.0,
+    "float8": 0.0,
+    "real": 0.0,
+    "double precision": 0.0,
+    "numeric": 0.0,
     "timestamptz": datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC),
     "timestamp": datetime.datetime(2000, 1, 1),
     "timestamp with time zone": datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC),

@@ -34,10 +34,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import _json
 from . import telemetry as _telemetry
 
 # Re-exported under this module's historic names: the supervision moved to
@@ -67,6 +69,7 @@ _REJECT = "reject"
 #: this long -- it is a deploy-time event, so seconds are the right unit and a
 #: read on the publish path is not.
 DEFAULT_GROUP_REFRESH = 30.0
+MAX_ENVELOPE_BYTES = 1 << 20
 
 #: Reconnect backoff for the doorbell's held `LISTEN` connection, re-exported
 #: from `wreath._doorbell` where the supervision itself lives. The cap is
@@ -87,6 +90,106 @@ class NoSubscriberGroup(RuntimeError):
 def _validate_channel(value: str) -> str:
     """A LISTEN/NOTIFY channel is just a bounded SQL-safe identifier."""
     return validate_identifier(value, "channel")
+
+
+@dataclass(frozen=True, slots=True)
+class MessageEnvelope:
+    """Versioned message identity and causality around a JSON payload.
+
+    The marker makes detection exact. A bus only emits this shape when the
+    caller supplies an envelope, so existing publishers retain their byte
+    shape and an older consumer can still decode an envelope as an ordinary
+    JSON object during a rolling deployment.
+    """
+
+    kind: str
+    payload: Any
+    version: int = 1
+    id: str = ""
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    trace_context: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.kind, str)
+            or not self.kind
+            or len(self.kind.encode("utf-8")) > 255
+        ):
+            raise ValueError("MessageEnvelope kind must be between 1 and 255 UTF-8 bytes")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+            raise ValueError("MessageEnvelope version must be an integer >= 1")
+        identifier = self.id or str(uuid.uuid4())
+        _check_envelope_text("id", identifier, 255, required=True)
+        _check_envelope_text("correlation_id", self.correlation_id, 255)
+        _check_envelope_text("causation_id", self.causation_id, 255)
+        _check_envelope_text("trace_context", self.trace_context, 1024)
+        object.__setattr__(self, "id", identifier)
+        encoded = _json.dumps(self.as_dict())
+        if len(encoded) > MAX_ENVELOPE_BYTES:
+            raise ValueError(
+                f"MessageEnvelope is {len(encoded)} bytes; maximum is {MAX_ENVELOPE_BYTES}"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        """The explicit version-1 wire object."""
+        return {
+            "__wreath_message__": 1,
+            "kind": self.kind,
+            "version": self.version,
+            "id": self.id,
+            "correlation_id": self.correlation_id,
+            "causation_id": self.causation_id,
+            "trace_context": self.trace_context,
+            "payload": self.payload,
+        }
+
+    def encode(self) -> bytes:
+        """Encode with Wreath's native JSON kernel."""
+        return _json.dumps(self.as_dict())
+
+    @classmethod
+    def decode(cls, value: Any) -> MessageEnvelope | None:
+        """Decode an envelope, returning `None` for a legacy plain payload."""
+        try:
+            data = _json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("__wreath_message__") != 1:
+            return None
+        expected = {
+            "__wreath_message__",
+            "kind",
+            "version",
+            "id",
+            "correlation_id",
+            "causation_id",
+            "trace_context",
+            "payload",
+        }
+        if set(data) != expected:
+            raise ValueError("MessageEnvelope version 1 has unexpected or missing fields")
+        return cls(
+            kind=data["kind"],
+            payload=data["payload"],
+            version=data["version"],
+            id=data["id"],
+            correlation_id=data["correlation_id"],
+            causation_id=data["causation_id"],
+            trace_context=data["trace_context"],
+        )
+
+
+def _check_envelope_text(
+    name: str, value: str | None, limit: int, *, required: bool = False
+) -> None:
+    if value is None and not required:
+        return
+    if not isinstance(value, str) or (required and not value) or len(value.encode("utf-8")) > limit:
+        qualifier = "non-empty " if required else ""
+        raise ValueError(
+            f"MessageEnvelope {name} must be a {qualifier}string of at most {limit} bytes"
+        )
 
 
 @dataclass(slots=True)
@@ -118,6 +221,10 @@ class Message:
     def reject(self) -> None:
         """Fail permanently — the durable message is dead-lettered immediately."""
         self._disposition = _REJECT
+
+    def envelope(self) -> MessageEnvelope | None:
+        """Return the versioned envelope, or `None` for a legacy payload."""
+        return MessageEnvelope.decode(self.payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,24 +506,13 @@ class MessageBus:
         who knows a consumer must exist. Without it the publish is a counted
         no-op, because shipping a producer before its consumer is normal.
 
-        **Trace context rides the durable row and not the ephemeral NOTIFY, and
-        the asymmetry is deliberate.** A durable publish writes a row per group,
-        so the calling request's `traceparent` goes on it and the consumer --
-        often a different service on a different day -- runs its handler under
-        that context. Ephemeral fan-out has no row: `pg_notify($1, $2)` carries
-        the caller's payload *as* the message, so the only place a traceparent
-        could go is inside that payload, which means wrapping every ephemeral
-        message in an envelope.
-
-        That is a **breaking change to a live wire format between processes**,
-        and it is deferred rather than skipped. A rolling deploy has publishers
-        on the new build and subscribers on the old one at the same time, so the
-        envelope has to be versioned and the old build has to keep reading plain
-        payloads -- which is a design with its own compatibility window, not a
-        line of code. The 8000-byte NOTIFY bound is *not* the obstacle; a
-        traceparent is 55 bytes. `docs/reference/roadmap.md` carries the row, and
-        `tests/messaging/test_trace.py` pins the current format so the deferral
-        stays a decision rather than becoming an omission.
+        Plain payloads retain their existing wire shape. Passing a
+        `MessageEnvelope` opts into the marked, versioned object used for event
+        identity, correlation, causation, and explicit trace context. During a
+        rolling deployment an older build still decodes that object as ordinary
+        JSON; consumers should be deployed before producers when they require
+        envelope semantics. `Message.envelope()` recognizes the new shape while
+        returning `None` for every legacy payload.
         """
         _validate_channel(channel)
         if require_group and not durable:
@@ -424,7 +520,11 @@ class MessageBus:
                 "require_group applies to durable publishes; ephemeral fan-out "
                 "has no groups, only whoever happens to be listening"
             )
-        body = json.dumps(payload)
+        body = (
+            payload.encode().decode("utf-8")
+            if isinstance(payload, MessageEnvelope)
+            else json.dumps(payload)
+        )
         if durable:
             await self._publish_durable(
                 channel, body, tx=tx, tenant=tenant, key=key,

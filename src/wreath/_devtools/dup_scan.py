@@ -375,6 +375,54 @@ def _exclusion(reason: str, *sites: tuple[str, str]) -> Exclusion:
 # the tree; an exact set stops matching as soon as a new site joins the group.
 INTENTIONAL_GROUPS: tuple[Exclusion, ...] = (
     _exclusion(
+        "gzip encode and decode deliberately own independent ISA kernels so neither "
+        "direction pulls the other algorithm into its instruction or cache footprint",
+        ('src/wreath/_native/gzip/decode/crc32_pclmul.c',
+         'wreath_gzip_decoder_crc32_pclmul'),
+        ('src/wreath/_native/gzip/encode/crc32_pclmul.c',
+         'wreath_gzip_encoder_crc32_pclmul'),
+    ),
+    _exclusion(
+        "gzip encode and decode deliberately own independent ISA kernels so neither "
+        "direction pulls the other algorithm into its instruction or cache footprint",
+        ('src/wreath/_native/gzip/decode/crc32_vpclmul.c',
+         'wreath_gzip_decoder_crc32_vpclmul'),
+        ('src/wreath/_native/gzip/encode/crc32_vpclmul.c',
+         'wreath_gzip_encoder_crc32_vpclmul'),
+    ),
+    _exclusion(
+        "gzip encode and decode keep separate runtime dispatch contracts; sharing this "
+        "small query would couple otherwise independent codec implementations",
+        ('src/wreath/_native/gzip/decode/crc32.c',
+         'wreath_gzip_decoder_crc32_arm_available'),
+        ('src/wreath/_native/gzip/encode/crc32.c',
+         'wreath_gzip_encoder_crc32_arm_available'),
+    ),
+    _exclusion(
+        "HTTP-client and PostgreSQL awaitables live in separate extensions with distinct "
+        "object layouts; direct field access avoids a generic offset or callback layer",
+        ('src/wreath/_native/client_http1.c', 'client_request_result'),
+        ('src/wreath/_native/postgres/pipeline.c', 'statement_completion_result'),
+    ),
+    _exclusion(
+        "HTTP-client and PostgreSQL awaitables live in separate extensions with distinct "
+        "object layouts; direct field access avoids a generic offset or callback layer",
+        ('src/wreath/_native/client_http1.c', 'client_request_exception'),
+        ('src/wreath/_native/postgres/pipeline.c', 'statement_completion_exception'),
+    ),
+    _exclusion(
+        "normalisation erases the different capsule layouts and owned fields released by "
+        "these unrelated destructors",
+        ('src/wreath/_native/activate.c', 'request_layout_free'),
+        ('src/wreath/_native/cedar.c', 'cedar_decision_batch_destroy'),
+    ),
+    _exclusion(
+        "object-store read and list preserve distinct streaming APIs; a shared async "
+        "generator would add an await/yield layer to every observed item",
+        ('src/wreath/_replay_adapters.py', 'ObservedObjectStore.read_stream'),
+        ('src/wreath/_replay_adapters.py', 'ObservedObjectStore.list'),
+    ),
+    _exclusion(
         "scaffold functions emit unrelated literal artifacts; normalisation erases "
         "the literal content that is their entire behaviour",
         *(('src/wreath/_scaffold.py', name) for name in (

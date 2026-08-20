@@ -8,6 +8,41 @@
 
 enum { SCIM_WORD = 256, SCIM_STRING };
 
+typedef enum {
+    SCIM_ATTR_PATH,
+    SCIM_ATTR_LEFT,
+    SCIM_ATTR_RIGHT,
+    SCIM_ATTR_OPERAND,
+    SCIM_ATTR_OP,
+    SCIM_ATTR_VALUE,
+    SCIM_ATTR_PREDICATE,
+    SCIM_ATTR_COUNT,
+} ScimAttr;
+
+static PyObject *scim_attr_names[SCIM_ATTR_COUNT];
+
+int
+wreath_scim_ready(void)
+{
+    static const char *names[SCIM_ATTR_COUNT] = {
+        "path", "left", "right", "operand", "op", "value", "predicate",
+    };
+    for (int index = 0; index < SCIM_ATTR_COUNT; index++) {
+        scim_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (scim_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(scim_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+scim_getattr(PyObject *object, ScimAttr attribute)
+{
+    return PyObject_GetAttr(object, scim_attr_names[attribute]);
+}
+
 typedef struct {
     int kind;
     PyObject *value;
@@ -495,7 +530,7 @@ scim_check_attributes(PyObject *node, PyObject *attributes, PyObject *types, int
     if (instance < 0) return -1;
     if (instance) {
         if (nested) return 0;
-        path = PyObject_GetAttrString(node, "path");
+        path = scim_getattr(node, SCIM_ATTR_PATH);
         if (path == NULL) return -1;
         Py_ssize_t dot = PyUnicode_FindChar(path, '.', 0,
                                             PyUnicode_GET_LENGTH(path), 1);
@@ -510,7 +545,7 @@ scim_check_attributes(PyObject *node, PyObject *attributes, PyObject *types, int
     instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 4));
     if (instance < 0) return -1;
     if (instance) {
-        path = PyObject_GetAttrString(node, "path");
+        path = scim_getattr(node, SCIM_ATTR_PATH);
         if (path == NULL) return -1;
         int held = PySet_Contains(attributes, path);
         if (held == 0) scim_unheld(types, attributes, path);
@@ -520,8 +555,8 @@ scim_check_attributes(PyObject *node, PyObject *attributes, PyObject *types, int
     instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 1));
     if (instance < 0) return -1;
     if (instance) {
-        PyObject *left = PyObject_GetAttrString(node, "left");
-        PyObject *right = PyObject_GetAttrString(node, "right");
+        PyObject *left = scim_getattr(node, SCIM_ATTR_LEFT);
+        PyObject *right = scim_getattr(node, SCIM_ATTR_RIGHT);
         int failed = left == NULL || right == NULL ||
                      scim_check_attributes(left, attributes, types, nested) < 0 ||
                      scim_check_attributes(right, attributes, types, nested) < 0;
@@ -533,7 +568,7 @@ scim_check_attributes(PyObject *node, PyObject *attributes, PyObject *types, int
         instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, type_index));
         if (instance < 0) return -1;
         if (instance) {
-            PyObject *operand = PyObject_GetAttrString(node, "operand");
+            PyObject *operand = scim_getattr(node, SCIM_ATTR_OPERAND);
             int result = operand == NULL ? -1 :
                 scim_check_attributes(operand, attributes, types, nested);
             Py_XDECREF(operand);
@@ -783,8 +818,8 @@ static int scim_matches_node(PyObject *node, PyObject *resource, PyObject *types
 static int
 scim_matches_values(PyObject *node, PyObject *resource, PyObject *types)
 {
-    PyObject *path = PyObject_GetAttrString(node, "path");
-    PyObject *op = PyObject_GetAttrString(node, "op");
+    PyObject *path = scim_getattr(node, SCIM_ATTR_PATH);
+    PyObject *op = scim_getattr(node, SCIM_ATTR_OP);
     PyObject *wanted = NULL;
     PyObject *values;
     int result = 0;
@@ -792,7 +827,7 @@ scim_matches_values(PyObject *node, PyObject *resource, PyObject *types)
     values = scim_values(resource, path, types);
     if (values == NULL) goto error;
     if (PyUnicode_CompareWithASCIIString(op, "pr") != 0) {
-        wanted = PyObject_GetAttrString(node, "value");
+        wanted = scim_getattr(node, SCIM_ATTR_VALUE);
         if (wanted == NULL) {
             Py_DECREF(values);
             goto error;
@@ -834,8 +869,8 @@ scim_matches_node(PyObject *node, PyObject *resource, PyObject *types)
     instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 4));
     if (instance < 0) return -1;
     if (instance) {
-        PyObject *path = PyObject_GetAttrString(node, "path");
-        PyObject *predicate = PyObject_GetAttrString(node, "predicate");
+        PyObject *path = scim_getattr(node, SCIM_ATTR_PATH);
+        PyObject *predicate = scim_getattr(node, SCIM_ATTR_PREDICATE);
         PyObject *values;
         int result = 0;
         if (path == NULL || predicate == NULL) {
@@ -861,9 +896,9 @@ scim_matches_node(PyObject *node, PyObject *resource, PyObject *types)
     instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 1));
     if (instance < 0) return -1;
     if (instance) {
-        PyObject *op = PyObject_GetAttrString(node, "op");
-        PyObject *left = PyObject_GetAttrString(node, "left");
-        PyObject *right = PyObject_GetAttrString(node, "right");
+        PyObject *op = scim_getattr(node, SCIM_ATTR_OP);
+        PyObject *left = scim_getattr(node, SCIM_ATTR_LEFT);
+        PyObject *right = scim_getattr(node, SCIM_ATTR_RIGHT);
         int result;
         if (op == NULL || left == NULL || right == NULL) {
             Py_XDECREF(op); Py_XDECREF(left); Py_XDECREF(right);
@@ -883,7 +918,7 @@ scim_matches_node(PyObject *node, PyObject *resource, PyObject *types)
         instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, type_index));
         if (instance < 0) return -1;
         if (instance) {
-            PyObject *operand = PyObject_GetAttrString(node, "operand");
+            PyObject *operand = scim_getattr(node, SCIM_ATTR_OPERAND);
             int result = operand == NULL ? -1 :
                 scim_matches_node(operand, resource, types);
             Py_XDECREF(operand);

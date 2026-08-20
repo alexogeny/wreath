@@ -193,8 +193,8 @@ def _ttl_from_headers(response: Any, default: float) -> float:
     value = response.header(b"cache-control")
     if not value:
         return default
-    for directive in value.split(b","):
-        directive = directive.strip().lower()
+    for raw_directive in value.split(b","):
+        directive = raw_directive.strip().lower()
         if directive.startswith(b"max-age="):
             try:
                 seconds = float(int(directive[len(b"max-age=") :]))

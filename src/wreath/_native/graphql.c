@@ -2,6 +2,44 @@
  * resolvers; C owns repeated row projection and child-layout assembly. */
 #include "wreathcore.h"
 
+typedef enum {
+    GQ_ATTR_NAME,
+    GQ_ATTR_POLICY,
+    GQ_ATTR_RESOLVER,
+    GQ_ATTR_RELATIONSHIP,
+    GQ_ATTR_COLUMN,
+    GQ_ATTR_PYTHON_NAME,
+    GQ_ATTR_ATTRIBUTE,
+    GQ_ATTR_KEY,
+    GQ_ATTR_ORM_GET_RELATION,
+    GQ_ATTR_COUNT,
+} GraphqlAttr;
+
+static PyObject *graphql_attr_names[GQ_ATTR_COUNT];
+
+int
+wreath_graphql_ready(void)
+{
+    static const char *names[GQ_ATTR_COUNT] = {
+        "name", "policy", "resolver", "relationship", "column",
+        "python_name", "attribute", "key", "_orm_get_relation",
+    };
+    for (int index = 0; index < GQ_ATTR_COUNT; index++) {
+        graphql_attr_names[index] = PyUnicode_InternFromString(names[index]);
+        if (graphql_attr_names[index] == NULL) {
+            while (index-- != 0) Py_CLEAR(graphql_attr_names[index]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline PyObject *
+graphql_getattr(PyObject *object, GraphqlAttr attribute)
+{
+    return PyObject_GetAttr(object, graphql_attr_names[attribute]);
+}
+
 typedef struct {
     PyObject *name;
     PyObject *resource;
@@ -341,7 +379,7 @@ wreath_graphql_policy_prepare(PyObject *Py_UNUSED(self), PyObject *args)
     for (Py_ssize_t supplied_index = 0; supplied_index < supplied;
          supplied_index++) {
         PyObject *field = PySequence_Fast_GET_ITEM(fields, supplied_index);
-        PyObject *name = PyObject_GetAttrString(field, "name");
+        PyObject *name = graphql_getattr(field, GQ_ATTR_NAME);
         PyObject *schema_field = NULL, *policy = NULL;
         Py_ssize_t policy_index;
         if (name == NULL) goto error;
@@ -354,7 +392,7 @@ wreath_graphql_policy_prepare(PyObject *Py_UNUSED(self), PyObject *args)
             Py_DECREF(name);
             goto error;
         }
-        policy = PyObject_GetAttrString(schema_field, "policy");
+        policy = graphql_getattr(schema_field, GQ_ATTR_POLICY);
         Py_DECREF(schema_field);
         if (policy == NULL) {
             Py_DECREF(name);
@@ -458,9 +496,7 @@ wreath_graphql_policy_items(PyObject *Py_UNUSED(self), PyObject *args)
             Py_DECREF(requirement);
             goto error;
         }
-        item = PyTuple_Pack(2, requirement, path);
-        Py_DECREF(requirement);
-        Py_DECREF(path);
+        item = wreath_tuple2_from_owned(requirement, path);
         if (item == NULL) goto error;
         PyTuple_SET_ITEM(items, index, item);
     }
@@ -955,7 +991,7 @@ graphql_plain_fields_compile(PyObject *schema_fields, PyObject *fields,
     }
     for (Py_ssize_t index = 0; index < field_count; index++) {
         PyObject *field = PySequence_Fast_GET_ITEM(fields, index);
-        PyObject *name = PyObject_GetAttrString(field, "name");
+        PyObject *name = graphql_getattr(field, GQ_ATTR_NAME);
         PyObject *schema_field = NULL;
         PyObject *resolver = NULL;
         PyObject *relationship = NULL;
@@ -967,8 +1003,8 @@ graphql_plain_fields_compile(PyObject *schema_fields, PyObject *fields,
         }
         Py_DECREF(name);
         if (schema_field == NULL) goto declined;
-        resolver = PyObject_GetAttrString(schema_field, "resolver");
-        relationship = PyObject_GetAttrString(schema_field, "relationship");
+        resolver = graphql_getattr(schema_field, GQ_ATTR_RESOLVER);
+        relationship = graphql_getattr(schema_field, GQ_ATTR_RELATIONSHIP);
         if (resolver == NULL || relationship == NULL) {
             Py_XDECREF(relationship);
             Py_XDECREF(resolver);
@@ -983,22 +1019,22 @@ graphql_plain_fields_compile(PyObject *schema_fields, PyObject *fields,
         }
         Py_DECREF(relationship);
         Py_DECREF(resolver);
-        column = PyObject_GetAttrString(schema_field, "column");
+        column = graphql_getattr(schema_field, GQ_ATTR_COLUMN);
         if (column == NULL) {
             Py_DECREF(schema_field);
             goto error;
         }
         if (column != Py_None) {
-            plan[index].attribute = PyObject_GetAttrString(column, "python_name");
+            plan[index].attribute = graphql_getattr(column, GQ_ATTR_PYTHON_NAME);
         }
         else {
-            plan[index].attribute = PyObject_GetAttrString(schema_field, "attribute");
+            plan[index].attribute = graphql_getattr(schema_field, GQ_ATTR_ATTRIBUTE);
         }
         Py_DECREF(column);
         Py_DECREF(schema_field);
         if (plan[index].attribute == NULL) goto error;
         if (plan[index].attribute == Py_None) goto declined;
-        plan[index].key = PyObject_GetAttrString(field, "key");
+        plan[index].key = graphql_getattr(field, GQ_ATTR_KEY);
         if (plan[index].key == NULL) goto error;
         plan[index].key_json = wreath_json_dumps(NULL, plan[index].key);
         if (plan[index].key_json == NULL) goto error;
@@ -1163,7 +1199,7 @@ wreath_graphql_project_plain(PyObject *Py_UNUSED(self), PyObject *args)
     }
     for (Py_ssize_t index = 0; index < field_count; index++) {
         PyObject *field = PySequence_Fast_GET_ITEM(fields, index);
-        PyObject *name = PyObject_GetAttrString(field, "name");
+        PyObject *name = graphql_getattr(field, GQ_ATTR_NAME);
         PyObject *schema_field = NULL;
         PyObject *resolver = NULL;
         PyObject *relationship = NULL;
@@ -1175,8 +1211,8 @@ wreath_graphql_project_plain(PyObject *Py_UNUSED(self), PyObject *args)
         }
         Py_DECREF(name);
         if (schema_field == NULL) goto declined;
-        resolver = PyObject_GetAttrString(schema_field, "resolver");
-        relationship = PyObject_GetAttrString(schema_field, "relationship");
+        resolver = graphql_getattr(schema_field, GQ_ATTR_RESOLVER);
+        relationship = graphql_getattr(schema_field, GQ_ATTR_RELATIONSHIP);
         if (resolver == NULL || relationship == NULL) {
             Py_XDECREF(relationship);
             Py_XDECREF(resolver);
@@ -1191,22 +1227,22 @@ wreath_graphql_project_plain(PyObject *Py_UNUSED(self), PyObject *args)
         }
         Py_DECREF(relationship);
         Py_DECREF(resolver);
-        column = PyObject_GetAttrString(schema_field, "column");
+        column = graphql_getattr(schema_field, GQ_ATTR_COLUMN);
         if (column == NULL) {
             Py_DECREF(schema_field);
             goto error;
         }
         if (column != Py_None) {
-            plan[index].attribute = PyObject_GetAttrString(column, "python_name");
+            plan[index].attribute = graphql_getattr(column, GQ_ATTR_PYTHON_NAME);
         }
         else {
-            plan[index].attribute = PyObject_GetAttrString(schema_field, "attribute");
+            plan[index].attribute = graphql_getattr(schema_field, GQ_ATTR_ATTRIBUTE);
         }
         Py_DECREF(column);
         Py_DECREF(schema_field);
         if (plan[index].attribute == NULL) goto error;
         if (plan[index].attribute == Py_None) goto declined;
-        plan[index].key = PyObject_GetAttrString(field, "key");
+        plan[index].key = graphql_getattr(field, GQ_ATTR_KEY);
         if (plan[index].key == NULL) goto error;
     }
     results = PyList_New(PySequence_Fast_GET_SIZE(instances));
@@ -1392,7 +1428,9 @@ flatten(PyObject *values, int is_list)
         if (slot == NULL) goto error;
         PyList_SET_ITEM(layout, index, slot);
     }
-    answer = PyTuple_Pack(2, flat, layout);
+    answer = wreath_tuple2_from_owned(flat, layout);
+    flat = NULL;
+    layout = NULL;
 error:
     if (children != NULL) {
         for (Py_ssize_t index = 0; index < count; index++)
@@ -1427,7 +1465,7 @@ wreath_graphql_flatten_relationship(PyObject *Py_UNUSED(self), PyObject *args)
     objects = PySequence_Fast(instances, "instances must be a sequence");
     if (objects == NULL) return NULL;
     values = PyList_New(PySequence_Fast_GET_SIZE(objects));
-    name = PyUnicode_InternFromString("_orm_get_relation");
+    name = Py_NewRef(graphql_attr_names[GQ_ATTR_ORM_GET_RELATION]);
     argument = PyLong_FromSsize_t(relation_index);
     if (values == NULL || name == NULL || argument == NULL) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(objects); index++) {

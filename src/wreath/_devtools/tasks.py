@@ -119,8 +119,8 @@ def _resolve_pin(mode: str) -> set[int]:
     if mode == "pcores":
         return _top_freq_cpus()
     cpus: set[int] = set()
-    for part in mode.split(","):
-        part = part.strip()
+    for raw_part in mode.split(","):
+        part = raw_part.strip()
         if not part:
             continue
         if "-" in part:

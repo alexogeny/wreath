@@ -1949,15 +1949,11 @@ static PyObject *
 p256_affine_to_py(const P256Point *point)
 {
     U256 x, y;
-    PyObject *x_object = NULL, *y_object = NULL, *result = NULL;
+    PyObject *x_object = NULL, *y_object = NULL;
     if (!p256_to_affine(&x, &y, point)) Py_RETURN_NONE;
     x_object = field_to_py(&x, &P256_FIELD);
     y_object = field_to_py(&y, &P256_FIELD);
-    if (x_object != NULL && y_object != NULL)
-        result = PyTuple_Pack(2, x_object, y_object);
-    Py_XDECREF(y_object);
-    Py_XDECREF(x_object);
-    return result;
+    return wreath_tuple2_from_owned(x_object, y_object);
 }
 
 static int

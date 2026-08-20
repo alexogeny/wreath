@@ -476,59 +476,54 @@ done:
 static PyObject *
 decode_vector_text(const unsigned char *raw, Py_ssize_t length)
 {
-    PyObject *text, *stripped, *body, *parts, *list;
-    PyObject *open_bracket, *close_bracket;
-    int bracketed;
+    PyObject *text;
+    PyObject *list;
+    Py_ssize_t start = 0;
+    Py_ssize_t end = length;
+    Py_ssize_t count = 1;
 
     text = PyUnicode_DecodeASCII((const char *)raw, length, "strict");
     if (text == NULL) return NULL;
-    stripped = PyObject_CallMethod(text, "strip", NULL);
-    Py_DECREF(text);
-    if (stripped == NULL) return NULL;
-    open_bracket = PyUnicode_FromString("[");
-    close_bracket = PyUnicode_FromString("]");
-    if (open_bracket == NULL || close_bracket == NULL) {
-        Py_XDECREF(open_bracket);
-        Py_XDECREF(close_bracket);
-        Py_DECREF(stripped);
-        return NULL;
-    }
-    bracketed = PyUnicode_Tailmatch(stripped, open_bracket, 0, PY_SSIZE_T_MAX, -1) == 1 &&
-                PyUnicode_Tailmatch(stripped, close_bracket, 0, PY_SSIZE_T_MAX, 1) == 1;
-    Py_DECREF(open_bracket);
-    Py_DECREF(close_bracket);
-    if (!bracketed) {
-        Py_DECREF(stripped);
+    while (start < end && Py_UNICODE_ISSPACE(raw[start])) start++;
+    while (end > start && Py_UNICODE_ISSPACE(raw[end - 1])) end--;
+    if (end - start < 2 || raw[start] != '[' || raw[end - 1] != ']') {
+        Py_DECREF(text);
         PyErr_SetString(PyExc_ValueError, "text-format vector is not bracketed");
         return NULL;
     }
-    body = PySequence_GetSlice(stripped, 1, PyUnicode_GET_LENGTH(stripped) - 1);
-    Py_DECREF(stripped);
-    if (body == NULL) return NULL;
-    Py_SETREF(body, PyObject_CallMethod(body, "strip", NULL));
-    if (body == NULL) return NULL;
-    if (PyUnicode_GET_LENGTH(body) == 0) {
-        Py_DECREF(body);
+    start++;
+    end--;
+    while (start < end && Py_UNICODE_ISSPACE(raw[start])) start++;
+    while (end > start && Py_UNICODE_ISSPACE(raw[end - 1])) end--;
+    if (start == end) {
+        Py_DECREF(text);
         return PyList_New(0);
     }
-    parts = PyObject_CallMethod(body, "split", "s", ",");
-    Py_DECREF(body);
-    if (parts == NULL) return NULL;
-    list = PyList_New(PyList_GET_SIZE(parts));
+    for (Py_ssize_t index = start; index < end; index++) {
+        if (raw[index] == ',') count++;
+    }
+    list = PyList_New(count);
     if (list == NULL) {
-        Py_DECREF(parts);
+        Py_DECREF(text);
         return NULL;
     }
-    for (Py_ssize_t index = 0; index < PyList_GET_SIZE(parts); index++) {
-        PyObject *number = PyFloat_FromString(PyList_GET_ITEM(parts, index));
+    Py_ssize_t item = 0;
+    Py_ssize_t part_start = start;
+    for (Py_ssize_t index = start; index <= end; index++) {
+        if (index < end && raw[index] != ',') continue;
+        PyObject *part = PyUnicode_FromKindAndData(
+            PyUnicode_1BYTE_KIND, raw + part_start, index - part_start);
+        PyObject *number = part == NULL ? NULL : PyFloat_FromString(part);
+        Py_XDECREF(part);
         if (number == NULL) {
-            Py_DECREF(parts);
+            Py_DECREF(text);
             Py_DECREF(list);
             return NULL;
         }
-        PyList_SET_ITEM(list, index, number);
+        PyList_SET_ITEM(list, item++, number);
+        part_start = index + 1;
     }
-    Py_DECREF(parts);
+    Py_DECREF(text);
     return list;
 }
 
@@ -657,6 +652,8 @@ decode_halfvec(const unsigned char *raw, Py_ssize_t length)
  * is declaration-time work on a cold path, and two copies of a bounds check are
  * two chances to disagree about what pgvector accepts. */
 static PyObject *sparsevec_type = NULL;
+static PyObject *str_sparse_data = NULL;
+static PyObject *str_comma = NULL;
 
 static int
 check_sparsevec(PyObject *value)
@@ -691,7 +688,7 @@ encode_sparsevec(PyObject *value)
     unsigned char *out;
 
     if (check_sparsevec(value) < 0) return NULL;
-    capsule = PyObject_GetAttrString(value, "_data");
+    capsule = PyObject_GetAttr(value, str_sparse_data);
     if (capsule == NULL) return NULL;
     data = wreath_sparse_vector_get(capsule);
     if (data == NULL) goto done;
@@ -815,45 +812,34 @@ decode_sparsevec(const unsigned char *raw, Py_ssize_t length)
 static PyObject *
 encode_sparsevec_text(PyObject *value)
 {
-    PyObject *dim_object = NULL, *indices = NULL, *values = NULL;
-    PyObject *pieces = NULL, *comma = NULL, *body = NULL, *text = NULL;
+    PyObject *capsule = NULL;
+    PyObject *pieces = NULL, *body = NULL, *text = NULL;
     PyObject *result = NULL;
-    Py_ssize_t count;
+    WreathSparseVector *data;
 
     if (check_sparsevec(value) < 0) return NULL;
-    dim_object = PyObject_GetAttrString(value, "dim");
-    indices = PyObject_GetAttrString(value, "indices");
-    values = PyObject_GetAttrString(value, "values");
-    if (dim_object == NULL || indices == NULL || values == NULL) goto done;
-    count = PySequence_Size(indices);
-    if (count < 0) goto done;
-    pieces = PyList_New(count);
+    capsule = PyObject_GetAttr(value, str_sparse_data);
+    if (capsule == NULL) goto done;
+    data = wreath_sparse_vector_get(capsule);
+    if (data == NULL) goto done;
+    pieces = PyList_New(data->count);
     if (pieces == NULL) goto done;
-    for (Py_ssize_t index = 0; index < count; index++) {
-        PyObject *position = PySequence_GetItem(indices, index);
-        PyObject *number = PySequence_GetItem(values, index);
-        PyObject *piece = NULL;
-        if (position != NULL && number != NULL) {
-            piece = PyUnicode_FromFormat("%S:%R", position, number);
-        }
-        Py_XDECREF(position);
+    for (Py_ssize_t index = 0; index < data->count; index++) {
+        PyObject *number = PyFloat_FromDouble(data->values[index]);
+        PyObject *piece = number == NULL ? NULL : PyUnicode_FromFormat(
+            "%d:%R", data->indices[index], number);
         Py_XDECREF(number);
         if (piece == NULL) goto done;
         PyList_SET_ITEM(pieces, index, piece);
     }
-    comma = PyUnicode_FromString(",");
-    if (comma == NULL) goto done;
-    body = PyUnicode_Join(comma, pieces);
+    body = PyUnicode_Join(str_comma, pieces);
     if (body == NULL) goto done;
-    text = PyUnicode_FromFormat("{%U}/%S", body, dim_object);
+    text = PyUnicode_FromFormat("{%U}/%d", body, data->dimension);
     if (text == NULL) goto done;
     result = PyUnicode_AsEncodedString(text, "ascii", "strict");
 done:
-    Py_XDECREF(dim_object);
-    Py_XDECREF(indices);
-    Py_XDECREF(values);
+    Py_XDECREF(capsule);
     Py_XDECREF(pieces);
-    Py_XDECREF(comma);
     Py_XDECREF(body);
     Py_XDECREF(text);
     return result;
@@ -862,53 +848,52 @@ done:
 static PyObject *
 decode_sparsevec_text(const unsigned char *raw, Py_ssize_t length)
 {
-    PyObject *text = NULL, *split = NULL, *body = NULL, *dim_object = NULL;
-    PyObject *inner = NULL, *parts = NULL, *mapping = NULL, *result = NULL;
-    Py_ssize_t size;
+    PyObject *text = NULL, *dim_text = NULL, *dim_object = NULL;
+    PyObject *mapping = NULL, *result = NULL;
+    Py_ssize_t start = 0;
+    Py_ssize_t end = length;
+    Py_ssize_t slash;
+    Py_ssize_t inner_start;
+    Py_ssize_t inner_end;
 
     text = PyUnicode_DecodeASCII((const char *)raw, length, "strict");
     if (text == NULL) return NULL;
-    Py_SETREF(text, PyObject_CallMethod(text, "strip", NULL));
-    if (text == NULL) return NULL;
-    /* rpartition, so a `/` inside the braces could never be mistaken for the
-       one that introduces the dimension. */
-    split = PyObject_CallMethod(text, "rpartition", "s", "/");
-    if (split == NULL || PyTuple_GET_SIZE(split) != 3) goto malformed;
-    body = Py_NewRef(PyTuple_GET_ITEM(split, 0));
-    dim_object = Py_NewRef(PyTuple_GET_ITEM(split, 2));
-    if (PyUnicode_GET_LENGTH(PyTuple_GET_ITEM(split, 1)) == 0) goto malformed;
-    size = PyUnicode_GET_LENGTH(body);
-    if (size < 2 || PyUnicode_READ_CHAR(body, 0) != '{' ||
-        PyUnicode_READ_CHAR(body, size - 1) != '}') {
-        goto malformed;
-    }
-    inner = PySequence_GetSlice(body, 1, size - 1);
-    if (inner == NULL) goto done;
-    Py_SETREF(inner, PyObject_CallMethod(inner, "strip", NULL));
-    if (inner == NULL) goto done;
-    Py_SETREF(dim_object, PyNumber_Long(dim_object));
+    while (start < end && Py_UNICODE_ISSPACE(raw[start])) start++;
+    while (end > start && Py_UNICODE_ISSPACE(raw[end - 1])) end--;
+    slash = end;
+    while (slash > start && raw[slash - 1] != '/') slash--;
+    if (slash == start || slash - start < 3 || raw[start] != '{' ||
+        raw[slash - 2] != '}') goto malformed;
+    dim_text = PyUnicode_FromKindAndData(
+        PyUnicode_1BYTE_KIND, raw + slash, end - slash);
+    dim_object = dim_text == NULL ? NULL : PyNumber_Long(dim_text);
     if (dim_object == NULL) goto done;
     mapping = PyDict_New();
     if (mapping == NULL) goto done;
-    if (PyUnicode_GET_LENGTH(inner) != 0) {
-        parts = PyObject_CallMethod(inner, "split", "s", ",");
-        if (parts == NULL) goto done;
-        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(parts); index++) {
-            PyObject *piece = PyList_GET_ITEM(parts, index);  /* borrowed */
-            Py_ssize_t size = PyUnicode_GET_LENGTH(piece);
-            /* Split at the colon by index rather than by calling `partition`:
-               a method call inside a loop re-resolves the attribute by name
-               every iteration (NC005), and a find plus two slices is what the
-               method would have done anyway. */
-            Py_ssize_t colon = PyUnicode_FindChar(piece, ':', 0, size, 1);
+    inner_start = start + 1;
+    inner_end = slash - 2;
+    while (inner_start < inner_end && Py_UNICODE_ISSPACE(raw[inner_start]))
+        inner_start++;
+    while (inner_end > inner_start && Py_UNICODE_ISSPACE(raw[inner_end - 1]))
+        inner_end--;
+    if (inner_start != inner_end) {
+        Py_ssize_t part_start = inner_start;
+        for (Py_ssize_t cursor = inner_start; cursor <= inner_end; cursor++) {
+            if (cursor < inner_end && raw[cursor] != ',') continue;
+            Py_ssize_t colon = part_start;
+            /* complexity: allow CL-NEST -- disjoint comma-delimited parts; total scan is linear. */
+            while (colon < cursor && raw[colon] != ':') colon++;
             PyObject *key = NULL, *item = NULL, *number = NULL;
+            PyObject *key_text = NULL;
             int stored;
-            if (colon == -2) goto done;
-            if (colon < 0) goto malformed;
-            key = PySequence_GetSlice(piece, 0, colon);
-            number = PySequence_GetSlice(piece, colon + 1, size);
-            if (key != NULL) Py_SETREF(key, PyNumber_Long(key));
+            if (colon == cursor) goto malformed;
+            key_text = PyUnicode_FromKindAndData(
+                PyUnicode_1BYTE_KIND, raw + part_start, colon - part_start);
+            number = PyUnicode_FromKindAndData(
+                PyUnicode_1BYTE_KIND, raw + colon + 1, cursor - colon - 1);
+            if (key_text != NULL) key = PyNumber_Long(key_text);
             if (number != NULL) item = PyFloat_FromString(number);
+            Py_XDECREF(key_text);
             Py_XDECREF(number);
             if (key == NULL || item == NULL) {
                 Py_XDECREF(key);
@@ -919,6 +904,7 @@ decode_sparsevec_text(const unsigned char *raw, Py_ssize_t length)
             Py_DECREF(key);
             Py_DECREF(item);
             if (stored < 0) goto done;
+            part_start = cursor + 1;
         }
     }
     if (sparsevec_type == NULL) {
@@ -932,11 +918,8 @@ malformed:
                     "text-format sparsevec is not '{index:value,...}/dim'");
 done:
     Py_XDECREF(text);
-    Py_XDECREF(split);
-    Py_XDECREF(body);
+    Py_XDECREF(dim_text);
     Py_XDECREF(dim_object);
-    Py_XDECREF(inner);
-    Py_XDECREF(parts);
     Py_XDECREF(mapping);
     return result;
 }
@@ -1682,8 +1665,13 @@ decode_numeric(const unsigned char *raw, Py_ssize_t length)
 {
     int ndigits, weight;
     unsigned int sign, dscale;
-    PyObject *unscaled = NULL, *base = NULL, *text = NULL, *result = NULL;
+    PyObject *text = NULL, *result = NULL;
+    char *coefficient = NULL;
     long exponent;
+    long target_exponent;
+    Py_ssize_t coefficient_start = 0;
+    Py_ssize_t coefficient_end = 0;
+    int all_zero = 1;
     int i;
 
     if (length < 8) {
@@ -1707,59 +1695,77 @@ decode_numeric(const unsigned char *raw, Py_ssize_t length)
         return NULL;
     }
 
-    unscaled = PyLong_FromLong(0);
-    base = PyLong_FromLong(10000);
-    if (unscaled == NULL || base == NULL) goto done;
     for (i = 0; i < ndigits; i++) {
         int group = (int)(int16_t)((raw[8 + i * 2] << 8) | raw[9 + i * 2]);
-        PyObject *scaled, *addend;
         if (group < 0 || group >= 10000) {
             PyErr_SetString(PyExc_ValueError, "invalid numeric digit group");
             goto done;
         }
-        scaled = PyNumber_Multiply(unscaled, base);
-        if (scaled == NULL) goto done;
-        addend = PyLong_FromLong(group);
-        if (addend == NULL) { Py_DECREF(scaled); goto done; }
-        Py_SETREF(unscaled, PyNumber_Add(scaled, addend));
-        Py_DECREF(scaled);
-        Py_DECREF(addend);
-        if (unscaled == NULL) goto done;
+        if (group != 0) all_zero = 0;
     }
     exponent = 4L * (weight - ndigits + 1);
+    target_exponent = -(long)dscale;
 
     /* Move onto the advertised display scale. Growing is always safe; shrinking
        only ever drops PostgreSQL's zero group padding, and the remainder guard
        means a significant digit is never discarded. */
-    {
-        PyObject *ten = PyLong_FromLong(10);
-        if (ten == NULL) goto done;
-        while (exponent > -(long)dscale) {
-            Py_SETREF(unscaled, PyNumber_Multiply(unscaled, ten));
-            if (unscaled == NULL) { Py_DECREF(ten); goto done; }
-            exponent--;
+    if (all_zero) {
+        coefficient = PyMem_Malloc(2);
+        if (coefficient == NULL) {
+            PyErr_NoMemory();
+            goto done;
         }
-        while (exponent < -(long)dscale) {
-            PyObject *pair = PyNumber_Divmod(unscaled, ten);
-            int divisible;
-            if (pair == NULL) { Py_DECREF(ten); goto done; }
-            divisible = !PyObject_IsTrue(PyTuple_GET_ITEM(pair, 1));
-            if (!divisible) { Py_DECREF(pair); break; }
-            Py_SETREF(unscaled, Py_NewRef(PyTuple_GET_ITEM(pair, 0)));
-            Py_DECREF(pair);
-            exponent++;
+        coefficient[0] = '0';
+        coefficient[1] = '\0';
+        exponent = target_exponent;
+    }
+    else {
+        Py_ssize_t group_digits = (Py_ssize_t)ndigits * 4;
+        Py_ssize_t appended = exponent > target_exponent
+            ? (Py_ssize_t)(exponent - target_exponent) : 0;
+        coefficient = PyMem_Malloc((size_t)(group_digits + appended + 1));
+        if (coefficient == NULL) {
+            PyErr_NoMemory();
+            goto done;
         }
-        Py_DECREF(ten);
+        for (i = 0; i < ndigits; i++) {
+            unsigned int group = (unsigned int)(
+                (raw[8 + i * 2] << 8) | raw[9 + i * 2]);
+            char *digits = coefficient + i * 4;
+            digits[0] = (char)('0' + group / 1000);
+            digits[1] = (char)('0' + group / 100 % 10);
+            digits[2] = (char)('0' + group / 10 % 10);
+            digits[3] = (char)('0' + group % 10);
+        }
+        while (coefficient_start < group_digits &&
+               coefficient[coefficient_start] == '0') coefficient_start++;
+        coefficient_end = group_digits;
+        if (appended != 0) {
+            memset(coefficient + coefficient_end, '0', (size_t)appended);
+            coefficient_end += appended;
+            exponent = target_exponent;
+        }
+        else {
+            while (exponent < target_exponent &&
+                   coefficient_end > coefficient_start &&
+                   coefficient[coefficient_end - 1] == '0') {
+                coefficient_end--;
+                exponent++;
+            }
+        }
+        coefficient[coefficient_end] = '\0';
     }
 
     text = PyUnicode_FromFormat(
-        "%s%SE%ld", sign == PG_NUMERIC_NEG ? "-" : "", unscaled, exponent
+        "%s%sE%ld", sign == PG_NUMERIC_NEG ? "-" : "",
+        coefficient + coefficient_start, exponent
     );
     if (text == NULL) goto done;
     result = PyObject_CallOneArg(decimal_type, text);
 
 done:
-    Py_XDECREF(unscaled); Py_XDECREF(base); Py_XDECREF(text);
+    PyMem_Free(coefficient);
+    Py_XDECREF(text);
     return result;
 }
 
@@ -2407,7 +2413,6 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
     }
     if (oid == PG_UUID) {
         PyObject *uuid_bytes;
-        PyObject *empty_args;
         PyObject *keywords;
         PyObject *result;
         if (length != 16) {
@@ -2415,17 +2420,14 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
             return NULL;
         }
         uuid_bytes = PyBytes_FromStringAndSize((const char *)raw, length);
-        empty_args = PyTuple_New(0);
         keywords = uuid_bytes == NULL ? NULL : Py_BuildValue("{s:O}", "bytes", uuid_bytes);
-        if (uuid_bytes == NULL || empty_args == NULL || keywords == NULL) {
+        if (uuid_bytes == NULL || keywords == NULL) {
             Py_XDECREF(uuid_bytes);
-            Py_XDECREF(empty_args);
             Py_XDECREF(keywords);
             return NULL;
         }
-        result = PyObject_Call(uuid_type, empty_args, keywords);
+        result = PyObject_VectorcallDict(uuid_type, NULL, 0, keywords);
         Py_DECREF(uuid_bytes);
-        Py_DECREF(empty_args);
         Py_DECREF(keywords);
         return result;
     }
@@ -2634,6 +2636,9 @@ wreath_pg_codec_init(PyObject *module)
         sparsevec_type = PyObject_GetAttrString(sparsevec_module, "SparseVector");
         Py_DECREF(sparsevec_module);
         if (sparsevec_type == NULL) return -1;
+        str_sparse_data = PyUnicode_InternFromString("_data");
+        str_comma = PyUnicode_InternFromString(",");
+        if (str_sparse_data == NULL || str_comma == NULL) return -1;
     }
 
     datetime_module = PyImport_ImportModule("datetime");
@@ -2671,6 +2676,8 @@ wreath_pg_codec_fini(void)
     Py_CLEAR(uuid_type);
     Py_CLEAR(decimal_type);
     Py_CLEAR(sparsevec_type);
+    Py_CLEAR(str_sparse_data);
+    Py_CLEAR(str_comma);
     Py_CLEAR(str_as_tuple);
     Py_CLEAR(utc_timezone);
     Py_CLEAR(date_fromisoformat);

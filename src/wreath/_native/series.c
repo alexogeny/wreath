@@ -10,6 +10,27 @@
 #include <math.h>
 #include <stdio.h>
 
+static PyObject *series_name_astimezone;
+static PyObject *series_name_utcoffset;
+
+int
+wreath_series_ready(void)
+{
+    if (series_name_astimezone == NULL &&
+        (series_name_astimezone = PyUnicode_InternFromString("astimezone")) == NULL)
+        return -1;
+    if (series_name_utcoffset == NULL &&
+        (series_name_utcoffset = PyUnicode_InternFromString("utcoffset")) == NULL)
+        return -1;
+    return 0;
+}
+
+static inline PyObject *
+series_astimezone(PyObject *value, PyObject *tz)
+{
+    return PyObject_CallMethodOneArg(value, series_name_astimezone, tz);
+}
+
 static const char series_digit_pairs[] =
     "00010203040506070809"
     "10111213141516171819"
@@ -300,9 +321,9 @@ wreath_series_spine(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "series spine unit must be in range 0..6");
         return NULL;
     }
-    PyObject *local = PyObject_CallMethod(start, "astimezone", "O", tz);
+    PyObject *local = series_astimezone(start, tz);
     if (local == NULL) return NULL;
-    PyObject *offset_method = PyObject_GetAttrString(tz, "utcoffset");
+    PyObject *offset_method = PyObject_GetAttr(tz, series_name_utcoffset);
     if (offset_method == NULL) {
         Py_DECREF(local);
         return NULL;
@@ -377,14 +398,14 @@ wreath_series_spine_length(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "series spine unit must be in range 0..6");
         return NULL;
     }
-    PyObject *offset_method = PyObject_GetAttrString(tz, "utcoffset");
+    PyObject *offset_method = PyObject_GetAttr(tz, series_name_utcoffset);
     if (offset_method == NULL) return NULL;
     PyObject *base_start = series_base_datetime(start, api);
     PyObject *base_end = series_base_datetime(end, api);
     PyObject *local_start = base_start == NULL ? NULL
-        : PyObject_CallMethod(base_start, "astimezone", "O", tz);
+        : series_astimezone(base_start, tz);
     PyObject *local_end = base_end == NULL ? NULL
-        : PyObject_CallMethod(base_end, "astimezone", "O", tz);
+        : series_astimezone(base_end, tz);
     Py_XDECREF(base_start);
     Py_XDECREF(base_end);
     if (local_start == NULL || local_end == NULL) {
@@ -502,15 +523,15 @@ wreath_series_spine_lengths(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *units = PySequence_Fast(
         unit_source, "series spine units must be an iterable of unit indices");
     PyObject *offset_method = units == NULL ? NULL
-        : PyObject_GetAttrString(tz, "utcoffset");
+        : PyObject_GetAttr(tz, series_name_utcoffset);
     PyObject *base_start = offset_method == NULL ? NULL
         : series_base_datetime(start, api);
     PyObject *base_end = base_start == NULL ? NULL
         : series_base_datetime(end, api);
     PyObject *local_start = base_start == NULL ? NULL
-        : PyObject_CallMethod(base_start, "astimezone", "O", tz);
+        : series_astimezone(base_start, tz);
     PyObject *local_end = base_end == NULL ? NULL
-        : PyObject_CallMethod(base_end, "astimezone", "O", tz);
+        : series_astimezone(base_end, tz);
     Py_XDECREF(base_start);
     Py_XDECREF(base_end);
     if (units == NULL || offset_method == NULL || local_start == NULL ||
@@ -1569,7 +1590,7 @@ series_chart_spine_index(SeriesChartSpine *spine, PyObject *bucket,
         !_PyDateTime_HAS_TZINFO(bucket)) return 0;
     int same_zone = PyDateTime_DATE_GET_TZINFO(bucket) == spine->tz;
     PyObject *local = same_zone
-        ? bucket : PyObject_CallMethod(bucket, "astimezone", "O", spine->tz);
+        ? bucket : series_astimezone(bucket, spine->tz);
     if (local == NULL) return -1;
     SeriesWallClock wall = {
         PyDateTime_GET_YEAR(local), PyDateTime_GET_MONTH(local),
@@ -2664,9 +2685,9 @@ wreath_series_chart_spine(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
 
-    PyObject *offset_method = PyObject_GetAttrString(tz, "utcoffset");
-    PyObject *local_start = PyObject_CallMethod(start, "astimezone", "O", tz);
-    PyObject *local_end = PyObject_CallMethod(end, "astimezone", "O", tz);
+    PyObject *offset_method = PyObject_GetAttr(tz, series_name_utcoffset);
+    PyObject *local_start = series_astimezone(start, tz);
+    PyObject *local_end = series_astimezone(end, tz);
     PyObject *downsample = PySequence_Fast(
         downsample_source,
         "series chart downsample rows must be an iterable of indices");

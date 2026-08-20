@@ -69,7 +69,7 @@ class TocEntry:
 class Rendered:
     html: str
     toc: tuple[TocEntry, ...]
-    title: str | None       # first H1, for the page <title>
+    title: str | None  # first H1, for the page <title>
 
 
 def slugify(text: str) -> str:
@@ -79,14 +79,15 @@ def slugify(text: str) -> str:
 
 
 def _esc(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
 
 
 def _safe_href(url: str) -> str:
     stripped = url.strip()
     if not _SAFE_SCHEME.match(stripped):
-        return "#"                       # reject javascript:, data:, etc.
+        return "#"  # reject javascript:, data:, etc.
     return _esc(stripped)
 
 
@@ -108,8 +109,7 @@ def _inline(text: str) -> str:
 
     # 3. Images (before links — an image is a `!`-prefixed link), then links.
     def _image(match: re.Match[str]) -> str:
-        return (f'<img src="{_safe_href(match.group(2))}" alt="{match.group(1)}" '
-                f'loading="lazy">')
+        return f'<img src="{_safe_href(match.group(2))}" alt="{match.group(1)}" loading="lazy">'
 
     def _link(match: re.Match[str]) -> str:
         return f'<a href="{_safe_href(match.group(2))}">{match.group(1)}</a>'
@@ -118,7 +118,9 @@ def _inline(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, text)
     text = re.sub(
         r"&lt;(https?://[^\s>]+)&gt;",
-        lambda m: f'<a href="{_safe_href(m.group(1))}">{m.group(1)}</a>', text)
+        lambda m: f'<a href="{_safe_href(m.group(1))}">{m.group(1)}</a>',
+        text,
+    )
 
     # 4. Emphasis: strikethrough, then strong before emphasis (** __ and * _).
     text = re.sub(r"~~(\S.*?\S|\S)~~", r"<del>\1</del>", text)
@@ -186,7 +188,8 @@ class _Renderer:
 
     def _heading(self, line: str) -> None:
         match = _HEADING.match(line)
-        assert match is not None
+        if match is None:  # pragma: no cover - the block dispatcher matched it
+            raise RuntimeError("heading renderer received a non-heading line")
         level = len(match.group(1))
         text = match.group(2)
         explicit = _HEADING_ID.match(text)
@@ -200,7 +203,8 @@ class _Renderer:
         self.toc.append(TocEntry(level, slug, plain(text)))
         self.out.append(
             f'<h{level} id="{slug}">{_inline(text)}'
-            f'<a class="anchor" href="#{slug}" aria-label="Permalink">#</a></h{level}>')
+            f'<a class="anchor" href="#{slug}" aria-label="Permalink">#</a></h{level}>'
+        )
 
     def _code_block(self, lines: list[str], i: int, fence: re.Match[str]) -> int:
         marker, info = fence.group(1), fence.group(2)
@@ -210,7 +214,7 @@ class _Renderer:
         while i < len(lines) and not lines[i].startswith(marker[0] * len(marker)):
             body.append(lines[i])
             i += 1
-        i += 1     # consume the closing fence (or EOF)
+        i += 1  # consume the closing fence (or EOF)
         raw = "\n".join(body)
         lang_class = f' class="language-{_esc(info)}"' if info else ""
         code = highlight(raw, info) if info else _esc(raw)
@@ -221,10 +225,10 @@ class _Renderer:
         head = ""
         if title := attrs.get("title", ""):
             lang = f'<span class="code-lang">{_esc(info)}</span>' if info else ""
-            head = (f'<div class="code-head"><span class="code-title">{_esc(title)}</span>'
-                    f"{lang}</div>")
-        self.out.append(
-            f'<div class="code">{head}<pre><code{lang_class}>{code}</code></pre></div>')
+            head = (
+                f'<div class="code-head"><span class="code-title">{_esc(title)}</span>{lang}</div>'
+            )
+        self.out.append(f'<div class="code">{head}<pre><code{lang_class}>{code}</code></pre></div>')
         return i
 
     def _blockquote(self, lines: list[str], i: int) -> int:
@@ -261,7 +265,7 @@ class _Renderer:
                         i += 1
                         continue
                     break
-                if line.startswith(" ") and items:      # continuation of the item text
+                if line.startswith(" ") and items:  # continuation of the item text
                     items[-1][0].append(line.strip())
                     i += 1
                     continue
@@ -269,7 +273,7 @@ class _Renderer:
             indent = _indent(line)
             if indent < base:
                 break
-            if indent > base:                            # a sub-list under the last item
+            if indent > base:  # a sub-list under the last item
                 nested, i = self._parse_list(lines, i)
                 if items:
                     items[-1][2].append(nested)
@@ -277,24 +281,26 @@ class _Renderer:
             if m_ol is not None:
                 content = m_ol.group(3)
             else:
-                assert m_ul is not None
+                if m_ul is None:  # pragma: no cover - list dispatch matched one form
+                    raise RuntimeError("list renderer received a non-list line")
                 content = m_ul.group(2)
             task = _TASK.match(content)
             if task is not None:
                 checked = " checked" if task.group(1).lower() == "x" else ""
-                items.append(([task.group(2)],
-                              f'<input type="checkbox" disabled{checked}> ', []))
+                items.append(([task.group(2)], f'<input type="checkbox" disabled{checked}> ', []))
             else:
                 items.append(([content], "", []))
             i += 1
         body = "".join(
             f"<li>{prefix}{_inline(' '.join(text))}{''.join(nested)}</li>"
-            for text, prefix, nested in items)
+            for text, prefix, nested in items
+        )
         return f"<{tag}>{body}</{tag}>", i
 
     def _admonition(self, lines: list[str], i: int) -> int:
         match = _ADMONITION.match(lines[i])
-        assert match is not None
+        if match is None:  # pragma: no cover - the block dispatcher matched it
+            raise RuntimeError("admonition renderer received an ordinary line")
         marker, kind = match.group(1), match.group(2).lower()
         title = match.group(3) if match.group(3) is not None else kind.capitalize()
         i += 1
@@ -310,11 +316,11 @@ class _Renderer:
             self.out.append(
                 f'<details class="admonition {_esc(kind)}"{open_attr}>'
                 f'<summary class="admonition-title">{_inline(title)}</summary>\n'
-                f"{inner}\n</details>")
+                f"{inner}\n</details>"
+            )
             return i
         title_html = f'<p class="admonition-title">{_inline(title)}</p>' if title else ""
-        self.out.append(
-            f'<div class="admonition {_esc(kind)}">{title_html}\n{inner}\n</div>')
+        self.out.append(f'<div class="admonition {_esc(kind)}">{title_html}\n{inner}\n</div>')
         return i
 
     def _tabs(self, lines: list[str], i: int) -> int:
@@ -343,15 +349,17 @@ class _Renderer:
         self._counter[0] += 1
         group = f"tabs-{self._counter[0]}"
         inputs = "".join(
-            f'<input type="radio" name="{group}" id="{group}-{k}"'
-            f'{" checked" if k == 0 else ""}>' for k in range(len(tabs)))
+            f'<input type="radio" name="{group}" id="{group}-{k}"{" checked" if k == 0 else ""}>'
+            for k in range(len(tabs))
+        )
         labels = "".join(
             f'<label class="tab-label" for="{group}-{k}">{_inline(t)}</label>'
-            for k, (t, _) in enumerate(tabs))
+            for k, (t, _) in enumerate(tabs)
+        )
         panels = "".join(f'<div class="tab-panel">{h}</div>' for _, h in tabs)
         self.out.append(
-            f'<div class="tabbed">{inputs}<div class="tab-labels">{labels}</div>'
-            f"{panels}</div>")
+            f'<div class="tabbed">{inputs}<div class="tab-labels">{labels}</div>{panels}</div>'
+        )
         return i
 
     def _table(self, lines: list[str], i: int) -> int:
@@ -367,23 +375,31 @@ class _Renderer:
         # 1.3.1). Every table here is a column-headed data table.
         head = "".join(
             f'<th scope="col"{_align(aligns, c)}>{_inline(cell)}</th>'
-            for c, cell in enumerate(header))
+            for c, cell in enumerate(header)
+        )
         body = "".join(
-            "<tr>" + "".join(
-                f"<td{_align(aligns, c)}>{_inline(cell)}</td>" for c, cell in enumerate(row))
-            + "</tr>" for row in rows)
+            "<tr>"
+            + "".join(f"<td{_align(aligns, c)}>{_inline(cell)}</td>" for c, cell in enumerate(row))
+            + "</tr>"
+            for row in rows
+        )
         # Wrapped so a table wider than the column scrolls itself. Without it a
         # wide table scrolls the whole page sideways on a phone, which is a
         # layout bug the reader has to fight on every other page too.
         self.out.append(
             f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
-            f"<tbody>{body}</tbody></table></div>")
+            f"<tbody>{body}</tbody></table></div>"
+        )
         return i
 
     def _paragraph(self, lines: list[str], i: int) -> int:
         buffer: list[str] = []
-        while (i < len(lines) and lines[i].strip()
-               and not _is_block_start(lines[i]) and not _is_table(lines, i)):
+        while (
+            i < len(lines)
+            and lines[i].strip()
+            and not _is_block_start(lines[i])
+            and not _is_table(lines, i)
+        ):
             buffer.append(lines[i].strip())
             i += 1
         self.out.append(f"<p>{_inline(' '.join(buffer))}</p>")
@@ -407,7 +423,7 @@ def _line_numbers(spec: str) -> frozenset[int]:
             else:
                 out.add(int(start))
         except ValueError:
-            continue                  # a malformed range highlights nothing
+            continue  # a malformed range highlights nothing
     return frozenset(out)
 
 
@@ -435,14 +451,20 @@ def _mark_lines(html: str, wanted: frozenset[int]) -> str:
                 lines.append(open_tag + tail)
     return "\n".join(
         f'<span class="hl">{line}</span>' if number in wanted else line
-        for number, line in enumerate(lines, 1))
+        for number, line in enumerate(lines, 1)
+    )
 
 
 def _is_block_start(line: str) -> bool:
     return bool(
-        _HEADING.match(line) or _FENCE.match(line) or _THEMATIC.match(line)
-        or _ADMONITION.match(line) or _CONTENT_TAB.match(line) or line.startswith(">")
-        or _UL_ITEM.match(line) or _OL_ITEM.match(line)
+        _HEADING.match(line)
+        or _FENCE.match(line)
+        or _THEMATIC.match(line)
+        or _ADMONITION.match(line)
+        or _CONTENT_TAB.match(line)
+        or line.startswith(">")
+        or _UL_ITEM.match(line)
+        or _OL_ITEM.match(line)
     )
 
 
@@ -455,13 +477,12 @@ def _strip_frontmatter(lines: list[str]) -> list[str]:
     if lines and lines[0].strip() == "---":
         for j in range(1, len(lines)):
             if lines[j].strip() == "---":
-                return lines[j + 1:]
+                return lines[j + 1 :]
     return lines
 
 
 def _is_table(lines: list[str], i: int) -> bool:
-    return (i + 1 < len(lines) and "|" in lines[i]
-            and bool(_TABLE_DELIM.match(lines[i + 1])))
+    return i + 1 < len(lines) and "|" in lines[i] and bool(_TABLE_DELIM.match(lines[i + 1]))
 
 
 def _table_row(line: str) -> list[str]:
@@ -471,8 +492,8 @@ def _table_row(line: str) -> list[str]:
 
 def _table_aligns(delim: str) -> list[str]:
     out: list[str] = []
-    for spec in delim.strip().strip("|").split("|"):
-        spec = spec.strip()
+    for raw_spec in delim.strip().strip("|").split("|"):
+        spec = raw_spec.strip()
         left, right = spec.startswith(":"), spec.endswith(":")
         out.append("center" if left and right else "right" if right else "left" if left else "")
     return out

@@ -51,16 +51,23 @@ static int
 html_response_python_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(args);
-    PyObject *full_args = PyTuple_New(count + 1);
+    PyObject *small_args[8];
+    PyObject **full_args = small_args;
     PyObject *result;
-    if (full_args == NULL) return -1;
-    PyTuple_SET_ITEM(full_args, 0, Py_NewRef(self));
-    for (Py_ssize_t index = 0; index < count; index++) {
-        PyTuple_SET_ITEM(
-            full_args, index + 1, Py_NewRef(PyTuple_GET_ITEM(args, index)));
+    if (count >= 8) {
+        full_args = PyMem_Malloc((size_t)(count + 1) * sizeof *full_args);
+        if (full_args == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
     }
-    result = PyObject_Call(html_response_original_init, full_args, kwargs);
-    Py_DECREF(full_args);
+    full_args[0] = self;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        full_args[index + 1] = PyTuple_GET_ITEM(args, index);
+    }
+    result = PyObject_VectorcallDict(
+        html_response_original_init, full_args, (size_t)count + 1, kwargs);
+    if (full_args != small_args) PyMem_Free(full_args);
     if (result == NULL) return -1;
     Py_DECREF(result);
     return 0;

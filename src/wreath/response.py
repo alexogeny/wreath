@@ -154,8 +154,8 @@ class Response:
                 media_type = self.media_type
             response_headers = list(headers)
             has_type = has_length = False
-            for key, _ in response_headers:
-                key = key.lower()
+            for raw_key, _ in response_headers:
+                key = raw_key.lower()
                 if key == _CONTENT_TYPE:
                     has_type = True
                 elif key == _CONTENT_LENGTH:

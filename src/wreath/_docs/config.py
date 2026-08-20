@@ -280,6 +280,9 @@ class Site:
             build-time star and fork counts. See `Repo`.
         links: extra header links — a homepage, a package page, a chat room —
             each drawn with one of the built-in `ICONS`.
+        map_page: source path of the site's wayfinding page. When set, a
+            labelled `Browse` link stays in the header on every viewport. The
+            page must also appear in `nav`.
     """
 
     name: str
@@ -302,6 +305,8 @@ class Site:
     repo: Repo | None = None
     #: Extra header links (homepage, package page, chat).
     links: tuple[Link, ...] = ()
+    #: Source page behind the persistent Browse link; empty disables it.
+    map_page: str = ""
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -312,6 +317,11 @@ class Site:
             raise ValueError(f"unknown feel {self.feel!r}; choose from {sorted(_FEELS)}")
         if self.tabs not in ("auto", "never"):
             raise ValueError(f"Site.tabs must be 'auto' or 'never', not {self.tabs!r}")
+        if self.map_page and self.map_page not in {page.source for page in self.nav.pages()}:
+            raise ValueError(
+                f"Site.map_page {self.map_page!r} is not in nav; add Page(..., "
+                f"{self.map_page!r}) so Browse cannot point at an unpublished page"
+            )
         if self.palette.font not in _FACES:
             raise ValueError(f"unknown Palette.font {self.palette.font!r}; "
                              f"choose from {sorted(_FACES)}")

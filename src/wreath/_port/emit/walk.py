@@ -35,18 +35,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
             for candidate in node.body
             if isinstance(candidate, ast.ClassDef)
         }
-        partial = {
-            name
-            for name, bases in class_bases.items()
-            if any(
-                isinstance(base, ast.Call)
-                and isinstance(base.func, ast.Attribute)
-                and base.func.attr == "model_as_partial"
-                for candidate in node.body
-                if isinstance(candidate, ast.ClassDef) and candidate.name == name
-                for base in candidate.bases
-            )
-        }
+        partial: set[str] = set()
         for candidate in node.body:
             if not isinstance(candidate, ast.ClassDef):
                 continue
@@ -56,6 +45,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                     and isinstance(base.func, ast.Attribute)
                     and base.func.attr == "model_as_partial"
                 ):
+                    partial.add(candidate.name)
                     partial.add(self._seg(base.func.value))
         changed = True
         while changed:
@@ -71,6 +61,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                         partial.add(base)
                         changed = True
         self._pydantic_partial_family = frozenset(partial)
+
         def owner_id(candidate: ast.AST) -> int | None:
             owner = self._parents.get(id(candidate))
             while owner is not None:
@@ -88,9 +79,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                 owner = self._parents.get(id(owner))
             return tuple(owners)
 
-        transport_definitions: dict[
-            str, list[tuple[ast.Assign, ast.Call, int | None]]
-        ] = {}
+        transport_definitions: dict[str, list[tuple[ast.Assign, ast.Call, int | None]]] = {}
         for candidate in ast.walk(node):
             if (
                 isinstance(candidate, ast.Assign)
@@ -107,7 +96,9 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
             target = (
                 candidate.target
                 if isinstance(candidate, ast.AnnAssign)
-                else candidate.targets[0] if len(candidate.targets) == 1 else None
+                else candidate.targets[0]
+                if len(candidate.targets) == 1
+                else None
             )
             value = candidate.value
             if (
@@ -158,9 +149,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                 if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
                     continue
                 targets = (
-                    statement.targets
-                    if isinstance(statement, ast.Assign)
-                    else [statement.target]
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
                 if not any(
                     isinstance(target, ast.Name) and target.id == "model_config"
@@ -216,8 +205,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                             )
                     if not (
                         isinstance(transport, ast.Call)
-                        and self.imports.origin(transport.func)
-                        == "httpx.AsyncHTTPTransport"
+                        and self.imports.origin(transport.func) == "httpx.AsyncHTTPTransport"
                         and not transport.args
                         and all(keyword.arg == "retries" for keyword in transport.keywords)
                     ):
@@ -243,8 +231,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                     and request.func.value.id == item.optional_vars.id
                     and request.func.attr in _TEST_REQUEST_METHODS
                     and all(
-                        keyword.arg
-                        in {"headers", "json", "content", "data", "params", "timeout"}
+                        keyword.arg in {"headers", "json", "content", "data", "params", "timeout"}
                         for keyword in request.keywords
                     )
                 ]
@@ -266,11 +253,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                     # Re-narrowed: the comprehension above only keeps calls whose
                     # `func` is an Attribute, but `requests` is a list of `ast.Call`
                     # and that guarantee does not survive the binding.
-                    method = (
-                        request.func.attr
-                        if isinstance(request.func, ast.Attribute)
-                        else ""
-                    )
+                    method = request.func.attr if isinstance(request.func, ast.Attribute) else ""
                     target_index = 1 if method == "request" else 0
                     if len(request.args) <= target_index:
                         continue
@@ -313,10 +296,7 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                 self.imports.origin(
                     decorator.func if isinstance(decorator, ast.Call) else decorator
                 ).endswith("pytest.fixture")
-                or (
-                    isinstance(decorator, ast.Attribute)
-                    and decorator.attr == "fixture"
-                )
+                or (isinstance(decorator, ast.Attribute) and decorator.attr == "fixture")
                 for decorator in statement.decorator_list
             )
             if fixture and any(

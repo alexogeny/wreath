@@ -26,16 +26,12 @@ postgres_connect(PyObject *module, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *call_args = PyTuple_Pack(
-        3, dsn, connection_type, buffered_protocol_type);
-    if (call_args == NULL) return NULL;
     PyObject *call_kwargs = PyDict_New();
     PyObject *size_obj = PyLong_FromSsize_t(cache_size);
     PyObject *bytes_obj = PyLong_FromSsize_t(cache_bytes);
     if (call_kwargs == NULL || size_obj == NULL || bytes_obj == NULL ||
         PyDict_SetItemString(call_kwargs, "statement_cache_size", size_obj) < 0 ||
         PyDict_SetItemString(call_kwargs, "statement_cache_bytes", bytes_obj) < 0) {
-        Py_DECREF(call_args);
         Py_XDECREF(call_kwargs);
         Py_XDECREF(size_obj);
         Py_XDECREF(bytes_obj);
@@ -43,9 +39,10 @@ postgres_connect(PyObject *module, PyObject *args, PyObject *kwargs)
     }
     Py_DECREF(size_obj);
     Py_DECREF(bytes_obj);
-    PyObject *result = PyObject_Call(connect_buffered, call_args, call_kwargs);
+    PyObject *call_args[] = {dsn, connection_type, buffered_protocol_type};
+    PyObject *result = PyObject_VectorcallDict(
+        connect_buffered, call_args, 3, call_kwargs);
     Py_DECREF(call_kwargs);
-    Py_DECREF(call_args);
     return result;
 }
 

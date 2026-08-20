@@ -13,6 +13,24 @@
 
 PyTypeObject *WreathH3StreamType = NULL;
 static PyTypeObject *WreathH3EndpointType = NULL;
+static PyObject *h3_name_on_timer;
+static PyObject *h3_name_call_later;
+static PyObject *h3_name_cancel;
+
+static int
+h3_connection_names_ready(void)
+{
+    if (h3_name_on_timer == NULL &&
+        (h3_name_on_timer = PyUnicode_InternFromString("_on_timer")) == NULL)
+        return -1;
+    if (h3_name_call_later == NULL &&
+        (h3_name_call_later = PyUnicode_InternFromString("call_later")) == NULL)
+        return -1;
+    if (h3_name_cancel == NULL &&
+        (h3_name_cancel = PyUnicode_InternFromString("cancel")) == NULL)
+        return -1;
+    return 0;
+}
 
 /* --- time ---------------------------------------------------------------- */
 uint64_t
@@ -690,12 +708,12 @@ rearm_timer(WreathH3Endpoint *ep)
     double delay = (min_expiry <= now) ? 0.0
                    : (double)(min_expiry - now) / (double)NGTCP2_SECONDS;
     /* schedule loop.call_later(delay, self._on_timer) */
-    PyObject *cb = PyObject_GetAttrString((PyObject *)ep, "_on_timer");
+    PyObject *cb = PyObject_GetAttr((PyObject *)ep, h3_name_on_timer);
     if (cb == NULL) {
         PyErr_Clear();
         return;
     }
-    PyObject *loop_call_later = PyObject_GetAttrString(ep->loop, "call_later");
+    PyObject *loop_call_later = PyObject_GetAttr(ep->loop, h3_name_call_later);
     if (loop_call_later == NULL) {
         Py_DECREF(cb);
         PyErr_Clear();
@@ -714,7 +732,8 @@ rearm_timer(WreathH3Endpoint *ep)
      * one is scheduled on every datagram, accumulating stale timers (each of
      * which reruns this O(conns) rearm) in the loop's heap at datagram rate. */
     if (ep->timer_handle != NULL) {
-        PyObject *cancelled = PyObject_CallMethod(ep->timer_handle, "cancel", NULL);
+        PyObject *cancelled = PyObject_CallMethodNoArgs(
+            ep->timer_handle, h3_name_cancel);
         if (cancelled == NULL) {
             PyErr_Clear();
         } else {
@@ -1230,7 +1249,8 @@ wreath_h3_ready(PyObject *module)
         PyErr_SetString(PyExc_RuntimeError, "ngtcp2_crypto_ossl_init failed");
         return -1;
     }
-    if (wreath_h3_init_message_keys() < 0) {
+    if (wreath_h3_init_message_keys() < 0 || h3_connection_names_ready() < 0 ||
+        wreath_policy_ready() < 0) {
         return -1;
     }
     /* Resolve the optional Flight Recorder vtable, exactly as _server does. A

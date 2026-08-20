@@ -67,9 +67,9 @@ from typing import Any
 from . import protobuf as _protobuf
 from ._auth import requirements as _requirements
 from ._auth.decorators import authorize as _authorize
+from ._compression import _gzip_decoder_new, _gzip_decompress_with
 from ._native import _core
 from .compression import gzip_compress as _gzip_compress
-from .compression import gzip_decompress as _gzip_decompress
 from .exceptions import HTTPException
 from .response import StreamingResponse
 from .router import Router
@@ -99,8 +99,8 @@ _PREFIX_BYTES = 5
 #: what makes an unknown entry in `grpc-accept-encoding` a non-event rather than
 #: a refusal.
 #:
-#: gzip comes from `wreath.compression`, a facade over the interpreter's own
-#: `zlib`, so this adds no dependency. zstd is deliberately absent even though
+#: gzip comes from Wreath's independent native codec, so this adds no
+#: dependency. zstd is deliberately absent even though
 #: that facade offers it: `grpc-encoding` values are a registry shared with
 #: every other implementation, and a coding a Go or Java client cannot name is a
 #: dialect rather than a feature.
@@ -290,6 +290,7 @@ class Unframer:
     ) -> None:
         self._max = max_message_bytes
         self._encoding = encoding
+        self._gzip_workspace = _gzip_decoder_new() if encoding == "gzip" else None
         self._native = _core.GrpcUnframer(
             max_message_bytes,
             encoding,
@@ -306,7 +307,7 @@ class Unframer:
     def _decode(self, payload: bytes) -> bytes:
         """Decompress one message, bounded by the same ceiling the prefix has."""
         try:
-            return _gzip_decompress(payload, max_output_bytes=self._max)
+            return _gzip_decompress_with(self._gzip_workspace, payload, self._max)
         except ValueError as error:
             text = str(error)
             if "expands past" in text:

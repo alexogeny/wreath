@@ -50,7 +50,7 @@ class ResponseCapture:
             if self.strict and self.status is None:
                 raise RuntimeError("ASGI app sent a body before response start")
             self._chunks.append(bytes(message.get("body", b"")))
-            self.finished = not bool(message.get("more_body", False))
+            self.finished = not bool(message.get("more_body"))
             return
         if self.strict:
             raise RuntimeError(f"ASGI app sent unsupported HTTP message {kind!r}")

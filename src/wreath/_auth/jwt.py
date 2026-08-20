@@ -201,7 +201,8 @@ def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
     if kty == "OKP":
         if jwk.get("crv") != "Ed25519":
             raise UnsupportedAlgorithm(
-                f"OKP curve {jwk.get('crv')!r} is not supported (Ed25519 only)")
+                f"OKP curve {jwk.get('crv')!r} is not supported (Ed25519 only)"
+            )
         return OkpPublicKey(_b64url_decode(jwk["x"]))
     raise JwtError(f"unsupported JWK key type: {kty!r}")
 
@@ -212,8 +213,8 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
     text = pem.decode("ascii") if isinstance(pem, (bytes, bytearray)) else pem
     body = []
     kind = "spki"
-    for line in text.splitlines():
-        line = line.strip()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         if line.startswith("-----BEGIN"):
             kind = "pkcs1" if "RSA PUBLIC KEY" in line else "spki"
             continue
@@ -226,8 +227,7 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
         raise JwtError("invalid RSA public key")
     if n.bit_length() < MIN_RSA_MODULUS_BITS:
         raise JwtError(
-            f"RSA modulus is {n.bit_length()} bits; at least "
-            f"{MIN_RSA_MODULUS_BITS} are required"
+            f"RSA modulus is {n.bit_length()} bits; at least {MIN_RSA_MODULUS_BITS} are required"
         )
     return RsaPublicKey(n, e)
 
@@ -286,9 +286,7 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
 
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
     """Split + decode + JSON-parse a compact JWS. Raises ValueError if malformed."""
-    header_bytes, payload_bytes, signing_input, signature = _native_parse(
-        token, _MAX_SEGMENT_BYTES
-    )
+    header_bytes, payload_bytes, signing_input, signature = _native_parse(token, _MAX_SEGMENT_BYTES)
     header = json.loads(header_bytes)
     claims = json.loads(payload_bytes)
     if not isinstance(header, dict) or not isinstance(claims, dict):
@@ -307,7 +305,7 @@ def peek_header(token: str) -> dict[str, Any] | None:
         if not first:
             return None
         header = json.loads(_b64url_decode(first))
-    except (ValueError, KeyError, json.JSONDecodeError):
+    except ValueError, KeyError, json.JSONDecodeError:
         return None
     return header if isinstance(header, dict) else None
 
@@ -322,28 +320,18 @@ def _verify_hs(alg: str, secret: bytes, signing_input: bytes, signature: bytes) 
 # ---- RSA verification (PKCS#1/PSS) ----------------------------------------
 
 
-def _verify_rs(
-    key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes
-) -> bool:
+def _verify_rs(key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes) -> bool:
     digest = hashlib.new(hash_name, signing_input).digest()
     constructor = getattr(hashlib, hash_name)
     return bool(
-        _core.jose_verify_rsa(
-            key.n, key.e, key.size, constructor, digest, signature, False
-        )
+        _core.jose_verify_rsa(key.n, key.e, key.size, constructor, digest, signature, False)
     )
 
 
-def _verify_ps(
-    key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes
-) -> bool:
+def _verify_ps(key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes) -> bool:
     digest = hashlib.new(hash_name, signing_input).digest()
     constructor = getattr(hashlib, hash_name)
-    return bool(
-        _core.jose_verify_rsa(
-            key.n, key.e, key.size, constructor, digest, signature, True
-        )
-    )
+    return bool(_core.jose_verify_rsa(key.n, key.e, key.size, constructor, digest, signature, True))
 
 
 def _verify_signature(
@@ -357,15 +345,19 @@ def _verify_signature(
     if key.family != family:
         return False
     if family == "HS":
-        assert isinstance(key, SymmetricKey)
+        if not isinstance(key, SymmetricKey):
+            return False
         return _verify_hs(alg, key.secret, signing_input, signature)
     if family == "EC":
-        assert isinstance(key, EcPublicKey)
+        if not isinstance(key, EcPublicKey):
+            return False
         return verify_es256(key.x, key.y, signing_input, signature)
     if family == "OKP":
-        assert isinstance(key, OkpPublicKey)
+        if not isinstance(key, OkpPublicKey):
+            return False
         return verify_ed25519(key.public, signing_input, signature)
-    assert isinstance(key, RsaPublicKey)
+    if not isinstance(key, RsaPublicKey):
+        return False
     hash_name = _HASH[alg]
     if alg in _PS:
         return _verify_ps(key, hash_name, signing_input, signature)
@@ -411,9 +403,7 @@ def _reason_valid(
     audiences: tuple[str, ...],
     required: tuple[str, ...],
 ) -> int:
-    return int(
-        _native_claims(dict(claims), now, leeway, issuer, audiences, required)
-    )
+    return int(_native_claims(dict(claims), now, leeway, issuer, audiences, required))
 
 
 class JwtVerifier:
@@ -454,8 +444,7 @@ class JwtVerifier:
         for alg in self._algorithms:
             if _FAMILY[alg] != self._key.family:
                 raise UnsupportedAlgorithm(
-                    f"algorithm {alg!r} is incompatible with the configured "
-                    f"{self._key.family} key"
+                    f"algorithm {alg!r} is incompatible with the configured {self._key.family} key"
                 )
         self._issuer = issuer
         self._audiences = _freeze_audiences(audience)
@@ -511,7 +500,7 @@ def verify_jwt(
 
     try:
         header, claims, signing_input, signature = _parse_compact(token)
-    except (ValueError, KeyError, json.JSONDecodeError):
+    except ValueError, KeyError, json.JSONDecodeError:
         return None
 
     alg = header.get("alg")
@@ -529,7 +518,7 @@ def verify_jwt(
     try:
         if not _verify_signature(alg, key, signing_input, signature):
             return None
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         return None
 
     reason = _reason_valid(
@@ -557,7 +546,7 @@ def verify_jwt(
 
     try:
         return identity(claims)
-    except (KeyError, ValueError):
+    except KeyError, ValueError:
         return None
 
 

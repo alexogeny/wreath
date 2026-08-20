@@ -1002,6 +1002,7 @@ class Wreath:
             *self._databases.values(),
             *self._client_fact_providers.values(),
             *self._counter_sources,
+            *((self._authorizer,) if self._authorizer is not None else ()),
             self,
         )
 
@@ -4281,7 +4282,7 @@ class Wreath:
         websocket_hooks = self._websocket_hooks
         request: Request | None = None
         policy = self._http_policy
-        policy_native = bool(scope.get("_wreath_policy_native", False))
+        policy_native = bool(scope.get("_wreath_policy_native"))
         if (
             policy is not None
             and policy._native_ingress_only

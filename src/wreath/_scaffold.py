@@ -133,9 +133,7 @@ def create(options: Options) -> list[str]:
 
     _check_name(options.name)
     if options.forge != "none" and options.forge not in FORGES:
-        raise ScaffoldError(
-            f"unknown forge {options.forge!r}; supported: {', '.join(FORGES)}"
-        )
+        raise ScaffoldError(f"unknown forge {options.forge!r}; supported: {', '.join(FORGES)}")
     if options.profile not in ("service", "modular-monolith"):
         raise ScaffoldError(
             f"unknown profile {options.profile!r}; supported: service, modular-monolith"
@@ -264,8 +262,7 @@ def _env_example(options: Options) -> str:
     if options.database == "postgres":
         lines.insert(
             0,
-            f"{options.prefix}_DATABASE_URL="
-            "postgresql://wreath:wreath@127.0.0.1:55432/wreath_test",
+            f"{options.prefix}_DATABASE_URL=postgresql://wreath:wreath@127.0.0.1:55432/wreath_test",
         )
     return "\n".join(lines) + "\n"
 
@@ -283,12 +280,12 @@ def _config(options: Options) -> str:
     database_field = ""
     database_note = ""
     if options.database == "postgres":
-        database_field = '''
+        database_field = """
     #: The database. **No default**: guessing at `localhost` and connecting to
     #: the wrong database is worse than refusing to start, so this is required
     #: and the error names the variable.
     database_url: str
-'''
+"""
         database_note = f"""
 `{prefix}_DATABASE_URL` is read here but the connection is not opened here.
 `app.py` hands it to `app.postgres(...)`, which connects during the lifespan --
@@ -368,8 +365,7 @@ def _app(options: Options) -> str:
         ]
     database_wiring = ""
     signature = (
-        "build(*, settings: Settings = SETTINGS, "
-        "adapters: Adapters | None = None) -> Wreath:"
+        "build(*, settings: Settings = SETTINGS, adapters: Adapters | None = None) -> Wreath:"
     )
     build_doc = '''"""Assemble one application from immutable settings and explicit ports.
 
@@ -418,7 +414,7 @@ def _app(options: Options) -> str:
                 "        # tenant schema to resolve into.\n"
                 "        application.add_global_middleware(TenancyMiddleware(tenancy))\n"
             )
-        database_wiring = f'''
+        database_wiring = f"""
     if database:
         # The connection is opened by the lifespan, not here. wreath then
         # validates the live schema against the models and refuses to start on
@@ -427,7 +423,7 @@ def _app(options: Options) -> str:
         application.postgres("main", dsn=settings.database_url)
         application.orm(
             database="main", models=list(MODELS){schema_mode})
-{tenancy_wiring}'''
+{tenancy_wiring}"""
     return f'''"""The application: settings in, routers gathered, nothing else.
 
 `build()` exists as well as `app` because a factory is what a test wants -- one
@@ -459,13 +455,13 @@ app = build()
 
 def _items_router(options: Options) -> str:
     if options.profile == "modular-monolith":
-        imports = '''from ...config import Settings
+        imports = """from ...config import Settings
 from .contracts import Item, ItemPage, NewItem
-from .ports import Catalogue'''
+from .ports import Catalogue"""
     else:
-        imports = '''from ..config import Settings
+        imports = """from ..config import Settings
 from ..contracts import Item, ItemPage, NewItem
-from ..ports import Catalogue'''
+from ..ports import Catalogue"""
     return f'''"""HTTP delivery for the items context.
 
 The router is a factory because its port is supplied by `app.build`. Routes
@@ -541,7 +537,7 @@ class NewItem:
 
 
 def _ports(options: Options) -> str:
-    contracts = ".contracts" if options.profile == "modular-monolith" else ".contracts"
+    contracts = ".contracts"
     return f'''"""Ports the items context requires from infrastructure."""
 
 from __future__ import annotations
@@ -650,7 +646,7 @@ class MemoryCatalogue:
 
 
 def _agents(options: Options) -> str:
-    return f'''# {options.name} architecture
+    return f"""# {options.name} architecture
 
 - Put business capabilities under `{options.name}/domains/<context>/`.
 - A context may import shared wire primitives, but never another context's adapter.
@@ -660,7 +656,7 @@ def _agents(options: Options) -> str:
 - Every route must declare `@public()` or an authentication/authorization guard.
 - Give every route a stable `operation_id`; review `wreath doctor routes
   {options.name}.app:app` when the surface changes.
-'''
+"""
 
 
 def _models(options: Options) -> str:
@@ -1066,7 +1062,7 @@ def _readme(options: Options) -> str:
             "  -e POSTGRES_PASSWORD=wreath -e POSTGRES_USER=wreath \\",
             "  -e POSTGRES_DB=wreath_test -p 55432:5432 postgres:17-alpine",
             "",
-            f'psql "$DSN" -c \'CREATE SCHEMA IF NOT EXISTS {name}\'',
+            f"psql \"$DSN\" -c 'CREATE SCHEMA IF NOT EXISTS {name}'",
             "```",
             "",
             "Creating the schema is a separate statement on purpose: a migration",
@@ -1137,7 +1133,7 @@ def _web_package_json(options: Options) -> str:
 
 
 def _web_tsconfig(options: Options) -> str:
-    return '''{
+    return """{
   "compilerOptions": {
     "strict": true,
     "target": "ES2022",
@@ -1150,11 +1146,11 @@ def _web_tsconfig(options: Options) -> str:
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"]
 }
-'''
+"""
 
 
 def _web_index_html(options: Options) -> str:
-    return f'''<!doctype html>
+    return f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -1166,11 +1162,11 @@ def _web_index_html(options: Options) -> str:
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-'''
+"""
 
 
 def _web_main(options: Options) -> str:
-    return '''import { StrictMode } from "react";
+    return """import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -1185,11 +1181,11 @@ createRoot(document.getElementById("root")!).render(
     </QueryClientProvider>
   </StrictMode>,
 );
-'''
+"""
 
 
 def _web_app(options: Options) -> str:
-    return f'''// The hooks below come from `web/src/api/`, which is generated from the route
+    return f"""// The hooks below come from `web/src/api/`, which is generated from the route
 // table. Run this before the first `npm run dev`, and again after any change to
 // a handler's parameters or return type:
 //
@@ -1242,4 +1238,4 @@ export function App() {{
     </main>
   );
 }}
-'''
+"""

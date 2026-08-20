@@ -171,8 +171,8 @@ def commit_messages(root: Path, revision_range: str) -> dict[str, str]:
     """
     raw = _git(root, "log", "--format=%H%x1f%B%x00", revision_range)
     messages = {}
-    for record in raw.split("\x00"):
-        record = record.strip("\n")
+    for raw_record in raw.split("\x00"):
+        record = raw_record.strip("\n")
         if not record:
             continue
         sha, _, message = record.partition("\x1f")

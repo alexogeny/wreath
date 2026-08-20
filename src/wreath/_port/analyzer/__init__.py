@@ -268,8 +268,8 @@ def detect_roots(roots) -> Detection | None:
     saying so. Reading imports is the cheapest question that catches it.
     """
     parts = []
-    for root in roots:
-        root = Path(root)
+    for raw_root in roots:
+        root = Path(raw_root)
         signals: dict[str, ModuleSignals] = {}
         for path in _iter_py(root, on_error=lambda exc: None):
             try:
