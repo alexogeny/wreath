@@ -1,0 +1,209 @@
+{
+  "schema": "wreath/e2e-holistic-stack-instructions/2",
+  "recorded": "2026-08-20",
+  "python": "3.14.7",
+  "platform": "Linux-7.1.8-1-cachyos-x86_64-with-glibc2.44",
+  "cpu": "AMD Ryzen 7 7730U with Radeon Graphics",
+  "metric": "retired userspace instructions per successful request",
+  "transport": "TLS 1.3 over HTTP/1.1 for every arm",
+  "method": "median of alternating N/N2 process slopes; fixed startup, imports, dependency construction, warmup and perf attachment cancel",
+  "request": {
+    "method": "POST",
+    "path": "/v1/holistic/42?limit=3&page=1&size=12&sort=-score",
+    "headers": {
+      "Authorization": "Bearer holistic-user",
+      "Accept-Encoding": "gzip",
+      "Content-Type": "application/json",
+      "Host": "operations.example.com",
+      "Origin": "https://example.com",
+      "Sec-Fetch-Site": "same-origin",
+      "X-Trace": "holistic-trace-42",
+      "Cookie": "session=holistic-session",
+      "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
+      "X-Forwarded-For": "4.1.1.1"
+    },
+    "body": {
+      "title": "Quarterly <report>",
+      "lines": [
+        {
+          "sku": "alpha-1",
+          "quantity": 2,
+          "price": 12.5
+        },
+        {
+          "sku": "beta-2",
+          "quantity": 1,
+          "price": 7.25
+        },
+        {
+          "sku": "gamma-3",
+          "quantity": 4,
+          "price": 3.5
+        }
+      ],
+      "labels": {
+        "active": true,
+        "reviewed": false
+      }
+    },
+    "verified_response_facts": [
+      "Quarterly &lt;report&gt;",
+      "holistic-user / 42",
+      "POST:/v1/holistic/42",
+      "gamma-3",
+      "data-buckets=\"730\"",
+      "data-lines=\"288\"",
+      "data-paths=\"11\"",
+      "data-vector=\"128:128:30000/32\"",
+      "data-page=\"12/48\"",
+      "data-metrics=\"5\"",
+      "data-client-country=\"US\"",
+      "data-client-agent=\"Chrome\"",
+      "data-client-bot=\"false\"",
+      "<svg",
+      "<path d=\"M",
+      "data-distance=\"732\""
+    ]
+  },
+  "compression_configurations": {
+    "wreath": "format-aware native gzip",
+    "wreath-optimal": {
+      "selected": "RFC 9842 dcz",
+      "dictionary": "real response for neighbouring resource 41",
+      "dictionary_sha256": "2abfed996470b2420c3a0dca419b65d663260e930bd8a267202e09c3cfbf5912",
+      "fallback": "format-aware prepared fragment gzip",
+      "fragment": "249-byte dynamic prefix plus cached stable suffix"
+    },
+    "fastapi": "Starlette gzip backed by zlib"
+  },
+  "measurement": {
+    "requests_high": 30,
+    "requests_low": 15,
+    "trials": 5,
+    "connections": 8,
+    "warmup": 50,
+    "server_cpu": 8,
+    "generator_cpu": 0,
+    "pythonhashseed": 0
+  },
+  "packages": {
+    "wreath": "0.3.2",
+    "fastapi": "0.139.0",
+    "starlette": "1.3.1",
+    "pydantic": "2.12.5",
+    "pydantic-core": "2.41.5",
+    "uvicorn": "0.48.0",
+    "uvloop": "0.22.1",
+    "httptools": "0.7.1",
+    "cedarpy": "4.8.7",
+    "asyncpg": "0.31.0",
+    "aiohttp": "3.14.3",
+    "numpy": "2.5.2",
+    "jinja2": "3.1.6",
+    "protobuf": "7.35.1",
+    "msgspec": "0.21.1"
+  },
+  "arms": {
+    "wreath": {
+      "holistic": {
+        "median": 4690493.933333334,
+        "range": [
+          4673132.666666667,
+          4696948.733333333
+        ],
+        "samples": [
+          4691121.733333333,
+          4690493.933333334,
+          4676279.533333333,
+          4673132.666666667,
+          4696948.733333333
+        ]
+      },
+      "holistic-aa": {
+        "median": 4691983.666666667,
+        "range": [
+          4680434.533333333,
+          4727171.2
+        ],
+        "samples": [
+          4689033.8,
+          4691983.666666667,
+          4680434.533333333,
+          4727171.2,
+          4710659.266666667
+        ],
+        "absolute_delta_from_holistic": 1489.7333333333954
+      }
+    },
+    "wreath-optimal": {
+      "holistic": {
+        "median": 2426742.4,
+        "range": [
+          2416961.933333333,
+          2447952.7333333334
+        ],
+        "samples": [
+          2447952.7333333334,
+          2416961.933333333,
+          2441188.6,
+          2426742.4,
+          2418018.3333333335
+        ]
+      },
+      "holistic-aa": {
+        "median": 2429107.1333333333,
+        "range": [
+          2409277.0,
+          2441407.4
+        ],
+        "samples": [
+          2429107.1333333333,
+          2423556.533333333,
+          2409277.0,
+          2441407.4,
+          2429909.066666667
+        ],
+        "absolute_delta_from_holistic": 2364.7333333333954
+      }
+    },
+    "fastapi": {
+      "holistic": {
+        "median": 226270075.33333334,
+        "range": [
+          226205485.13333333,
+          226918986.66666666
+        ],
+        "samples": [
+          226205485.13333333,
+          226270075.33333334,
+          226918986.66666666,
+          226220670.8,
+          226653248.93333334
+        ]
+      },
+      "holistic-aa": {
+        "median": 226019411.6,
+        "range": [
+          225065602.2,
+          227659718.73333332
+        ],
+        "samples": [
+          225065602.2,
+          226123332.66666666,
+          225280800.53333333,
+          227659718.73333332,
+          226019411.6
+        ],
+        "absolute_delta_from_holistic": 250663.73333334923
+      }
+    }
+  },
+  "historical_control": {
+    "previous_wreath_gzip_backend": "zlib",
+    "previous_recorded": "2026-08-18",
+    "previous_wreath_instructions_per_request": 5686525.2,
+    "transport": "cleartext HTTP/1.1",
+    "directly_comparable_to_current_tls_matrix": false
+  },
+  "fairness": "All three arms receive the same nested operations-dashboard POST over TLS and are accepted only after matching security, CORS, session, compression and business response facts. All perform bearer and Cedar authorization, one PostgreSQL and one overlapping HTTP wire round trip, sparse-to-dense 730 x 48 x 6 series work, eleven chart paths, temporal, geospatial and vector calculations, ranked pagination, protobuf and MessagePack exports, escaped templates and compressed HTML. Wreath uses its built-in native/declarative surfaces. FastAPI uses Starlette, Pydantic, cedarpy, asyncpg, aiohttp, NumPy, Jinja, protobuf and msgspec. The algorithms are idiomatic implementations with equivalent output contracts, not byte-identical internal representations. Real driver protocols terminate at the same deterministic in-process peers. No external database, network, DNS, disk, wall clock, cycles or IPC enters the result. The Wreath optimal arm serves RFC 9842 dcz only after an exact Available-Dictionary hash match and retains a standards-compatible prepared fragment-gzip fallback for ordinary clients."
+}
