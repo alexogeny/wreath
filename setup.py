@@ -14,10 +14,12 @@ companion distributions selected by extras. `WREATH_BUILD_LINUX=1` and
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import sysconfig
+from pathlib import Path
 
 if sysconfig.get_config_var("Py_GIL_DISABLED"):
     raise RuntimeError(
@@ -54,6 +56,39 @@ class _ParallelBuildExt(build_ext):
         super().finalize_options()
         if self.parallel is None:
             self.parallel = os.cpu_count() or 1
+
+    def build_extensions(self) -> None:
+        """Keep each gzip ISA arm fenced into its own translation unit."""
+        if sys.platform == "win32":
+            super().build_extensions()
+            return
+        compile_one = self.compiler._compile
+
+        def compile_with_isa(obj, src, ext, cc_args, extra_postargs, pp_opts):
+            path = src.replace("\\", "/")
+            flags = list(extra_postargs or ())
+            if "/gzip/" in path:
+                # Some distro Python configs inject -flto. LTO would merge the
+                # independently gated ISA arms and let AVX/BMI instructions
+                # leak into baseline functions before runtime dispatch.
+                flags.append("-fno-lto")
+            if "/gzip/decode/" in path:
+                flags.append("-O3")
+            if path.endswith("crc32_pclmul.c"):
+                flags.extend(("-mpclmul", "-msse4.1"))
+            elif path.endswith("crc32_vpclmul.c"):
+                flags.extend(("-mavx2", "-mvpclmulqdq", "-mpclmul"))
+            elif path.endswith("inflate_bmi2.c"):
+                flags.extend(("-mbmi", "-mbmi2"))
+            elif path.endswith(("inflate_bmi2_avx2.c", "inflate_bmi2_avx2_long.c")):
+                flags.extend(("-mbmi", "-mbmi2", "-mavx2"))
+            return compile_one(obj, src, ext, cc_args, flags, pp_opts)
+
+        self.compiler._compile = compile_with_isa
+        try:
+            super().build_extensions()
+        finally:
+            self.compiler._compile = compile_one
 
 
 class _CleanBuild(build):
@@ -209,6 +244,38 @@ def _http3_extension() -> Extension:
     )
 
 
+_gzip_root = "src/wreath/_native/gzip"
+_gzip_headers = [str(path) for path in Path(_gzip_root).rglob("*.h")]
+_gzip_encoder_sources = [
+    f"{_gzip_root}/encode/{name}.c"
+    for name in ("cpu", "crc32", "huff", "deflate", "parse", "parse_formats")
+]
+_gzip_decoder_sources = [
+    f"{_gzip_root}/decode/{name}.c"
+    for name in ("cpu", "crc32", "inflate", "inflate_scalar")
+]
+_gzip_machine = platform.machine().lower()
+_gzip_x86_isa = (
+    os.environ.get("WREATH_GZIP_PORTABLE") != "1"
+    and sys.platform != "win32"
+    and _gzip_machine in {"amd64", "i386", "i686", "x86", "x86_64"}
+)
+if _gzip_x86_isa:
+    _gzip_encoder_sources.extend(
+        f"{_gzip_root}/encode/{name}.c"
+        for name in ("crc32_pclmul", "crc32_vpclmul")
+    )
+    _gzip_decoder_sources.extend(
+        f"{_gzip_root}/decode/{name}.c"
+        for name in (
+            "crc32_pclmul", "crc32_vpclmul", "inflate_bmi2",
+            "inflate_bmi2_avx2", "inflate_bmi2_avx2_long",
+        )
+    )
+else:
+    _gzip_decoder_sources.append(f"{_gzip_root}/portable_isa.c")
+
+
 ext_modules = [
         Extension(
             "wreath._native._core",
@@ -262,6 +329,9 @@ ext_modules = [
                 "src/wreath/_native/kv.c",
                 "src/wreath/_native/queue.c",
                 "src/wreath/_native/scheduler.c",
+                "src/wreath/_native/gzip_codec.c",
+                *_gzip_encoder_sources,
+                *_gzip_decoder_sources,
             ],
             depends=[
                 "src/wreath/_native/http.c",
@@ -275,7 +345,11 @@ ext_modules = [
                 "src/wreath/_native/hmac_sha256.h",
                 "src/wreath/_native/bytes_writer.h",
                 "src/wreath/_native/simd.h",
+                *_gzip_headers,
             ],
+            define_macros=(
+                [] if _gzip_x86_isa else [("WREATH_GZIP_PORTABLE", "1")]
+            ),
             extra_compile_args=extra_compile_args,
         ),
         Extension(

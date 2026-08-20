@@ -67,6 +67,18 @@ SOURCES = (
     "kv.c",
     "queue.c",
     "scheduler.c",
+    "gzip_codec.c",
+    "gzip/portable_isa.c",
+    "gzip/encode/cpu.c",
+    "gzip/encode/crc32.c",
+    "gzip/encode/huff.c",
+    "gzip/encode/deflate.c",
+    "gzip/encode/parse.c",
+    "gzip/encode/parse_formats.c",
+    "gzip/decode/cpu.c",
+    "gzip/decode/crc32.c",
+    "gzip/decode/inflate.c",
+    "gzip/decode/inflate_scalar.c",
 )
 
 setup(
@@ -76,6 +88,7 @@ setup(
         Extension(
             "wreath._native._core",
             sources=[str(ROOT / "src/wreath/_native" / name) for name in SOURCES],
+            define_macros=[("WREATH_GZIP_PORTABLE", "1")],
             extra_compile_args=FLAGS,
             extra_link_args=["-fsanitize=address,undefined"],
         )
