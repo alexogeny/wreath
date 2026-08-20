@@ -23,7 +23,8 @@ socket. `wreath doctor trace <id>` runs both. See
 `TraceLookup.omitted` is the half to read. Every source the lookup could *not*
 reach is named in the same report as the findings — a table not on this database,
 a schema still on the version before propagation, no socket, a trace aged out of
-the ring, and ephemeral bus messages, which carry no context at all. A forensic
+the ring, and ephemeral bus messages, which leave no durable history to search.
+An envelope may carry explicit trace context while it is in flight, but a forensic
 tool that quietly leaves a source out is worse than one that answers nothing,
 because "no durable work carries this trace" then reads as "nothing does".
 
