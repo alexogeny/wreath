@@ -17,9 +17,11 @@ policies read is not the one the directory writes.
 So wreath's SCIM support is an adapter, in the strict sense. It has no tables.
 
 ```python
-from wreath.organizations import InMemoryOrganizationStore, Memberships, scim_router
+from wreath.organizations import Memberships, PostgresOrganizationStore, scim_router
 
-store = InMemoryOrganizationStore(roles={"admin", "member", "billing"})
+store = PostgresOrganizationStore(
+    app.postgres("main"), roles={"admin", "member", "billing"}
+)
 
 app.configure_auth(backend, CedarAuthorizer(
     engine=CedarPolicies(POLICY),
