@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "metric": "retired userspace instructions per uncompressed byte",
+  "level": 6,
+  "lower_is_better": true,
+  "host": {
+    "os": "Linux x86-64",
+    "cpu": "AMD Ryzen 7 7730U"
+  },
+  "method": {
+    "contexts": "application- and stream-owned native workspaces, warm and reused",
+    "corpus_sizes": "10 kB, 30 kB, 50 kB, 150 kB, 500 kB, 1 MB; high-entropy JSON is 500 kB",
+    "counters": "userspace hardware performance counters",
+    "excluded": ["elapsed time", "cycles", "IPC"]
+  },
+  "competitive": [
+    {"format": "json", "encode": {"wreath": 52.938, "libdeflate": 64.579, "zlib_ng": 67.786}, "decode": {"wreath": 6.125, "libdeflate": 7.397, "zlib_ng": 9.170}},
+    {"format": "graphql", "encode": {"wreath": 32.314, "libdeflate": 49.763, "zlib_ng": 46.445}, "decode": {"wreath": 3.041, "libdeflate": 3.555, "zlib_ng": 4.366}},
+    {"format": "html", "encode": {"wreath": 45.375, "libdeflate": 59.271, "zlib_ng": 61.270}, "decode": {"wreath": 4.542, "libdeflate": 5.566, "zlib_ng": 6.854}},
+    {"format": "plaintext", "encode": {"wreath": 71.547, "libdeflate": 92.559, "zlib_ng": 101.699}, "decode": {"wreath": 6.839, "libdeflate": 7.820, "zlib_ng": 9.631}},
+    {"format": "log", "encode": {"wreath": 50.369, "libdeflate": 62.970, "zlib_ng": 67.059}, "decode": {"wreath": 6.121, "libdeflate": 7.553, "zlib_ng": 9.326}},
+    {"format": "high_entropy_json", "encode": {"wreath": 56.996, "libdeflate": 89.780, "zlib_ng": 124.367}, "decode": {"wreath": 10.461, "libdeflate": 14.227, "zlib_ng": 18.031}},
+    {"format": "weighted_corpus", "encode": {"wreath": 50.882, "libdeflate": 67.175, "zlib_ng": 71.956}, "decode": {"wreath": 5.620, "libdeflate": 6.816, "zlib_ng": 8.437}}
+  ],
+  "encoded_bytes": {
+    "wreath": 2409339,
+    "libdeflate": 2390225,
+    "zlib_ng": 2401526,
+    "wreath_delta_vs_libdeflate_percent": 0.80,
+    "wreath_delta_vs_zlib_ng_percent": 0.33
+  },
+  "cache_tuning_30_file_corpus": {
+    "recorded": "2026-08-20",
+    "formats": ["json", "graphql", "html", "plaintext", "log"],
+    "before": {
+      "wire_percent": 23.4404,
+      "encode_instructions_per_kib": 52736.35,
+      "encode_l1d_misses_per_kib": 2062.49,
+      "encode_llc_misses_per_kib": 280.889
+    },
+    "shipped": {
+      "wire_percent": 23.7071,
+      "encode_instructions_per_kib": 50212.06,
+      "encode_instructions_per_byte": 49.0352,
+      "encode_l1d_hit_percent": 91.6183,
+      "encode_l1d_misses_per_kib": 1797.0064,
+      "encode_llc_hit_percent": 93.9225,
+      "encode_llc_misses_per_kib": 134.64,
+      "decode_instructions_per_kib": 5508.47,
+      "decode_l1d_hit_percent": 94.761,
+      "decode_l1d_misses_per_kib": 58.3264,
+      "decode_llc_hit_percent": 98.3527,
+      "decode_llc_misses_per_kib": 1.4764
+    },
+    "reduction_percent": {
+      "encode_instructions": 4.79,
+      "encode_l1d_misses": 12.87,
+      "encode_llc_misses": 52.07
+    }
+  },
+  "cache_500kb": [
+    {"format": "json", "mode": "encode", "l1d_hit_percent": 91.5049, "llc_hit_percent": 85.6193, "l1d_misses_per_kb": 1967.5823, "llc_misses_per_kb": 297.3345},
+    {"format": "graphql", "mode": "encode", "l1d_hit_percent": 89.1816, "llc_hit_percent": 90.3780, "l1d_misses_per_kb": 1278.5236, "llc_misses_per_kb": 145.5695},
+    {"format": "html", "mode": "encode", "l1d_hit_percent": 89.7003, "llc_hit_percent": 87.7524, "l1d_misses_per_kb": 1807.6923, "llc_misses_per_kb": 260.2096},
+    {"format": "plaintext", "mode": "encode", "l1d_hit_percent": 88.5617, "llc_hit_percent": 93.4539, "l1d_misses_per_kb": 2828.4857, "llc_misses_per_kb": 200.2881},
+    {"format": "log", "mode": "encode", "l1d_hit_percent": 92.2170, "llc_hit_percent": 82.7859, "l1d_misses_per_kb": 1786.8267, "llc_misses_per_kb": 381.2427},
+    {"format": "high_entropy_json", "mode": "encode", "l1d_hit_percent": 97.7963, "llc_hit_percent": 99.0278, "l1d_misses_per_kb": 302.0641, "llc_misses_per_kb": 4.1304},
+    {"format": "json", "mode": "decode", "l1d_hit_percent": 94.8292, "llc_hit_percent": 98.0795, "l1d_misses_per_kb": 76.9155, "llc_misses_per_kb": 2.2230},
+    {"format": "graphql", "mode": "decode", "l1d_hit_percent": 91.1646, "llc_hit_percent": 97.8636, "l1d_misses_per_kb": 49.2743, "llc_misses_per_kb": 1.7893},
+    {"format": "html", "mode": "decode", "l1d_hit_percent": 93.3468, "llc_hit_percent": 98.0433, "l1d_misses_per_kb": 65.6218, "llc_misses_per_kb": 2.0755},
+    {"format": "plaintext", "mode": "decode", "l1d_hit_percent": 93.1406, "llc_hit_percent": 98.1704, "l1d_misses_per_kb": 72.2539, "llc_misses_per_kb": 2.0868},
+    {"format": "log", "mode": "decode", "l1d_hit_percent": 95.5492, "llc_hit_percent": 98.0094, "l1d_misses_per_kb": 71.4978, "llc_misses_per_kb": 2.1712}
+  ]
+}
