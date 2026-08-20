@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import gzip
 import zlib
 from compression import zstd
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from wreath import JSONResponse, Wreath
+from wreath._compression import _dcz_decompress
 from wreath.cache_control import CacheControl
 from wreath.compression import (
     ZSTD_MAX_LEVEL,
@@ -34,6 +37,78 @@ def test_gzip_facade_round_trip_and_state() -> None:
     assert zlib.decompress(encoded, wbits=31) == payload
     with pytest.raises(RuntimeError):
         compressor.finish()
+
+
+@pytest.mark.asyncio
+async def test_prepared_compression_ladder_is_dcz_fragment_then_format_gzip() -> None:
+    prefix = b'{"request":"00000000","items":['
+    stable = b'{"id":7,"name":"wreath"},' * 128
+    suffix = b'{"request":"00000000"}]}'
+    document = prefix + stable + suffix
+    dictionary = b'{"id":0,"name":"wreath"},' * 128
+    policy = CompressionPolicy(minimum_size=0)
+    token = policy._configure_dcz_dictionary("application/json", dictionary)
+    policy._configure_gzip_fragment(
+        "application/json",
+        document,
+        prefix_bytes=len(prefix),
+        suffix_bytes=len(suffix),
+    )
+
+    def request(available: bytes, accepted: bytes = b"dcz, gzip, zstd"):
+        headers = {
+            b"accept-encoding": accepted,
+            b"available-dictionary": available,
+        }
+        return SimpleNamespace(
+            method="GET",
+            identity=None,
+            scheme="https",
+            _header_bytes=headers.get,
+        )
+
+    exact = Response(document, media_type=b"application/json")
+    await policy.after(request(token), exact)
+    assert dict(exact.headers)[b"content-encoding"] == b"dcz"
+    assert _dcz_decompress(exact.body, dictionary, max_output_bytes=100_000) == document
+
+    fragment = Response(document, media_type=b"application/json")
+    await policy.after(request(b":wrong:"), fragment)
+    assert dict(fragment.headers)[b"content-encoding"] == b"gzip"
+    assert gzip.decompress(fragment.body) == document
+    first_member = zlib.decompressobj(wbits=31)
+    first_member.decompress(fragment.body)
+    assert first_member.unused_data.startswith(b"\x1f\x8b")
+
+    changed = prefix + stable[:-1] + b"!" + suffix
+    format_gzip = Response(changed, media_type=b"application/json")
+    await policy.after(request(b":wrong:"), format_gzip)
+    assert dict(format_gzip.headers)[b"content-encoding"] == b"gzip"
+    assert zlib.decompress(format_gzip.body, wbits=31) == changed
+    one_member = zlib.decompressobj(wbits=31)
+    one_member.decompress(format_gzip.body)
+    assert one_member.eof and one_member.unused_data == b""
+
+    zstd_preferred = Response(document, media_type=b"application/json")
+    await policy.after(
+        request(b":wrong:", b"dcz;q=1, zstd;q=1, gzip;q=0.5"),
+        zstd_preferred,
+    )
+    assert dict(zstd_preferred.headers)[b"content-encoding"] == b"zstd"
+    assert zstd.decompress(zstd_preferred.body) == document
+
+    malformed_dcz = Response(document, media_type=b"application/json")
+    await policy.after(request(token, b"dcz;q=1e0, gzip"), malformed_dcz)
+    assert dict(malformed_dcz.headers)[b"content-encoding"] == b"gzip"
+
+    lower_dcz = Response(document, media_type=b"application/json")
+    await policy.after(request(token, b"dcz;q=0.5, gzip, zstd"), lower_dcz)
+    assert dict(lower_dcz.headers)[b"content-encoding"] == b"zstd"
+
+    unavailable_only = Response(document, media_type=b"application/json")
+    await policy.after(request(b":wrong:", b"dcz"), unavailable_only)
+    assert b"content-encoding" not in dict(unavailable_only.headers)
+    assert unavailable_only.body == document
 
 
 @pytest.mark.asyncio
