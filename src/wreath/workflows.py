@@ -56,7 +56,6 @@ for isolation.
 
 from __future__ import annotations
 
-import inspect
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -64,6 +63,7 @@ from typing import Any
 
 from . import _nplusone
 from . import telemetry as _telemetry
+from ._awaitable import is_awaitable
 from ._recording_format import (
     COMPENSATION_FAILED,
     COMPENSATION_NONE,
@@ -464,7 +464,7 @@ async def _call(handler: Callable[..., Any], context: StepContext) -> Any:
     ceremony with no payoff.
     """
     result = handler(context)
-    if inspect.isawaitable(result):
+    if is_awaitable(result):
         return await result
     return result
 
