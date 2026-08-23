@@ -9,6 +9,7 @@ from decimal import Decimal as _Decimal
 from typing import Any, cast
 from urllib.parse import quote, urlencode
 
+from .._awaitable import is_awaitable
 from .._codecs import parse_qs
 from ..audit_log import REDACTED, actor
 from ..crud import Access, retrieval_fields, sensitive_fields
@@ -348,10 +349,10 @@ class Admin:
 
         Raises:
             AdminError: nothing is registered, or a write operation is
-                registered with no `csrf` verifier. A server-rendered form
-                cannot carry `CsrfPolicy`'s header, so an admin that
-                accepted posts without one would be a cross-site write against
-                the most privileged surface in the application.
+                registered with no `csrf` verifier. The generated admin has not
+                yet adapted `CsrfPolicy(form_field=...)` automatically, so an
+                admin that accepted posts without the explicit adapter would be
+                a cross-site write against the most privileged surface.
         """
         from ..router import Router
 
@@ -368,12 +369,11 @@ class Admin:
         if writing and self._csrf is None:
             raise AdminError(
                 f"the admin generates {', '.join(writing)} but was given no "
-                "`csrf` verifier. wreath.policy.CsrfPolicy reads its "
-                "token from a request header, which a plain HTML form post "
-                "cannot carry, so it cannot protect these routes -- mounting it "
-                "would refuse every admin form instead. Pass csrf=(request) -> "
-                "bool, or register operations=('list', 'retrieve') for a "
-                "read-only admin."
+                "`csrf` verifier for its form or header token. Pass "
+                "csrf=(request) -> bool, or register "
+                "operations=('list', 'retrieve') for a read-only admin. "
+                "CsrfPolicy(form_field=...) supports custom forms, but the "
+                "generated admin's adapter remains explicit."
             )
 
         base = prefix.rstrip("/")
@@ -776,7 +776,7 @@ def _html(template: Any, context: dict[str, Any], status: int = 200) -> Response
 async def _csrf_refusal(csrf: Any, request: Any) -> Response | None:
     """Refuse a mutating request the verifier does not vouch for."""
     verdict = csrf(request)
-    if hasattr(verdict, "__await__"):
+    if is_awaitable(verdict):
         verdict = await verdict
     if verdict:
         return None

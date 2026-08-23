@@ -52,9 +52,9 @@ admin.register(
 
 ## Growing it into a writable one
 
-You need two things: a CSRF verifier, because
-`wreath.policy.CsrfPolicy` is header-only and an HTML form cannot carry a
-header, and a step-up window on the write operations.
+You need two things: an explicit CSRF verifier (the generated admin does not yet
+adapt `CsrfPolicy(form_field=...)` automatically), and a step-up window on the
+write operations.
 
 ```python
 admin = Admin(

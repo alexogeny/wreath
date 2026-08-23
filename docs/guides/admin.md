@@ -144,11 +144,10 @@ authorize={"read": Access.roles("staff"),
 
 The read screens stay usable all day; the destructive ones ask again.
 
-## Cross-site request forgery, and a gap you must close
+## Cross-site request forgery
 
-`wreath.policy.CsrfPolicy` reads its token from a request *header*. A
-plain HTML form post cannot carry one, so that middleware cannot protect these
-routes — mounting it would refuse every admin form rather than defend it.
+`wreath.policy.CsrfPolicy(form_field=...)` can protect an ordinary HTML form
+with the same signed double-submit token it accepts from script clients.
 
 Rather than ship an unprotected escalation path or grow a second CSRF
 implementation, the admin **requires you to name the check**: `csrf=` takes a
@@ -162,9 +161,10 @@ start — register the read operations and the requirement goes away:
 admin.register(Account, operations=("list", "retrieve"))
 ```
 
-Form-field CSRF support in `CsrfPolicy` is on
-[the roadmap](../reference/roadmap.md); when it lands, `csrf=` becomes a
-one-liner pointing at it.
+The generated admin does not yet render that hidden field or adapt the global
+policy automatically, so it keeps the explicit `csrf=` callback. That small
+integration seam is tracked on [the roadmap](../reference/roadmap.md); custom
+forms can use `CsrfPolicy(form_field=...)` directly today.
 
 ## No JavaScript, and therefore a real CSP
 
