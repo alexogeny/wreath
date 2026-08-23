@@ -7913,6 +7913,118 @@
           {}
         ]
       }
+    },
+    "notification-expired-window": {
+      "contract": {
+        "group": "web",
+        "stage": "notifications",
+        "axis": "expired timestamps in 32 recipient windows",
+        "assumption": "expiring a notification rate window is linear, never front-deletion quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "notification-expired-window",
+        "group": "web",
+        "stage": "notifications",
+        "axis": "expired timestamps in 32 recipient windows",
+        "assumption": "expiring a notification rate window is linear, never front-deletion quadratic",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.041,
+        "tail_exponent": 1.032,
+        "local_exponents": [
+          1.068,
+          1.009,
+          1.055
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0011820479994639754,
+          0.0024790419993223622,
+          0.004990424000425264,
+          0.010371291005867533
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "notification-live-window-control": {
+      "contract": {
+        "group": "web",
+        "stage": "notifications",
+        "axis": "live timestamps in the same 32 recipient windows",
+        "assumption": "checking an unexpired notification rate window is constant-time",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "notification-live-window-control",
+        "group": "web",
+        "stage": "notifications",
+        "axis": "live timestamps in the same 32 recipient windows",
+        "assumption": "checking an unexpired notification rate window is constant-time",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.049,
+        "tail_exponent": 0.083,
+        "local_exponents": [
+          -0.342,
+          0.034,
+          0.132
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.000011110998457297683,
+          0.000008767005056142807,
+          0.000008975999662652612,
+          0.00000983799691312015
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     }
   }
 }
