@@ -92,8 +92,29 @@ def _validate_channel(value: str) -> str:
     return validate_identifier(value, "channel")
 
 
+class _MessageEnvelopeCache:
+    """One private slot without adding a field to the public dataclass shape."""
+
+    __slots__ = ("_encoded",)
+    _encoded: bytes | None
+
+
+def _json_tree_is_immutable(value: Any) -> bool:
+    """Whether re-encoding ``value`` can never observe a later mutation.
+
+    Envelopes intentionally accept arbitrary JSON-shaped values.  Caching a
+    dict or list would therefore change the long-standing behaviour where a
+    caller may mutate its payload before publishing it.  Scalars and recursive
+    tuples are the useful safe subset: their native encoding can be retained
+    without turning the envelope into an implicit snapshot.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    return isinstance(value, tuple) and all(_json_tree_is_immutable(item) for item in value)
+
+
 @dataclass(frozen=True, slots=True)
-class MessageEnvelope:
+class MessageEnvelope(_MessageEnvelopeCache):
     """Versioned message identity and causality around a JSON payload.
 
     The marker makes detection exact. A bus only emits this shape when the
@@ -126,6 +147,8 @@ class MessageEnvelope:
         _check_envelope_text("trace_context", self.trace_context, 1024)
         object.__setattr__(self, "id", identifier)
         encoded = _json.dumps(self.as_dict())
+        cached = encoded if _json_tree_is_immutable(self.payload) else None
+        object.__setattr__(self, "_encoded", cached)
         if len(encoded) > MAX_ENVELOPE_BYTES:
             raise ValueError(
                 f"MessageEnvelope is {len(encoded)} bytes; maximum is {MAX_ENVELOPE_BYTES}"
@@ -146,7 +169,8 @@ class MessageEnvelope:
 
     def encode(self) -> bytes:
         """Encode with Wreath's native JSON kernel."""
-        return _json.dumps(self.as_dict())
+        encoded = self._encoded
+        return encoded if encoded is not None else _json.dumps(self.as_dict())
 
     @classmethod
     def decode(cls, value: Any) -> MessageEnvelope | None:
@@ -520,18 +544,22 @@ class MessageBus:
                 "require_group applies to durable publishes; ephemeral fan-out "
                 "has no groups, only whoever happens to be listening"
             )
-        body = (
-            payload.encode().decode("utf-8")
-            if isinstance(payload, MessageEnvelope)
-            else json.dumps(payload)
-        )
+        if isinstance(payload, MessageEnvelope):
+            encoded = payload.encode()
+            body = encoded.decode("utf-8")
+        else:
+            # Plain payloads have always exposed stdlib json.dumps' exact text
+            # on PostgreSQL's wire (including its spaces and ASCII escaping).
+            # Keep that contract; receiving can use the native compatible
+            # decoder without altering a byte a publisher emits.
+            body = json.dumps(payload)
+            encoded = body.encode("utf-8")
         if durable:
             await self._publish_durable(
                 channel, body, tx=tx, tenant=tenant, key=key,
                 require_group=require_group,
             )
             return
-        encoded = body.encode("utf-8")
         check_notify_payload(encoded)
         wire = self._channel_wire(channel)
         if tx is not None:
@@ -989,7 +1017,7 @@ class MessageBus:
             # Only a malformed payload is tolerated here -- a publisher on an
             # older wire format, say. Anything else is ours to hear about.
             with contextlib.suppress(ValueError, TypeError):
-                payload = json.loads(note.payload)
+                payload = _json.loads(note.payload)
         for sub in ephemeral_subs.get(channel, ()):  # at-most-once, fire-and-forget
             message = Message(channel=channel, group=sub.group, tenant="",
                               payload=payload)
@@ -1120,7 +1148,7 @@ class MessageBus:
             return None
         payload = row["payload"]
         if isinstance(payload, (str, bytes)):
-            payload = json.loads(payload)
+            payload = _json.loads(payload)
         return Message(channel=sub.channel, group=sub.group, tenant=row["tenant"],
                        payload=payload, id=row["id"], fence=row["fence"],
                        attempts=row["attempts"],
@@ -1210,7 +1238,9 @@ class MessageBus:
 
     def _wake_consumers(self) -> None:
         """Wake every parked consumer. One doorbell, every waiter."""
-        for wake in tuple(self._waiters):
+        # Event.set() schedules a parked task; it cannot resume that task and
+        # mutate this event-loop-owned list until this synchronous loop returns.
+        for wake in self._waiters:
             wake.set()
 
     async def _park(self, wake: asyncio.Event) -> None:

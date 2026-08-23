@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
+from types import SimpleNamespace
 
 import pytest
 
+from wreath import messaging as messaging_module
 from wreath._jobcore import PayloadTooLarge
 from wreath._replay_adapters import DatabaseDouble
 from wreath.messaging import Message, MessageBus, MessageEnvelope
@@ -25,6 +28,15 @@ async def test_publish_ephemeral_notifies():
     assert json.loads(body) == {"id": 1}
 
 
+async def test_plain_payloads_keep_their_exact_legacy_wire_text():
+    db = DatabaseDouble()
+    bus = _bus(db)
+    payload = {"greeting": "olá", "not_a_number": float("nan"), 7: True}
+    await bus.publish("booking_created", payload)
+    call = next(c for c in db.calls if "pg_notify" in c[0])
+    assert call[1][1] == json.dumps(payload)
+
+
 async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
     db = DatabaseDouble()
     bus = _bus(db)
@@ -42,6 +54,65 @@ async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
     delivered = Message(payload=wire, channel="booking_created", group=None, tenant="")
     assert delivered.envelope() == envelope
     assert MessageEnvelope.decode({"id": 1}) is None
+
+
+def test_an_envelope_serializes_once_without_changing_its_dataclass_shape(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+    native_dumps = messaging_module._json.dumps
+
+    def counting_dumps(value):
+        nonlocal calls
+        calls += 1
+        return native_dumps(value)
+
+    monkeypatch.setattr(messaging_module._json, "dumps", counting_dumps)
+    envelope = MessageEnvelope("booking.created", ("event", 1), id="event-1")
+    first = envelope.encode()
+    assert envelope.encode() is first
+    assert calls == 1
+    assert [item.name for item in fields(envelope)] == [
+        "kind",
+        "payload",
+        "version",
+        "id",
+        "correlation_id",
+        "causation_id",
+        "trace_context",
+    ]
+
+
+def test_an_envelope_does_not_cache_a_mutable_payload() -> None:
+    payload = {"booking": {"status": "pending"}}
+    envelope = MessageEnvelope("booking.updated", payload, id="event-1")
+
+    payload["booking"]["status"] = "confirmed"
+
+    assert json.loads(envelope.encode())["payload"] == {
+        "booking": {"status": "confirmed"}
+    }
+
+
+def test_dispatch_uses_the_native_compatible_json_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+    native_loads = messaging_module._json.loads
+
+    def counting_loads(value):
+        nonlocal calls
+        calls += 1
+        return native_loads(value)
+
+    monkeypatch.setattr(messaging_module._json, "loads", counting_loads)
+    bus = _bus(DatabaseDouble())
+    bus._dispatch(
+        SimpleNamespace(channel="wire", payload='{"id": 1}'),
+        {"wire": "booking_created"},
+        {"booking_created": []},
+    )
+    assert calls == 1
 
 
 async def test_publish_ephemeral_oversized_rejected():
