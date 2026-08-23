@@ -6,6 +6,7 @@
  */
 #include "server_policy.h"
 #include "wreathcore.h"
+#include "compression_select.h"
 
 #include <math.h>
 #include <string.h>
@@ -72,6 +73,10 @@ ascii_equal_ci(const char *left, Py_ssize_t left_size,
                const char *right, Py_ssize_t right_size)
 {
     if (left_size != right_size) return 0;
+    /* ASGI's canonical path supplies lower-case names.  Let libc handle that
+     * overwhelmingly common exact-byte case in wide words, while retaining
+     * the case-insensitive fallback for manually constructed responses. */
+    if (left == right || memcmp(left, right, (size_t)left_size) == 0) return 1;
     for (Py_ssize_t i = 0; i < left_size; i++) {
         unsigned char a = (unsigned char)left[i];
         unsigned char b = (unsigned char)right[i];
@@ -93,77 +98,11 @@ trim_ows(const char **data, Py_ssize_t *size)
                          (*data)[*size - 1] == '\t')) (*size)--;
 }
 
-/* 0 none, 1 gzip, 2 zstd, 3 dcz.  The fallback is retained so an unmatched
- * dictionary can continue through prepared-fragment and format-aware gzip
- * without reparsing Accept-Encoding. */
-static int
-select_compression(PyObject *value, int allow_dcz, int *fallback)
-{
-    if (value == NULL || !PyBytes_Check(value)) return 0;
-    const char *data = PyBytes_AS_STRING(value);
-    Py_ssize_t size = PyBytes_GET_SIZE(value), start = 0;
-    int gzip_named = 0, gzip_q = 0, zstd_q = 0, dcz_q = 0, wildcard_q = 0;
-    for (Py_ssize_t i = 0; i <= size; i++) {
-        if (i < size && data[i] != ',') continue;
-        const char *item = data + start;
-        Py_ssize_t item_size = i - start;
-        start = i + 1;
-        trim_ows(&item, &item_size);
-        if (item_size == 0) continue;
-        Py_ssize_t semi = 0;
-        while (semi < item_size && item[semi] != ';') semi++;
-        const char *coding = item;
-        Py_ssize_t coding_size = semi;
-        trim_ows(&coding, &coding_size);
-        int quality = 1000;
-        Py_ssize_t parameter = semi;
-        while (parameter < item_size) {
-            parameter++;
-            Py_ssize_t end = parameter;
-            while (end < item_size && item[end] != ';') end++;
-            const char *part = item + parameter;
-            Py_ssize_t part_size = end - parameter;
-            trim_ows(&part, &part_size);
-            Py_ssize_t equals = 0;
-            while (equals < part_size && part[equals] != '=') equals++;
-            const char *name = part;
-            Py_ssize_t name_size = equals;
-            trim_ows(&name, &name_size);
-            if (ascii_equal_ci(name, name_size, "q", 1)) {
-                quality = equals < part_size
-                    ? wreath_parse_quality(part + equals + 1,
-                                           part_size - equals - 1) : 0;
-            }
-            parameter = end;
-        }
-        if (ascii_equal_ci(coding, coding_size, "gzip", 4)) {
-            gzip_named = 1;
-            gzip_q = quality;
-        }
-        else if (ascii_equal_ci(coding, coding_size, "zstd", 4)) zstd_q = quality;
-        else if (ascii_equal_ci(coding, coding_size, "dcz", 3)) dcz_q = quality;
-        else if (coding_size == 1 && coding[0] == '*') wildcard_q = quality;
-    }
-    if (!gzip_named) gzip_q = wildcard_q;
-    int ordinary = zstd_q > 0 && zstd_q >= gzip_q ? 2 : (gzip_q > 0 ? 1 : 0);
-    int ordinary_q = ordinary == 2 ? zstd_q : (ordinary == 1 ? gzip_q : 0);
-    int selected = allow_dcz && dcz_q > 0 && dcz_q >= ordinary_q ? 3 : ordinary;
-    if (fallback != NULL) {
-        /* A client that selected DCZ opted into the prepared-response ladder.
-         * On a dictionary miss, gzip wins its ordinary tie with zstd so the
-         * prepared fragment gets the next attempt.  A strictly higher zstd q
-         * still wins, and the gzip codec owns fragment-to-format fallthrough. */
-        *fallback = selected == 3 && gzip_q > 0 && gzip_q >= zstd_q
-            ? 1 : ordinary;
-    }
-    return selected;
-}
-
-
 static int
 bytes_equal_ci(PyObject *left, PyObject *right)
 {
-    return PyBytes_Check(left) && PyBytes_Check(right) &&
+    if (!PyBytes_Check(left) || !PyBytes_Check(right)) return 0;
+    return left == right ||
         ascii_equal_ci(PyBytes_AS_STRING(left), PyBytes_GET_SIZE(left),
                        PyBytes_AS_STRING(right), PyBytes_GET_SIZE(right));
 }
@@ -264,6 +203,46 @@ append_literal(PyObject *headers, const char *name, const char *value)
     Py_XDECREF(name_obj);
     Py_XDECREF(value_obj);
     return result;
+}
+
+
+static int
+append_literal_value(PyObject *headers, const char *name, Py_ssize_t name_size,
+                     PyObject *value)
+{
+    PyObject *name_obj = PyBytes_FromStringAndSize(name, name_size);
+    if (name_obj == NULL) return -1;
+    int result = append_pair(headers, name_obj, value);
+    Py_DECREF(name_obj);
+    return result;
+}
+
+
+static int
+set_literal_value(PyObject *headers, Py_ssize_t index,
+                  const char *name, Py_ssize_t name_size, PyObject *value)
+{
+    PyObject *name_obj = PyBytes_FromStringAndSize(name, name_size);
+    PyObject *pair = name_obj != NULL ? PyTuple_Pack(2, name_obj, value) : NULL;
+    Py_XDECREF(name_obj);
+    if (pair == NULL) return -1;
+    return PyList_SetItem(headers, index, pair); /* steals */
+}
+
+
+static int
+timing_value_is_only_metric(PyObject *value, PyObject *metric)
+{
+    if (!PyBytes_Check(value) || !PyBytes_Check(metric)) return 0;
+    const char *data = PyBytes_AS_STRING(value);
+    Py_ssize_t size = PyBytes_GET_SIZE(value);
+    trim_ows(&data, &size);
+    if (memchr(data, ',', (size_t)size) != NULL) return 0;
+    const char *semi = memchr(data, ';', (size_t)size);
+    Py_ssize_t name_size = semi == NULL ? size : (Py_ssize_t)(semi - data);
+    trim_ows(&data, &name_size);
+    return ascii_equal_ci(
+        data, name_size, PyBytes_AS_STRING(metric), PyBytes_GET_SIZE(metric));
 }
 
 
@@ -540,6 +519,44 @@ invalid:
     return 0;
 }
 
+static int
+maintenance_config_valid(PyObject *config)
+{
+    if (!PyTuple_CheckExact(config) || PyTuple_GET_SIZE(config) != 4 ||
+        !PyFrozenSet_Check(PyTuple_GET_ITEM(config, 0)) ||
+        !PyCallable_Check(PyTuple_GET_ITEM(config, 1)) ||
+        !PyTuple_CheckExact(PyTuple_GET_ITEM(config, 2)) ||
+        !PyBytes_CheckExact(PyTuple_GET_ITEM(config, 3))) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "invalid native maintenance policy descriptor");
+        return 0;
+    }
+    return 1;
+}
+
+static int
+run_maintenance(PyObject *config, PyObject *path, WreathPolicyReply *reply)
+{
+    int exempt = PySet_Contains(PyTuple_GET_ITEM(config, 0), path);
+    if (exempt < 0) return -1;
+    if (exempt) return 0;
+    PyObject *allowed = PyObject_CallNoArgs(PyTuple_GET_ITEM(config, 1));
+    if (allowed == NULL) return -1;
+    int admit = PyObject_IsTrue(allowed);
+    Py_DECREF(allowed);
+    if (admit < 0) return -1;
+    if (admit) return 0;
+    reply->status = 503;
+    reply->headers = PySequence_List(PyTuple_GET_ITEM(config, 2));
+    reply->body = Py_NewRef(PyTuple_GET_ITEM(config, 3));
+    if (reply->headers == NULL) {
+        Py_CLEAR(reply->body);
+        return -1;
+    }
+    reply->flight_flags |= WREATH_NFR_FLAG_POLICY_REFUSED;
+    return 1;
+}
+
 
 static int
 run_ai_scraping(const WreathCoreCAPI *core, PyObject *config,
@@ -591,13 +608,16 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
     }
     PyObject *tag = PyTuple_GET_ITEM(program->descriptor, WREATH_POLICY_TAG);
     if (!PyUnicode_Check(tag) ||
-        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v3") != 0) {
+        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v4") != 0) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported native HTTP policy descriptor");
         return -1;
     }
     PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
     PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
-    if (ai_scraping != NULL || compression != NULL) {
+    PyObject *maintenance = program_item(program, WREATH_POLICY_MAINTENANCE);
+    PyObject *csrf = program_item(program, WREATH_POLICY_CSRF);
+    PyObject *timing = program_item(program, WREATH_POLICY_TIMING);
+    if (ai_scraping != NULL || compression != NULL || csrf != NULL || timing != NULL) {
         program->core = (const WreathCoreCAPI *)PyCapsule_Import(
             WREATH_CORE_CAPI_NAME, 0);
         if (program->core == NULL) return -1;
@@ -605,6 +625,7 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
             !ai_scraping_config_valid(program->core, ai_scraping)) return -1;
         if (compression != NULL && !compression_config_valid(compression)) return -1;
     }
+    if (maintenance != NULL && !maintenance_config_valid(maintenance)) return -1;
     program->response_transform = (unsigned char)(
         program_item(program, WREATH_POLICY_CACHE) != NULL ||
         program_item(program, WREATH_POLICY_COMPRESSION) != NULL);
@@ -1203,8 +1224,9 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         int allow_dcz = PyTuple_CheckExact(compression) &&
             PyTuple_GET_SIZE(compression) >= 9 &&
             PyTuple_CheckExact(PyTuple_GET_ITEM(compression, 6));
-        state->compression_coding = (unsigned char)select_compression(
-            accepted, allow_dcz, &fallback);
+        int coding = wreath_select_compression_value(accepted, allow_dcz, &fallback);
+        if (coding < 0) return -1;
+        state->compression_coding = (unsigned char)coding;
         state->compression_fallback = (unsigned char)fallback;
         if (state->compression_coding == 3) {
             Py_ssize_t count = 0;
@@ -1233,6 +1255,12 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         if (count != 1 || !trusted_host_allowed(trusted, host)) {
             return reply_problem(reply, 400);
         }
+    }
+
+    PyObject *maintenance = program_item(program, WREATH_POLICY_MAINTENANCE);
+    if (maintenance != NULL) {
+        int result = run_maintenance(maintenance, path, reply);
+        if (result != 0) return result;
     }
 
     PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
@@ -1458,6 +1486,41 @@ matching_dcz_dictionary(WreathPolicyProgram *program, PyObject *compression,
         ? entry : NULL;
 }
 
+static PyObject *
+compress_dcz(PyObject *compressor, PyObject *dictionary, PyObject *body,
+             PyObject *level)
+{
+    static const unsigned char magic[8] = {
+        0x5e, 0x2a, 0x4d, 0x18, 0x20, 0x00, 0x00, 0x00
+    };
+    PyObject *arguments[4] = {
+        body, level, Py_None, PyTuple_GET_ITEM(dictionary, 2)
+    };
+    PyObject *payload = PyObject_Vectorcall(compressor, arguments, 4, NULL);
+    if (payload == NULL) return NULL;
+    if (!PyBytes_CheckExact(payload)) {
+        Py_DECREF(payload);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "native DCZ compressor did not return bytes");
+        return NULL;
+    }
+    PyObject *digest = PyTuple_GET_ITEM(dictionary, 1);
+    Py_ssize_t payload_size = PyBytes_GET_SIZE(payload);
+    if (payload_size > PY_SSIZE_T_MAX - 40) {
+        Py_DECREF(payload);
+        return PyErr_NoMemory();
+    }
+    PyObject *result = PyBytes_FromStringAndSize(NULL, payload_size + 40);
+    if (result != NULL) {
+        char *out = PyBytes_AS_STRING(result);
+        memcpy(out, magic, sizeof(magic));
+        memcpy(out + 8, PyBytes_AS_STRING(digest), 32);
+        memcpy(out + 40, PyBytes_AS_STRING(payload), (size_t)payload_size);
+    }
+    Py_DECREF(payload);
+    return result;
+}
+
 int
 wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
                        PyObject *status_obj, PyObject *headers, PyObject **body,
@@ -1474,11 +1537,8 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
         PyObject *value = PyTuple_GET_ITEM(cache, 0);
         if (PyTuple_GET_ITEM(cache, 1) == Py_True &&
             response_index_literal(headers, "set-cookie", 10) >= 0) {
-            value = PyBytes_FromString("private, no-store");
-            if (value == NULL) return -1;
-            int result = append_literal(headers, "cache-control", "private, no-store");
-            Py_DECREF(value);
-            if (result < 0) return -1;
+            if (append_literal(
+                    headers, "cache-control", "private, no-store") < 0) return -1;
         }
         else {
             PyObject *name = PyBytes_FromString("cache-control");
@@ -1525,13 +1585,13 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
         compression, coding == 2 || coding == 3 ? 2 : 1);
     PyObject *compressed;
     if (coding == 3) {
-        PyObject *compressor = PyTuple_GET_ITEM(compression, 7);
-        compressed = PyObject_CallFunctionObjArgs(
-            compressor, dcz_dictionary, *body, level, NULL);
+        compressed = compress_dcz(
+            PyTuple_GET_ITEM(compression, 4), dcz_dictionary, *body, level);
     }
     else if (coding == 2) {
         PyObject *compressor = PyTuple_GET_ITEM(compression, 4);
-        compressed = PyObject_CallFunctionObjArgs(compressor, *body, level, NULL);
+        PyObject *arguments[2] = {*body, level};
+        compressed = PyObject_Vectorcall(compressor, arguments, 2, NULL);
     }
     else {
         long gzip_level = PyLong_AsLong(level);
@@ -1637,12 +1697,10 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
                 PyErr_SetString(PyExc_RuntimeError, "CSRF cookie size invariant failed");
                 return -1;
             }
-            PyObject *result = PyObject_CallFunctionObjArgs(
-                PyTuple_GET_ITEM(csrf, 14), headers,
-                PyTuple_GET_ITEM(csrf, 2), cookie, NULL);
+            int result = program->core->replace_cookie(
+                headers, PyTuple_GET_ITEM(csrf, 2), cookie);
             Py_DECREF(cookie);
-            if (result == NULL) return -1;
-            Py_DECREF(result);
+            if (result < 0) return -1;
             PyObject *cache_name = PyBytes_FromString("cache-control");
             PyObject *cache_value = PyBytes_FromString("private, no-store");
             int cache_result = cache_name != NULL && cache_value != NULL
@@ -1659,7 +1717,6 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
         PyObject *timing = program_item(program, WREATH_POLICY_TIMING);
         state->elapsed_ns = policy_now_ns() - state->started_ns;
         if (PyTuple_GET_ITEM(timing, 1) == Py_True) {
-            PyObject *name = PyBytes_FromString("server-timing");
             PyObject *metric = PyTuple_GET_ITEM(timing, 0);
             char buffer[128];
             int written = PyOS_snprintf(
@@ -1668,12 +1725,40 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
                 (double)state->elapsed_ns / 1000000.0);
             PyObject *value = written >= 0 && written < (int)sizeof(buffer)
                 ? PyBytes_FromStringAndSize(buffer, written) : NULL;
-            if (name == NULL || value == NULL || replace_header(headers, name, value) < 0) {
-                Py_XDECREF(name);
+            int timing_result = -1;
+            if (value != NULL) {
+                int timing_index = response_index_literal(
+                    headers, "server-timing", 13);
+                if (timing_index < 0) {
+                    timing_result = append_literal_value(
+                        headers, "server-timing", 13, value);
+                }
+                else {
+                    int unique = 1;
+                    for (Py_ssize_t i = timing_index + 1;
+                         i < PyList_GET_SIZE(headers); i++) {
+                        PyObject *pair = PyList_GET_ITEM(headers, i);
+                        PyObject *name = PyTuple_GET_ITEM(pair, 0);
+                        if (PyBytes_Check(name) && ascii_equal_ci(
+                                PyBytes_AS_STRING(name), PyBytes_GET_SIZE(name),
+                                "server-timing", 13)) {
+                            unique = 0;
+                            break;
+                        }
+                    }
+                    PyObject *old = PyTuple_GET_ITEM(
+                        PyList_GET_ITEM(headers, timing_index), 1);
+                    timing_result = unique && timing_value_is_only_metric(old, metric)
+                        ? set_literal_value(
+                            headers, timing_index, "server-timing", 13, value)
+                        : program->core->replace_server_timing(
+                            headers, metric, value);
+                }
+            }
+            if (timing_result < 0) {
                 Py_XDECREF(value);
                 return -1;
             }
-            Py_DECREF(name);
             Py_DECREF(value);
         }
     }

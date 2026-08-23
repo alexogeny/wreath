@@ -22,11 +22,31 @@ Both read the request scheme and `Host`, so behind a proxy both belong after
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from os import urandom
 
+from .._http import _is_http_token
 from .._native import _core
 from .._webpolicy import append_missing_headers, normalize_origin, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
+
+_STATE_CSP_NONCE = "_wreath_csp_nonce"
+_STATE_CSP_POLICY = "_wreath_csp_policy"
+
+
+def csp_nonce(request: Request) -> str:
+    """Return the per-request CSP nonce prepared by `SecurityHeadersPolicy`.
+
+    The value is minted once on first use and is the exact value injected into
+    the configured CSP directives during response egress.
+    """
+    nonce = request.state.get(_STATE_CSP_NONCE)
+    if nonce is not None:
+        return nonce
+    policy = request.state.get(_STATE_CSP_POLICY)
+    if policy is None:
+        raise RuntimeError("SecurityHeadersPolicy has not enabled CSP nonces")
+    return policy._mint_nonce(request)
 
 
 def _normalize_host(value: str, *, pattern: bool = False) -> str | None:
@@ -204,6 +224,10 @@ class SecurityHeadersPolicy:
 
     Args:
         content_security_policy: The CSP value, or None to emit no CSP header.
+        csp_nonce_directives: CSP directive names that receive a fresh
+            per-request nonce, such as `script-src` and `style-src`.
+        csp_report_only: Emit `Content-Security-Policy-Report-Only` instead
+            of the enforcing header.
         frame_options: The `X-Frame-Options` value, or None to omit it.
         content_type_options: Emit `X-Content-Type-Options: nosniff`.
         referrer_policy: The `Referrer-Policy` value, or None to omit it.
@@ -219,12 +243,21 @@ class SecurityHeadersPolicy:
         ValueError: `hsts_preload` without `hsts_include_subdomains` and a year of max-age.
     """
 
-    __slots__ = ("headers", "hsts_header", "https_headers")
+    __slots__ = (
+        "_csp_header_name",
+        "_csp_template",
+        "_has_nonce",
+        "headers",
+        "hsts_header",
+        "https_headers",
+    )
 
     def __init__(
         self,
         *,
         content_security_policy: str | None = "default-src 'self'",
+        csp_nonce_directives: Iterable[str] = (),
+        csp_report_only: bool = False,
         frame_options: str | None = "DENY",
         content_type_options: bool = True,
         referrer_policy: str | None = "strict-origin-when-cross-origin",
@@ -234,6 +267,20 @@ class SecurityHeadersPolicy:
         hsts_preload: bool = False,
         strict_transport_security: str | None = None,
     ) -> None:
+        nonce_directives = tuple(csp_nonce_directives)
+        for directive in nonce_directives:
+            if (
+                not isinstance(directive, str)
+                or not directive
+                or not _is_http_token(directive)
+            ):
+                raise ValueError("CSP nonce directives must be non-empty directive names")
+        if len(set(nonce_directives)) != len(nonce_directives):
+            raise ValueError("CSP nonce directives must not repeat")
+        if nonce_directives and content_security_policy is None:
+            raise ValueError("CSP nonce directives require content_security_policy")
+        if not isinstance(csp_report_only, bool):
+            raise ValueError("csp_report_only must be a bool")
         if hsts_max_age is not None and strict_transport_security is not None:
             raise ValueError("structured and raw HSTS settings are mutually exclusive")
         if hsts_max_age is not None and (
@@ -257,8 +304,34 @@ class SecurityHeadersPolicy:
             else None
         )
         headers: list[tuple[bytes, bytes]] = []
+        self._csp_header_name = (
+            b"content-security-policy-report-only"
+            if csp_report_only
+            else b"content-security-policy"
+        )
+        self._has_nonce = bool(nonce_directives)
+        self._csp_template: bytes | None = None
         if content_security_policy is not None:
-            headers.append((b"content-security-policy", content_security_policy.encode("latin-1")))
+            if "\r" in content_security_policy or "\n" in content_security_policy:
+                raise ValueError("content_security_policy must not contain a line break")
+            csp = content_security_policy
+            if nonce_directives:
+                segments = [item.strip() for item in csp.split(";") if item.strip()]
+                present = {item.split(None, 1)[0] for item in segments}
+                for directive in nonce_directives:
+                    addition = "'nonce-{nonce}'"
+                    if directive in present:
+                        segments = [
+                            f"{item} {addition}"
+                            if item.split(None, 1)[0] == directive
+                            else item
+                            for item in segments
+                        ]
+                    else:
+                        segments.append(f"{directive} {addition}")
+                self._csp_template = "; ".join(segments).encode("latin-1")
+            else:
+                headers.append((self._csp_header_name, csp.encode("latin-1")))
         if frame_options is not None:
             headers.append((b"x-frame-options", frame_options.encode("latin-1")))
         if content_type_options:
@@ -272,6 +345,15 @@ class SecurityHeadersPolicy:
             (*self.headers, self.hsts_header) if self.hsts_header is not None else self.headers
         )
 
+    def _prepare_nonce(self, request: Request) -> None:
+        if self._has_nonce:
+            request.state.__setattr__(_STATE_CSP_POLICY, self)
+
+    def _mint_nonce(self, request: Request) -> str:
+        nonce = urandom(16).hex()
+        request.state.__setattr__(_STATE_CSP_NONCE, nonce)
+        return nonce
+
     def describe(self):
         """Every configured header, with its value, read off the precompiled set.
 
@@ -282,8 +364,7 @@ class SecurityHeadersPolicy:
         """
         from .base import HeaderSpec, PolicyContract
 
-        return PolicyContract(
-            response_headers=tuple(
+        headers = tuple(
                 (
                     None,
                     HeaderSpec(
@@ -295,7 +376,17 @@ class SecurityHeadersPolicy:
                     ),
                 )
                 for name, value in self.https_headers
-            ),
+            )
+        if self._has_nonce:
+            headers = (*headers, (None, HeaderSpec(
+                self._csp_header_name.decode("ascii")
+                .replace("-", " ")
+                .title()
+                .replace(" ", "-"),
+                description="Per-response CSP carrying a fresh nonce.",
+            )))
+        return PolicyContract(
+            response_headers=headers,
         )
 
     def _egress_inplace(self, request: Request, response) -> None:
@@ -309,6 +400,13 @@ class SecurityHeadersPolicy:
         # every single response just to compare one string.
         additions = self.https_headers if request.scheme == "https" else self.headers
         append_missing_headers(response.headers, additions)
+        template = self._csp_template
+        if template is not None:
+            nonce = csp_nonce(request).encode("ascii")
+            append_missing_headers(
+                response.headers,
+                ((self._csp_header_name, template.replace(b"{nonce}", nonce)),),
+            )
 
     def _egress_sync(self, request: Request, response):
         """Reference executor transformer; compiled policy mutates in place."""
@@ -324,4 +422,5 @@ __all__ = [
     "SecurityHeadersPolicy",
     "TrustedHostPolicy",
     "WebSocketOriginPolicy",
+    "csp_nonce",
 ]
