@@ -47,7 +47,9 @@ Reference: `wreath.users` for the sending side of account mail, and
 
 from __future__ import annotations
 
+import heapq
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -207,8 +209,18 @@ class Notifications:
         self._enqueue = enqueue
         self._rate_limit = rate_limit
         self._kinds: dict[type, KindSpec] = {}
+        self._kind_names: set[str] = set()
+        # CapabilityMap deliberately is not the owner here: its required
+        # cardinality bound may evict a still-live digest and deliver a repeat.
+        # This table instead expires every entry at its semantic deadline. The
+        # heap makes sweeping untouched recipients amortized rather than making
+        # the request that happens to revisit one recipient own all cleanup.
         self._recent: dict[tuple[str, str], float] = {}
-        self._counts: dict[str, list[float]] = {}
+        self._recent_expirations: list[tuple[float, int, tuple[str, str]]] = []
+        self._recent_sequence = 0
+        self._counts: dict[str, deque[float]] = {}
+        self._count_expirations: list[tuple[float, int, str]] = []
+        self._count_sequence = 0
         #: Counted rather than logged and forgotten. A rising `rate_limited`
         #: with a flat `delivered` is a notification loop -- something writing a
         #: row whose notification writes a row -- and it is invisible without a
@@ -235,7 +247,7 @@ class Notifications:
                 RFC 8058 requirement, refused here rather than at send time so
                 it is a startup error instead of a delivery failure.
         """
-        if any(spec.name == name for spec in self._kinds.values()):
+        if name in self._kind_names:
             raise ValueError(f"notification kind {name!r} is already declared")
         if mail_class is MailClass.MARKETING and unsubscribe is None:
             raise ValueError(
@@ -249,7 +261,11 @@ class Notifications:
         spec = KindSpec(name, window, mail_class, unsubscribe, tuple(only))
 
         def declare(cls: type) -> type:
+            previous = self._kinds.get(cls)
+            if previous is not None:
+                self._kind_names.discard(previous.name)
             self._kinds[cls] = spec
+            self._kind_names.add(name)
             return cls
 
         return declare
@@ -275,6 +291,8 @@ class Notifications:
         """Deliver `note` to one recipient on every channel they allow."""
         spec = self._spec_and_clock(note)
         moment = time.time() if now is None else now
+        if self._count_expirations and self._count_expirations[0][0] < moment:
+            self._sweep_rate_windows(moment)
         if self._is_duplicate(spec, to, moment):
             self.deduplicated += 1
             return SendResult(deduplicated=True)
@@ -303,8 +321,26 @@ class Notifications:
                 delivered.append(channel.name)
         if delivered:
             self.delivered += 1
-            self._recent[(spec.name, to.key)] = moment
-            self._counts.setdefault(to.key, []).append(moment)
+            if spec.digest > 0:
+                key = (spec.name, to.key)
+                deadline = moment + spec.digest
+                self._recent[key] = deadline
+                self._recent_sequence += 1
+                heapq.heappush(
+                    self._recent_expirations,
+                    (deadline, self._recent_sequence, key),
+                )
+            if self._rate_limit > 0:
+                window = self._counts.get(to.key)
+                if window is None:
+                    window = deque()
+                    self._counts[to.key] = window
+                    self._count_sequence += 1
+                    heapq.heappush(
+                        self._count_expirations,
+                        (moment + 3600, self._count_sequence, to.key),
+                    )
+                window.append(moment)
         self.declined += len(declined)
         return SendResult(tuple(delivered), tuple(declined), False, failed)
 
@@ -322,25 +358,47 @@ class Notifications:
         await self._enqueue(job)
 
     def _is_duplicate(self, spec: KindSpec, to: Recipient, moment: float) -> bool:
+        while self._recent_expirations and self._recent_expirations[0][0] <= moment:
+            deadline, _sequence, key = heapq.heappop(self._recent_expirations)
+            if self._recent.get(key) == deadline:
+                del self._recent[key]
         if spec.digest <= 0:
             return False
-        last = self._recent.get((spec.name, to.key))
-        return last is not None and moment - last < spec.digest
+        deadline = self._recent.get((spec.name, to.key))
+        return deadline is not None and moment < deadline
+
+    def _sweep_rate_windows(self, moment: float) -> None:
+        """Release every hourly window whose oldest entry has expired."""
+        cutoff = moment - 3600
+        expirations = self._count_expirations
+        while expirations and expirations[0][0] < moment:
+            deadline, _sequence, key = heapq.heappop(expirations)
+            window = self._counts.get(key)
+            if window is None or window[0] + 3600 != deadline:
+                continue
+            while window and window[0] < cutoff:
+                window.popleft()
+            if not window:
+                del self._counts[key]
+                continue
+            self._count_sequence += 1
+            heapq.heappush(
+                expirations,
+                (window[0] + 3600, self._count_sequence, key),
+            )
 
     def _within_rate_limit(self, to: Recipient, moment: float) -> bool:
         """Whether this recipient is under the hourly cap.
 
-        The window is trimmed on read rather than swept on a timer, so a
-        recipient nobody notifies costs nothing and the table cannot grow a
-        background task of its own.
+        Expiration is swept on sends rather than by a background task.  The
+        heap keeps that work proportional to expired recipients, including
+        recipients that are never notified again.
         """
         if self._rate_limit <= 0:
             return True
-        window = self._counts.setdefault(to.key, [])
-        cutoff = moment - 3600
-        while window and window[0] < cutoff:
-            window.pop(0)
-        return len(window) < self._rate_limit
+        self._sweep_rate_windows(moment)
+        window = self._counts.get(to.key)
+        return window is None or len(window) < self._rate_limit
 
 
 # --- channels ---------------------------------------------------------------
