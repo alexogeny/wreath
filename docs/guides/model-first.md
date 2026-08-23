@@ -122,7 +122,8 @@ withheld-field rules, the same pagination. Read-only is the version to start
 from: `operations=("list", "retrieve")` generates no write route at all, which
 is a stronger statement than a policy that denies writes, and it needs no CSRF
 verifier because it generates no forms. A writable admin **requires** `csrf=`,
-because `CsrfPolicy` is header-only and an HTML form cannot carry a header.
+because its form-token adapter remains explicit; custom forms can use
+`CsrfPolicy(form_field=...)` directly.
 See [the admin](admin.md) and [the recipe](../cookbook/recipes/read-only-admin.md).
 
 ## 5. The contract, from your return annotations
