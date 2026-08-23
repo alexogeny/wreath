@@ -30,7 +30,6 @@ Routes (any subset via `operations=`): `GET /` (paginated list),
 
 from __future__ import annotations
 
-import inspect
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -39,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from ._auth.geofence import WITHHELD as _WITHHELD
 from ._auth.geofence import coarsen as _coarsen
 from ._auth.geofence import resolve_precision as _resolve_precision
+from ._awaitable import is_awaitable
 from .binding import _jsonable_any as _jsonable
 from .pagination import DEFAULT_SIZE as _DEFAULT_PAGE_SIZE
 from .pagination import MAX_SIZE as _MAX_PAGE_SIZE
@@ -767,7 +767,7 @@ async def _object_ok(
 ) -> bool:
     """Run a row-level authorizer; accept a bool or an AuthorizationDecision."""
     result = authorizer(request, op, instance)
-    if inspect.isawaitable(result):
+    if is_awaitable(result):
         result = await result
     allowed = getattr(result, "allowed", None)
     return bool(result) if allowed is None else bool(allowed)
