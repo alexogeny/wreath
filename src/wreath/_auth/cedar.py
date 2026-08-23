@@ -17,13 +17,13 @@ can insist on a *recent* one. Every one of them can be overridden individually.
 
 from __future__ import annotations
 
-import inspect
 import math
 import time
 import warnings
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol, cast
 
+from .._awaitable import is_awaitable
 from .._native import _core
 from .._reqcache import resolve_once
 from ..request import Request
@@ -757,18 +757,27 @@ class CedarAuthorizer:
         self, request: Request, identity: Identity, action_name: str
     ) -> tuple[object, object, object, dict[str, object]]:
         """Map the resource-independent half of one or more engine queries."""
-        principal = await _resolve(self._principal(identity))
-        action = await _resolve(self._action(action_name, request))
+        principal = (
+            _default_principal(identity)
+            if self._principal is _default_principal
+            else await _resolve(self._principal(identity))
+        )
+        action = (
+            _default_action(action_name, request)
+            if self._action is _default_action
+            else await _resolve(self._action(action_name, request))
+        )
         action_attributes = getattr(self._engine, "context_attributes_for_action", None)
         needed = action_attributes(action) if callable(action_attributes) else None
         principal_entity = getattr(self._engine, "principal_entity_for_action", None)
-        entities = (
-            None
-            if self._entities is _default_entities
-            and callable(principal_entity)
-            and not principal_entity(action)
-            else await _resolve(self._entities(request))
-        )
+        if self._entities is _default_entities:
+            entities = (
+                None
+                if callable(principal_entity) and not principal_entity(action)
+                else _default_entities(request)
+            )
+        else:
+            entities = await _resolve(self._entities(request))
         if self._context is _default_context and needed is not None:
             context: dict[str, object] = {}
             if "method" in needed:
@@ -1055,6 +1064,6 @@ class CedarAuthorizer:
 
 
 async def _resolve(value: Any) -> Any:
-    if inspect.isawaitable(value):
+    if is_awaitable(value):
         return await value
     return value

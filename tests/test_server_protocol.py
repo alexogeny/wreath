@@ -21,9 +21,10 @@ from _server_ingest import feed
 
 import wreath.app as app_module
 from wreath import Response, Wreath
+from wreath._compression import _dcz_decompress
 from wreath.auth import BearerTokenBackend, Identity, authenticated
 from wreath.cache_control import CacheControl
-from wreath.policy import CachePolicy, CompressionPolicy, HttpPolicy
+from wreath.policy import CachePolicy, CompressionPolicy, HttpPolicy, MaintenancePolicy
 from wreath.response import PreparedResponse
 from wreath.server import ServerConfig
 
@@ -143,6 +144,45 @@ async def drive(
         await _settle()
     await _settle()
     return transport
+
+
+@impl
+@pytest.mark.asyncio
+async def test_native_maintenance_policy_refuses_before_python_activation(
+    protocol_cls,
+) -> None:
+    maintenance = MaintenancePolicy(active=True, exempt_paths=("/ready",))
+    app = Wreath(http_policy=HttpPolicy(maintenance=maintenance))
+    called = 0
+
+    @app.get("/")
+    async def home(request):
+        nonlocal called
+        called += 1
+        return "home"
+
+    @app.get("/ready")
+    async def ready(request):
+        nonlocal called
+        called += 1
+        return "ready"
+
+    refused = await drive(
+        protocol_cls,
+        app,
+        [b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"],
+    )
+    admitted = await drive(
+        protocol_cls,
+        app,
+        [b"GET /ready HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"],
+    )
+
+    assert b"HTTP/1.1 503" in refused.buffer
+    assert b"Application is in maintenance mode" in refused.buffer
+    assert b"HTTP/1.1 200" in admitted.buffer
+    assert called == 1
+    assert maintenance.refused == 1
 
 
 # --- simple apps ------------------------------------------------------------
@@ -267,6 +307,42 @@ async def test_native_first_class_cache_and_compression_transform_before_egress(
     assert b"content-encoding: gzip\r\n" in head
     assert b"vary: accept-encoding\r\n" in head
     assert gzip.decompress(body) == b"native-policy" * 100
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_dcz_uses_the_registered_dictionary_and_standard_frame() -> None:
+    dictionary = b'{"kind":"dashboard","rows":[' + (b'{"id":41},' * 1000) + b"]}"
+    document = dictionary.replace(b'"id":41', b'"id":42')
+    compression = CompressionPolicy(minimum_size=0)
+    token = compression._configure_dcz_dictionary("application/json", dictionary)
+    app = Wreath(http_policy=HttpPolicy(compression=compression))
+
+    @app.get("/")
+    async def payload(request: Any) -> Response:
+        return Response(document, media_type=b"application/json")
+
+    request = (
+        GET[:-2]
+        + b"Accept-Encoding: dcz, gzip\r\nAvailable-Dictionary: "
+        + token
+        + b"\r\n\r\n"
+    )
+    transport = await drive(
+        _NativeHttpProtocol,
+        app,
+        [request],
+        extra={
+            "sockname": ("127.0.0.1", 8000),
+            "peername": ("127.0.0.1", 54321),
+            "sslcontext": object(),
+        },
+    )
+    head, body = bytes(transport.buffer).split(b"\r\n\r\n", 1)
+
+    assert b"content-encoding: dcz\r\n" in head
+    assert b"vary: accept-encoding, available-dictionary\r\n" in head
+    assert _dcz_decompress(body, dictionary, max_output_bytes=len(document)) == document
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")

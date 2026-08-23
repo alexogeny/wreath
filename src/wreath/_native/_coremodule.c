@@ -39,6 +39,10 @@ static PyMethodDef core_methods[] = {
     {"activate_path", wreath_activate_path, METH_VARARGS,
      "activate_path(params, plan) -> (kwargs, errors)\n"
      "Execute a startup-compiled path-scalar binding plan."},
+    {"bind_path_into",
+     (PyCFunction)(void (*)(void))wreath_bind_path_into, METH_FASTCALL,
+     "bind_path_into(params, plan, kwargs) -> errors | None\n"
+     "Populate an existing mixed-source binding without success allocations."},
     {"activate_path_call",
      (PyCFunction)(void (*)(void))wreath_activate_path_call, METH_FASTCALL,
      "activate_path_call(handler, request, plan, error_type) -> result\n"
@@ -545,6 +549,9 @@ static PyMethodDef core_methods[] = {
      "http_serialize_request(method, target, host, headers, body) -> bytes"},
     {"select_content_encoding", wreath_select_content_encoding, METH_O,
      "select_content_encoding(accept_encoding) -> str | None"},
+    {"select_prepared_content_encoding", wreath_select_prepared_content_encoding,
+     METH_VARARGS,
+     "select_prepared_content_encoding(accept_encoding, dcz_available) -> str | None"},
     {"is_compressible_content_type", wreath_is_compressible_content_type, METH_O,
      "is_compressible_content_type(content_type) -> bool"},
     {"cache_control_flags", wreath_cache_control_flags, METH_O,
@@ -589,6 +596,8 @@ static WreathCoreCAPI core_capi = {
     wreath_gzip_compress_workspace,
     wreath_gzip_fragment_compress_workspace,
     wreath_gzip_format_object,
+    wreath_replace_cookie_inplace,
+    wreath_replace_server_timing_inplace,
 };
 
 

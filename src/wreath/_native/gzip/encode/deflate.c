@@ -223,14 +223,44 @@ static void emit_tokens(wreath_gzip_encoder_enc *e, const wreath_gzip_encoder_it
   for (unsigned i = 0; i < n; i++) {
     uint32_t rl = tok[i].run_and_len;
     unsigned run = rl & GZ_SEQ_RUN_MASK;
-    unsigned len = rl >> GZ_SEQ_LEN_SHIFT;
+    unsigned len = (rl >> GZ_SEQ_LEN_SHIFT) & GZ_SEQ_LEN_MASK;
+#if GZ_EMIT_LITERAL_TRIPLES
+    /* DEFLATE literal codes are at most 15 bits.  Three therefore fit beside
+     * the bit writer's <8 pending bits in one uint64_t; four do not. */
+    while (run >= 3) {
+      uint32_t first = lit_pack[ip[0]], second = lit_pack[ip[1]],
+               third = lit_pack[ip[2]];
+      unsigned first_bits = first >> 16;
+      unsigned second_bits = second >> 16;
+      uint64_t bits = (first & 0xffffu) |
+          ((uint64_t)(second & 0xffffu) << first_bits) |
+          ((uint64_t)(third & 0xffffu) << (first_bits + second_bits));
+      bw_put(&w, bits, first_bits + second_bits + (third >> 16));
+      ip += 3;
+      run -= 3;
+    }
+    if (run == 2) {
+      uint32_t first = lit_pack[ip[0]], second = lit_pack[ip[1]];
+      unsigned first_bits = first >> 16;
+      bw_put(&w, (first & 0xffffu) |
+          ((uint64_t)(second & 0xffffu) << first_bits),
+          first_bits + (second >> 16));
+      ip += 2;
+      run = 0;
+    }
+    if (run) {
+      uint32_t p = lit_pack[*ip++];
+      bw_put(&w, p & 0xffff, p >> 16);
+    }
+#else
     while (run--) {
       uint32_t p = lit_pack[*ip++];
       bw_put(&w, p & 0xffff, p >> 16);
     }
+#endif
     if (len) {
       unsigned dist = tok[i].dist;
-      unsigned ds = wreath_gzip_encoder_dist_code(dist);
+      unsigned ds = rl >> GZ_SEQ_DIST_SHIFT;
       uint64_t d = e->d_pack[ds] | ((uint64_t)(dist - wreath_gzip_encoder_dist_base[ds]) << e->d_nb[ds]);
       unsigned lb = e->len_nb[len];
       bw_put(&w, e->len_pack[len] | (d << lb), lb + e->d_tot[ds]);
@@ -541,39 +571,12 @@ static size_t count_sequences(const uint8_t *in, const struct wreath_gzip_encode
   for (unsigned i = first; i < last; i++) {
     uint32_t rl = seq[i].run_and_len;
     unsigned run = rl & GZ_SEQ_RUN_MASK;
-    unsigned len = rl >> GZ_SEQ_LEN_SHIFT;
+    unsigned len = (rl >> GZ_SEQ_LEN_SHIFT) & GZ_SEQ_LEN_MASK;
     size_t end = pos + run;
     while (pos < end) ll[in[pos++]]++;
     if (len) {
       ll[257 + wreath_gzip_encoder_len_sym[len]]++;
-      dd[wreath_gzip_encoder_dist_code(seq[i].dist)]++;
-      pos += len;
-    }
-  }
-  return pos;
-}
-
-static size_t count_sequences_both(const uint8_t *in, const struct wreath_gzip_encoder_seq *seq,
-                                   unsigned first, unsigned last, size_t pos,
-                                   uint32_t *ll, uint32_t *dd,
-                                   uint32_t *cl, uint32_t *cd) {
-  for (unsigned i = first; i < last; i++) {
-    uint32_t rl = seq[i].run_and_len;
-    unsigned run = rl & GZ_SEQ_RUN_MASK;
-    unsigned len = rl >> GZ_SEQ_LEN_SHIFT;
-    size_t end = pos + run;
-    while (pos < end) {
-      unsigned b = in[pos++];
-      ll[b]++;
-      cl[b]++;
-    }
-    if (len) {
-      unsigned ls = 257 + wreath_gzip_encoder_len_sym[len];
-      unsigned ds = wreath_gzip_encoder_dist_code(seq[i].dist);
-      ll[ls]++;
-      dd[ds]++;
-      cl[ls]++;
-      cd[ds]++;
+      dd[rl >> GZ_SEQ_DIST_SHIFT]++;
       pos += len;
     }
   }
@@ -586,9 +589,14 @@ static void sync_histograms(wreath_gzip_encoder_enc *e, const uint8_t *in, size_
   if (need_chunk && e->hist_seq == e->ck_seq) {
     memset(e->ck_ll, 0, sizeof e->ck_ll);
     memset(e->ck_d, 0, sizeof e->ck_d);
-    e->hist_pos = count_sequences_both(in, e->tokens, e->hist_seq, e->nseq,
-                                       e->hist_pos, e->ll_freq, e->d_freq,
-                                       e->ck_ll, e->ck_d);
+    /* Count the unsynchronised suffix once into the empty chunk histogram,
+     * then merge its 316 dense counters into the whole-block histogram.  The
+     * old fused walk performed two scattered read/modify/writes per literal;
+     * this keeps the input pass to one hot 1 KiB table. */
+    e->hist_pos = count_sequences(in, e->tokens, e->hist_seq, e->nseq,
+                                  e->hist_pos, e->ck_ll, e->ck_d);
+    for (unsigned i = 0; i < 286; i++) e->ll_freq[i] += e->ck_ll[i];
+    for (unsigned i = 0; i < 30; i++) e->d_freq[i] += e->ck_d[i];
     e->hist_seq = e->nseq;
     return;
   }

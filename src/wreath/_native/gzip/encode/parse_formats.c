@@ -23,6 +23,9 @@
 #define GZPF_LOG_CHAIN 12
 #endif
 
+/* All ordinary format parsers maintain links for their multi-probe search. */
+#define GZPF_STORE_CHAIN 1
+
 /* JSON: per-byte short-match pricing wins a little ratio at lower cost than
  * the must-beat-both generic rule. */
 #define GZPF_NAME json
@@ -53,7 +56,13 @@
 #define GZPF_CHAIN 1
 #define GZPF_SHORTPRICE 0
 #define GZPF_SHORTMODE 0
+#undef GZPF_STORE_CHAIN
+#define GZPF_STORE_CHAIN 0
 #include "parse_format_template.h"
+
+/* The remaining parsers walk more than the head candidate. */
+#undef GZPF_STORE_CHAIN
+#define GZPF_STORE_CHAIN 1
 
 /* Plaintext is the generic encoder's narrowest lead over libdeflate, so spend
  * fewer probes: the ratio remains within one percent while the instruction
@@ -71,3 +80,4 @@
 #define GZPF_SHORTPRICE 1
 #define GZPF_SHORTMODE 3
 #include "parse_format_template.h"
+#undef GZPF_STORE_CHAIN

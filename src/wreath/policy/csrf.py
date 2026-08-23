@@ -14,9 +14,10 @@ app.configure_http_policy(HttpPolicy(
 async def whoami(request):
     return {"csrf": csrf_token(request)}
 ```
-The resubmitted token is read from a request *header* only -- `x-csrf-token` by
-default. A plain HTML form post cannot carry one, so this suits a script client
-that reads the cookie or calls `csrf_token` and sets the header itself.
+The resubmitted token is read from `x-csrf-token` by default. Set
+`form_field="csrf_token"` when ordinary HTML forms also need to submit it in
+their urlencoded or multipart body; header-only deployments retain the native
+zero-body-read fast path.
 
 Mount `ProxyPolicy` ahead of this one behind a TLS-terminating proxy;
 see `CsrfPolicy` for why the origin check depends on it.
@@ -166,8 +167,8 @@ class CsrfPolicy:
     exactly the check it had before, rather than to nothing.
 
     Token validation is two independent checks, and both must pass. The double
-    submit: the request carries the token in the configured header -- a header, never a
-    form field, so a classic HTML form post cannot satisfy it -- and in the cookie,
+    submit: the request carries the token in the configured header, or in the
+    explicitly configured form field, and in the cookie,
     the two are byte-equal under a constant-time compare, and the cookie's own
     HMAC signature verifies and is within `max_age`. The origin check: the
     request's `Origin` header, or failing that the origin parsed out of
@@ -214,6 +215,8 @@ class CsrfPolicy:
         secret: HMAC key, at least 32 bytes. A str is encoded as UTF-8.
         cookie_name: Cookie the token is written to and read from.
         header_name: Request header the resubmitted token is read from.
+        form_field: Optional urlencoded/multipart text field carrying the token.
+            The header wins when both are present. Repeated fields are refused.
         max_age: Token lifetime in seconds, and the cookie `Max-Age`.
         secure: Mark the cookie `Secure`. Leave True outside local plaintext development.
         same_site: Cookie `SameSite`, one of strict, lax, or none.
@@ -238,6 +241,7 @@ class CsrfPolicy:
         "exempt_errors",
         "_header_name",
         "_header_name_bytes",
+        "_form_field",
         "_max_age",
         "_same_site",
         "_secret",
@@ -254,6 +258,7 @@ class CsrfPolicy:
         *,
         cookie_name: str = "wreath_csrf",
         header_name: str = "x-csrf-token",
+        form_field: str | None = None,
         max_age: int = 2 * 60 * 60,
         secure: bool = True,
         same_site: str = "lax",
@@ -267,6 +272,8 @@ class CsrfPolicy:
             raise ValueError("CSRF secret must contain at least 32 bytes")
         if not _is_http_token(cookie_name) or not _is_http_token(header_name):
             raise ValueError("CSRF cookie and header names must be valid HTTP tokens")
+        if form_field is not None and (not isinstance(form_field, str) or not form_field):
+            raise ValueError("CSRF form_field must be a non-empty string or None")
         # The browser enforces these prefixes by *dropping* a cookie that does
         # not meet them, so a mismatch here is a CSRF cookie that silently never
         # arrives (RFC 6265bis 4.1.3).
@@ -286,6 +293,7 @@ class CsrfPolicy:
         self._cookie_prefix = f"{cookie_name}=".encode("ascii")
         self._header_name = header_name
         self._header_name_bytes = header_name.encode("ascii")
+        self._form_field = form_field
         self._max_age = max_age
         self._secure = secure
         self._same_site = normalized_same_site
@@ -369,10 +377,10 @@ class CsrfPolicy:
                 HeaderSpec(
                     self._header_name,
                     description=(
-                        "The CSRF token, resubmitted from the cookie. Read from "
-                        "this header only, never from the form body."
+                        "The CSRF token, resubmitted from the cookie. This "
+                        "header takes precedence over a configured form field."
                     ),
-                    required=True,
+                    required=self._form_field is None,
                 ),
             ),
             responses=(
@@ -399,6 +407,45 @@ class CsrfPolicy:
         request.state.__setattr__(_STATE_TOKEN, token)
         request.state.__setattr__(_STATE_ISSUE, True)
         return token
+
+    def _check_exemption(self, request: Request):
+        try:
+            if self._exempt is not None and self._exempt(request):
+                return True
+            return None
+        except Exception:  # noqa: BLE001
+            # Application code controls a security decision. Fail closed and
+            # retain an observable counter so a broken predicate is diagnosable.
+            self.exempt_errors += 1
+            return ProblemResponse(
+                status=403, title="Forbidden", detail="CSRF validation failed"
+            )
+
+    def _validate_submission(
+        self,
+        request: Request,
+        headers: dict[bytes, bytes],
+        submitted: bytes | None,
+        now: int,
+    ):
+        cookie = request.cookies.get(self._cookie_name)
+        valid, issued = False, now
+        # `latin-1` cannot raise on an attacker-controlled cookie where ASCII
+        # could turn a would-be 403 into a 500.
+        if (
+            cookie is not None
+            and submitted is not None
+            and hmac.compare_digest(cookie.encode("latin-1", "replace"), submitted)
+        ):
+            valid, issued = self._validate(cookie, now)
+        if not valid or not self._origin_valid(request, headers):
+            return ProblemResponse(
+                status=403, title="Forbidden", detail="CSRF validation failed"
+            )
+        renew = now - issued >= self._max_age * 3 // 4
+        request.state.__setattr__(_STATE_TOKEN, self._new_token(now) if renew else cookie)
+        request.state.__setattr__(_STATE_ISSUE, renew)
+        return None
 
     def _ingress_sync(self, request: Request):
         """Answer from `Sec-Fetch-Site` when the browser sent it; else the token.
@@ -453,50 +500,51 @@ class CsrfPolicy:
             request.state.__setattr__(_STATE_ISSUE, renew)
             return None
 
-        try:
-            if self._exempt is not None and self._exempt(request):
-                return None
-        except Exception:  # noqa: BLE001
-            # `exempt` is application code standing on a security decision, so
-            # failing closed is the only defensible direction and the broad
-            # catch is deliberate: a predicate that raises must not become an
-            # exemption. What it must not also be is invisible -- a typo in the
-            # predicate refuses every unsafe request forever, and a wall of 403s
-            # reads exactly like a site under attack rather than one that is
-            # broken. Counting separates "this request was refused" from "the
-            # check cannot run", which have different fixes.
-            self.exempt_errors += 1
-            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
+        exemption = self._check_exemption(request)
+        if exemption is True:
+            return None
+        if exemption is not None:
+            return exemption
 
         headers = request._index_headers()
-        cookie = request.cookies.get(self._cookie_name)
         submitted = headers.get(self._header_name_bytes)
-        valid, issued = False, now
-        # `latin-1` cannot raise on a str that came out of header parsing,
-        # where `ascii` could: a cookie value is attacker-controlled, and an
-        # encode error there turned a would-be 403 into a 500.
-        if (
-            cookie is not None
-            and submitted is not None
-            and hmac.compare_digest(cookie.encode("latin-1", "replace"), submitted)
-        ):
-            valid, issued = self._validate(cookie, now)
-        if not valid or not self._origin_valid(request, headers):
-            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
-        # Renewed here as well as on safe methods. A client that only ever POSTs
-        # -- an SPA doing background writes, a form-less API caller -- never took
-        # the safe-method path, so its token aged out and every write started
-        # answering 403 with nothing to refresh it.
-        renew = now - issued >= self._max_age * 3 // 4
-        request.state.__setattr__(
-            _STATE_TOKEN, self._new_token(now) if renew else cookie
-        )
-        request.state.__setattr__(_STATE_ISSUE, renew)
-        return None
+        return self._validate_submission(request, headers, submitted, now)
 
     async def _ingress(self, request: Request):
-        """Reference executor wrapper; compiled policy uses `_ingress_sync`."""
-        return self._ingress_sync(request)
+        """Validate a header token, or lazily parse an enabled form field."""
+        if (
+            self._form_field is None
+            or request.header(_SEC_FETCH_SITE) is not None
+            or request.method in _SAFE_METHODS
+        ):
+            return self._ingress_sync(request)
+
+        exemption = self._check_exemption(request)
+        if exemption is True:
+            return None
+        if exemption is not None:
+            return exemption
+
+        now = int(time.time())
+        headers = request._index_headers()
+        submitted = headers.get(self._header_name_bytes)
+        if submitted is None:
+            content_type = headers.get(b"content-type", b"").lower()
+            media_type = content_type.partition(b";")[0].strip()
+            if media_type in {
+                b"application/x-www-form-urlencoded",
+                b"multipart/form-data",
+            }:
+                try:
+                    values = (await request.form()).getlist(self._form_field)
+                except ValueError:
+                    values = []
+                if len(values) == 1:
+                    try:
+                        submitted = values[0].encode("ascii")
+                    except UnicodeEncodeError:
+                        submitted = None
+        return self._validate_submission(request, headers, submitted, now)
 
     def _egress_inplace(self, request: Request, response) -> None:
         """Write the CSRF cookie when `_ingress` minted or renewed the token.

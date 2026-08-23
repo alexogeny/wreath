@@ -204,6 +204,32 @@ async def test_accepted_response_receives_native_egress_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_timing_replaces_only_its_metric_in_existing_fields() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="total"))
+    )
+
+    @app.get("/timed")
+    async def timed(request: Any) -> Response:
+        return Response(
+            b"ok",
+            headers=[
+                (b"server-timing", b"db;dur=2, total;dur=9"),
+                (b"server-timing", b"cache;dur=1"),
+            ],
+        )
+
+    app._compile_routes()
+    response = await serve(
+        app, b"GET /timed HTTP/1.1\r\nhost: allowed.test\r\n\r\n"
+    )
+
+    assert response.count(b"server-timing:") == 1
+    assert b"server-timing: db;dur=2, cache;dur=1, total;dur=" in response
+    assert b"total;dur=9" not in response
+
+
+@pytest.mark.asyncio
 async def test_html_response_materializes_mutable_headers_for_native_egress() -> None:
     app = Wreath(http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy()))
 

@@ -837,10 +837,10 @@ def foreign_findings(
     # handler is a web.Request; no import in the module mentions it, and the
     # import table cannot resolve a parameter. Restricted to parameters of the
     # enclosing function so an unrelated local of the same name is untouched.
-    param_names: tuple[str, ...] = ()
+    param_names: set[str] = set()
     for framework, names in _FRAMEWORK_PARAMS.items():
         if framework in roots:
-            param_names += names
+            param_names.update(names)
     if param_names:
         rule = "foreign.aiohttp.request" if aio else "foreign.pyramid.request"
         for func in ast.walk(tree):

@@ -470,6 +470,8 @@ async def test_a_kind_with_no_digest_window_sends_every_time() -> None:
         await notify.send(PhotoShared("Ada"), to=recipient, now=1000.0)
     assert len(sender.messages) == 3
     assert notify.deduplicated == 0
+    assert notify._recent == {}
+    assert notify._recent_expirations == []
 
 
 async def test_rate_limit_zero_disables_the_cap() -> None:
@@ -483,6 +485,105 @@ async def test_rate_limit_zero_disables_the_cap() -> None:
         await notify.send(PhotoShared(str(index)), to=recipient)
     assert len(sender.messages) == 12
     assert notify.rate_limited == 0
+    assert notify._counts == {}
+
+
+async def test_expired_notification_state_is_swept_without_revisiting_recipients() -> None:
+    sender = CapturingEmailSender()
+    notify = Notifications(channels=[Email(sender)], rate_limit=0)
+    notify.kind("photo_shared", digest=10)(PhotoShared)
+
+    for index in range(100):
+        await notify.send(
+            PhotoShared(str(index)),
+            to=Recipient(f"u{index}", email=f"u{index}@example.com"),
+            now=1000.0,
+        )
+    assert len(notify._recent) == 100
+
+    await notify.send(
+        PhotoShared("later"),
+        to=Recipient("later", email="later@example.com"),
+        now=1011.0,
+    )
+    assert set(notify._recent) == {("photo_shared", "later")}
+
+
+async def test_digest_state_is_swept_during_non_digest_traffic() -> None:
+    @dataclass
+    class Immediate:
+        subject: str
+
+    sender = CapturingEmailSender()
+    notify = Notifications(channels=[Email(sender)], rate_limit=0)
+    notify.kind("photo_shared", digest=10)(PhotoShared)
+    notify.kind("immediate")(Immediate)
+
+    for index in range(100):
+        await notify.send(
+            PhotoShared(str(index)),
+            to=Recipient(f"u{index}", email=f"u{index}@example.com"),
+            now=1000.0,
+        )
+
+    await notify.send(
+        Immediate("later"),
+        to=Recipient("later", email="later@example.com"),
+        now=1011.0,
+    )
+
+    assert notify._recent == {}
+    assert notify._recent_expirations == []
+
+
+async def test_rate_state_expires_while_a_long_digest_suppresses_delivery() -> None:
+    sender = CapturingEmailSender()
+    notify = Notifications(channels=[Email(sender)], rate_limit=2)
+    notify.kind("photo_shared", digest=7200)(PhotoShared)
+    recipient = Recipient("u1", email="u@example.com")
+
+    await notify.send(PhotoShared("first"), to=recipient, now=1000.0)
+    result = await notify.send(PhotoShared("duplicate"), to=recipient, now=4601.0)
+
+    assert result.deduplicated
+    assert notify._counts == {}
+    assert notify._count_expirations == []
+
+
+async def test_an_expired_rate_window_releases_its_recipient_state() -> None:
+    sender = CapturingEmailSender()
+    notify = Notifications(channels=[Email(sender)], rate_limit=2)
+    notify.kind("photo_shared")(PhotoShared)
+    recipient = Recipient("u1", email="u@example.com")
+
+    await notify.send(PhotoShared("one"), to=recipient, now=1000.0)
+    await notify.send(PhotoShared("two"), to=recipient, now=1001.0)
+    assert not notify._within_rate_limit(recipient, 1002.0)
+    assert notify._within_rate_limit(recipient, 4602.0)
+    assert notify._counts == {}
+
+
+async def test_expired_rate_windows_are_swept_without_revisiting_recipients() -> None:
+    sender = CapturingEmailSender()
+    notify = Notifications(channels=[Email(sender)], rate_limit=2)
+    notify.kind("photo_shared")(PhotoShared)
+
+    for index in range(100):
+        await notify.send(
+            PhotoShared(str(index)),
+            to=Recipient(f"u{index}", email=f"u{index}@example.com"),
+            now=1000.0,
+        )
+    assert len(notify._counts) == 100
+
+    await notify.send(
+        PhotoShared("later"),
+        to=Recipient("later", email="later@example.com"),
+        now=4601.0,
+    )
+
+    assert set(notify._counts) == {"later"}
+    assert len(notify._count_expirations) == 1
 
 
 async def test_the_digest_window_is_only_armed_by_a_delivery() -> None:

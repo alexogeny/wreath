@@ -11,9 +11,15 @@ and cannot be installed with `add_middleware()`.
 
 ::: wreath.policy.cache
 
+::: wreath.policy.admission
+
 ::: wreath.policy.compression
 
 ::: wreath.policy.csrf
+
+::: wreath.policy.deadline
+
+::: wreath.policy.maintenance
 
 ::: wreath.policy.proxy
 
@@ -23,9 +29,13 @@ and cannot be installed with `add_middleware()`.
 
 ::: wreath.policy.request_id
 
+::: wreath.policy.request_decompression
+
 ::: wreath.policy.security
 
 ::: wreath.policy.sessions
+
+::: wreath.policy.signed_routes
 
 ::: wreath.policy.timing
 

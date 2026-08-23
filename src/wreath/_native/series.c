@@ -1460,13 +1460,17 @@ series_chart_lttb(const double *values, const double *prefix,
         double average_y_delta = average_y - values[anchor];
         double area_constant = -anchor_x * values[anchor] -
                                (double)anchor * average_y_delta;
+        /* The x contribution is an arithmetic progression.  Carrying it
+         * forward removes one integer-to-double conversion and multiply per
+         * candidate from the LTTB inner loop. */
+        double linear_area = (double)range_start * average_y_delta + area_constant;
         for (Py_ssize_t index = range_start; index < range_end; index++) {
-            double area = fabs(anchor_x * values[index] +
-                               (double)index * average_y_delta + area_constant);
+            double area = fabs(anchor_x * values[index] + linear_area);
             if (area > best_area) {
                 best_area = area;
                 best = index;
             }
+            linear_area += average_y_delta;
         }
         selected[bucket + 1] = best;
         anchor = best;

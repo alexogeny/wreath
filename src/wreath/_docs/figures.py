@@ -257,12 +257,13 @@ def _heap(target: tuple[int, int]) -> str:
     while path[-1][0]:
         depth, slot = path[-1]
         path.append((depth - 1, slot // 2))
+    path_keys = set(path)
     for step, key in enumerate(path):
         x, y = positions[key]
         parts.append(f'<circle class="f-node f-sift" style="--t:{1.0 + step * 0.3:.2f}" '
                      f'cx="{x:.1f}" cy="{y:.1f}" r="7"/>')
     for key, (x, y) in positions.items():
-        if key not in path:
+        if key not in path_keys:
             parts.append(f'<circle class="f-node" cx="{x:.1f}" cy="{y:.1f}" r="7"/>')
     tx, ty = positions[target]
     parts.append(f'<circle class="f-mark" cx="{tx:.1f}" cy="{ty:.1f}" r="11"/>')

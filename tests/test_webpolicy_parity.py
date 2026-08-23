@@ -120,6 +120,23 @@ def test_encoding_selection(value: bytes, expected: str | None) -> None:
     assert _core.select_content_encoding(value) == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "available", "expected"),
+    [
+        (b"dcz, gzip, zstd", True, "dcz"),
+        (b"dcz, gzip, zstd", False, "gzip"),
+        (b"dcz;q=1, zstd;q=1, gzip;q=0.5", False, "zstd"),
+        (b"dcz;q=0.5, gzip, zstd", True, "zstd"),
+        (b"dcz", False, None),
+        (b"dcz;q=bogus, gzip", True, "gzip"),
+    ],
+)
+def test_prepared_encoding_selection_is_one_native_parse(
+    value: bytes, available: bool, expected: str | None
+) -> None:
+    assert _core.select_prepared_content_encoding(value, available) == expected
+
+
 def test_policy_helpers_follow_the_rfcs_they_cite() -> None:
     # A structured suffix with a `+json` subtype is JSON for every purpose that
     # matters here (RFC 6839 §3.1), and the `charset` parameter is not part of

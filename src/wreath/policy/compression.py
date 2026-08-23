@@ -14,12 +14,12 @@ from .._compression import (
 )
 from .._webpolicy import (
     NO_TRANSFORM,
+    _select_prepared_content_encoding,
     append_vary,
     cache_control_flags,
     find_response_header,
     is_compressible_content_type,
     replace_content_length,
-    select_content_encoding,
 )
 from ..compression import (
     ZSTD_DEFAULT_LEVEL,
@@ -59,64 +59,6 @@ def _format_index(value: str | bytes) -> int:
     if media in {"plaintext", "text/plain"}:
         return 6
     return 0
-
-
-def _coding_qualities(value: bytes) -> dict[bytes, int]:
-    """Parse only the codings needed by the prepared-response path."""
-    qualities: dict[bytes, int] = {}
-    for raw_item in value.lower().split(b","):
-        token, *parameters = raw_item.strip().split(b";")
-        quality = 1000
-        for parameter in parameters:
-            name, separator, raw_quality = parameter.strip().partition(b"=")
-            if name.strip() != b"q":
-                continue
-            if not separator:
-                quality = 0
-                continue
-            raw_quality = raw_quality.strip()
-            if raw_quality == b"0":
-                quality = 0
-            elif raw_quality == b"1":
-                quality = 1000
-            elif (
-                3 <= len(raw_quality) <= 5
-                and raw_quality[1:2] == b"."
-                and raw_quality[:1] in (b"0", b"1")
-                and raw_quality[2:].isdigit()
-                and (raw_quality[:1] == b"0" or not raw_quality[2:].strip(b"0"))
-            ):
-                quality = int(raw_quality[2:].ljust(3, b"0")) if raw_quality[:1] == b"0" else 1000
-            else:
-                quality = 0
-        qualities[token.strip()] = quality
-    return qualities
-
-
-def _select_prepared_coding(
-    accepted: bytes,
-    *,
-    dcz_available: bool,
-) -> str | None:
-    """Select DCZ first, then the gzip ladder, without overriding client q-values."""
-    ordinary = select_content_encoding(accepted)
-    qualities = _coding_qualities(accepted)
-    gzip_quality = qualities[b"gzip"] if b"gzip" in qualities else qualities.get(b"*", 0)
-    zstd_quality = qualities.get(b"zstd", 0)
-    dcz_quality = qualities.get(b"dcz", 0)
-    ordinary_quality = max(gzip_quality, zstd_quality)
-
-    # A client that made DCZ at least as desirable as every ordinary coding is
-    # asking for the prepared-response ladder.  An exact dictionary match takes
-    # the first rung.  If it misses, gzip wins an ordinary tie so its prepared
-    # fragment gets the next attempt; the gzip codec itself falls through to
-    # the format-aware encoder when the stable span does not match.
-    if dcz_quality > 0 and dcz_quality >= ordinary_quality:
-        if dcz_available:
-            return "dcz"
-        if gzip_quality > 0 and gzip_quality >= zstd_quality:
-            return "gzip"
-    return ordinary
 
 
 def _encoded_etag(value: bytes, coding: str) -> bytes | None:
@@ -251,9 +193,9 @@ class CompressionPolicy:
         self.gzip_level = gzip_level
         self._gzip_workspace = _gzip_encoder_new()
         self._dcz_dictionaries: list[tuple[bytes, bytes, object] | None] = [None] * _FORMAT_COUNT
-        self._gzip_fragments: list[tuple[int, int, bytes, bytes, int] | None] = [
-            None
-        ] * _FORMAT_COUNT
+        self._gzip_fragments: tuple[
+            tuple[int, int, bytes, bytes, int] | None, ...
+        ] = (None,) * _FORMAT_COUNT
         self.zstd_level = zstd_level
         self.compress_streaming = compress_streaming
         self.compress_authenticated = compress_authenticated
@@ -284,13 +226,15 @@ class CompressionPolicy:
             self.gzip_level,
             format,
         )
-        self._gzip_fragments[_format_index(format)] = (
+        fragments = list(self._gzip_fragments)
+        fragments[_format_index(format)] = (
             prefix_bytes,
             suffix_bytes,
             middle,
             cached,
             self.gzip_level,
         )
+        self._gzip_fragments = tuple(fragments)
 
     def describe(self):
         """What negotiation this policy takes part in.
@@ -362,7 +306,7 @@ class CompressionPolicy:
             and isinstance(response, Response)
             and request._header_bytes(b"available-dictionary") == dcz_entry[0]
         )
-        coding = _select_prepared_coding(accepted, dcz_available=dcz_available)
+        coding = _select_prepared_content_encoding(accepted, dcz_available)
         if coding is None:
             return response
         etag = find_response_header(headers, b"etag")
@@ -382,7 +326,7 @@ class CompressionPolicy:
                     response.body,
                     level,
                     content_type,
-                    tuple(self._gzip_fragments),
+                    self._gzip_fragments,
                 )
                 if coding == "gzip"
                 else zstd_compress(response.body, level)

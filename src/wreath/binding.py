@@ -72,6 +72,7 @@ from time import monotonic_ns as _monotonic_ns
 from typing import Any
 from uuid import UUID
 
+from ._awaitable import is_awaitable as _awaitable
 from ._b64 import b64_encode as _b64encode_str
 from ._codecs import parse_qs
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
@@ -1735,7 +1736,9 @@ class AppScope:
         pending = self._pending.get(fn)
         if pending is not None:
             # Someone else is building this key; wait on their result.
-            return await pending
+            # A cancelled waiter must not cancel the shared future and thereby
+            # cancel every other first request waiting for the same singleton.
+            return await asyncio.shield(pending)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[fn] = future
         try:
@@ -1793,36 +1796,7 @@ class AppScope:
             raise failure
 
 
-_GENERATOR_TYPE = types.GeneratorType
 _COROUTINE_TYPE = types.CoroutineType
-_ITERABLE_COROUTINE = inspect.CO_ITERABLE_COROUTINE
-
-
-def _awaitable(value: Any) -> bool:
-    """`inspect.isawaitable`, without its price.
-
-    A dependency written `def` may still hand back something to await, so the
-    check cannot be dropped -- but `inspect.isawaitable` costs ~390ns, because
-    it finishes on `isinstance(value, collections.abc.Awaitable)` and an ABC
-    instance check is ~220ns of that on its own. It ran on the return value of
-    every synchronous dependency, which is why a `def` dependency measured
-    *dearer* than an `async def` one: the async branch short-circuits before it.
-
-    `collections.abc.Awaitable` decides membership by looking for `__await__`
-    on the type, so asking the type directly answers the same question at a
-    fifth of the cost. The two disagree on exactly one input: a class
-    `register()`ed onto the ABC without defining `__await__`. That object was
-    never awaitable -- `await` looks the method up on the type too -- so the old
-    answer only bought a `TypeError` one line later.
-    """
-    cls = value.__class__
-    if hasattr(cls, "__await__"):
-        return True
-    # A generator decorated with `@types.coroutine` is awaitable and carries no
-    # `__await__`; it is the one shape the type alone cannot answer.
-    if cls is _GENERATOR_TYPE:
-        return bool(value.gi_code.co_flags & _ITERABLE_COROUTINE)
-    return False
 
 
 def _compile_dependency(
@@ -2768,13 +2742,18 @@ def compile_binder(
         than merely cheap.
         """
         errors: list[dict[str, Any]] | None = None
-        for name, alias, annotation in path_specs:
-            try:
-                kwargs[name] = _convert_scalar(
-                    annotation, request.path_params[alias], ("path", alias)
-                )
-            except ValidationError as invalid:
-                errors = invalid.errors if errors is None else [*errors, *invalid.errors]
+        if compiled_path_entries:
+            errors = _core.bind_path_into(
+                request.path_params, compiled_path_entries, kwargs
+            )
+        else:
+            for name, alias, annotation in path_specs:
+                try:
+                    kwargs[name] = _convert_scalar(
+                        annotation, request.path_params[alias], ("path", alias)
+                    )
+                except ValidationError as invalid:
+                    errors = invalid.errors if errors is None else [*errors, *invalid.errors]
         if query_specs:
             # `request.query_string`, not `request.scope[...]`: on the native
             # server the scope is a lazily materialized dict over

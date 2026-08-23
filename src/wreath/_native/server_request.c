@@ -449,6 +449,39 @@ context_header(WreathRequestContext *self, PyObject *key)
 }
 
 static PyObject *
+context_single_header(WreathRequestContext *self, PyObject *key)
+{
+    if (!PyBytes_Check(key)) {
+        PyErr_SetString(PyExc_TypeError, "header name must be bytes");
+        return NULL;
+    }
+    const char *wanted = PyBytes_AS_STRING(key);
+    Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
+    Py_ssize_t count = wreath_headers_count(self->headers);
+    if (count < 0) return NULL;
+    Py_ssize_t found = -1;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *candidate;
+        const char *ignored_value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t ignored_value_size;
+        if (wreath_headers_view(
+                self->headers, index, &candidate, &candidate_size,
+                &ignored_value, &ignored_value_size) < 0) return NULL;
+        if (candidate_size != wanted_size ||
+            memcmp(candidate, wanted, (size_t)wanted_size) != 0) continue;
+        if (found >= 0) {
+            PyErr_SetString(PyExc_ValueError, "request header occurs more than once");
+            return NULL;
+        }
+        found = index;
+    }
+    if (found < 0) Py_RETURN_NONE;
+    PyObject *value = wreath_headers_value_borrowed(self->headers, found);
+    return value == NULL ? NULL : Py_NewRef(value);
+}
+
+static PyObject *
 context_header_index(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
 {
     if (context_build_header_index(self) < 0) return NULL;
@@ -477,6 +510,21 @@ context_set_header(WreathRequestContext *self, PyObject *args)
     PyObject *value;
     if (!PyArg_UnpackTuple(args, "_set_header", 2, 2, &name, &value)) return NULL;
     if (wreath_headers_set_first(self->headers, name, value) < 0) return NULL;
+    PyMem_Free(self->header_index);
+    self->header_index = NULL;
+    self->header_index_capacity = 0;
+    self->header_unique_count = 0;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+context_remove_headers(WreathRequestContext *self, PyObject *args)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (wreath_headers_remove_all(
+                self->headers, PyTuple_GET_ITEM(args, index)) < 0) return NULL;
+    }
     PyMem_Free(self->header_index);
     self->header_index = NULL;
     self->header_index_capacity = 0;
@@ -956,11 +1004,13 @@ static PyMethodDef context_methods[] = {
     {"_bearer_token", (PyCFunction)context_bearer_token, METH_NOARGS, NULL},
     {"_bearer_verify", (PyCFunction)context_bearer_verify, METH_O, NULL},
     {"_header", (PyCFunction)context_header, METH_O, NULL},
+    {"_single_header", (PyCFunction)context_single_header, METH_O, NULL},
     {"_header_text", (PyCFunction)(void (*)(void))context_header_text,
      METH_FASTCALL, NULL},
     {"_header_index", (PyCFunction)context_header_index, METH_NOARGS, NULL},
     {"get", (PyCFunction)(void (*)(void))context_header_get, METH_FASTCALL, NULL},
     {"_set_header", (PyCFunction)context_set_header, METH_VARARGS, NULL},
+    {"_remove_headers", (PyCFunction)context_remove_headers, METH_VARARGS, NULL},
     {"_parse_cookies", (PyCFunction)context_parse_cookies, METH_VARARGS, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},

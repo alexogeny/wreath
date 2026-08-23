@@ -449,6 +449,11 @@ def scan_text(path: str, text: str) -> list[Finding]:
 STATIC_CACHE = re.compile(r"\bstatic\s+PyObject\s*\*\s*(\w+)\s*=\s*NULL\s*;")
 
 
+def _has_null_guard(code_lines: list[str], start: int, end: int, name: str) -> bool:
+    guard = re.compile(rf"\bif\s*\(\s*{re.escape(name)}\s*==\s*NULL\s*\)")
+    return any(guard.search(code_lines[index]) for index in range(start, end + 1))
+
+
 def _is_lazy_cached_import(code_lines: list[str], index: int) -> bool:
     """True when this import is a guarded one-time cache, not per-item work.
 
@@ -462,8 +467,7 @@ def _is_lazy_cached_import(code_lines: list[str], index: int) -> bool:
         match = STATIC_CACHE.search(code_lines[i])
         if not match:
             continue
-        guard = re.compile(rf"\bif\s*\(\s*{re.escape(match.group(1))}\s*==\s*NULL\s*\)")
-        return any(guard.search(code_lines[j]) for j in range(i, index + 1))
+        return _has_null_guard(code_lines, i, index, match.group(1))
     return False
 
 

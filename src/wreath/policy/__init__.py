@@ -8,23 +8,26 @@ and their ordering is fixed by `HttpPolicy` rather than by priorities.
 from __future__ import annotations
 
 from os import urandom as _urandom
-from typing import Any
+from typing import Any, cast
 
-from .._compression import _dcz_compress
+from .._compression import _dcz_compress, require_zstd
 from .._webpolicy import origin_matches as _native_origin_matches
 from .._webpolicy import replace_cookie as _native_replace_cookie
+from .admission import AdmissionStats, ConcurrencyPolicy
 from .cache import CachePolicy
-from .compression import CompressionPolicy, zstd_compress
+from .compression import CompressionPolicy
 from .cors import CorsPolicy
 from .csrf import CsrfPolicy, csrf_token
 from .csrf import _csrf_new_token as _native_csrf_new_token
 from .csrf import _csrf_validate as _native_csrf_validate
+from .deadline import DeadlinePolicy
 from .idempotency import (
     IdempotencyPolicy,
     IdempotencyStore,
     MemoryIdempotencyStore,
     PostgresIdempotencyStore,
 )
+from .maintenance import MaintenancePolicy
 from .proxy import ProxyPolicy
 from .ratelimit import (
     MemoryRateLimitStore,
@@ -34,9 +37,16 @@ from .ratelimit import (
     TieredRateLimitPolicy,
     principal_key,
 )
+from .request_decompression import RequestDecompressionPolicy
 from .request_id import RequestIdPolicy, request_id
-from .security import SecurityHeadersPolicy, TrustedHostPolicy, WebSocketOriginPolicy
+from .security import (
+    SecurityHeadersPolicy,
+    TrustedHostPolicy,
+    WebSocketOriginPolicy,
+    csp_nonce,
+)
 from .sessions import SessionPolicy, rotate_session
+from .signed_routes import SignedRoutePolicy
 from .timing import ServerTimingPolicy, elapsed
 from .traffic import (
     AI_SCRAPERS,
@@ -69,6 +79,7 @@ class HttpPolicy:
     __slots__ = (
         "_components",
         "_dynamic_always",
+        "_has_action",
         "_has_activation",
         "_has_post_auth",
         "_native_ingress_only",
@@ -78,13 +89,18 @@ class HttpPolicy:
         "csrf",
         "cache_control",
         "compression",
+        "concurrency",
+        "deadline",
         "idempotency",
+        "maintenance",
         "proxy",
         "rate_limit",
         "principal_rate_limit",
+        "request_decompression",
         "request_id",
         "security_headers",
         "server_timing",
+        "signed_routes",
         "traffic",
         "session",
         "trusted_host",
@@ -99,8 +115,10 @@ class HttpPolicy:
         ai_scraping: AIScrapingPolicy | None = None,
         rate_limit: RateLimitPolicy | None = None,
         principal_rate_limit: RateLimitPolicy | TieredRateLimitPolicy | None = None,
+        request_decompression: RequestDecompressionPolicy | None = None,
         request_id: RequestIdPolicy | None = None,
         server_timing: ServerTimingPolicy | None = None,
+        signed_routes: SignedRoutePolicy | None = None,
         traffic: TrafficPolicy | None = None,
         cors: CorsPolicy | None = None,
         csrf: CsrfPolicy | None = None,
@@ -110,10 +128,14 @@ class HttpPolicy:
         idempotency: IdempotencyPolicy | None = None,
         cache_control: CachePolicy | None = None,
         compression: CompressionPolicy | None = None,
+        concurrency: ConcurrencyPolicy | None = None,
+        deadline: DeadlinePolicy | None = None,
+        maintenance: MaintenancePolicy | None = None,
     ) -> None:
         values = (
             ("proxy", proxy, ProxyPolicy),
             ("trusted_host", trusted_host, TrustedHostPolicy),
+            ("maintenance", maintenance, MaintenancePolicy),
             ("ai_scraping", ai_scraping, AIScrapingPolicy),
             ("traffic", traffic, TrafficPolicy),
             ("rate_limit", rate_limit, RateLimitPolicy),
@@ -121,6 +143,12 @@ class HttpPolicy:
                 "principal_rate_limit",
                 principal_rate_limit,
                 (RateLimitPolicy, TieredRateLimitPolicy),
+            ),
+            ("signed_routes", signed_routes, SignedRoutePolicy),
+            (
+                "request_decompression",
+                request_decompression,
+                RequestDecompressionPolicy,
             ),
             ("request_id", request_id, RequestIdPolicy),
             ("server_timing", server_timing, ServerTimingPolicy),
@@ -132,6 +160,8 @@ class HttpPolicy:
             ("idempotency", idempotency, IdempotencyPolicy),
             ("cache_control", cache_control, CachePolicy),
             ("compression", compression, CompressionPolicy),
+            ("concurrency", concurrency, ConcurrencyPolicy),
+            ("deadline", deadline, DeadlinePolicy),
         )
         for name, value, expected in values:
             expected_types = expected if isinstance(expected, tuple) else (expected,)
@@ -146,8 +176,10 @@ class HttpPolicy:
         self.ai_scraping = ai_scraping
         self.rate_limit = rate_limit
         self.principal_rate_limit = principal_rate_limit
+        self.request_decompression = request_decompression
         self.request_id = request_id
         self.server_timing = server_timing
+        self.signed_routes = signed_routes
         self.traffic = traffic
         self.cors = cors
         self.csrf = csrf
@@ -157,6 +189,10 @@ class HttpPolicy:
         self.idempotency = idempotency
         self.cache_control = cache_control
         self.compression = compression
+        self.concurrency = concurrency
+        self.deadline = deadline
+        self.maintenance = maintenance
+        self._has_action = concurrency is not None or deadline is not None
         self._has_activation = session is not None
         self._has_post_auth = principal_rate_limit is not None or idempotency is not None
         self._dynamic_always = (
@@ -201,6 +237,8 @@ class HttpPolicy:
             "ai_scraping",
             "rate_limit",
             "principal_rate_limit",
+            "signed_routes",
+            "request_decompression",
             "request_id",
             "server_timing",
             "traffic",
@@ -212,6 +250,9 @@ class HttpPolicy:
             "idempotency",
             "cache_control",
             "compression",
+            "concurrency",
+            "deadline",
+            "maintenance",
         ):
             current = getattr(self, name)
             incoming = getattr(other, name)
@@ -237,6 +278,8 @@ class HttpPolicy:
         """Independent readable definition of the compiled ingress program."""
         mask = _SECURITY if self.security_headers is not None else 0
         request._policy_mask = mask
+        if self.security_headers is not None:
+            self.security_headers._prepare_nonce(request)
 
         if self.proxy is not None:
             self.proxy._ingress_sync(request)
@@ -246,6 +289,10 @@ class HttpPolicy:
             candidate = self.trusted_host._ingress_sync(request)
             mask |= _TRUSTED_HOST
             request._policy_mask = mask
+            if candidate is not None:
+                return candidate
+        if self.maintenance is not None:
+            candidate = self.maintenance._ingress_sync(request)
             if candidate is not None:
                 return candidate
         if self.ai_scraping is not None:
@@ -269,6 +316,14 @@ class HttpPolicy:
             request._policy_mask = mask
             if candidate is not None:
                 return candidate
+        if self.signed_routes is not None:
+            candidate = self.signed_routes._ingress_sync(request)
+            if candidate is not None:
+                return candidate
+        if self.request_decompression is not None:
+            candidate = await self.request_decompression._ingress(request)
+            if candidate is not None:
+                return candidate
         if self.request_id is not None:
             self.request_id._ingress_sync(request)
             mask |= _REQUEST_ID
@@ -284,7 +339,11 @@ class HttpPolicy:
             if candidate is not None:
                 return candidate
         if self.csrf is not None:
-            candidate = self.csrf._ingress_sync(request)
+            candidate = (
+                self.csrf._ingress_sync(request)
+                if self.csrf._form_field is None
+                else await self.csrf._ingress(request)
+            )
             mask |= _CSRF
             request._policy_mask = mask
             if candidate is not None:
@@ -324,6 +383,19 @@ class HttpPolicy:
         session = self.session
         if session is not None:
             await session.before(request)
+
+    def _reference_action_enter(self) -> Any | None:
+        """Acquire the fail-fast handler permit, or return its 503 response."""
+        concurrency = self.concurrency
+        if concurrency is None or concurrency._acquire():
+            return None
+        return concurrency._refusal()
+
+    def _reference_action_exit(self) -> None:
+        """Release a handler permit acquired by `_reference_action_enter`."""
+        concurrency = self.concurrency
+        if concurrency is not None:
+            concurrency._release()
 
     async def _reference_dynamic_egress(
         self, request: Any, response: Any, *, native_one_shot: bool = False
@@ -401,7 +473,11 @@ class HttpPolicy:
         The native engine gains an opcode before one of those options can enter
         this descriptor.
         """
-        if self.traffic is not None:
+        if (
+            self.traffic is not None
+            or self.request_decompression is not None
+            or self.signed_routes is not None
+        ):
             return None
 
         proxy = self.proxy
@@ -453,7 +529,7 @@ class HttpPolicy:
 
         csrf = self.csrf
         if csrf is not None:
-            if csrf._exempt is not None:
+            if csrf._exempt is not None or csrf._form_field is not None:
                 return None
             csrf = (
                 csrf._secret,
@@ -475,6 +551,8 @@ class HttpPolicy:
 
         security = self.security_headers
         if security is not None:
+            if security._has_nonce:
+                return None
             security = (security.headers, security.https_headers)
 
         websocket_origin = self.websocket_origin
@@ -494,20 +572,34 @@ class HttpPolicy:
 
         compression = self.compression
         if compression is not None:
+            native_dcz = tuple(
+                None
+                if entry is None
+                else (
+                    entry[0],
+                    entry[1],
+                    cast(Any, entry[2]).as_digested_dict,
+                )
+                for entry in compression._dcz_dictionaries
+            )
             compression = (
                 compression.minimum_size,
                 compression.gzip_level,
                 compression.zstd_level,
                 compression.compress_authenticated,
-                zstd_compress,
+                require_zstd().compress,
                 compression._gzip_workspace,
-                tuple(compression._dcz_dictionaries),
+                native_dcz,
                 _dcz_compress,
-                tuple(compression._gzip_fragments),
+                compression._gzip_fragments,
             )
 
+        maintenance = self.maintenance
+        if maintenance is not None:
+            maintenance = maintenance._native()
+
         return (
-            "wreath.http-policy.v3",
+            "wreath.http-policy.v4",
             proxy,
             trusted,
             ai_scraping,
@@ -520,6 +612,7 @@ class HttpPolicy:
             websocket_origin,
             cache,
             compression,
+            maintenance,
         )
 
 
@@ -529,15 +622,20 @@ _POLICY_TYPES = frozenset(
         AIScrapingPolicy,
         CachePolicy,
         CompressionPolicy,
+        ConcurrencyPolicy,
         CsrfPolicy,
+        DeadlinePolicy,
         HttpPolicy,
         IdempotencyPolicy,
+        MaintenancePolicy,
         ProxyPolicy,
         RateLimitPolicy,
+        RequestDecompressionPolicy,
         RequestIdPolicy,
         SecurityHeadersPolicy,
         ServerTimingPolicy,
         SessionPolicy,
+        SignedRoutePolicy,
         TieredRateLimitPolicy,
         TrafficPolicy,
         TrustedHostPolicy,
@@ -555,29 +653,36 @@ __all__ = [
     "AI_SCRAPERS",
     "AIScrapingPolicy",
     "CachePolicy",
+    "AdmissionStats",
     "CompressionPolicy",
+    "ConcurrencyPolicy",
     "CorsPolicy",
     "CsrfPolicy",
+    "DeadlinePolicy",
     "HttpPolicy",
     "IdempotencyPolicy",
     "IdempotencyStore",
     "MemoryIdempotencyStore",
     "PostgresIdempotencyStore",
+    "MaintenancePolicy",
     "MemoryRateLimitStore",
     "PostgresRateLimitStore",
     "ProxyPolicy",
     "RateLimitPolicy",
     "RateLimitStore",
+    "RequestDecompressionPolicy",
     "RequestIdPolicy",
     "SecurityHeadersPolicy",
     "ServerTimingPolicy",
     "SessionPolicy",
+    "SignedRoutePolicy",
     "TieredRateLimitPolicy",
     "TrafficClass",
     "TrafficPolicy",
     "TrustedHostPolicy",
     "WebSocketOriginPolicy",
     "csrf_token",
+    "csp_nonce",
     "elapsed",
     "principal_key",
     "rotate_session",

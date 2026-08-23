@@ -421,15 +421,15 @@ class PlatformAdmin:
     def router(self, prefix: str = "/ops") -> Any:
         """Build the router. Write operations need a CSRF verifier.
 
-        `CsrfPolicy` is header-only and an HTML form cannot carry a header,
-        so `wreath.admin` requires `csrf=` before generating a write. The console
-        with the larger blast radius cannot require less.
+        The generated form integration keeps an explicit `csrf=` adapter even
+        though `CsrfPolicy(form_field=...)` supports custom HTML forms. The
+        console with the larger blast radius cannot require less.
         """
         writes = tuple(op for op in self._operations if op not in ("list", "inspect"))
         if writes and self._csrf is None:
             raise PlatformError(
                 f"operations {', '.join(writes)} write, and a write needs csrf=: "
-                "CsrfPolicy is header-only and an HTML form cannot carry a header"
+                "pass the generated console's explicit form-token verifier"
             )
         return {"prefix": prefix, "operations": self._operations,
                 "csp": CONTENT_SECURITY_POLICY}

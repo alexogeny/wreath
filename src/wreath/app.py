@@ -20,7 +20,6 @@ from asyncio import gather as _gather
 from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace as _dc_replace
-from inspect import isawaitable
 from inspect import iscoroutinefunction as _iscoroutinefunction
 from inspect import signature as _signature
 from time import monotonic_ns as _monotonic_ns
@@ -41,6 +40,7 @@ from ._auth.requirements import (
     second_factor_age,
     set_requirement,
 )
+from ._awaitable import is_awaitable
 from ._codecs import parse_qs as _parse_qs
 from ._flight_markers import capture_marker as _capture_marker
 from ._flight_markers import phase_marker as _phase_marker
@@ -1641,7 +1641,7 @@ class Wreath:
 
             async def start_flags(_app: Wreath) -> None:
                 result = start()
-                if isawaitable(result):
+                if is_awaitable(result):
                     await result
 
             self._startup_handlers.append(start_flags)
@@ -1649,7 +1649,7 @@ class Wreath:
 
             async def close_flags(_app: Wreath) -> None:
                 result = close()
-                if isawaitable(result):
+                if is_awaitable(result):
                     await result
 
             self._shutdown_handlers.append(close_flags)
@@ -2537,7 +2537,10 @@ class Wreath:
         policy = self._http_policy
         native_ingress_only = policy is not None and policy._native_ingress_only
         fast_policy = policy is not None and not (
-            policy._dynamic_always or policy._has_activation or policy._has_post_auth
+            policy._dynamic_always
+            or policy._has_action
+            or policy._has_activation
+            or policy._has_post_auth
         )
         frozen = self._frozen_responses
         if (
@@ -2676,7 +2679,7 @@ class Wreath:
                 identity = None
             elif isinstance(verified, Identity):
                 identity = verified
-            elif isawaitable(verified):
+            elif is_awaitable(verified):
                 return self._finish_http_plain_auth_sync_identity(
                     scope,
                     receive,
@@ -3193,7 +3196,7 @@ class Wreath:
                         identity = await cast(Awaitable[Identity | None], verified)
                     elif isinstance(verified, Identity):
                         identity = verified
-                    elif isawaitable(verified):
+                    elif is_awaitable(verified):
                         identity = await verified
                     else:
                         identity = cast(Identity | None, verified)
@@ -3213,7 +3216,7 @@ class Wreath:
                             identity = await cast(Awaitable[Identity | None], verified)
                         elif isinstance(verified, Identity):
                             identity = verified
-                        elif isawaitable(verified):
+                        elif is_awaitable(verified):
                             identity = await verified
                         else:
                             identity = cast(Identity | None, verified)
@@ -3682,7 +3685,7 @@ class Wreath:
                             identity = await cast(Awaitable[Identity | None], verified)
                         elif isinstance(verified, Identity):
                             identity = verified
-                        elif isawaitable(verified):
+                        elif is_awaitable(verified):
                             identity = await verified
                         else:
                             identity = cast(Identity | None, verified)
@@ -3978,28 +3981,61 @@ class Wreath:
             )
             return
         try:
-            if flight_phase is None:
-                value = handler(request)
-                if value.__class__ is _COROUTINE:
-                    value = await value
+            action_response = (
+                policy._reference_action_enter()
+                if policy is not None and policy._has_action
+                else None
+            )
+            if action_response is not None:
                 response = (
-                    value
-                    if value.__class__ is Response or value.__class__ is PreparedResponse
-                    else _coerce_response(value)
+                    action_response
+                    if action_response.__class__ is Response
+                    or action_response.__class__ is PreparedResponse
+                    else _coerce_response(action_response)
                 )
             else:
-                handler_start = _monotonic_ns()
-                value = handler(request)
-                if value.__class__ is _COROUTINE:
-                    value = await value
-                flight_phase(_PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start)
-                serialize_start = _monotonic_ns()
+                handler_start = _monotonic_ns() if flight_phase is not None else 0
+                has_permit = policy is not None and policy.concurrency is not None
+                try:
+                    deadline = None if policy is None else policy.deadline
+                    if deadline is None:
+                        value = handler(request)
+                        if value.__class__ is _COROUTINE:
+                            value = await value
+                    else:
+                        deadline_started = _monotonic_ns()
+                        deadline_scope = _asyncio_timeout(deadline.seconds)
+                        try:
+                            async with deadline_scope:
+                                value = handler(request)
+                                if value.__class__ is _COROUTINE:
+                                    value = await value
+                                elif (
+                                    _monotonic_ns() - deadline_started
+                                    > deadline._nanoseconds
+                                ):
+                                    value = deadline._refusal()
+                        except TimeoutError:
+                            if not deadline_scope.expired():
+                                raise
+                            value = deadline._refusal()
+                finally:
+                    if has_permit and policy is not None:
+                        policy._reference_action_exit()
+                if flight_phase is not None:
+                    flight_phase(
+                        _PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start
+                    )
+                    serialize_start = _monotonic_ns()
                 response = (
                     value
                     if value.__class__ is Response or value.__class__ is PreparedResponse
                     else _coerce_response(value)
                 )
-                flight_phase(_PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start)
+                if flight_phase is not None:
+                    flight_phase(
+                        _PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start
+                    )
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
 
@@ -5027,7 +5063,7 @@ class Wreath:
                         identity = await cast(Awaitable[Identity | None], verified)
                     elif isinstance(verified, Identity):
                         identity = verified
-                    elif isawaitable(verified):
+                    elif is_awaitable(verified):
                         identity = await verified
                     else:
                         identity = cast(Identity | None, verified)
@@ -5289,7 +5325,7 @@ class Wreath:
         for label, close in steps:
             try:
                 result = close()
-                if isawaitable(result):
+                if is_awaitable(result):
                     await result
             except Exception as failure:
                 # Broad by necessity: these are user-supplied and driver-supplied

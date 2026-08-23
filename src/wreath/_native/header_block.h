@@ -32,5 +32,6 @@ PyObject *wreath_headers_value_object(PyObject *headers, Py_ssize_t index);
 PyObject *wreath_headers_value_borrowed(PyObject *headers, Py_ssize_t index);
 PyObject *wreath_headers_materialize(PyObject *headers);
 int wreath_headers_set_first(PyObject *headers, PyObject *name, PyObject *value);
+int wreath_headers_remove_all(PyObject *headers, PyObject *name);
 
 #endif

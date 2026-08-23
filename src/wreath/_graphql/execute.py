@@ -26,11 +26,11 @@ level's object count, so a slow field is distinguishable from a wide one.
 
 from __future__ import annotations
 
-import inspect
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
 from .._auth.requirements import PolicyRequirement
+from .._awaitable import is_awaitable
 from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_RESOLVER as _PH_RESOLVER
 from .._flight_markers import phase_marker as _phase_marker
@@ -279,7 +279,7 @@ class _Run:
         )
         if spec.batch:
             result = spec.fn(parents, info)
-            if inspect.isawaitable(result):
+            if is_awaitable(result):
                 result = await result
             values = list(result)
             if len(values) != len(parents):
@@ -292,7 +292,7 @@ class _Run:
         values = []
         for parent in parents:
             result = spec.fn(parent, info)
-            if inspect.isawaitable(result):
+            if is_awaitable(result):
                 result = await result
             values.append(result)
         return values
@@ -447,7 +447,7 @@ class _Run:
                 path=(field.name,), parent_type="Query",
             )
             result = root.resolver.fn(info)
-            if inspect.isawaitable(result):
+            if is_awaitable(result):
                 result = await result
             if root.is_list:
                 return list(result or ())

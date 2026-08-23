@@ -4,6 +4,7 @@
 #include <Python.h>
 
 PyObject *wreath_activate_path(PyObject *, PyObject *);
+PyObject *wreath_bind_path_into(PyObject *, PyObject *const *, Py_ssize_t);
 PyObject *wreath_activate_path_call(PyObject *, PyObject *const *, Py_ssize_t);
 PyObject *wreath_request_layout(PyObject *, PyObject *);
 PyObject *wreath_request_new(PyObject *, PyObject *const *, Py_ssize_t);

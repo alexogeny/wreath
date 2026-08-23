@@ -4189,6 +4189,54 @@ def _check_baseline(names: list[str]) -> int:
     return 0
 
 
+def _notification_window_harness(size: int, *, expired: bool) -> float:
+    """Price trimming separately from constructing same-size recipient windows."""
+    from collections import deque
+
+    from wreath.notifications import Notifications, Recipient
+
+    cohort = []
+    values = deque(float(index) for index in range(size))
+    for index in range(32):
+        notifications = Notifications((), rate_limit=size + 1)
+        recipient = Recipient(f"recipient-{index}")
+        notifications._counts[recipient.key] = values.copy()
+        cohort.append((notifications, recipient))
+    moment = float(size + 3601) if expired else 3599.0
+    start = time.perf_counter()
+    for notifications, recipient in cohort:
+        notifications._within_rate_limit(recipient, moment)
+    return time.perf_counter() - start
+
+
+@probe(
+    "notification-expired-window",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="expired timestamps in 32 recipient windows",
+    assumption="expiring a notification rate window is linear, never front-deletion quadratic",
+    stage="notifications",
+    group="web",
+)
+def _notification_expired_window(size: int) -> float:
+    """Every expired timestamp is removed once from the deque head."""
+    return _notification_window_harness(size, expired=True)
+
+
+@probe(
+    "notification-live-window-control",
+    expect=0.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="live timestamps in the same 32 recipient windows",
+    assumption="checking an unexpired notification rate window is constant-time",
+    stage="notifications",
+    group="web",
+)
+def _notification_live_window_control(size: int) -> float:
+    """Same-size control: no timestamp has crossed the one-hour cutoff."""
+    return _notification_window_harness(size, expired=False)
+
+
 # --- CLI ------------------------------------------------------------------
 
 

@@ -103,6 +103,9 @@ typedef uint32_t wreath_gzip_encoder_link;
 #ifndef GZ_HASH_SPECIALIZE_PROFILES
 #define GZ_HASH_SPECIALIZE_PROFILES 1
 #endif
+#ifndef GZ_EMIT_LITERAL_TRIPLES
+#define GZ_EMIT_LITERAL_TRIPLES 1
+#endif
 /* Stream-level experiments.  Both decisions are taken outside the parse loop,
  * so a winning policy changes which specialised loop runs rather than adding
  * another per-position branch. */
@@ -149,8 +152,11 @@ typedef uint32_t wreath_gzip_encoder_link;
 /* A run of literals followed by one match.  Literal bytes remain in the input
  * buffer; the parser writes one record per match/run instead of one word per
  * DEFLATE symbol. */
-#define GZ_SEQ_LEN_SHIFT 23
-#define GZ_SEQ_RUN_MASK ((1u << GZ_SEQ_LEN_SHIFT) - 1u)
+#define GZ_SEQ_RUN_BITS 14
+#define GZ_SEQ_LEN_SHIFT GZ_SEQ_RUN_BITS
+#define GZ_SEQ_LEN_MASK 0x1ffu
+#define GZ_SEQ_DIST_SHIFT 23
+#define GZ_SEQ_RUN_MASK ((1u << GZ_SEQ_RUN_BITS) - 1u)
 #ifndef GZ_SEQUENCE_PACKED
 #define GZ_SEQUENCE_PACKED 1
 #endif
@@ -236,6 +242,16 @@ typedef uint32_t wreath_gzip_encoder_item;
 #endif
 /* Triage looks at the first this many input bytes and then never again. */
 #define GZ_TRIAGE_SPAN 8192
+#if GZ_SEQUENCE_IR
+_Static_assert(GZ_TRIAGE_SPAN <= GZ_SEQ_RUN_MASK,
+               "sequence literal-run field must hold the unsynchronised triage sample");
+_Static_assert(GZ_CHUNK_TOK <= GZ_SEQ_RUN_MASK,
+               "sequence literal-run field must hold one unsynchronised chunk");
+_Static_assert(GZ_MAX_MATCH <= GZ_SEQ_LEN_MASK,
+               "sequence length field must hold the maximum DEFLATE match");
+_Static_assert(30 <= (1u << (32 - GZ_SEQ_DIST_SHIFT)),
+               "sequence distance field must hold every DEFLATE distance code");
+#endif
 
 /* Token layout: bit 8 distinguishes the two cases, so the emit loop branches on
  * a single test and never reloads. */
@@ -408,7 +424,9 @@ static inline void wreath_gzip_encoder_push_match(wreath_gzip_encoder_enc *e, un
 #endif
 #if GZ_SEQUENCE_IR
   struct wreath_gzip_encoder_seq *s = &e->tokens[e->nseq++];
-  s->run_and_len = e->litrun | (len << GZ_SEQ_LEN_SHIFT);
+  unsigned ds = wreath_gzip_encoder_dist_code(dist);
+  s->run_and_len = e->litrun | (len << GZ_SEQ_LEN_SHIFT) |
+                   (ds << GZ_SEQ_DIST_SHIFT);
   s->dist = (uint16_t)dist;
 #if !GZ_SEQUENCE_PACKED
   s->reserved = 0;

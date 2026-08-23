@@ -128,12 +128,14 @@ def aliases(manifest: dict) -> list[str]:
     it, which is a worse answer than the search having missed.
     """
     names: list[str] = []
+    seen: set[str] = set()
     for subsystem in manifest.get("subsystems", []):
         if subsystem.get("capability") is None:
             continue
         for entry in subsystem.get("replaces") or ():
             name = str(entry).strip().lower()
-            if name and name not in names:
+            if name and name not in seen:
+                seen.add(name)
                 names.append(name)
     return names
 
@@ -190,7 +192,8 @@ def public_modules(sources: tuple[str, ...] | list[str]) -> list[str]:
     (`wreath._capability_data`) derive their module column from here, so the two
     cannot disagree about what a subsystem exposes.
     """
-    seen: list[str] = []
+    modules: list[str] = []
+    seen: set[str] = set()
     for source in sources:
         if not source.startswith("src/wreath/"):
             continue
@@ -202,8 +205,9 @@ def public_modules(sources: tuple[str, ...] | list[str]) -> list[str]:
             continue
         rendered = f"wreath.{name}"
         if rendered not in seen:
-            seen.append(rendered)
-    return seen
+            seen.add(rendered)
+            modules.append(rendered)
+    return modules
 
 
 def _modules(sources: tuple[str, ...] | list[str]) -> str:

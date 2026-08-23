@@ -21,6 +21,8 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
+from ._awaitable import is_awaitable
+
 Background = Callable[[], Awaitable[None]]
 
 #: Threads reserved for synchronous background callables.
@@ -110,7 +112,7 @@ class BackgroundTask:
         call = functools.partial(context.run, self.func, *self.args, **self.kwargs)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(_background_executor(), call)
-        if inspect.isawaitable(result):
+        if is_awaitable(result):
             await result
 
 

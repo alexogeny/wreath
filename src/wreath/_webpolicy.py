@@ -71,6 +71,7 @@ replace_content_length = _core.replace_content_length
 replace_response_header = _core.replace_response_header
 replace_server_timing = _core.replace_server_timing
 select_content_encoding = _core.select_content_encoding
+_select_prepared_content_encoding = _core.select_prepared_content_encoding
 
 __all__ = [
     "NO_STORE",
