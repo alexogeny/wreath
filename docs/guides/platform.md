@@ -101,5 +101,6 @@ never another's, and a console evaluated against that vocabulary would put
 `acme:admin` one policy mistake away from every customer's data.
 
 It ships no JavaScript, so its CSP is `default-src 'none'` with no nonce, and a
-write operation requires `csrf=` — `CsrfPolicy` is header-only and an HTML
-form cannot carry a header.
+write operation requires `csrf=`. `CsrfPolicy(form_field=...)` supports custom
+HTML forms, but the generated console keeps an explicit adapter until it can
+render and bind that field without validating a request twice.
