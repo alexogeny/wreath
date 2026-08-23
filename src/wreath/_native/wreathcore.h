@@ -422,6 +422,11 @@ typedef struct {
                                         int level, PyObject *format,
                                         PyObject *fragments);
     int (*gzip_format)(PyObject *value, int *format);
+    /* Policy response edits stay inside _core but are callable by sibling
+     * transports without a Python vectorcall or a duplicate implementation. */
+    int (*replace_cookie)(PyObject *headers, PyObject *prefix, PyObject *value);
+    int (*replace_server_timing)(PyObject *headers, PyObject *metric,
+                                 PyObject *value);
 } WreathCoreCAPI;
 
 #define WREATH_CORE_CAPI_NAME "wreath._native._core._C_API"
@@ -546,6 +551,7 @@ PyObject *wreath_http_client_counters_snapshot(PyObject *self, PyObject *capsule
 
 /* webpolicy.c */
 PyObject *wreath_select_content_encoding(PyObject *self, PyObject *arg);
+PyObject *wreath_select_prepared_content_encoding(PyObject *self, PyObject *args);
 PyObject *wreath_is_compressible_content_type(PyObject *self, PyObject *arg);
 PyObject *wreath_cache_control_flags(PyObject *self, PyObject *arg);
 PyObject *wreath_origin_matches(PyObject *self, PyObject *args);
@@ -555,6 +561,10 @@ PyObject *wreath_replace_content_length(PyObject *self, PyObject *args);
 PyObject *wreath_replace_response_header(PyObject *self, PyObject *args);
 PyObject *wreath_replace_cookie(PyObject *self, PyObject *args);
 PyObject *wreath_replace_server_timing(PyObject *self, PyObject *args);
+int wreath_replace_cookie_inplace(PyObject *headers, PyObject *prefix,
+                                  PyObject *value);
+int wreath_replace_server_timing_inplace(PyObject *headers, PyObject *metric,
+                                         PyObject *value);
 PyObject *wreath_find_response_header(PyObject *self, PyObject *args);
 int wreath_register_webpolicy(PyObject *module);
 

@@ -522,3 +522,63 @@ wreath_headers_set_first(PyObject *headers, PyObject *name, PyObject *value)
     Py_DECREF(list);
     return rc;
 }
+
+int
+wreath_headers_remove_all(PyObject *headers, PyObject *name)
+{
+    if (!PyBytes_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "header name must be bytes");
+        return -1;
+    }
+    PyObject *list = headers;
+    if (wreath_headers_is_block(headers)) {
+        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
+        if (self->materialized == NULL) {
+            const char *wanted = PyBytes_AS_STRING(name);
+            Py_ssize_t wanted_size = PyBytes_GET_SIZE(name);
+            Py_ssize_t write = 0;
+            for (Py_ssize_t read = 0; read < self->count; read++) {
+                const char *candidate;
+                const char *ignored_value;
+                Py_ssize_t candidate_size;
+                Py_ssize_t ignored_value_size;
+                if (wreath_headers_view(
+                        headers, read, &candidate, &candidate_size,
+                        &ignored_value, &ignored_value_size) < 0) return -1;
+                if (candidate_size == wanted_size &&
+                    memcmp(candidate, wanted, (size_t)wanted_size) == 0) {
+                    Py_CLEAR(self->names[read]);
+                    Py_CLEAR(self->values[read]);
+                    continue;
+                }
+                if (write != read) {
+                    if (!self->object_mode) self->spans[write] = self->spans[read];
+                    self->names[write] = self->names[read];
+                    self->values[write] = self->values[read];
+                    self->names[read] = NULL;
+                    self->values[read] = NULL;
+                }
+                write++;
+            }
+            self->count = write;
+            return 0;
+        }
+        list = self->materialized;
+    }
+    if (!PyList_Check(list)) {
+        PyErr_SetString(PyExc_TypeError, "headers must be a list of byte pairs");
+        return -1;
+    }
+    for (Py_ssize_t index = PyList_GET_SIZE(list); index-- > 0;) {
+        PyObject *pair = PyList_GET_ITEM(list, index);
+        if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2 ||
+            !PyBytes_Check(PyTuple_GET_ITEM(pair, 0))) {
+            PyErr_SetString(PyExc_TypeError, "header must be a pair of bytes");
+            return -1;
+        }
+        int equal = PyObject_RichCompareBool(PyTuple_GET_ITEM(pair, 0), name, Py_EQ);
+        if (equal < 0) return -1;
+        if (equal == 1 && PySequence_DelItem(list, index) < 0) return -1;
+    }
+    return 0;
+}

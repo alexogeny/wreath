@@ -310,6 +310,31 @@ wreath_activate_path(PyObject *Py_UNUSED(module), PyObject *args)
     return result;
 }
 
+PyObject *
+wreath_bind_path_into(PyObject *Py_UNUSED(module), PyObject *const *args,
+                      Py_ssize_t nargs)
+{
+    if (nargs != 3) {
+        PyErr_Format(PyExc_TypeError,
+                     "bind_path_into expected 3 arguments, got %zd", nargs);
+        return NULL;
+    }
+    PyObject *params = args[0];
+    PyObject *plan = args[1];
+    PyObject *kwargs = args[2];
+    if (!PyTuple_CheckExact(plan) || !PyDict_CheckExact(kwargs)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "bind_path_into expected a tuple plan and exact dict output");
+        return NULL;
+    }
+    PyObject *errors = NULL;
+    if (activate_path_into(params, plan, kwargs, &errors) < 0) {
+        Py_XDECREF(errors);
+        return NULL;
+    }
+    return errors == NULL ? Py_NewRef(Py_None) : errors;
+}
+
 static PyObject *
 raise_activation_errors(PyObject *error_type, PyObject *errors)
 {
