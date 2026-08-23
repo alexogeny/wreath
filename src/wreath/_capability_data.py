@@ -76,7 +76,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'middleware',
-        'capability': 'Native deny-by-default known-AI-scraper policy with matching robots declarations, replaceable explicit allowances, native refusal metrics and structured Flight/OTLP dispositions; plus rate limiting and metered quotas, declarative client-fact traffic classes, CORS, CSRF, sessions, security headers, compression, request IDs, idempotency keys, and cache-control policy',
+        'capability': 'Native deny-by-default known-AI-scraper policy with matching robots declarations, replaceable explicit allowances, native refusal metrics and structured Flight/OTLP dispositions; plus rate limiting and metered quotas, declarative client-fact traffic classes, CORS, header/form CSRF, sessions, static or nonce-bearing security headers, response compression, bounded request decompression, native maintenance admission, fail-fast handler concurrency, handler deadlines, signed routes, request IDs, idempotency keys, and cache-control policy',
         'modules': ('wreath.middleware', 'wreath.policy', 'wreath.compression', 'wreath.cache_control', 'wreath.session_store', 'wreath.store', 'wreath.quota'),
         'guides': ('docs/guides/middleware.md', 'docs/guides/compression.md', 'docs/guides/caching.md', 'docs/guides/idempotency.md', 'docs/guides/quotas.md'),
         'replaces': ('slowapi', 'limits', 'flask-cors', 'django-cors-headers', 'secure', 'itsdangerous'),
