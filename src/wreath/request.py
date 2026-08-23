@@ -1016,6 +1016,36 @@ class Request:
         if header_map is not None:
             header_map[name] = value
 
+    def _remove_headers(self, *names: bytes) -> None:
+        """Remove every occurrence of internal representation headers."""
+        context = self._context
+        native_remove = None if context is None else getattr(context, "_remove_headers", None)
+        if native_remove is not None:
+            native_remove(*names)
+        else:
+            wanted = frozenset(names)
+            headers = self.headers
+            headers[:] = [pair for pair in headers if pair[0] not in wanted]
+        header_map = self._header_map
+        if header_map is not None:
+            for name in names:
+                header_map.pop(name, None)
+
+    def _single_header(self, name: bytes) -> bytes | None:
+        """Return one raw value, refusing duplicate security-sensitive fields."""
+        context = self._context
+        native_single = None if context is None else getattr(context, "_single_header", None)
+        if native_single is not None:
+            return cast("bytes | None", native_single(name))
+        found = None
+        for candidate, value in self.headers:
+            if candidate != name:
+                continue
+            if found is not None:
+                raise ValueError("request header occurs more than once")
+            found = value
+        return found
+
     def _index_headers(self) -> Any:
         """Return the first-value header index for multi-header consumers."""
         header_map = self._header_map
