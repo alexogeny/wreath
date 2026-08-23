@@ -30,6 +30,9 @@ _GUARD_WORDS = ("auth", "guard", "permission", "role", "policy", "access")
 _ACTION_WORDS = ("action", "operation", "permission", "verb")
 _RESOURCE_WORDS = ("resource", "subject", "object")
 _CONDITION_WORDS = ("condition", "when", "context")
+_ACTION_KEYS = frozenset(_ACTION_WORDS)
+_RESOURCE_KEYS = frozenset(_RESOURCE_WORDS)
+_CONDITION_KEYS = frozenset(_CONDITION_WORDS)
 _DEPENDENCY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*")
 _VERSION_CLAUSE = re.compile(r"^(<=|>=|==|!=|~=|<|>)\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
@@ -84,7 +87,7 @@ def _expression(node: ast.AST | None) -> str | None:
         return None
 
 
-def _keyword(call: ast.Call, names: tuple[str, ...]) -> ast.AST | None:
+def _keyword(call: ast.Call, names: frozenset[str]) -> ast.AST | None:
     for item in call.keywords:
         if item.arg in names:
             return item.value
@@ -237,13 +240,13 @@ class PolicyCandidate:
         if not any(word in factory.lower() for word in _GUARD_WORDS):
             return None
         declared = defaults or {}
-        action_node = _keyword(call, _ACTION_WORDS) or next(
+        action_node = _keyword(call, _ACTION_KEYS) or next(
             (declared[name] for name in _ACTION_WORDS if name in declared), None
         )
-        resource_node = _keyword(call, _RESOURCE_WORDS) or next(
+        resource_node = _keyword(call, _RESOURCE_KEYS) or next(
             (declared[name] for name in _RESOURCE_WORDS if name in declared), None
         )
-        condition_node = _keyword(call, _CONDITION_WORDS) or next(
+        condition_node = _keyword(call, _CONDITION_KEYS) or next(
             (declared[name] for name in _CONDITION_WORDS if name in declared), None
         )
         action = _enum_tail(action_node)

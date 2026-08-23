@@ -188,15 +188,17 @@ def route_methods(attr: str, call: ast.Call | None) -> tuple[str, ...] | None:
         named.elts if isinstance(named, (ast.List, ast.Tuple, ast.Set)) else (named,)
     )
     methods: list[str] = []
+    seen: set[str] = set()
     for value in values:
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             return None
         method = value.value.lower()
-        if method == "head" and "get" in methods:
+        if method == "head" and "get" in seen:
             continue  # a wreath GET route answers HEAD already
         if method not in _VERBS:
             return None
         methods.append(method)
+        seen.add(method)
     return tuple(methods) or ("get",)
 
 
