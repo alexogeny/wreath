@@ -1088,7 +1088,10 @@ class Session:
         except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
             direct_plan = None
         batch_limit = _batch_limit(len(remote))
-        for batch in _batches(tuple(keys), len(remote)):
+        remote_indexes = tuple(column.index for column in remote)
+        identities = tuple(keys)
+        for start in range(0, len(identities), batch_limit):
+            batch = identities[start : start + batch_limit]
             sql, values = _selectin_sql(
                 target, remote, _pad_to_width(batch, batch_limit)
             )
@@ -1111,7 +1114,7 @@ class Session:
             _native_core.orm_attach_relationships(
                 keys,
                 batch_children,
-                tuple(column.index for column in remote),
+                remote_indexes,
                 relationship.index,
                 many,
                 storage._MODEL_API,
@@ -1868,12 +1871,6 @@ def _pad_to_width(
 def _batch_limit(width: int) -> int:
     """The largest batch the key and bind-parameter bounds allow."""
     return min(MAX_SELECTIN_KEYS, max(1, MAX_BIND_PARAMETERS // max(width, 1)))
-
-
-def _batches(keys: tuple[tuple[Any, ...], ...], width: int) -> list[tuple[Any, ...]]:
-    """Split identities into batches bounded by keys and by bind parameters."""
-    limit = _batch_limit(width)
-    return [keys[start : start + limit] for start in range(0, len(keys), limit)]
 
 
 def _selectin_sql(
