@@ -73,23 +73,22 @@ import base64
 import binascii
 import hashlib
 import hmac
-import inspect
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
-
-from ._auth._ecverify import on_p256_curve, verify_es256
 
 # The RSA half of this is `wreath._auth.jwt`'s, deliberately: it already parses a
 # DER public key without a third-party dependency and already implements
 # RSASSA-PKCS1-v1_5 verification against a minimum modulus size. A second
 # spelling of either beside it is how the two drift apart.
+from ._auth._ecverify import on_p256_curve, verify_es256
 from ._auth.jwt import (
     MIN_RSA_MODULUS_BITS,
     RsaPublicKey,
     _der_read_tlv,
     _verify_rs,
 )
+from ._awaitable import is_awaitable
 from .xml import Document, Element, Limits, XMLRefusal, canonicalize_span, parse
 
 if TYPE_CHECKING:
@@ -1218,7 +1217,7 @@ async def verify_response(
     # unauthenticated caller fill it -- and, worse, burn the identifier of an
     # assertion the real user is about to present.
     claimed = ledger.claim(f"{issuer}\x1f{assertion_id}")
-    if inspect.isawaitable(claimed):
+    if is_awaitable(claimed):
         claimed = await claimed
     if not claimed:
         raise _refuse(
