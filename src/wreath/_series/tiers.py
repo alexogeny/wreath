@@ -454,7 +454,7 @@ def _authoritative(
 
     # Nothing covers it. If the tiers exist but the zone rules them out, say so:
     # it is a different mistake with a different fix.
-    if any(tier not in zone_ok for tier in ladder):
+    if len(zone_ok) != len(ladder):
         raise refuse(
             f"no tier can answer for zone {read_zone!r}: this view materialises "
             f"in {stored_zone!r}, and a stored grain can only be re-cut into "
