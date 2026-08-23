@@ -107,6 +107,38 @@ async def test_concurrent_first_requests_construct_exactly_once() -> None:
     assert all(result == {"value": 1} for result in results)
 
 
+@pytest.mark.asyncio
+async def test_cancelling_one_app_scope_waiter_does_not_cancel_the_others() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def expensive(request: Request) -> str:
+        started.set()
+        await release.wait()
+        return "shared"
+
+    async def handler(request: Request, value=Depends(expensive, scope="app")) -> dict:
+        return {"value": value}
+
+    bound = compile_binder(handler, "/", app_scope=AppScope())
+    creator = asyncio.create_task(bound(_request()))
+    await started.wait()
+    cancelled = asyncio.create_task(bound(_request()))
+    survivor = asyncio.create_task(bound(_request()))
+    await asyncio.sleep(0)
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+
+    assert await creator == {"value": "shared"}
+    assert await survivor == {"value": "shared"}
+    assert await bound(_request()) == {"value": "shared"}
+
+
 # --- lifetime inversion is a compile-time error ------------------------------
 
 
