@@ -38,6 +38,9 @@
 #ifndef GZP_CACHE_BEST
 #define GZP_CACHE_BEST GZ_CACHE_BEST_BYTE
 #endif
+#ifndef GZP_STORE_CHAIN
+#define GZP_STORE_CHAIN GZP_CHAINED
+#endif
 #ifdef GZP_CHAIN_C
 #define GZP_CHAIN_V GZP_CHAIN_C
 #define GZP_NICE_V GZP_NICE_C
@@ -163,6 +166,7 @@ GZP(wreath_gzip_encoder_find_)(const uint8_t *in, uint32_t pos, uint32_t n, uint
 
 size_t GZP(wreath_gzip_encoder_parse_)(wreath_gzip_encoder_enc *e, const uint8_t *in, size_t pos_in, size_t stop_in,
                       size_t n_in, const struct wreath_gzip_encoder_prof *P) {
+  (void)P; /* compile-time-specialised instantiations do not load the profile */
   uint32_t *head = e->head;
   uint32_t base = e->base;
 #ifdef GZP_HASH_BITS
@@ -199,7 +203,9 @@ size_t GZP(wreath_gzip_encoder_parse_)(wreath_gzip_encoder_enc *e, const uint8_t
 #if GZP_CHAINED
     while (hpos < pos) {
       uint32_t hh = wreath_gzip_encoder_hash4(wreath_gzip_encoder_ld32(in + hpos), hb);
+#if GZP_STORE_CHAIN
       prev[GZ_PREV_IDX(hpos)] = GZ_LINK_PUT(head[hh] - base);
+#endif
       head[hh] = base + hpos;
 #if GZP_MIN3
       head3[wreath_gzip_encoder_hash3(wreath_gzip_encoder_ld32(in + hpos))] = base + hpos;
@@ -208,7 +214,9 @@ size_t GZP(wreath_gzip_encoder_parse_)(wreath_gzip_encoder_enc *e, const uint8_t
     }
     uint32_t h = wreath_gzip_encoder_hash4(wreath_gzip_encoder_ld32(in + pos), hb);
     uint32_t cand = head[h] - base;
+#if GZP_STORE_CHAIN
     prev[GZ_PREV_IDX(pos)] = GZ_LINK_PUT(cand);
+#endif
     head[h] = base + pos;
     hpos = pos + 1;
 
@@ -260,7 +268,9 @@ size_t GZP(wreath_gzip_encoder_parse_)(wreath_gzip_encoder_enc *e, const uint8_t
       if (len < GZP_LAZY_V && pos + 1 < hend) {
         uint32_t h2 = wreath_gzip_encoder_hash4(wreath_gzip_encoder_ld32(in + pos + 1), hb);
         uint32_t cand2 = head[h2] - base;
+#if GZP_STORE_CHAIN
         prev[GZ_PREV_IDX(pos + 1)] = GZ_LINK_PUT(cand2);
+#endif
         head[h2] = base + pos + 1;
 #if GZP_MIN3
         head3[wreath_gzip_encoder_hash3(wreath_gzip_encoder_ld32(in + pos + 1))] = base + pos + 1;
@@ -345,6 +355,7 @@ size_t GZP(wreath_gzip_encoder_parse_)(wreath_gzip_encoder_enc *e, const uint8_t
 #undef GZP_SHORTPRICE
 #undef GZP_SHORTMODE
 #undef GZP_CACHE_BEST
+#undef GZP_STORE_CHAIN
 #undef GZP_CHAIN_V
 #undef GZP_NICE_V
 #undef GZP_LAZY_V
