@@ -159,6 +159,7 @@ REPO_ROOTS = ("src/", "tests/", "docs/", "benchmarks/", "tools/")
 _FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_INVALID_REPO_PATH = re.compile(r"[*<> \t|]")
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,7 @@ def _is_repo_path(text: str) -> bool:
     """
     if not text.startswith(REPO_ROOTS):
         return False
-    return not any(char in text for char in "*<> \t|")
+    return _INVALID_REPO_PATH.search(text) is None
 
 
 def _ignored_paths(root: Path, cited: list[str]) -> frozenset[str]:
