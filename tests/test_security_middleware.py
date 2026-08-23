@@ -6,7 +6,7 @@ import pytest
 
 from wreath import Wreath
 from wreath._native import _core
-from wreath.policy import HttpPolicy, SecurityHeadersPolicy, TrustedHostPolicy
+from wreath.policy import HttpPolicy, SecurityHeadersPolicy, TrustedHostPolicy, csp_nonce
 from wreath.testing import TestClient
 
 
@@ -107,6 +107,74 @@ async def test_security_headers_do_not_replace_handler_values() -> None:
     assert response.header("x-content-type-options") == "nosniff"
     # TestClient uses an HTTP scope; HSTS must only be emitted for HTTPS.
     assert response.header("strict-transport-security") is None
+
+
+@pytest.mark.asyncio
+async def test_csp_nonce_is_shared_with_handler_and_header_then_rotated() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
+                content_security_policy="default-src 'self'; script-src 'self'",
+                csp_nonce_directives=("script-src", "style-src"),
+            )
+        )
+    )
+
+    @app.get("/")
+    async def index(request: Any) -> str:
+        nonce = csp_nonce(request)
+        assert csp_nonce(request) == nonce
+        return nonce
+
+    async with TestClient(app) as client:
+        first = await client.get("/")
+        second = await client.get("/")
+
+    first_nonce = first.body.decode()
+    second_nonce = second.body.decode()
+    assert first_nonce != second_nonce
+    assert first.header("content-security-policy") == (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{first_nonce}'; "
+        f"style-src 'nonce-{first_nonce}'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csp_report_only_uses_report_only_header() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            security_headers=SecurityHeadersPolicy(
+                csp_report_only=True,
+                csp_nonce_directives=("script-src",),
+            )
+        )
+    )
+
+    @app.get("/")
+    async def index(request: Any) -> str:
+        return csp_nonce(request)
+
+    async with TestClient(app) as client:
+        response = await client.get("/")
+
+    assert response.header("content-security-policy") is None
+    assert response.header("content-security-policy-report-only") is not None
+
+
+def test_csp_nonce_requires_an_enabled_nonce_policy() -> None:
+    from wreath.request import Request
+
+    request = Request({"type": "http", "method": "GET", "path": "/"}, None)
+    with pytest.raises(RuntimeError, match="has not enabled CSP nonces"):
+        csp_nonce(request)
+
+
+@pytest.mark.parametrize("directive", ["", "script src", "script-src;", "script-src"])
+def test_csp_nonce_directives_are_validated(directive: str) -> None:
+    directives = (directive, directive) if directive == "script-src" else (directive,)
+    with pytest.raises(ValueError, match="CSP nonce directives"):
+        SecurityHeadersPolicy(csp_nonce_directives=directives)
 
 
 @pytest.mark.asyncio

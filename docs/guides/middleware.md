@@ -143,6 +143,103 @@ selects among the small tuple of application declarations in Python. Configuring
 it therefore makes the policy descriptor use the readable executor on Wreath's
 server too; there is no silent native/Python split whose ordering could differ.
 
+## Admission, deadlines, and maintenance
+
+These controls belong at different boundaries, so Wreath keeps them separate:
+
+```python
+from wreath.policy import (
+    ConcurrencyPolicy, DeadlinePolicy, HttpPolicy, MaintenancePolicy,
+)
+
+maintenance = MaintenancePolicy(exempt_paths=("/ready",), retry_after=30)
+app.configure_http_policy(HttpPolicy(
+    concurrency=ConcurrencyPolicy(128, retry_after=1),
+    deadline=DeadlinePolicy(2.0),
+    maintenance=maintenance,
+))
+```
+
+`ConcurrencyPolicy` is fail-fast admission around handler execution. It does
+not build an invisible queue of suspended requests when all permits are in use.
+`DeadlinePolicy` bounds an asynchronous handler; synchronous Python cannot be
+pre-empted safely and belongs in an isolated worker when it needs a hard CPU
+deadline. `MaintenancePolicy` is a native atomic switch with exact exempt paths:
+`maintenance.enable()` refuses ordinary traffic with 503, while `/ready/delete`
+does not inherit an exemption declared for `/ready`.
+
+## Compressed request bodies
+
+Response compression and request decompression are separate declarations. To
+accept gzip uploads without changing a handler or `Request` API:
+
+```python
+from wreath.policy import HttpPolicy, RequestDecompressionPolicy
+
+app.configure_http_policy(HttpPolicy(
+    request_decompression=RequestDecompressionPolicy(
+        max_output_bytes=4 * 1024 * 1024,
+    ),
+))
+```
+
+The compressed input is still bounded by `RequestLimits.max_body_bytes`; the
+separate decoded bound is what stops a small gzip member expanding into memory
+pressure. `body()`, `json()`, and `form()` share the decoded request cache.
+Duplicate, stacked, and unsupported content codings are refused rather than
+interpreted differently by a proxy and the application.
+
+## CSP nonces
+
+Static security headers stay precompiled. A page that genuinely needs inline
+script or style can opt into a per-request nonce and read the exact value Wreath
+will place in the response policy:
+
+```python
+from wreath.policy import HttpPolicy, SecurityHeadersPolicy, csp_nonce
+
+app.configure_http_policy(HttpPolicy(
+    security_headers=SecurityHeadersPolicy(
+        content_security_policy="default-src 'self'",
+        csp_nonce_directives=("script-src", "style-src"),
+        csp_report_only=True,  # remove after observing the policy
+    ),
+))
+
+@app.get("/")
+async def page(request):
+    nonce = csp_nonce(request)
+    return HTMLResponse(f'<script nonce="{nonce}">start()</script>')
+```
+
+The nonce is minted once for the request. A handler-supplied CSP header still
+wins, as it does for every `SecurityHeadersPolicy` default.
+
+## Signed route URLs
+
+`SignedRoutePolicy` binds the rotating, expiring `ActionTokens` primitive to an
+exact HTTP method, path, and raw query string. A single-use token uses the same
+explicit replay ledger as any other action token:
+
+```python
+from wreath.policy import HttpPolicy, SignedRoutePolicy
+from wreath.tokens import ActionTokens, TokenPurpose
+
+tokens = ActionTokens(
+    {"2026-08": SIGNING_KEY},
+    current="2026-08",
+    purposes=(TokenPurpose("download", ttl=300),),
+)
+downloads = SignedRoutePolicy(tokens, "download", paths=("/download",))
+app.configure_http_policy(HttpPolicy(signed_routes=downloads))
+
+url = downloads.sign("/download?file=report.pdf")
+```
+
+Changing or reordering an ordinary query parameter invalidates the URL. The
+generic 403 does not reveal whether a token was missing, expired, replayed, or
+signed by an old key no longer in the rotation set.
+
 ## User story: give verified agents their own traffic lane
 
 ```python
@@ -220,6 +317,21 @@ token check rather than replacing it — so nothing that worked stops working.
 Metadata answered the request no token was minted eagerly, so one is minted at
 that call and the cookie is written as before; the cost moved to the request that
 wanted a token instead of being paid by every request that did not.
+
+For a server-rendered form, configure the text field the form submits:
+
+```python
+csrf = CsrfPolicy(
+    secret=SECRET,
+    trusted_hosts=("app.example",),
+    form_field="csrf_token",
+)
+```
+
+Render `csrf_token(request)` into a hidden `csrf_token` input. On an unsafe
+urlencoded or multipart request, the normal header still wins; only a missing
+header triggers the native form parser. Repeated token fields are refused as
+ambiguous. Leaving `form_field=None` preserves the header-only native fast path.
 
 `cross_site_refusals` counts unsafe requests the header check refused. On a
 browser-facing deployment a counter that never moves means the header is not

@@ -27,6 +27,31 @@ def _request(method: str, headers: list[tuple[bytes, bytes]] | None = None) -> R
     )
 
 
+def _request_with_body(
+    method: str, body: bytes, headers: list[tuple[bytes, bytes]]
+) -> Request:
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "scheme": "https",
+            "path": "/",
+            "query_string": b"",
+            "headers": headers,
+        },
+        receive,
+    )
+
+
 @pytest.mark.asyncio
 async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> None:
     middleware = CsrfPolicy("s" * 32)
@@ -48,6 +73,77 @@ async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> No
             (b"x-csrf-token", token.encode()),
         ],
     )
+    assert await middleware._ingress(unsafe) is None
+
+
+@pytest.mark.asyncio
+async def test_configured_urlencoded_form_field_can_resubmit_token() -> None:
+    middleware = CsrfPolicy("s" * 32, form_field="csrf_token")
+    safe = _request("GET")
+    assert await middleware._ingress(safe) is None
+    token = csrf_token(safe)
+    unsafe = _request_with_body(
+        "POST",
+        f"title=hello&csrf_token={token}".encode(),
+        [
+            (b"host", b"example.test"),
+            (b"origin", b"https://example.test"),
+            (b"cookie", f"wreath_csrf={token}".encode()),
+            (b"content-type", b"application/x-www-form-urlencoded"),
+        ],
+    )
+
+    assert await middleware._ingress(unsafe) is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_form_tokens_are_refused_as_ambiguous() -> None:
+    middleware = CsrfPolicy("s" * 32, form_field="csrf_token")
+    safe = _request("GET")
+    await middleware._ingress(safe)
+    token = csrf_token(safe)
+    unsafe = _request_with_body(
+        "POST",
+        f"csrf_token={token}&csrf_token={token}".encode(),
+        [
+            (b"host", b"example.test"),
+            (b"origin", b"https://example.test"),
+            (b"cookie", f"wreath_csrf={token}".encode()),
+            (b"content-type", b"application/x-www-form-urlencoded"),
+        ],
+    )
+
+    refusal = await middleware._ingress(unsafe)
+    assert refusal is not None and refusal.status == 403
+
+
+@pytest.mark.asyncio
+async def test_csrf_header_wins_without_reading_form_body() -> None:
+    middleware = CsrfPolicy("s" * 32, form_field="csrf_token")
+    safe = _request("GET")
+    await middleware._ingress(safe)
+    token = csrf_token(safe)
+
+    async def should_not_receive() -> dict[str, Any]:
+        raise AssertionError("a present CSRF header must avoid body parsing")
+
+    unsafe = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/",
+            "headers": [
+                (b"host", b"example.test"),
+                (b"origin", b"https://example.test"),
+                (b"cookie", f"wreath_csrf={token}".encode()),
+                (b"x-csrf-token", token.encode()),
+                (b"content-type", b"application/x-www-form-urlencoded"),
+            ],
+        },
+        should_not_receive,
+    )
+
     assert await middleware._ingress(unsafe) is None
 
 
@@ -125,6 +221,8 @@ def test_csrf_configuration_validation() -> None:
         CsrfPolicy("short")
     with pytest.raises(ValueError):
         CsrfPolicy("s" * 32, same_site="none", secure=False)
+    with pytest.raises(ValueError):
+        CsrfPolicy("s" * 32, form_field="")
 
 
 # --- trusted origins, and the config refusals -------------------------------
