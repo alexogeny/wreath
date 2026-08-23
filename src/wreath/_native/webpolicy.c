@@ -15,13 +15,169 @@
  */
 
 #include "wreathcore.h"
+#include "compression_select.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 #define WREATH_NO_TRANSFORM 1
 #define WREATH_NO_STORE 2
 #define WREATH_PRIVATE 4
 #define WREATH_PUBLIC 8
+
+/* Request admission is mutable application state, so it lives on the policy
+ * object that declared it rather than in process-global counters. The two
+ * tiny types below keep the per-request decision to one atomic load/CAS and
+ * remain honest under the free-threaded build. */
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t limit;
+    _Atomic Py_ssize_t active;
+    _Atomic Py_ssize_t refused;
+} WreathAdmissionGate;
+
+typedef struct {
+    PyObject_HEAD
+    _Atomic int active;
+    _Atomic Py_ssize_t refused;
+} WreathPolicySwitch;
+
+static int
+admission_gate_init(PyObject *object, PyObject *args, PyObject *kwargs)
+{
+    static char *names[] = {"limit", NULL};
+    Py_ssize_t limit;
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "n:AdmissionGate", names, &limit)) return -1;
+    if (limit < 1) {
+        PyErr_SetString(PyExc_ValueError, "admission limit must be positive");
+        return -1;
+    }
+    WreathAdmissionGate *self = (WreathAdmissionGate *)object;
+    self->limit = limit;
+    atomic_init(&self->active, 0);
+    atomic_init(&self->refused, 0);
+    return 0;
+}
+
+static PyObject *
+admission_gate_acquire(PyObject *object, PyObject *Py_UNUSED(ignored))
+{
+    WreathAdmissionGate *self = (WreathAdmissionGate *)object;
+    Py_ssize_t active = atomic_load_explicit(&self->active, memory_order_relaxed);
+    while (active < self->limit) {
+        if (atomic_compare_exchange_weak_explicit(
+                &self->active, &active, active + 1,
+                memory_order_acquire, memory_order_relaxed)) Py_RETURN_TRUE;
+    }
+    atomic_fetch_add_explicit(&self->refused, 1, memory_order_relaxed);
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
+admission_gate_release(PyObject *object, PyObject *Py_UNUSED(ignored))
+{
+    WreathAdmissionGate *self = (WreathAdmissionGate *)object;
+    Py_ssize_t previous = atomic_fetch_sub_explicit(
+        &self->active, 1, memory_order_release);
+    if (previous < 1) {
+        atomic_fetch_add_explicit(&self->active, 1, memory_order_relaxed);
+        PyErr_SetString(PyExc_RuntimeError, "admission gate released without a permit");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+admission_gate_snapshot(PyObject *object, PyObject *Py_UNUSED(ignored))
+{
+    WreathAdmissionGate *self = (WreathAdmissionGate *)object;
+    return Py_BuildValue(
+        "nnn", self->limit,
+        atomic_load_explicit(&self->active, memory_order_relaxed),
+        atomic_load_explicit(&self->refused, memory_order_relaxed));
+}
+
+static PyMethodDef admission_gate_methods[] = {
+    {"acquire", admission_gate_acquire, METH_NOARGS, "Try to acquire one permit."},
+    {"release", admission_gate_release, METH_NOARGS, "Release one acquired permit."},
+    {"snapshot", admission_gate_snapshot, METH_NOARGS, "Return (limit, active, refused)."},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyType_Slot admission_gate_slots[] = {
+    {Py_tp_init, admission_gate_init},
+    {Py_tp_methods, admission_gate_methods},
+    {0, NULL},
+};
+
+static PyType_Spec admission_gate_spec = {
+    .name = "wreath._native._core.AdmissionGate",
+    .basicsize = sizeof(WreathAdmissionGate),
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = admission_gate_slots,
+};
+
+static int
+policy_switch_init(PyObject *object, PyObject *args, PyObject *kwargs)
+{
+    static char *names[] = {"active", NULL};
+    int active = 0;
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "|p:PolicySwitch", names, &active)) return -1;
+    WreathPolicySwitch *self = (WreathPolicySwitch *)object;
+    atomic_init(&self->active, active);
+    atomic_init(&self->refused, 0);
+    return 0;
+}
+
+static PyObject *
+policy_switch_allows(PyObject *object, PyObject *Py_UNUSED(ignored))
+{
+    WreathPolicySwitch *self = (WreathPolicySwitch *)object;
+    if (!atomic_load_explicit(&self->active, memory_order_acquire)) Py_RETURN_TRUE;
+    atomic_fetch_add_explicit(&self->refused, 1, memory_order_relaxed);
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
+policy_switch_set(PyObject *object, PyObject *arg)
+{
+    int active = PyObject_IsTrue(arg);
+    if (active < 0) return NULL;
+    WreathPolicySwitch *self = (WreathPolicySwitch *)object;
+    atomic_store_explicit(&self->active, active, memory_order_release);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+policy_switch_snapshot(PyObject *object, PyObject *Py_UNUSED(ignored))
+{
+    WreathPolicySwitch *self = (WreathPolicySwitch *)object;
+    return Py_BuildValue(
+        "in", atomic_load_explicit(&self->active, memory_order_relaxed),
+        atomic_load_explicit(&self->refused, memory_order_relaxed));
+}
+
+static PyMethodDef policy_switch_methods[] = {
+    {"allows", policy_switch_allows, METH_NOARGS, "Whether requests are admitted."},
+    {"set", policy_switch_set, METH_O, "Set the active maintenance state."},
+    {"snapshot", policy_switch_snapshot, METH_NOARGS, "Return (active, refused)."},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyType_Slot policy_switch_slots[] = {
+    {Py_tp_init, policy_switch_init},
+    {Py_tp_methods, policy_switch_methods},
+    {0, NULL},
+};
+
+static PyType_Spec policy_switch_spec = {
+    .name = "wreath._native._core.PolicySwitch",
+    .basicsize = sizeof(WreathPolicySwitch),
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = policy_switch_slots,
+};
 
 static void
 trim_ows(const char **data, Py_ssize_t *length)
@@ -35,69 +191,34 @@ trim_ows(const char **data, Py_ssize_t *length)
     }
 }
 
+static PyObject *
+content_encoding_name(int coding)
+{
+    if (coding == 1) return PyUnicode_FromString("gzip");
+    if (coding == 2) return PyUnicode_FromString("zstd");
+    if (coding == 3) return PyUnicode_FromString("dcz");
+    Py_RETURN_NONE;
+}
+
 PyObject *
 wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
 {
-    Py_buffer view;
-    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
-    const char *data = (const char *)view.buf;
-    Py_ssize_t start = 0;
-    /* Qualities are thousandths, and 0 already means "not acceptable", so it
-     * doubles as the not-offered sentinel. Only gzip tracks whether it was
-     * *named*, because that is what decides whether the wildcard applies to it.
-     * RFC 9110 §12.5.3; the worked examples in it are the vectors
-     * tests/test_webpolicy_parity.py holds this to. */
-    int gzip_named = 0, gzip_q = 0, zstd_q = 0, wildcard_q = 0;
-    for (Py_ssize_t i = 0; i <= view.len; i++) {
-        if (i < view.len && data[i] != ',') continue;
-        const char *item = data + start;
-        Py_ssize_t item_len = i - start;
-        start = i + 1;
-        trim_ows(&item, &item_len);
-        if (item_len == 0) continue;
-        Py_ssize_t semi = 0;
-        while (semi < item_len && item[semi] != ';') semi++;
-        const char *coding = item;
-        Py_ssize_t coding_len = semi;
-        trim_ows(&coding, &coding_len);
-        int quality = 1000;
-        Py_ssize_t parameter = semi;
-        while (parameter < item_len) {
-            parameter++;
-            Py_ssize_t end = parameter;
-            while (end < item_len && item[end] != ';') end++;
-            const char *part = item + parameter;
-            Py_ssize_t part_len = end - parameter;
-            trim_ows(&part, &part_len);
-            Py_ssize_t equals = 0;
-            while (equals < part_len && part[equals] != '=') equals++;
-            const char *name = part;
-            Py_ssize_t name_len = equals;
-            trim_ows(&name, &name_len);
-            if (wreath_ascii_equal_ci_str(name, name_len, "q")) {
-                quality = equals < part_len
-                    ? wreath_parse_quality(part + equals + 1, part_len - equals - 1)
-                    : 0;
-            }
-            parameter = end;
-        }
-        if (wreath_ascii_equal_ci_str(coding, coding_len, "gzip")) {
-            gzip_named = 1;
-            gzip_q = quality;
-        } else if (wreath_ascii_equal_ci_str(coding, coding_len, "zstd")) {
-            zstd_q = quality;
-        } else if (coding_len == 1 && coding[0] == '*') {
-            wildcard_q = quality;
-        }
-    }
-    PyBuffer_Release(&view);
-    if (!gzip_named) gzip_q = wildcard_q;
-    /* Ties go to zstd; a client that prefers gzip says so with a higher q. */
-    if (zstd_q > 0 && zstd_q >= gzip_q)
-        return PyUnicode_FromString("zstd");
-    if (gzip_q > 0)
-        return PyUnicode_FromString("gzip");
-    Py_RETURN_NONE;
+    int coding = wreath_select_compression_value(arg, 0, NULL);
+    return coding < 0 ? NULL : content_encoding_name(coding);
+}
+
+PyObject *
+wreath_select_prepared_content_encoding(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *accepted;
+    int dcz_available;
+    if (!PyArg_ParseTuple(args, "Op:select_prepared_content_encoding",
+                          &accepted, &dcz_available)) return NULL;
+    int fallback = 0;
+    int coding = wreath_select_compression_value(accepted, 1, &fallback);
+    if (coding < 0) return NULL;
+    if (coding == 3 && !dcz_available) coding = fallback;
+    return content_encoding_name(coding);
 }
 
 PyObject *
@@ -610,46 +731,51 @@ error:
     return NULL;
 }
 
-PyObject *
-wreath_replace_cookie(PyObject *Py_UNUSED(self), PyObject *args)
+int
+wreath_replace_cookie_inplace(PyObject *headers, PyObject *prefix,
+                              PyObject *value)
 {
-    PyObject *headers, *prefix, *value;
-    if (!PyArg_ParseTuple(args, "OOO:replace_cookie", &headers, &prefix, &value))
-        return NULL;
     if (!PyBytes_Check(prefix) || !PyBytes_Check(value)) {
         PyErr_SetString(PyExc_TypeError, "cookie prefix and value must be bytes");
-        return NULL;
+        return -1;
     }
     if (!PyList_Check(headers)) {
         PyErr_SetString(PyExc_TypeError, "response headers must be a list");
-        return NULL;
+        return -1;
     }
     Py_ssize_t count = PyList_GET_SIZE(headers);
     Py_ssize_t prefix_length = PyBytes_GET_SIZE(prefix);
     const char *prefix_data = PyBytes_AS_STRING(prefix);
-    int found = 0;
+    Py_ssize_t found = -1;
+    Py_ssize_t matches = 0;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
-        if (validate_header_pair(pair) < 0) return NULL;
+        if (validate_header_pair(pair) < 0) return -1;
         PyObject *current = PyTuple_GET_ITEM(pair, 1);
-        if (!found && header_name_is(pair, "set-cookie") &&
+        if (header_name_is(pair, "set-cookie") &&
             PyBytes_GET_SIZE(current) >= prefix_length &&
             memcmp(PyBytes_AS_STRING(current), prefix_data, (size_t)prefix_length) == 0) {
-            found = 1;
+            if (found < 0) found = i;
+            matches++;
         }
     }
     PyObject *name = PyBytes_FromString("set-cookie");
     PyObject *replacement = name ? header_pair(name, value) : NULL;
     Py_XDECREF(name);
-    if (replacement == NULL) return NULL;
-    if (!found) {
+    if (replacement == NULL) return -1;
+    if (found < 0) {
         int result = PyList_Append(headers, replacement);
         Py_DECREF(replacement);
-        if (result < 0) return NULL;
-        Py_RETURN_NONE;
+        return result;
+    }
+    /* Once a replacement has reached the canonical final slot, another mint
+     * can swap that pair directly.  The general rebuild below remains for
+     * duplicates and for the first call that must move an older cookie. */
+    if (matches == 1 && found == count - 1) {
+        return PyList_SetItem(headers, found, replacement); /* steals */
     }
     PyObject *rebuilt = PyList_New(0);
-    if (rebuilt == NULL) { Py_DECREF(replacement); return NULL; }
+    if (rebuilt == NULL) { Py_DECREF(replacement); return -1; }
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
         PyObject *current = PyTuple_GET_ITEM(pair, 1);
@@ -662,16 +788,27 @@ wreath_replace_cookie(PyObject *Py_UNUSED(self), PyObject *args)
         PyList_SetSlice(headers, 0, count, rebuilt) < 0) goto error;
     Py_DECREF(rebuilt);
     Py_DECREF(replacement);
-    Py_RETURN_NONE;
+    return 0;
 error:
     Py_DECREF(rebuilt);
     Py_DECREF(replacement);
-    return NULL;
+    return -1;
+}
+
+PyObject *
+wreath_replace_cookie(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers, *prefix, *value;
+    if (!PyArg_ParseTuple(args, "OOO:replace_cookie", &headers, &prefix, &value))
+        return NULL;
+    if (wreath_replace_cookie_inplace(headers, prefix, value) < 0) return NULL;
+    Py_RETURN_NONE;
 }
 
 static int
 timing_metric_matches(const char *data, Py_ssize_t length, PyObject *metric)
 {
+    if (length <= 0) return 0;
     const char *semi = memchr(data, ';', (size_t)length);
     if (semi != NULL) length = (Py_ssize_t)(semi - data);
     trim_ows(&data, &length);
@@ -688,25 +825,23 @@ timing_metric_matches(const char *data, Py_ssize_t length, PyObject *metric)
     return 1;
 }
 
-PyObject *
-wreath_replace_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
+int
+wreath_replace_server_timing_inplace(PyObject *headers, PyObject *metric,
+                                     PyObject *value)
 {
-    PyObject *headers, *metric, *value;
-    if (!PyArg_ParseTuple(args, "OOO:replace_server_timing", &headers, &metric, &value))
-        return NULL;
     if (!PyBytes_Check(metric) || !PyBytes_Check(value)) {
         PyErr_SetString(PyExc_TypeError, "timing metric and value must be bytes");
-        return NULL;
+        return -1;
     }
     if (!PyList_Check(headers)) {
         PyErr_SetString(PyExc_TypeError, "response headers must be a list");
-        return NULL;
+        return -1;
     }
     Py_ssize_t count = PyList_GET_SIZE(headers);
     int found = 0;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
-        if (validate_header_pair(pair) < 0) return NULL;
+        if (validate_header_pair(pair) < 0) return -1;
         if (!found && header_name_is(pair, "server-timing")) {
             found = 1;
         }
@@ -714,17 +849,16 @@ wreath_replace_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *name = PyBytes_FromString("server-timing");
     PyObject *replacement = name ? header_pair(name, value) : NULL;
     Py_XDECREF(name);
-    if (replacement == NULL) return NULL;
+    if (replacement == NULL) return -1;
     if (!found) {
         int result = PyList_Append(headers, replacement);
         Py_DECREF(replacement);
-        if (result < 0) return NULL;
-        Py_RETURN_NONE;
+        return result;
     }
     PyObject *rebuilt = PyList_New(0), *retained = PyList_New(0);
     if (rebuilt == NULL || retained == NULL) {
         Py_XDECREF(rebuilt); Py_XDECREF(retained); Py_DECREF(replacement);
-        return NULL;
+        return -1;
     }
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
@@ -765,15 +899,42 @@ wreath_replace_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
     if (append_result < 0 || PyList_SetSlice(headers, 0, count, rebuilt) < 0)
         goto timing_error;
     Py_DECREF(rebuilt); Py_DECREF(retained); Py_DECREF(replacement);
-    Py_RETURN_NONE;
+    return 0;
 timing_error:
     Py_DECREF(rebuilt); Py_DECREF(retained); Py_DECREF(replacement);
-    return NULL;
+    return -1;
+}
+
+PyObject *
+wreath_replace_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers, *metric, *value;
+    if (!PyArg_ParseTuple(args, "OOO:replace_server_timing", &headers, &metric, &value))
+        return NULL;
+    if (wreath_replace_server_timing_inplace(headers, metric, value) < 0)
+        return NULL;
+    Py_RETURN_NONE;
 }
 
 int
 wreath_register_webpolicy(PyObject *module)
 {
+    PyObject *admission_gate = PyType_FromSpec(&admission_gate_spec);
+    PyObject *policy_switch = PyType_FromSpec(&policy_switch_spec);
+    if (admission_gate == NULL || policy_switch == NULL) {
+        Py_XDECREF(admission_gate);
+        Py_XDECREF(policy_switch);
+        return -1;
+    }
+    if (PyModule_AddObject(module, "AdmissionGate", admission_gate) < 0) {
+        Py_DECREF(admission_gate);
+        Py_DECREF(policy_switch);
+        return -1;
+    }
+    if (PyModule_AddObject(module, "PolicySwitch", policy_switch) < 0) {
+        Py_DECREF(policy_switch);
+        return -1;
+    }
     return PyModule_AddIntConstant(module, "NO_TRANSFORM", WREATH_NO_TRANSFORM) < 0 ||
            PyModule_AddIntConstant(module, "NO_STORE", WREATH_NO_STORE) < 0 ||
            PyModule_AddIntConstant(module, "PRIVATE", WREATH_PRIVATE) < 0 ||
