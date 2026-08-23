@@ -166,20 +166,20 @@ part a single-module analysis cannot establish, because the transaction is
 usually opened by the caller. A rule that guessed would fire on every correct
 handler that reads before it writes, which is all of them.
 
-## Cross-site request forgery for HTML form posts
+## Generated-admin integration with form CSRF
 
-`wreath.policy.CsrfPolicy` reads the resubmitted token from a request
-**header**, which suits a script client that sets one and cannot work for a plain
-HTML form — a form post carries no header. Mounting the middleware in front of a
-server-rendered form does not defend it, it refuses it.
+`wreath.policy.CsrfPolicy(form_field=...)` now validates urlencoded and multipart
+HTML forms alongside its header path. It uses the same signed double-submit
+token and origin check, gives the header precedence, and refuses repeated form
+fields as ambiguous.
 
-That gap is why [`wreath.admin`](admin.md) *requires* a `csrf=` verifier before it
-will generate any write route, rather than shipping an unprotected escalation
-path or growing a second CSRF implementation beside the one that exists. What is
-missing is small and well-shaped: a configured form-field name that the
-middleware reads when the request carries a form content type, alongside the
-header it reads today. When that lands, the admin's `csrf=` becomes a one-line
-pointer at it and this row leaves the page.
+[`wreath.admin`](admin.md) still accepts its older `csrf=(request) -> bool`
+adapter and still requires one before generating a write route. What remains is
+the small integration surface that renders `csrf_token(request)` into every
+generated form and points that verifier at the already-completed global policy,
+without validating the same request twice. Until that ships, custom
+server-rendered forms can use `CsrfPolicy(form_field=...)` directly while the
+generated admin keeps its explicit adapter.
 
 ## `series` charts in the admin
 
