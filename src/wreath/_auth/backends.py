@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
 
+from .._awaitable import is_awaitable
 from ..request import Request
 from .models import AuthorizationDecision, Identity
 from .requirements import PolicyRequirement
@@ -185,7 +186,7 @@ class BearerTokenBackend:
         # returning an awaitable is supported but exceptional.
         if result is None or isinstance(result, Identity):
             return result
-        if inspect.isawaitable(result):
+        if is_awaitable(result):
             return await result
         return cast(Identity | None, result)
 
