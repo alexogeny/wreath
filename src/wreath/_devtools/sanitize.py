@@ -111,6 +111,11 @@ _KNOWN_ARTIFACTS = (
     "test_map_lint",
     "test_request_trace",
     "test_complexity_probe",
+    # Discovery resolves its baseline relative to the imported package. The
+    # isolated sanitizer package deliberately contains no docs/ tree, so the
+    # ratchet's baseline cannot exist there; ordinary and explicit discovery
+    # gates still exercise the real repository.
+    "test_complexity_discover",
     # This test deliberately caps process RSS. Its three child interpreters
     # inherit LD_PRELOAD from the sanitizer harness, so ASan's shadow mapping
     # and quarantine are exactly the memory it observes. The native ring/heap
@@ -129,6 +134,12 @@ _KNOWN_ARTIFACTS = (
     # resolves that absent sanitized-tree path; the rest of the capability
     # suite remains real coverage and must keep running.
     "test_the_shipped_index_matches_the_manifest_it_is_generated_from",
+    # ASan instrumentation stretches the synchronous request/response turn
+    # enough for the arrival estimator to observe real idle gaps. The test's
+    # premise is a saturated loop with no slack, so its <=2 collection bound is
+    # not meaningful in that execution environment; the rest of the reactor GC
+    # suite remains instrumented.
+    "test_a_saturated_loop_does_not_collect_in_the_batch",
 )
 
 _SANITIZER_ERROR = re.compile(

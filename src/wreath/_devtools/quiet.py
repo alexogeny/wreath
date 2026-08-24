@@ -789,8 +789,11 @@ def plan(tier: int, *, pid: int | None = None) -> list[Step]:
                     Change("sysfs", str(paranoid), current, "-1"),
                 )
             )
-        for service in NOISY_SERVICES:
-            state = _service_state(service)
+        for service, state in zip(
+            NOISY_SERVICES,
+            _service_states(NOISY_SERVICES),
+            strict=True,
+        ):
             if state == "active":
                 steps.append(
                     Step(
@@ -909,13 +912,34 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _service_state(unit: str) -> str:
+def _service_states(units: Sequence[str]) -> tuple[str, ...]:
+    """Return every unit's active state with one systemd round trip.
+
+    `systemctl is-active` accepts multiple units and emits one state per unit in
+    argument order.  The quieting plan used to launch one process for every
+    named service; on a runner with a slow or absent system bus those fourteen
+    identical connection attempts dominated every caller of `plan()`.
+
+    Missing output is treated as unknown in the same safe direction as the old
+    per-unit probe: only an explicit ``active`` state creates a stop step.
+    """
+    if not units:
+        return ()
     if shutil.which("systemctl") is None:
-        return "unknown"
+        return ("unknown",) * len(units)
     result = subprocess.run(
-        ["systemctl", "is-active", unit], capture_output=True, text=True, check=False
+        ["systemctl", "is-active", *units],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    return result.stdout.strip() or "unknown"
+    reported = result.stdout.splitlines()
+    return tuple(
+        reported[index].strip() or "unknown"
+        if index < len(reported)
+        else "unknown"
+        for index in range(len(units))
+    )
 
 
 # --- the watchdog -----------------------------------------------------------
