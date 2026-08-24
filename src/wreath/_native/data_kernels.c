@@ -202,32 +202,93 @@ numeric_rank_descending(const void *left_pointer, const void *right_pointer)
     return numeric_rank_ascending(right_pointer, left_pointer);
 }
 
+static inline int
+numeric_rank_order(const NumericRank *left, const NumericRank *right,
+                   int descending)
+{
+    int ascending = numeric_rank_ascending(left, right);
+    return descending ? -ascending : ascending;
+}
+
+/* Keep the requested sorted prefix in a max heap whose root is the worst
+ * retained item. Pagination normally asks for a small first page; sorting the
+ * entire candidate set made the discarded tail pay qsort's comparisons and
+ * occupy the cache. Ties use the same index order as the full comparators. */
+static void
+numeric_rank_heap_offer(NumericRank *heap, Py_ssize_t *used,
+                        Py_ssize_t capacity, NumericRank candidate,
+                        int descending)
+{
+    Py_ssize_t position;
+    if (*used < capacity) {
+        position = (*used)++;
+        while (position > 0) {
+            Py_ssize_t parent = (position - 1) / 2;
+            if (numeric_rank_order(&heap[parent], &candidate, descending) >= 0)
+                break;
+            heap[position] = heap[parent];
+            position = parent;
+        }
+        heap[position] = candidate;
+        return;
+    }
+    if (capacity == 0
+        || numeric_rank_order(&candidate, &heap[0], descending) >= 0)
+        return;
+
+    position = 0;
+    while (position < capacity / 2) {
+        Py_ssize_t child = position * 2 + 1;
+        Py_ssize_t right = child + 1;
+        if (right < capacity
+            && numeric_rank_order(&heap[right], &heap[child], descending) > 0)
+            child = right;
+        if (numeric_rank_order(&heap[child], &candidate, descending) <= 0)
+            break;
+        heap[position] = heap[child];
+        position = child;
+    }
+    heap[position] = candidate;
+}
+
 PyObject *
 wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *scores_source;
-    Py_ssize_t offset, limit;
-    int descending;
-    if (!PyArg_ParseTuple(args, "Onnp:rank_indices", &scores_source,
-                          &offset, &limit, &descending)) return NULL;
-    if (offset < 0 || limit < 0) {
-        PyErr_SetString(PyExc_ValueError, "rank offset and limit must be non-negative");
+    Py_ssize_t offset, limit, candidates = -1;
+    int descending, absolute = 0;
+    if (!PyArg_ParseTuple(args, "Onnp|np:rank_indices", &scores_source,
+                          &offset, &limit, &descending, &candidates,
+                          &absolute)) return NULL;
+    if (offset < 0 || limit < 0 || candidates < -1) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "rank offset and limit must be non-negative and candidates must be -1 or non-negative");
         return NULL;
     }
     PyObject *scores = PySequence_Fast(scores_source, "scores must be a sequence");
     if (scores == NULL) return NULL;
     Py_ssize_t count = PySequence_Fast_GET_SIZE(scores);
-    if ((size_t)count > SIZE_MAX / sizeof(NumericRank)) {
+    if (candidates >= 0 && candidates < count) count = candidates;
+    Py_ssize_t start = offset < count ? offset : count;
+    Py_ssize_t available = count - start;
+    Py_ssize_t output_count = limit < available ? limit : available;
+    Py_ssize_t prefix_count = start + output_count;
+    int empty = output_count == 0;
+    int partial = !empty && prefix_count < count / 2;
+    Py_ssize_t workspace_count = empty ? 0 : partial ? prefix_count : count;
+    if ((size_t)workspace_count > SIZE_MAX / sizeof(NumericRank)) {
         Py_DECREF(scores);
         return PyErr_NoMemory();
     }
-    NumericRank *ranks = count != 0
-        ? PyMem_Malloc((size_t)count * sizeof(*ranks)) : NULL;
-    if (count != 0 && ranks == NULL) {
+    NumericRank *ranks = workspace_count != 0
+        ? PyMem_Malloc((size_t)workspace_count * sizeof(*ranks)) : NULL;
+    if (workspace_count != 0 && ranks == NULL) {
         Py_DECREF(scores);
         return PyErr_NoMemory();
     }
     PyObject **items = PySequence_Fast_ITEMS(scores);
+    Py_ssize_t heap_used = 0;
     for (Py_ssize_t index = 0; index < count; index++) {
         if (PyBool_Check(items[index]) ||
             (!PyFloat_Check(items[index]) && !PyLong_Check(items[index]))) {
@@ -236,19 +297,25 @@ wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
                          index, Py_TYPE(items[index])->tp_name);
             goto rank_error;
         }
-        double score = PyFloat_AsDouble(items[index]);
+        double score = PyFloat_Check(items[index])
+            ? PyFloat_AS_DOUBLE(items[index]) : PyFloat_AsDouble(items[index]);
         if ((score == -1.0 && PyErr_Occurred()) || !isfinite(score)) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "rank score %zd must be finite", index);
             goto rank_error;
         }
-        ranks[index] = (NumericRank){score, index};
+        if (absolute) score = fabs(score);
+        NumericRank rank = (NumericRank){score, index};
+        if (empty) continue;
+        if (partial)
+            numeric_rank_heap_offer(
+                ranks, &heap_used, prefix_count, rank, descending);
+        else
+            ranks[index] = rank;
     }
-    qsort(ranks, (size_t)count, sizeof(*ranks), descending
-          ? numeric_rank_descending : numeric_rank_ascending);
-    Py_ssize_t start = offset < count ? offset : count;
-    Py_ssize_t available = count - start;
-    Py_ssize_t output_count = limit < available ? limit : available;
+    if (workspace_count > 1)
+        qsort(ranks, (size_t)workspace_count, sizeof(*ranks), descending
+              ? numeric_rank_descending : numeric_rank_ascending);
     PyObject *result = PyTuple_New(output_count);
     if (result == NULL) goto rank_error;
     for (Py_ssize_t index = 0; index < output_count; index++) {
@@ -2236,21 +2303,6 @@ typedef struct {
     size_t capacity;
 } DataInteger;
 
-typedef struct {
-    char *key;
-    size_t key_length;
-    uint64_t hash;
-    DataInteger value;
-} MetricEntry;
-
-typedef struct {
-    MetricEntry *entries;
-    size_t count;
-    size_t capacity;
-    size_t *slots;
-    size_t slot_capacity;
-} MetricTable;
-
 static void
 data_integer_clear(DataInteger *value)
 {
@@ -2443,92 +2495,6 @@ data_integer_to_python(const DataInteger *value)
     return result;
 }
 
-static uint64_t
-metric_hash(const char *data, size_t length)
-{
-    uint64_t hash = UINT64_C(1469598103934665603);
-    for (size_t index = 0; index < length; index++) {
-        hash ^= (uint8_t)data[index];
-        hash *= UINT64_C(1099511628211);
-    }
-    return hash;
-}
-
-static void
-metric_table_clear(MetricTable *table)
-{
-    for (size_t index = 0; index < table->count; index++) {
-        PyMem_Free(table->entries[index].key);
-        data_integer_clear(&table->entries[index].value);
-    }
-    PyMem_Free(table->entries);
-    PyMem_Free(table->slots);
-    memset(table, 0, sizeof(*table));
-}
-
-static int
-metric_table_rehash(MetricTable *table, size_t capacity)
-{
-    size_t *slots = PyMem_Malloc(capacity * sizeof(size_t));
-    if (slots == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    for (size_t index = 0; index < capacity; index++) slots[index] = SIZE_MAX;
-    for (size_t index = 0; index < table->count; index++) {
-        size_t slot = (size_t)table->entries[index].hash & (capacity - 1);
-        while (slots[slot] != SIZE_MAX) slot = (slot + 1) & (capacity - 1);
-        slots[slot] = index;
-    }
-    PyMem_Free(table->slots);
-    table->slots = slots;
-    table->slot_capacity = capacity;
-    return 0;
-}
-
-static int
-metric_table_add(MetricTable *table, char *key, size_t key_length,
-                 DataInteger *value)
-{
-    if (table->slot_capacity == 0 && metric_table_rehash(table, 16) < 0)
-        goto add_error;
-    if ((table->count + 1) * 10 >= table->slot_capacity * 7 &&
-        metric_table_rehash(table, table->slot_capacity * 2) < 0) goto add_error;
-    uint64_t hash = metric_hash(key, key_length);
-    size_t slot = (size_t)hash & (table->slot_capacity - 1);
-    while (table->slots[slot] != SIZE_MAX) {
-        MetricEntry *entry = &table->entries[table->slots[slot]];
-        if (entry->hash == hash && entry->key_length == key_length &&
-            memcmp(entry->key, key, key_length) == 0) {
-            int result = data_integer_add(&entry->value, value);
-            PyMem_Free(key);
-            data_integer_clear(value);
-            return result;
-        }
-        slot = (slot + 1) & (table->slot_capacity - 1);
-    }
-    if (table->count == table->capacity) {
-        size_t capacity = table->capacity ? table->capacity * 2 : 16;
-        MetricEntry *entries = PyMem_Realloc(
-            table->entries, capacity * sizeof(MetricEntry));
-        if (entries == NULL) {
-            PyErr_NoMemory();
-            goto add_error;
-        }
-        table->entries = entries;
-        table->capacity = capacity;
-    }
-    size_t index = table->count++;
-    table->entries[index] = (MetricEntry){key, key_length, hash, *value};
-    memset(value, 0, sizeof(*value));
-    table->slots[slot] = index;
-    return 0;
-add_error:
-    PyMem_Free(key);
-    data_integer_clear(value);
-    return -1;
-}
-
 static int
 metric_text(PyObject *object, PyObject **owner, const char **data, Py_ssize_t *length)
 {
@@ -2543,7 +2509,7 @@ metric_text(PyObject *object, PyObject **owner, const char **data, Py_ssize_t *l
 }
 
 static int
-metric_add_pair(MetricTable *table, const char *namespace_data,
+metric_add_pair(PyObject *result, const char *namespace_data,
                 Py_ssize_t namespace_length, const char *subsystem_data,
                 Py_ssize_t subsystem_length, PyObject *name_object,
                 PyObject *value_object)
@@ -2555,25 +2521,74 @@ metric_add_pair(MetricTable *table, const char *namespace_data,
         return -1;
     size_t key_length = (size_t)namespace_length + (size_t)subsystem_length +
                         (size_t)name_length + 2;
-    char *key = PyMem_Malloc(key_length);
-    if (key == NULL) {
+    char *key_data = PyMem_Malloc(key_length);
+    if (key_data == NULL) {
         Py_DECREF(name_owner);
         PyErr_NoMemory();
         return -1;
     }
-    char *cursor = key;
+    char *cursor = key_data;
     memcpy(cursor, namespace_data, (size_t)namespace_length);
     cursor += namespace_length; *cursor++ = '_';
     memcpy(cursor, subsystem_data, (size_t)subsystem_length);
     cursor += subsystem_length; *cursor++ = '_';
     memcpy(cursor, name_data, (size_t)name_length);
     Py_DECREF(name_owner);
-    DataInteger value = {0};
-    if (data_integer_from_python(&value, value_object) < 0) {
-        PyMem_Free(key);
+    if (!PyLong_Check(value_object)) {
+        PyMem_Free(key_data);
+        PyErr_Format(PyExc_TypeError,
+                     "counter value must be int, got %.200s",
+                     Py_TYPE(value_object)->tp_name);
         return -1;
     }
-    return metric_table_add(table, key, key_length, &value);
+    PyObject *key = PyUnicode_DecodeUTF8(
+        key_data, (Py_ssize_t)key_length, "strict");
+    PyMem_Free(key_data);
+    if (key == NULL) return -1;
+    PyObject *previous = PyDict_GetItemWithError(result, key);
+    if (previous == NULL && PyErr_Occurred()) {
+        Py_DECREF(key);
+        return -1;
+    }
+    if (previous == NULL) {
+        /* Preserve flatten's exact-int result even for an int subclass (and
+         * bool). Exact ints are already in the representation we want, so the
+         * overwhelmingly common path can borrow them without a conversion. */
+        PyObject *normalized = NULL;
+        if (!PyLong_CheckExact(value_object)) {
+            DataInteger integer = {0};
+            if (data_integer_from_python(&integer, value_object) == 0)
+                normalized = data_integer_to_python(&integer);
+            data_integer_clear(&integer);
+            if (normalized == NULL) {
+                Py_DECREF(key);
+                return -1;
+            }
+            value_object = normalized;
+        }
+        int added = PyDict_SetItem(result, key, value_object);
+        Py_XDECREF(normalized);
+        Py_DECREF(key);
+        return added;
+    }
+    /* Duplicate subsystem/name pairs are uncommon, but their arbitrary-size
+     * sum is part of flatten's contract. Keep the first exact Python integer
+     * directly in the result and pay the native-limb conversion only here. */
+    DataInteger total = {0};
+    DataInteger increment = {0};
+    int added = data_integer_from_python(&total, previous);
+    if (added == 0) added = data_integer_from_python(&increment, value_object);
+    if (added == 0) added = data_integer_add(&total, &increment);
+    PyObject *sum = added == 0 ? data_integer_to_python(&total) : NULL;
+    if (sum != NULL) {
+        added = PyDict_SetItem(result, key, sum);
+        Py_DECREF(sum);
+    }
+    else added = -1;
+    data_integer_clear(&increment);
+    data_integer_clear(&total);
+    Py_DECREF(key);
+    return added;
 }
 
 PyObject *
@@ -2592,7 +2607,12 @@ wreath_metrics_flatten(PyObject *Py_UNUSED(self), PyObject *args)
         Py_DECREF(namespace_owner);
         return NULL;
     }
-    MetricTable table = {0};
+    PyObject *result = PyDict_New();
+    if (result == NULL) {
+        Py_DECREF(readings);
+        Py_DECREF(namespace_owner);
+        return NULL;
+    }
     PyObject *reading;
     while ((reading = PyIter_Next(readings)) != NULL) {
         PyObject *subsystem_object = data_getattr(reading, DATA_ATTR_SUBSYSTEM);
@@ -2616,7 +2636,7 @@ wreath_metrics_flatten(PyObject *Py_UNUSED(self), PyObject *args)
             Py_ssize_t position = 0;
             PyObject *name, *value;
             while (PyDict_Next(values, &position, &name, &value)) {
-                if (metric_add_pair(&table, namespace_data, namespace_length,
+                if (metric_add_pair(result, namespace_data, namespace_length,
                                     subsystem_data, subsystem_length,
                                     name, value) < 0) {
                     Py_DECREF(subsystem_owner); Py_DECREF(values);
@@ -2632,7 +2652,7 @@ wreath_metrics_flatten(PyObject *Py_UNUSED(self), PyObject *args)
             Py_ssize_t count = PyList_GET_SIZE(items);
             for (Py_ssize_t index = 0; index < count; index++) {
                 PyObject *pair = PyList_GET_ITEM(items, index);
-                if (metric_add_pair(&table, namespace_data, namespace_length,
+                if (metric_add_pair(result, namespace_data, namespace_length,
                                     subsystem_data, subsystem_length,
                                     PyTuple_GET_ITEM(pair, 0),
                                     PyTuple_GET_ITEM(pair, 1)) < 0) {
@@ -2648,26 +2668,11 @@ wreath_metrics_flatten(PyObject *Py_UNUSED(self), PyObject *args)
     if (PyErr_Occurred()) goto metric_error;
     Py_DECREF(readings);
     Py_DECREF(namespace_owner);
-    PyObject *result = PyDict_New();
-    if (result == NULL) goto metric_table_error;
-    for (size_t index = 0; index < table.count; index++) {
-        MetricEntry *entry = &table.entries[index];
-        PyObject *key = PyUnicode_DecodeUTF8(entry->key, (Py_ssize_t)entry->key_length,
-                                             "strict");
-        PyObject *value = key == NULL ? NULL : data_integer_to_python(&entry->value);
-        if (value == NULL || PyDict_SetItem(result, key, value) < 0) {
-            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(result);
-            goto metric_table_error;
-        }
-        Py_DECREF(key); Py_DECREF(value);
-    }
-    metric_table_clear(&table);
     return result;
 metric_error:
     Py_DECREF(readings);
     Py_DECREF(namespace_owner);
-metric_table_error:
-    metric_table_clear(&table);
+    Py_DECREF(result);
     return NULL;
 }
 
@@ -2748,6 +2753,39 @@ locale_quality(const Py_UCS4 *text, Py_ssize_t start, Py_ssize_t end,
     return 1;
 }
 
+/* The weight of one Accept-* element, given the `;` that ends its tag and the
+ * element's end. Absent `q` is 1.0 and an unparseable one is 0.0, which RFC
+ * 9110 s12.4.2 reads as "not acceptable" rather than "unweighted".
+ *
+ * The first `q` wins: everything after it is accept-ext, so a second one is a
+ * parameter that happens to be spelled `q` and does not restate the weight.
+ * Three copies of this walk had drifted -- two stopped at the first `q` and
+ * the Accept parser let a later one overwrite it -- which is the whole reason
+ * it is one function now. */
+static double
+accept_quality(const Py_UCS4 *text, Py_ssize_t separator, Py_ssize_t end)
+{
+    Py_ssize_t parameter_start = separator < end ? separator + 1 : end;
+    while (parameter_start <= end) {
+        Py_ssize_t parameter_end = parameter_start;
+        while (parameter_end < end && text[parameter_end] != ';') parameter_end++;
+        Py_ssize_t equals = parameter_start;
+        while (equals < parameter_end && text[equals] != '=') equals++;
+        Py_ssize_t key_start = parameter_start, key_end = equals;
+        locale_trim(text, &key_start, &key_end);
+        if (locale_ascii_equal(text, key_start, key_end, "q")) {
+            double parsed;
+            if (equals == parameter_end ||
+                !locale_quality(text, equals + 1, parameter_end, &parsed))
+                return 0.0;
+            return parsed;
+        }
+        if (parameter_end == end) break;
+        parameter_start = parameter_end + 1;
+    }
+    return 1.0;
+}
+
 PyObject *
 wreath_locale_preference(PyObject *Py_UNUSED(self), PyObject *header)
 {
@@ -2774,29 +2812,12 @@ wreath_locale_preference(PyObject *Py_UNUSED(self), PyObject *header)
         locale_trim(text, &tag_start, &tag_end);
         if (tag_start < tag_end &&
             !(tag_end - tag_start == 1 && text[tag_start] == '*')) {
-            double quality = 1.0;
-            Py_ssize_t parameter_start = separator < end ? separator + 1 : end;
-            while (parameter_start <= end) {
-                Py_ssize_t parameter_end = parameter_start;
-                while (parameter_end < end && text[parameter_end] != ';')
-                    parameter_end++;
-                Py_ssize_t equals = parameter_start;
-                while (equals < parameter_end && text[equals] != '=') equals++;
-                Py_ssize_t key_start = parameter_start, key_end = equals;
-                locale_trim(text, &key_start, &key_end);
-                if (locale_ascii_equal(text, key_start, key_end, "q")) {
-                    double parsed;
-                    if (equals == parameter_end ||
-                        !locale_quality(text, equals + 1, parameter_end, &parsed))
-                        quality = 0.0;
-                    else
-                        quality = parsed;
-                    break;
-                }
-                if (parameter_end == end) break;
-                parameter_start = parameter_end + 1;
-            }
-            if (!found || quality > best_quality) {
+            /* `q=0` refuses a tag outright, so a refused one can never become
+             * the preference -- not even as the only candidate, which used to
+             * return the one language the client had ruled out. The sibling
+             * `select_language` has always read it this way. */
+            double quality = accept_quality(text, separator, end);
+            if (quality > 0.0 && (!found || quality > best_quality)) {
                 found = 1;
                 best_quality = quality;
                 best_start = tag_start;
@@ -2896,27 +2917,7 @@ wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
         while (separator < end && text[separator] != ';') separator++;
         Py_ssize_t tag_start = start, tag_end = separator;
         locale_trim(text, &tag_start, &tag_end);
-        double quality = 1.0;
-        Py_ssize_t parameter_start = separator < end ? separator + 1 : end;
-        while (parameter_start <= end) {
-            Py_ssize_t parameter_end = parameter_start;
-            while (parameter_end < end && text[parameter_end] != ';') parameter_end++;
-            Py_ssize_t equals = parameter_start;
-            while (equals < parameter_end && text[equals] != '=') equals++;
-            Py_ssize_t key_start = parameter_start, key_end = equals;
-            locale_trim(text, &key_start, &key_end);
-            if (locale_ascii_equal(text, key_start, key_end, "q")) {
-                double parsed;
-                if (equals == parameter_end ||
-                    !locale_quality(text, equals + 1, parameter_end, &parsed))
-                    quality = 0.0;
-                else
-                    quality = parsed;
-                break;
-            }
-            if (parameter_end == end) break;
-            parameter_start = parameter_end + 1;
-        }
+        double quality = accept_quality(text, separator, end);
         if (tag_end - tag_start == 1 && text[tag_start] == '*') {
             if (quality > wildcard_quality) wildcard_quality = quality;
         } else if (tag_start < tag_end) {
@@ -3285,27 +3286,7 @@ accept_parse(PyObject *header, Py_UCS4 **text_out, AcceptRange **ranges_out,
         Py_ssize_t media_start = start, media_end = separator;
         locale_trim(text, &media_start, &media_end);
         if (media_start < media_end) {
-            double quality = 1.0;
-            Py_ssize_t parameter_start = separator < end ? separator + 1 : end;
-            while (parameter_start <= end) {
-                Py_ssize_t parameter_end = parameter_start;
-                while (parameter_end < end && text[parameter_end] != ';')
-                    parameter_end++;
-                Py_ssize_t equals = parameter_start;
-                while (equals < parameter_end && text[equals] != '=') equals++;
-                Py_ssize_t key_start = parameter_start, key_end = equals;
-                locale_trim(text, &key_start, &key_end);
-                if (locale_ascii_equal(text, key_start, key_end, "q")) {
-                    double parsed;
-                    if (equals == parameter_end ||
-                        !locale_quality(text, equals + 1, parameter_end, &parsed))
-                        quality = 0.0;
-                    else
-                        quality = parsed;
-                }
-                if (parameter_end == end) break;
-                parameter_start = parameter_end + 1;
-            }
+            double quality = accept_quality(text, separator, end);
             int has_star = 0;
             for (Py_ssize_t index = media_start; index < media_end; index++)
                 if (text[index] == '*') has_star = 1;

@@ -1,6 +1,6 @@
 {
   "schema": "wreath/e2e-stack-instructions/1",
-  "recorded": "2026-08-18",
+  "recorded": "2026-08-24",
   "python": "3.14.7",
   "platform": "Linux-7.1.8-1-cachyos-x86_64-with-glibc2.44",
   "cpu": "AMD Ryzen 7 7730U with Radeon Graphics",
@@ -43,7 +43,7 @@
     "pythonhashseed": 0
   },
   "packages": {
-    "wreath": "0.3.1",
+    "wreath": "0.3.2",
     "fastapi": "0.139.0",
     "starlette": "1.3.1",
     "pydantic": "2.12.5",
@@ -55,253 +55,501 @@
     "multidict": "6.7.1",
     "uvicorn": "0.48.0",
     "uvloop": "0.22.1",
-    "httptools": "0.7.1"
+    "httptools": "0.7.1",
+    "sanic": "25.12.1",
+    "blacksheep": "2.6.3",
+    "granian": "2.7.9",
+    "msgspec": "0.21.1"
   },
   "arms": {
     "wreath": {
       "route": {
-        "median": 36006.196,
+        "median": 35221.0205,
         "range": [
-          35865.662,
-          36217.0585
+          35139.772,
+          36278.645
         ],
         "samples": [
-          35929.2815,
-          35865.662,
-          36006.196,
-          36217.0585,
-          36148.5605
+          35139.772,
+          35221.0205,
+          35187.074,
+          35494.415,
+          36278.645
         ],
         "added_from_previous": null
       },
       "cors": {
-        "median": 47156.4635,
+        "median": 46541.6645,
         "range": [
-          46812.41,
-          47299.142
+          46075.1505,
+          47107.951
         ],
         "samples": [
-          47156.4635,
-          47159.785,
-          46927.1695,
-          47299.142,
-          46812.41
+          46520.9485,
+          46541.6645,
+          46075.1505,
+          47107.951,
+          46731.4305
         ],
-        "added_from_previous": 11150.267499999994
+        "added_from_previous": 11320.644
       },
       "binding": {
-        "median": 115305.2045,
+        "median": 107943.36,
         "range": [
-          114922.714,
-          115650.5975
+          107661.6,
+          108188.775
         ],
         "samples": [
-          115650.5975,
-          115305.2045,
-          115487.3475,
-          115012.368,
-          114922.714
+          107661.6,
+          107943.36,
+          107721.8765,
+          108068.7755,
+          108188.775
         ],
-        "added_from_previous": 68148.74100000001
+        "added_from_previous": 61401.6955
       },
       "auth": {
-        "median": 122448.22,
+        "median": 114035.502,
         "range": [
-          122103.994,
-          122608.3635
+          113962.698,
+          114441.5215
         ],
         "samples": [
-          122444.2395,
-          122608.3635,
-          122448.22,
-          122538.202,
-          122103.994
+          114441.5215,
+          114034.8375,
+          114035.502,
+          113962.698,
+          114138.939
         ],
-        "added_from_previous": 7143.015499999994
+        "added_from_previous": 6092.141999999993
       },
       "cedar": {
-        "median": 173902.378,
+        "median": 153792.947,
         "range": [
-          173339.4365,
-          174760.782
+          153716.91,
+          154480.8365
         ],
         "samples": [
-          173838.3755,
-          173902.378,
-          173339.4365,
-          173927.554,
-          174760.782
+          154043.2305,
+          153792.947,
+          153762.5445,
+          154480.8365,
+          153716.91
         ],
-        "added_from_previous": 51454.157999999996
+        "added_from_previous": 39757.44499999999
       },
       "postgres": {
-        "median": 225857.137,
+        "median": 206036.9655,
         "range": [
-          225269.534,
-          226134.5585
+          205760.1675,
+          206679.1335
         ],
         "samples": [
-          226134.5585,
-          226064.356,
-          225857.137,
-          225269.534,
-          225654.4065
+          205928.846,
+          206036.9655,
+          205760.1675,
+          206496.991,
+          206679.1335
         ],
-        "added_from_previous": 51954.75899999999
+        "added_from_previous": 52244.018500000006
       },
       "complete": {
-        "median": 269109.6925,
+        "median": 249843.698,
         "range": [
-          268866.0375,
-          269509.8065
+          249578.3185,
+          250002.563
         ],
         "samples": [
-          269208.209,
-          269509.8065,
-          269109.6925,
-          269039.7015,
-          268866.0375
+          249625.254,
+          249876.5915,
+          249578.3185,
+          249843.698,
+          250002.563
         ],
-        "added_from_previous": 43252.55550000002
+        "added_from_previous": 43806.73250000001
       },
       "complete-aa": {
-        "median": 268951.7025,
+        "median": 249941.4395,
         "range": [
-          267993.4965,
-          270228.341
+          248898.3775,
+          250112.3025
         ],
         "samples": [
-          270228.341,
-          268951.7025,
-          269145.895,
-          267993.4965,
-          268619.0365
+          250112.3025,
+          249985.6605,
+          249941.4395,
+          249709.4345,
+          248898.3775
         ],
-        "absolute_delta_from_complete": 157.9899999999907
+        "absolute_delta_from_complete": 97.74150000000373
       }
     },
     "fastapi": {
       "route": {
-        "median": 426899.2765,
+        "median": 425756.8575,
         "range": [
-          425217.527,
-          427408.5435
+          425456.9935,
+          426424.8745
         ],
         "samples": [
-          427408.5435,
-          425217.527,
-          426987.1665,
-          426899.2765,
-          426854.429
+          425756.8575,
+          426105.199,
+          425627.574,
+          425456.9935,
+          426424.8745
         ],
         "added_from_previous": null
       },
       "cors": {
-        "median": 490825.531,
+        "median": 491308.0765,
         "range": [
-          490481.825,
-          491159.3885
+          489995.639,
+          493171.1575
         ],
         "samples": [
-          491159.3885,
-          490481.825,
-          490849.529,
-          490825.531,
-          490491.274
+          491324.9645,
+          491308.0765,
+          491117.2705,
+          489995.639,
+          493171.1575
         ],
-        "added_from_previous": 63926.25450000004
+        "added_from_previous": 65551.21900000004
       },
       "binding": {
-        "median": 776763.617,
+        "median": 774667.0105,
         "range": [
-          773528.8055,
-          778898.335
+          772940.9245,
+          776378.0075
         ],
         "samples": [
-          776763.617,
-          773528.8055,
-          775190.285,
-          777768.3695,
-          778898.335
+          772940.9245,
+          774667.0105,
+          776378.0075,
+          775467.4525,
+          773909.4135
         ],
-        "added_from_previous": 285938.08599999995
+        "added_from_previous": 283358.93399999995
       },
       "auth": {
-        "median": 867935.1045,
+        "median": 867013.848,
         "range": [
-          863622.589,
-          871976.158
+          865626.5435,
+          869046.137
         ],
         "samples": [
-          869171.7795,
-          871976.158,
-          863622.589,
-          867935.1045,
-          865428.632
+          865626.5435,
+          867013.848,
+          867669.6815,
+          869046.137,
+          866730.533
         ],
-        "added_from_previous": 91171.48750000005
+        "added_from_previous": 92346.83750000002
       },
       "cedar": {
-        "median": 1597271.6735,
+        "median": 1597998.972,
         "range": [
-          1594302.146,
-          1601398.144
+          1594562.435,
+          1600366.185
         ],
         "samples": [
-          1597271.6735,
-          1596860.3605,
-          1598533.229,
-          1594302.146,
-          1601398.144
+          1594562.435,
+          1600366.185,
+          1597786.3815,
+          1597998.972,
+          1600008.4055
         ],
-        "added_from_previous": 729336.569
+        "added_from_previous": 730985.1240000001
       },
       "postgres": {
-        "median": 1809675.257,
+        "median": 1811777.762,
         "range": [
-          1802477.6365,
-          1838927.298
+          1769739.053,
+          1840252.156
         ],
         "samples": [
-          1832621.689,
-          1802477.6365,
-          1838927.298,
-          1809399.5165,
-          1809675.257
+          1769739.053,
+          1811777.762,
+          1840252.156,
+          1793969.188,
+          1828571.6775
         ],
-        "added_from_previous": 212403.58349999995
+        "added_from_previous": 213778.79000000004
       },
       "complete": {
-        "median": 2133383.3635,
+        "median": 2107178.799,
         "range": [
-          2118638.432,
-          2153022.924
+          2085545.489,
+          2133905.294
         ],
         "samples": [
-          2118638.432,
-          2133154.808,
-          2153022.924,
-          2133383.3635,
-          2141149.2405
+          2095435.046,
+          2085545.489,
+          2133905.294,
+          2107178.799,
+          2133761.19
         ],
-        "added_from_previous": 323708.1065
+        "added_from_previous": 295401.037
       },
       "complete-aa": {
-        "median": 2127274.9085,
+        "median": 2141711.5775,
         "range": [
-          2098332.153,
-          2197497.261
+          2130354.1465,
+          2186916.236
         ],
         "samples": [
-          2143785.4485,
-          2102108.6905,
-          2197497.261,
-          2127274.9085,
-          2098332.153
+          2152703.0445,
+          2141711.5775,
+          2130354.1465,
+          2186916.236,
+          2131101.243
         ],
-        "absolute_delta_from_complete": 6108.4550000000745
+        "absolute_delta_from_complete": 34532.778500000015
+      }
+    },
+    "sanic": {
+      "route": {
+        "median": 220806.093,
+        "range": [
+          220367.4735,
+          222897.412
+        ],
+        "samples": [
+          220367.4735,
+          221094.373,
+          222897.412,
+          220806.093,
+          220623.901
+        ],
+        "added_from_previous": null
+      },
+      "cors": {
+        "median": 241149.8285,
+        "range": [
+          240434.3905,
+          241481.219
+        ],
+        "samples": [
+          241141.593,
+          241481.219,
+          241187.797,
+          240434.3905,
+          241149.8285
+        ],
+        "added_from_previous": 20343.73550000001
+      },
+      "binding": {
+        "median": 275629.3495,
+        "range": [
+          273716.8675,
+          275878.768
+        ],
+        "samples": [
+          275836.4945,
+          275878.768,
+          273716.8675,
+          275183.834,
+          275629.3495
+        ],
+        "added_from_previous": 34479.52100000001
+      },
+      "auth": {
+        "median": 277594.9235,
+        "range": [
+          276989.4215,
+          278566.786
+        ],
+        "samples": [
+          276989.4215,
+          278566.786,
+          277594.9235,
+          278055.4365,
+          277440.0305
+        ],
+        "added_from_previous": 1965.5739999999641
+      },
+      "cedar": {
+        "median": 974843.3,
+        "range": [
+          974012.9075,
+          977520.449
+        ],
+        "samples": [
+          974012.9075,
+          974843.3,
+          974636.787,
+          977289.901,
+          977520.449
+        ],
+        "added_from_previous": 697248.3765
+      },
+      "postgres": {
+        "median": 1145879.8045,
+        "range": [
+          1145011.5165,
+          1147251.99
+        ],
+        "samples": [
+          1145322.953,
+          1145011.5165,
+          1145879.8045,
+          1147251.99,
+          1146029.871
+        ],
+        "added_from_previous": 171036.50450000004
+      },
+      "complete": {
+        "median": 1443892.1895,
+        "range": [
+          1435399.8915,
+          1450871.777
+        ],
+        "samples": [
+          1443892.1895,
+          1450871.777,
+          1435399.8915,
+          1441975.5415,
+          1446724.708
+        ],
+        "added_from_previous": 298012.385
+      },
+      "complete-aa": {
+        "median": 1441145.499,
+        "range": [
+          1428221.3615,
+          1446100.2175
+        ],
+        "samples": [
+          1445364.4955,
+          1440702.645,
+          1441145.499,
+          1428221.3615,
+          1446100.2175
+        ],
+        "absolute_delta_from_complete": 2746.690500000026
+      }
+    },
+    "blacksheep": {
+      "route": {
+        "median": 104326.067,
+        "range": [
+          104090.9705,
+          105697.055
+        ],
+        "samples": [
+          104260.195,
+          104326.067,
+          104558.752,
+          105697.055,
+          104090.9705
+        ],
+        "added_from_previous": null
+      },
+      "cors": {
+        "median": 143282.97,
+        "range": [
+          142537.188,
+          143615.247
+        ],
+        "samples": [
+          143335.3385,
+          143014.795,
+          142537.188,
+          143282.97,
+          143615.247
+        ],
+        "added_from_previous": 38956.903000000006
+      },
+      "binding": {
+        "median": 222511.4115,
+        "range": [
+          220300.322,
+          223606.1485
+        ],
+        "samples": [
+          222511.4115,
+          223606.1485,
+          222137.189,
+          220300.322,
+          223194.313
+        ],
+        "added_from_previous": 79228.44149999999
+      },
+      "auth": {
+        "median": 229476.584,
+        "range": [
+          229216.4115,
+          229956.065
+        ],
+        "samples": [
+          229956.065,
+          229278.0755,
+          229476.584,
+          229693.022,
+          229216.4115
+        ],
+        "added_from_previous": 6965.172500000015
+      },
+      "cedar": {
+        "median": 931174.0205,
+        "range": [
+          929211.5725,
+          947448.744
+        ],
+        "samples": [
+          929211.5725,
+          937017.851,
+          931174.0205,
+          947448.744,
+          929786.624
+        ],
+        "added_from_previous": 701697.4365
+      },
+      "postgres": {
+        "median": 1104736.7655,
+        "range": [
+          1100563.9285,
+          1114464.8875
+        ],
+        "samples": [
+          1101456.26,
+          1106423.098,
+          1104736.7655,
+          1100563.9285,
+          1114464.8875
+        ],
+        "added_from_previous": 173562.745
+      },
+      "complete": {
+        "median": 1444118.534,
+        "range": [
+          1439650.05,
+          1448804.2885
+        ],
+        "samples": [
+          1445574.0345,
+          1448804.2885,
+          1444080.2235,
+          1439650.05,
+          1444118.534
+        ],
+        "added_from_previous": 339381.7685
+      },
+      "complete-aa": {
+        "median": 1447159.225,
+        "range": [
+          1439991.2275,
+          1450038.4425
+        ],
+        "samples": [
+          1440355.154,
+          1447159.225,
+          1447769.8965,
+          1439991.2275,
+          1450038.4425
+        ],
+        "absolute_delta_from_complete": 3040.691000000108
       }
     }
   },
-  "fairness": "Both stacks receive and verify the same request, response and CORS behavior. Wreath uses its native metal HTTP/1.1 server, binding, bearer backend, startup-compiled Cedar engine, PostgreSQL driver and HTTP client. FastAPI uses Uvicorn with uvloop+httptools, Pydantic, HTTPBearer, Starlette CORSMiddleware, cedarpy's public stateless authorize call, asyncpg and aiohttp. Both database and HTTP clients speak their real wire protocols to the same deterministic in-process peers. The server process owns those peers, so their small instruction cost is included equally. No external database, network, wall clock, cycles or IPC enters the result."
+  "fairness": "All four stacks receive and verify the same request, response and CORS behavior. Wreath uses its native metal HTTP/1.1 server, binding, bearer backend, startup-compiled Cedar engine, PostgreSQL driver and HTTP client. FastAPI uses Uvicorn with uvloop+httptools, Pydantic, HTTPBearer and Starlette CORSMiddleware. Sanic uses its native single-process server and response middleware; BlackSheep uses its built-in CORS policy on Granian ASGI with uvloop. Sanic and BlackSheep share msgspec binding, cedarpy's public stateless authorize call, asyncpg and aiohttp. Both database and HTTP clients speak their real wire protocols to the same deterministic in-process peers. The server process owns those peers, so their small instruction cost is included equally. No external database, network, wall clock, cycles or IPC enters the result."
 }
