@@ -21,7 +21,7 @@ should.
 ## End-to-end retired instructions
 
 `bench_holistic_stack_instructions.py` compares the broad application people
-actually end up maintaining. All three arms render one operations dashboard through
+actually end up maintaining. All five configurations render one operations dashboard through
 policy/session middleware, nested validation, bearer and Cedar authorization,
 overlapping PostgreSQL and HTTP clients, a 730 × 48 × 6 series projection,
 temporal/geospatial/vector work, pagination, protobuf, MessagePack, templates,
@@ -29,12 +29,13 @@ compression and HTML. Ordinary Wreath uses its format-aware native gzip. The
 optimal Wreath arm selects RFC 9842 DCZ when the HTTPS client supplies the exact
 hash of a real neighbouring response, and retains prepared fragment gzip as its
 ordinary-client fallback. FastAPI uses Starlette, Pydantic, cedarpy, asyncpg,
-aiohttp, NumPy, Jinja, protobuf and msgspec.
+aiohttp, NumPy, Jinja, protobuf and msgspec; Sanic and BlackSheep use the same
+typed ecosystem business kernel on their fastest retained server configurations.
 
 ```bash
 uv sync --inexact --group benchmark
 uv run python -m benchmarks.bench_holistic_stack_instructions \
-  --requests 30 --trials 5 --connections 8 --warmup 50 \
+  --requests 30 --trials 5 --connections 8 --warmup 16 \
   --output docs/perf/data/e2e-holistic-stack-instructions.json
 ```
 
@@ -44,12 +45,19 @@ HTTP/1.1. Every response is checked for the common business and policy facts
 before its counter is accepted; the DCZ arm additionally verifies its framing,
 dictionary, decoding and cache key, and its gzip fallback is exercised before
 measurement. An unchanged `holistic-aa` rebuild records the resolution floor.
+The harness records retired instructions plus L1 data, L1 instruction and all
+L2 cache hits and misses. Instructions and the four L1 events share one perf
+pass; the five AMD L2 component events share another. Neither pass multiplexes
+hardware counters, and both use the same alternating N/N2 slope method. L1 hits
+are accesses minus misses; L2 figures include demand and prefetch traffic.
 
-`bench_e2e_instructions.py` compares the complete service stack people actually
-assemble, then decomposes it cumulatively. The Wreath arm uses Wreath's metal
-server, binding, auth, Cedar, PostgreSQL driver, and HTTP client. The competitor
-uses FastAPI, Starlette CORS, Pydantic, Uvicorn/uvloop/httptools, `HTTPBearer`,
-`cedarpy`, `asyncpg`, and `aiohttp`.
+`bench_e2e_instructions.py` compares four complete service stacks people
+actually assemble, then decomposes them cumulatively. The Wreath arm uses
+Wreath's metal server, binding, auth, Cedar, PostgreSQL driver, and HTTP client.
+FastAPI uses Starlette CORS, Pydantic, Uvicorn/uvloop/httptools and `HTTPBearer`.
+Sanic uses its native server and response middleware. BlackSheep uses its built-in
+CORS policy on Granian/uvloop. The three ecosystem arms use `cedarpy`, `asyncpg`,
+and `aiohttp`; Sanic and BlackSheep share msgspec binding.
 
 ```bash
 uv sync --inexact --group benchmark

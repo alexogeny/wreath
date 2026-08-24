@@ -1,4 +1,4 @@
-"""Retired-instruction decomposition of equivalent Wreath and FastAPI stacks.
+"""Retired-instruction decomposition of four equivalent pragmatic stacks.
 
 This deliberately does not collect elapsed time, cycles or IPC. Each sample is
 the slope between N and N/2 successful socket requests into a fresh, pinned
@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Keep the virtual-environment launcher. Resolving its symlink to /usr/bin/python
 # silently drops the benchmark group installed in this environment.
 PYTHON = Path(sys.executable)
-FRAMEWORKS = ("wreath", "fastapi")
+FRAMEWORKS = ("wreath", "fastapi", "sanic", "blacksheep")
 ARMS = (*ARM_ORDER, "complete-aa")
 STACK_PACKAGES = (
     "wreath",
@@ -60,6 +60,10 @@ STACK_PACKAGES = (
     "uvicorn",
     "uvloop",
     "httptools",
+    "sanic",
+    "blacksheep",
+    "granian",
+    "msgspec",
 )
 
 
@@ -108,6 +112,47 @@ def _server_command(framework: str, port: int, cpu: int) -> list[str]:
             "benchmarks.e2e_stack:app",
             "--loop",
             "metal",
+        ]
+    if framework == "sanic":
+        return [
+            *prefix,
+            "-m",
+            "benchmarks.sanic_server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--app",
+            "benchmarks.e2e_stack",
+            "--workers",
+            "1",
+        ]
+    if framework == "blacksheep":
+        return [
+            *prefix,
+            "-m",
+            "granian",
+            "--interface",
+            "asgi",
+            "benchmarks.e2e_stack:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--workers",
+            "1",
+            "--runtime-threads",
+            "1",
+            "--blocking-threads",
+            "1",
+            "--runtime-mode",
+            "st",
+            "--loop",
+            "uvloop",
+            "--http",
+            "1",
+            "--no-access-log",
+            "--no-log",
         ]
     return [
         *prefix,
@@ -184,6 +229,36 @@ def _parse_instructions(stderr: str) -> int:
     raise RuntimeError(f"perf emitted no retired-instruction count:\n{stderr}")
 
 
+def _perf_pid(framework: str, server_pid: int) -> int:
+    """Return the sole request-serving PID, excluding Granian's manager."""
+    if framework != "blacksheep":
+        return server_pid
+    children_path = Path(f"/proc/{server_pid}/task/{server_pid}/children")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            children = children_path.read_text(encoding="ascii").split()
+        except OSError:
+            children = []
+        workers = []
+        for child in children:
+            try:
+                command = Path(f"/proc/{child}/cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"multiprocessing.spawn" in command:
+                workers.append(child)
+        if len(workers) == 1:
+            return int(workers[0])
+        if len(workers) > 1:
+            raise RuntimeError(
+                f"Granian manager {server_pid} spawned {len(workers)} request workers; "
+                "the e2e benchmark requires exactly one"
+            )
+        time.sleep(0.02)
+    raise RuntimeError(f"Granian manager {server_pid} did not spawn its worker")
+
+
 def _one_count(
     framework: str,
     arm: str,
@@ -205,6 +280,7 @@ def _one_count(
     try:
         _wait_ready(server, port)
         _verify(port, arm)
+        perf_pid = _perf_pid(framework, server.pid)
         generator_command = ["taskset", "-c", str(generator_cpu), str(PYTHON), "-c"]
         code = (
             "from benchmarks.bench_e2e_instructions import _drive;"
@@ -228,7 +304,7 @@ def _one_count(
                 "-e",
                 "instructions:u",
                 "-p",
-                str(server.pid),
+                str(perf_pid),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -255,7 +331,8 @@ def _one_count(
     finally:
         server.terminate()
         try:
-            server.wait(timeout=10)
+            timeout = 1 if framework in {"fastapi", "sanic", "blacksheep"} else 10
+            server.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait(timeout=5)
@@ -286,13 +363,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--framework", choices=FRAMEWORKS, action="append")
     parser.add_argument("--arm", choices=ARMS, action="append")
-    parser.add_argument("--requests", type=int, default=8_000)
+    parser.add_argument("--requests", type=int, default=4_000)
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--connections", type=int, default=32)
     parser.add_argument("--warmup", type=int, default=500)
     parser.add_argument("--server-cpu", type=int, default=8)
     parser.add_argument("--generator-cpu", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="retain compatible framework arms already present in --output",
+    )
     args = parser.parse_args(argv)
     if args.requests < 2 or args.trials < 3 or args.connections < 1 or args.warmup < 1:
         parser.error("requests >= 2, trials >= 3, connections >= 1 and warmup >= 1 required")
@@ -332,6 +414,16 @@ def main(argv: list[str] | None = None) -> int:
         "packages": _versions(),
         "arms": {},
     }
+    if args.merge and args.output.exists():
+        previous = json.loads(args.output.read_text(encoding="utf-8"))
+        if previous.get("schema") != document["schema"]:
+            parser.error(
+                f"cannot merge schema {previous.get('schema')!r}; expected "
+                f"{document['schema']!r}"
+            )
+        if previous.get("measurement") != document["measurement"]:
+            parser.error("cannot merge an artifact recorded with different measurement options")
+        document["arms"].update(previous.get("arms", {}))
     for framework in selected_frameworks:
         rows: dict[str, Any] = {}
         for arm in selected_arms:
@@ -376,11 +468,14 @@ def main(argv: list[str] | None = None) -> int:
         document["arms"][framework] = rows
 
     document["fairness"] = (
-        "Both stacks receive and verify the same request, response and CORS behavior. "
+        "All four stacks receive and verify the same request, response and CORS behavior. "
         "Wreath uses its native metal HTTP/1.1 server, binding, bearer backend, "
         "startup-compiled Cedar engine, PostgreSQL driver and HTTP client. FastAPI "
-        "uses Uvicorn with uvloop+httptools, Pydantic, HTTPBearer, Starlette "
-        "CORSMiddleware, cedarpy's public stateless authorize call, asyncpg and aiohttp. "
+        "uses Uvicorn with uvloop+httptools, Pydantic, HTTPBearer and Starlette "
+        "CORSMiddleware. Sanic uses its native single-process server and response "
+        "middleware; BlackSheep uses its built-in CORS policy on Granian ASGI with "
+        "uvloop. Sanic and BlackSheep share msgspec binding, cedarpy's public stateless "
+        "authorize call, asyncpg and aiohttp. "
         "Both database and HTTP clients speak their real wire protocols to the same "
         "deterministic in-process peers. The server process owns those peers, so their "
         "small instruction cost is included equally. No external database, network, "
