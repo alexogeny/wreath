@@ -38,6 +38,7 @@ SOURCES = (
     "ws.c",
     "multipart.c",
     "json.c",
+    "ryu/d2s.c",
     "simd.c",
     "msgpack.c",
     "aesgcm.c",
