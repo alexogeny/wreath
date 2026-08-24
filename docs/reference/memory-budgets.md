@@ -31,6 +31,7 @@ reading only if something makes it true, which is the same reason
 | Questions awaiting an answer | `entity.EntityRegistry` | `max_pending` | 1024 |
 | Started and attached stream keys | `streams.Streams` | `started_capacity`, log retention | 4096, per-stream retention |
 | Parsed GraphQL documents | `graphql` | `cache_size` | per-schema |
+| Parsed SCIM user/group filters | `_scim.router.scim_router` | `_FILTER_CACHE_SIZE`, per resource vocabulary | 64 each, per router |
 | Pinned permission tokens | `_auth.permissions` | `max_entries` | 64 |
 | Compiled query plans | `orm.Registry` | `query_cache_size`, `query_cache_bytes` | 512, 8 MiB |
 | Prepared statements, per connection | `postgres` / `_pgdriver` | `statement_cache_size`, `statement_cache_bytes` | per-pool |

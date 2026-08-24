@@ -74,7 +74,6 @@ from uuid import UUID
 
 from ._awaitable import is_awaitable as _awaitable
 from ._b64 import b64_encode as _b64encode_str
-from ._codecs import parse_qs
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
 from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
 from ._flight_markers import phase_marker as _phase_marker
@@ -2640,6 +2639,31 @@ def compile_binder(
         (name, alias, annotation, default, query_constraints.get(name))
         for name, alias, annotation, default in query_specs
     )
+    compiled_query_plan = None
+    if query_plan and all(annotation in path_opcodes for _, _, annotation, _, _ in query_plan):
+        query_entries = []
+        alias_positions: dict[str, list[int]] = {}
+        for index, (name, alias, annotation, default, constraint) in enumerate(query_plan):
+            minimum, maximum, overflow = (
+                (None, None, "error") if constraint is None else constraint
+            )
+            query_entries.append(
+                (
+                    name,
+                    alias,
+                    path_opcodes[annotation],
+                    default is inspect.Parameter.empty,
+                    default,
+                    minimum,
+                    maximum,
+                    overflow == "clamp",
+                )
+            )
+            alias_positions.setdefault(alias, []).append(index)
+        compiled_query_plan = (
+            {alias: tuple(positions) for alias, positions in alias_positions.items()},
+            tuple(query_entries),
+        )
     header_specs = () if spec is None else spec.header_params
     cookie_specs = () if spec is None else spec.cookie_params
     form_specs = () if spec is None else spec.form_params
@@ -2755,34 +2779,50 @@ def compile_binder(
                 except ValidationError as invalid:
                     errors = invalid.errors if errors is None else [*errors, *invalid.errors]
         if query_specs:
-            # `request.query_string`, not `request.scope[...]`: on the native
-            # server the scope is a lazily materialized dict over
-            # `_RequestContext`, so reading it here built the whole thing on
-            # every bound handler purely to reach one member.
-            query = parse_qs(request.query_string)
-            # First occurrence wins, which `dict` gives from the pairs reversed:
-            # the earliest pair is assigned last. `parse_qs` returns a list, so
-            # `reversed` is a view rather than a copy and the whole fold is one
-            # C loop -- it was a Python loop of `setdefault` calls, one per pair,
-            # over pairs a C parser had just produced.
-            values: dict[str, str] = dict(reversed(query))
-            for name, alias, annotation, default, constraint in query_plan:
-                raw = values.get(alias)
-                if raw is None:
-                    if default is inspect.Parameter.empty:
-                        error = _error(("query", alias), "parameter is required", "missing")
-                        errors = [error] if errors is None else [*errors, error]
-                        continue
-                    kwargs[name] = default
-                else:
-                    try:
-                        converted = _convert_scalar(annotation, raw, ("query", alias))
-                        if constraint is not None:
-                            converted = _apply_constraint(converted, constraint, ("query", alias))
-                    except ValidationError as invalid:
-                        errors = invalid.errors if errors is None else [*errors, *invalid.errors]
-                        continue
-                    kwargs[name] = converted
+            # Exact scalars are compiled into one native scan. It decodes only
+            # declared values, keeps the first occurrence, and writes directly
+            # into the already-owned kwargs dict, avoiding the generic pair
+            # list and reversed lookup dict. Unions and temporal annotations
+            # retain the reference path below.
+            if compiled_query_plan is not None:
+                errors = _core.bind_query_into(
+                    request.query_string, compiled_query_plan, kwargs, errors
+                )
+            else:
+                # `request.query_string`, not `request.scope[...]`: on the native
+                # server the scope is a lazily materialized dict over
+                # `_RequestContext`, so reading it here built the whole thing on
+                # every bound handler purely to reach one member.
+                query = _core.parse_qs(request.query_string)
+                # First occurrence wins, which `dict` gives from the pairs reversed:
+                # the earliest pair is assigned last. `parse_qs` returns a list, so
+                # `reversed` is a view rather than a copy and the whole fold is one
+                # C loop -- it was a Python loop of `setdefault` calls, one per pair,
+                # over pairs a C parser had just produced.
+                values: dict[str, str] = dict(reversed(query))
+                for name, alias, annotation, default, constraint in query_plan:
+                    raw = values.get(alias)
+                    if raw is None:
+                        if default is inspect.Parameter.empty:
+                            error = _error(("query", alias), "parameter is required", "missing")
+                            errors = [error] if errors is None else [*errors, error]
+                            continue
+                        kwargs[name] = default
+                    else:
+                        try:
+                            converted = _convert_scalar(annotation, raw, ("query", alias))
+                            if constraint is not None:
+                                converted = _apply_constraint(
+                                    converted, constraint, ("query", alias)
+                                )
+                        except ValidationError as invalid:
+                            errors = (
+                                invalid.errors
+                                if errors is None
+                                else [*errors, *invalid.errors]
+                            )
+                            continue
+                        kwargs[name] = converted
         for name, alias, annotation, default in header_specs:
             raw = request.header(alias)
             if raw is None:

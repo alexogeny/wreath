@@ -634,6 +634,41 @@ def test_json_dumps_integer_boundaries() -> None:
             assert json_dumps(value) == expected, (label, value)
 
 
+def test_json_dumps_binary64_spelling_matches_the_stdlib() -> None:
+    """Shortest-round-trip digits and Python's punctuation are both exact.
+
+    Powers of ten and their neighbours exercise the fixed/scientific cutovers;
+    raw deterministic bit patterns cover the mantissa/exponent combinations a
+    decimal-valued generator systematically misses. Ten thousand is enough to
+    make this a focused regression rather than a benchmark battery.
+    """
+    values = [
+        0.0,
+        -0.0,
+        float.fromhex("0x0.0000000000001p-1022"),
+        float.fromhex("0x1.0000000000000p-1022"),
+        float.fromhex("0x1.fffffffffffffp+1023"),
+    ]
+    for exponent in range(-324, 309):
+        value = float(f"1e{exponent}")
+        if math.isfinite(value):
+            values.extend(
+                (value, math.nextafter(value, -math.inf), math.nextafter(value, math.inf))
+            )
+
+    rng = random.Random(0x575245415448)
+    while len(values) < 10_000:
+        value = struct.unpack(">d", rng.getrandbits(64).to_bytes(8, "big"))[0]
+        if math.isfinite(value):
+            values.append(value)
+
+    twins = list(_twins("json_dumps"))
+    for value in values:
+        expected = _stdlib_dumps(value)
+        for label, json_dumps in twins:
+            assert json_dumps(value) == expected, (label, value)
+
+
 def test_json_dumps_escape_positions() -> None:
     # Regression for the SWAR escape scanner: escapes at every offset within
     # and around the 8-byte window, for several string lengths. Anchored on the

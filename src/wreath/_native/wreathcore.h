@@ -159,6 +159,7 @@ PyObject *wreath_gzip_fragment_compress_workspace(
     PyObject *workspace, PyObject *data, int level, PyObject *format,
     PyObject *fragments);
 int wreath_gzip_format_object(PyObject *value, int *format);
+PyObject *wreath_gzip_format(PyObject *self, PyObject *value);
 PyObject *wreath_gzip_decoder_new(PyObject *self, PyObject *ignored);
 PyObject *wreath_gzip_decompress(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *wreath_gzip_decompress_with(PyObject *self, PyObject *const *args,
@@ -304,11 +305,14 @@ PyObject *wreath_series_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_spine_length(PyObject *self, PyObject *args);
 PyObject *wreath_series_spine_lengths(PyObject *self, PyObject *args);
 PyObject *wreath_format_duration_parts(PyObject *self, PyObject *args);
+PyObject *wreath_format_iso_datetime(PyObject *self, PyObject *args);
 PyObject *wreath_relative_english(PyObject *self, PyObject *args);
+PyObject *wreath_relative_english_between(PyObject *self, PyObject *args);
 PyObject *wreath_series_lttb(PyObject *self, PyObject *args);
 PyObject *wreath_series_path(PyObject *self, PyObject *args);
 PyObject *wreath_series_nice_ticks(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart(PyObject *self, PyObject *args);
+PyObject *wreath_series_chart_text(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_data(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart(PyObject *self, PyObject *args);
@@ -355,6 +359,8 @@ PyObject *wreath_orm_collect_values(PyObject *self, PyObject *args);
 /* codecs.c */
 PyObject *wreath_percent_decode(PyObject *self, PyObject *args, PyObject *kwargs);
 PyObject *wreath_parse_qs(PyObject *self, PyObject *args);
+PyObject *wreath_bind_query_into(PyObject *self, PyObject *const *args,
+                                 Py_ssize_t nargs);
 PyObject *wreath_page_params(PyObject *self, PyObject *args);
 PyObject *wreath_parse_form_urlencoded(PyObject *self, PyObject *args);
 PyObject *wreath_parse_cookies(PyObject *self, PyObject *args);

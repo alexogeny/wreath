@@ -79,6 +79,15 @@ def _drive(
     return sent
 
 
+def _grpc_status_headers(sent: list[dict]) -> dict[bytes, bytes]:
+    """Return status metadata from an ordinary trailer or Trailers-Only head."""
+    for event in reversed(sent):
+        headers = dict(event.get("headers", ()))
+        if b"grpc-status" in headers:
+            return headers
+    raise AssertionError("gRPC response carried no grpc-status")
+
+
 @message
 class Ping:
     text: str = field(1)
@@ -362,7 +371,7 @@ class TestServiceDeclaration:
         sent = _drive(
             app, "/t.S/M", frame_message(encode(Ping(text="hi"))), http_version="1.1"
         )
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.UNIMPLEMENTED)).encode()
         assert b"HTTP/2" in trailers[b"grpc-message"]
 
@@ -379,7 +388,7 @@ class TestServiceDeclaration:
         app = Wreath()
         app.include_router(service.router())
         sent = _drive(app, "/t.S/M", b"", content_type="application/json")
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
 
     def test_a_unary_call_carrying_two_messages_is_refused(self):
@@ -400,7 +409,7 @@ class TestServiceDeclaration:
         app.include_router(service.router())
         body = frame_message(encode(Ping(text="a"))) + frame_message(encode(Ping(text="b")))
         sent = _drive(app, "/t.S/M", body)
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INVALID_ARGUMENT)).encode()
 
     def _echo_app(self):
@@ -422,7 +431,7 @@ class TestServiceDeclaration:
         fallback is never taken and a missing header would reach the comparison
         as None."""
         sent = _drive(self._echo_app(), "/t.S/M", b"", content_type=None)
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
 
     def test_an_unsupported_request_encoding_is_refused_by_name(self):
@@ -443,7 +452,7 @@ class TestServiceDeclaration:
             frame_message(encode(Ping(text="a"))),
             extra_headers=((b"grpc-encoding", b"deflate"),),
         )
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.UNIMPLEMENTED)).encode()
         assert b"deflate" in trailers[b"grpc-message"]
         assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
@@ -453,7 +462,7 @@ class TestServiceDeclaration:
         framed at all. Defaulting it would invent a request the client never
         sent."""
         sent = _drive(self._echo_app(), "/t.S/M", b"")
-        trailers = dict(sent[-1]["headers"])
+        trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INVALID_ARGUMENT)).encode()
         assert b"none" in trailers[b"grpc-message"]
 

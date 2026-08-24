@@ -17,6 +17,19 @@ import pytest
 from benchmarks import wreath_server
 from wreath._devtools import quiet
 
+
+@pytest.fixture(autouse=True)
+def _no_real_container_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep safety tests independent of a host daemon or its startup latency.
+
+    Container enumeration has its own injected-run boundary below. None of the
+    plan/watchdog contracts depend on whether this machine happens to have a
+    running Podman socket, so reaching the real daemon here is both nondeterministic
+    and several seconds slower on a cold CI runner.
+    """
+    monkeypatch.setattr(quiet, "container_runtimes", lambda: ())
+
+
 # --- the ancestry exemption, which is the property that matters most ---------
 
 
@@ -408,6 +421,44 @@ def test_the_plan_is_ordered_by_tier() -> None:
     steps = quiet.plan(2)
     tiers = [step.tier for step in steps]
     assert tiers == sorted(tiers), "the plan jumps between tiers"
+
+
+def test_service_states_are_collected_in_one_systemd_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> object:
+        calls.append(command)
+        return type(
+            "R",
+            (),
+            {"stdout": "active\ninactive\n", "returncode": 3},
+        )()
+
+    monkeypatch.setattr(quiet.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(quiet.subprocess, "run", fake_run)
+
+    assert quiet._service_states(("one.service", "two.service")) == (
+        "active",
+        "inactive",
+    )
+    assert calls == [
+        ["systemctl", "is-active", "one.service", "two.service"],
+    ]
+
+
+def test_service_states_fail_closed_when_systemd_omits_a_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = type("R", (), {"stdout": "active\n", "returncode": 3})()
+    monkeypatch.setattr(quiet.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(quiet.subprocess, "run", lambda *_args, **_kwargs: result)
+
+    assert quiet._service_states(("one.service", "missing.service")) == (
+        "active",
+        "unknown",
+    )
 
 
 def test_only_privileged_steps_carry_a_change() -> None:

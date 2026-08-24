@@ -406,7 +406,13 @@ class FlagView:
 
     def enabled(self, name: str) -> bool:
         """Whether `name` is on for the bound context."""
-        return self._provider.resolve(Flag(name, False), self._context)
+        provider = self._provider
+        if type(provider) is FeatureFlags:
+            # The built-in provider already validates the string name and owns
+            # the boolean fast path. Do not allocate and validate a temporary
+            # typed declaration for every request-time boolean lookup.
+            return provider.enabled(name, self._context)
+        return provider.resolve(Flag(name, False), self._context)
 
     __contains__ = enabled
 

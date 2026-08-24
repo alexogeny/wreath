@@ -4,7 +4,7 @@ The selected application is controlled by two environment variables because a
 measurement process must import exactly one framework and one cumulative arm:
 
 ``WREATH_E2E_FRAMEWORK``
-    ``wreath`` or ``fastapi``.
+    ``wreath``, ``fastapi``, ``sanic`` or ``blacksheep``.
 
 ``WREATH_E2E_ARM``
     ``route``, ``cors``, ``binding``, ``auth``, ``cedar``, ``postgres`` or
@@ -33,8 +33,11 @@ ARM = os.environ.get("WREATH_E2E_ARM", "complete")
 ARM_ORDER = ("route", "cors", "binding", "auth", "cedar", "postgres", "complete")
 EFFECTIVE_ARM = "complete" if ARM == "complete-aa" else ARM
 
-if FRAMEWORK not in {"wreath", "fastapi"}:
-    raise RuntimeError(f"WREATH_E2E_FRAMEWORK must be 'wreath' or 'fastapi', got {FRAMEWORK!r}")
+if FRAMEWORK not in {"wreath", "fastapi", "sanic", "blacksheep"}:
+    raise RuntimeError(
+        "WREATH_E2E_FRAMEWORK must be 'wreath', 'fastapi', 'sanic' or "
+        f"'blacksheep', got {FRAMEWORK!r}"
+    )
 if EFFECTIVE_ARM not in ARM_ORDER:
     raise RuntimeError(
         "WREATH_E2E_ARM must be route, cors, binding, auth, cedar, postgres, "
@@ -236,7 +239,7 @@ if FRAMEWORK == "wreath":
             endpoint = authenticated()(endpoint)
         app.post("/api/reports/{item_id}")(endpoint)
 
-else:
+elif FRAMEWORK == "fastapi":
     from cedarpy import Decision, is_authorized
     from fastapi import Depends, FastAPI, HTTPException, Security
     from fastapi import Query as FastAPIQuery
@@ -340,3 +343,165 @@ else:
                     upstream_status=upstream_status,
                     upstream_bytes=upstream_bytes,
                 )
+
+else:
+    import msgspec
+    from cedarpy import Decision, is_authorized
+
+    class ReportPayload(msgspec.Struct, frozen=True):
+        title: Annotated[str, msgspec.Meta(min_length=4, max_length=80)]
+        tags: Annotated[list[str], msgspec.Meta(min_length=1, max_length=8)]
+
+    cedar_entities = json.dumps([])
+    cedar_request = {
+        "principal": 'User::"user"',
+        "action": 'Action::"read"',
+        "resource": 'Document::"42"',
+        "context": {},
+    }
+
+    def _authorization(headers: Any) -> str:
+        if FRAMEWORK == "blacksheep":
+            values = headers.get(b"authorization")
+            value = values[-1].decode("latin-1") if values else ""
+        else:
+            value = headers.get("authorization", "")
+        if value != "Bearer user":
+            raise ValueError("Authorization must be 'Bearer user'")
+        return "user"
+
+    def _query_limit(query: Any) -> int:
+        value = query.get("limit")
+        if isinstance(value, list):
+            value = value[-1] if value else None
+        if value is None:
+            raise ValueError("query parameter 'limit' must be an integer from 1 to 8")
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "query parameter 'limit' must be an integer from 1 to 8"
+            ) from None
+        if not 1 <= limit <= 8:
+            raise ValueError("query parameter 'limit' must be an integer from 1 to 8")
+        return limit
+
+    async def _bound_result(
+        body: bytes,
+        headers: Any,
+        query: Any,
+        item_id: int,
+    ) -> dict[str, Any]:
+        payload = msgspec.json.decode(body, type=ReportPayload)
+        limit = _query_limit(query)
+        user = "user"
+        if ARM_INDEX >= ARM_ORDER.index("auth"):
+            user = _authorization(headers)
+        if ARM_INDEX >= ARM_ORDER.index("cedar"):
+            decision = is_authorized(cedar_request, POLICY, cedar_entities)
+            if decision.decision != Decision.Allow:
+                raise ValueError("request is forbidden by Cedar")
+        database = 42
+        upstream_status = 200
+        upstream_bytes = len(_UPSTREAM_BODY)
+        if ARM_INDEX >= ARM_ORDER.index("postgres"):
+            state = await _DEPENDENCIES.fastapi()
+            if ARM_INDEX >= ARM_ORDER.index("complete"):
+                fetch = asyncio.create_task(state.http.get("/data"))
+                try:
+                    database = await state.database.fetchval("select $1::int4", 42)
+                except BaseException:
+                    fetch.cancel()
+                    raise
+                response = await fetch
+                upstream_body = await response.read()
+                upstream_status = response.status
+                upstream_bytes = len(upstream_body)
+                response.release()
+            else:
+                database = await state.database.fetchval("select $1::int4", 42)
+        return _result(
+            user=user,
+            item_id=item_id,
+            limit=limit,
+            title=payload.title,
+            tags=payload.tags,
+            database=database,
+            upstream_status=upstream_status,
+            upstream_bytes=upstream_bytes,
+        )
+
+    if FRAMEWORK == "sanic":
+        from sanic import Request as SanicRequest
+        from sanic import Sanic
+        from sanic.response import json as sanic_json
+
+        app = Sanic(f"wreath_e2e_{ARM}")
+
+        if ARM_INDEX >= ARM_ORDER.index("cors"):
+
+            @app.on_response
+            async def cors_response(request: SanicRequest, response: Any) -> None:
+                if request.headers.get("origin") == ALLOWED_ORIGIN:
+                    response.headers["access-control-allow-origin"] = ALLOWED_ORIGIN
+
+        if ARM_INDEX < ARM_ORDER.index("binding"):
+
+            @app.post("/api/reports/42")
+            async def sanic_report(_request: SanicRequest):
+                return sanic_json(_result())
+
+        else:
+
+            @app.post("/api/reports/<item_id:int>")
+            async def sanic_bound_report(request: SanicRequest, item_id: int):
+                result = await _bound_result(
+                    request.body,
+                    request.headers,
+                    request.args,
+                    item_id,
+                )
+                return sanic_json(result)
+
+    else:
+        from blacksheep import Application, Content, Request, Response
+
+        app = Application()
+        if ARM_INDEX >= ARM_ORDER.index("cors"):
+            app.use_cors(
+                allow_origins=[ALLOWED_ORIGIN],
+                allow_methods=["POST"],
+                allow_headers=["Authorization", "Content-Type"],
+            )
+
+        def blacksheep_json(value: dict[str, Any]) -> Response:
+            return Response(
+                200,
+                content=Content(
+                    b"application/json",
+                    msgspec.json.encode(value),
+                ),
+            )
+
+        if ARM_INDEX < ARM_ORDER.index("binding"):
+
+            @app.router.post("/api/reports/42")
+            async def blacksheep_report() -> Response:
+                return blacksheep_json(_result())
+
+        else:
+
+            @app.router.post("/api/reports/{item_id}")
+            async def blacksheep_bound_report(
+                request: Request, item_id: int
+            ) -> Response:
+                content = request.content
+                if content is None:
+                    raise ValueError("request body is required")
+                result = await _bound_result(
+                    await content.read(),
+                    request.headers,
+                    request.query,
+                    item_id,
+                )
+                return blacksheep_json(result)

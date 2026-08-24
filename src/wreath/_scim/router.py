@@ -18,6 +18,7 @@ from typing import Any
 from .._codecs import parse_qs
 from .._userkit import hash_password
 from ..authorization import authorize
+from ..cache import BoundedCache
 from ..response import JSONResponse, Response
 from ..router import Router
 from . import resources
@@ -49,6 +50,13 @@ DEFAULT_PAGE_SIZE = 100
 #: a truncated page reads as "these are all the matches" and is how a directory
 #: decides to recreate everyone it could not see.
 MAX_FILTER_SCAN = 1000
+
+# Client filter text is bounded to 2 KiB by the parser, and these router-owned
+# per-resource tables bound how many successful immutable parses survive. A
+# separate table per attribute vocabulary lets the client text itself be the
+# lookup key. Invalid filters are deliberately not cached, so they still take
+# the parser's exact refusal path on every request.
+_FILTER_CACHE_SIZE = 64
 
 
 class ScimResponse(JSONResponse):
@@ -110,6 +118,19 @@ def _require(store: Any, methods: Iterable[str], what: str) -> None:
             f"{type(store).__name__} does not. See the guide for the two seams "
             "SCIM provisions through."
         )
+
+
+def _parsed_filter(
+    cache: BoundedCache,
+    expression: str,
+    attributes: frozenset[str],
+) -> Any:
+    """Reuse one successful parse within the router that owns ``cache``."""
+    node = cache.get(expression)
+    if node is None:
+        node = parse_filter(expression, attributes=attributes)
+        cache.set(expression, node)
+    return node
 
 
 def scim_router(
@@ -285,6 +306,8 @@ def scim_router(
         return f"{request.scheme}://{host}{root}{mounted}"
 
     router = Router(prefix=prefix, tags=("scim",))
+    user_filter_cache = BoundedCache(max_entries=_FILTER_CACHE_SIZE)
+    group_filter_cache = BoundedCache(max_entries=_FILTER_CACHE_SIZE)
 
     # --- reading the two stores ---------------------------------------------
 
@@ -516,7 +539,8 @@ def scim_router(
         """Filter, page and envelope a list of already-built representations."""
         expression = query.get("filter")
         if expression:
-            node = parse_filter(expression, attributes=shape.queryable)
+            cache = user_filter_cache if shape is resources.USER else group_filter_cache
+            node = _parsed_filter(cache, expression, shape.queryable)
             documents = select(node, documents)
         documents = sort_documents(documents, query, shape)
         start, count = paging(query)

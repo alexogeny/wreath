@@ -37,6 +37,7 @@ default, because a schema dump is reconnaissance.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from ._auth.permissions import SURFACE_ACTIONS
@@ -79,6 +80,20 @@ MAX_CACHED_QUERY_CHARS = 16 * 1024
 #: `multipart/form-data`), which is what keeps a simple request from reaching a
 #: mutation with the caller's cookies attached.
 _ACCEPTED_CONTENT_TYPES = frozenset({"application/json", "application/graphql+json"})
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedDocument:
+    """One parsed document and the operations already charged against its schema.
+
+    The entry, rather than a second cache, keeps the cost fact under the parsed
+    document's existing client-text bound.  Replacing the immutable entry is
+    also safe when free-threaded requests race: at worst both perform the same
+    bounded walk once, and neither can observe a half-written set.
+    """
+
+    document: Any
+    weighed: frozenset[str | None] = frozenset()
 
 
 class GraphQL:
@@ -397,9 +412,54 @@ class GraphQL:
             return parse(source, self._limits)
         cached = self._cache.get(source)
         if cached is not None:
-            return cached
+            return cached.document
         document = parse(source, self._limits)
-        self._cache.set(source, document)
+        self._cache.set(source, _CachedDocument(document))
+        return document
+
+    def _prepare(self, source: str, operation_name: str | None) -> Any:
+        """Parse and charge one operation, reusing the schema-bound result.
+
+        Only a validated schema may retain the result.  ``run()`` is public and
+        can be used before ``router()`` freezes declarations; caching a weight
+        there would let a later ``cost=`` declaration make the remembered fact
+        stale.  Oversized documents remain deliberately uncached as well.
+        """
+        if len(source) > MAX_CACHED_QUERY_CHARS:
+            document = parse(source, self._limits)
+            self._weigh(document, operation_name)
+            return document
+
+        cached = self._cache.get(source)
+        if cached is None:
+            document = parse(source, self._limits)
+            cached = _CachedDocument(document)
+            self._cache.set(source, cached)
+        else:
+            document = cached.document
+
+        if not self._frozen:
+            self._weigh(document, operation_name)
+            return document
+
+        try:
+            operation = document.operation(operation_name)
+        except (KeyError, ValueError):
+            # Execution owns the useful error for an unresolved operation.
+            return document
+        key = operation.name
+        if key in cached.weighed:
+            return document
+        weigh(
+            self._schema,
+            document,
+            operation,
+            max_complexity=self._limits.max_complexity,
+        )
+        self._cache.set(
+            source,
+            _CachedDocument(document, cached.weighed | frozenset((key,))),
+        )
         return document
 
     def _weigh(self, document: Any, operation_name: str | None) -> None:
@@ -440,8 +500,7 @@ class GraphQL:
             return dumps(body) if json_output else body
 
         try:
-            document = self.parse(source)
-            self._weigh(document, operation_name)
+            document = self._prepare(source, operation_name)
         except GraphQLSyntaxError as error:
             return result({
                 "errors": [{"message": str(error), "extensions": {"code": error.code}}]

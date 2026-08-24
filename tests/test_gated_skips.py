@@ -11,11 +11,21 @@ instead of the count quietly drifting below reality.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import pathlib
 import re
 import tomllib
+from types import SimpleNamespace
 
 import _gated_skips as gated
+
+_SUITE_CONFIG_SPEC = importlib.util.spec_from_file_location(
+    "_wreath_suite_config", pathlib.Path(__file__).with_name("conftest.py")
+)
+if _SUITE_CONFIG_SPEC is None or _SUITE_CONFIG_SPEC.loader is None:
+    raise RuntimeError("could not load the root test-suite conftest")
+suite_config = importlib.util.module_from_spec(_SUITE_CONFIG_SPEC)
+_SUITE_CONFIG_SPEC.loader.exec_module(suite_config)
 
 DSN_ENV = gated.DSN_ENV
 
@@ -199,6 +209,27 @@ def test_a_worker_that_collected_more_wins() -> None:
     assert merged[gated.TOTAL] == 9
     assert merged["network"] == 3
     assert merged["fuzz"] == 6
+
+
+def test_disjoint_collection_shards_sum_their_deselections(monkeypatch) -> None:
+    monkeypatch.setattr(suite_config, "_DESELECTED", {})
+    first = SimpleNamespace(workeroutput={
+        "wreath_collection_shard": True,
+        "gated_deselected": {gated.TOTAL: 3, "network": 3},
+    })
+    second = SimpleNamespace(workeroutput={
+        "wreath_collection_shard": True,
+        "gated_deselected": {gated.TOTAL: 2, "fuzz": 2},
+    })
+
+    suite_config.pytest_testnodedown(first, None)
+    suite_config.pytest_testnodedown(second, None)
+
+    assert suite_config._DESELECTED == {
+        gated.TOTAL: 5,
+        "network": 3,
+        "fuzz": 2,
+    }
 
 
 def test_the_deselect_banner_asks_for_a_flag_not_a_database() -> None:

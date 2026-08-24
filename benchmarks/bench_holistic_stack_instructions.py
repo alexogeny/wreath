@@ -1,9 +1,10 @@
-"""Retired-instruction account for equivalent holistic service applications.
+"""Hardware-counter account for equivalent holistic service applications.
 
-Only ``instructions:u`` is collected. Each sample is an alternating N/N/2
-process slope, so fixed imports, startup, dependency construction, warm-up and
-perf attachment cancel. ``holistic-aa`` rebuilds the unchanged application as
-a resolution control. The server and generator run on separate physical cores.
+Instructions and L1D/L1I/L2 hits and misses are collected in two
+non-multiplexed perf passes. Each sample is an alternating N/N/2 process slope,
+so fixed imports, startup, dependency construction, warm-up and perf attachment
+cancel. ``holistic-aa`` rebuilds the unchanged application as a resolution
+control. The server and generator run on separate physical cores.
 
 Run after installing the benchmark group::
 
@@ -35,12 +36,54 @@ from pathlib import Path
 from typing import Any
 
 from . import h2load
-from .holistic_fastapi import REQUEST_BODY, REQUEST_HEADERS, REQUEST_METHOD, REQUEST_PATH
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
-FRAMEWORKS = ("wreath", "wreath-optimal", "fastapi")
+REQUEST_METHOD = "POST"
+REQUEST_PATH = "/v1/holistic/42?limit=3&page=1&size=12&sort=-score"
+REQUEST_BODY = (
+    b'{"title":"Quarterly <report>","lines":['
+    b'{"sku":"alpha-1","quantity":2,"price":12.5},'
+    b'{"sku":"beta-2","quantity":1,"price":7.25},'
+    b'{"sku":"gamma-3","quantity":4,"price":3.5}'
+    b'],"labels":{"active":true,"reviewed":false}}'
+)
+REQUEST_HEADERS = {
+    "Authorization": "Bearer holistic-user",
+    "Accept-Encoding": "gzip",
+    "Content-Type": "application/json",
+    "Host": "operations.example.com",
+    "Origin": "https://example.com",
+    "Sec-Fetch-Site": "same-origin",
+    "X-Trace": "holistic-trace-42",
+    "Cookie": "session=holistic-session",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
+    "X-Forwarded-For": "4.1.1.1",
+}
+FRAMEWORKS = ("wreath", "wreath-optimal", "fastapi", "sanic", "blacksheep")
 ARMS = ("holistic", "holistic-aa")
+COUNTER_GROUPS = (
+    (
+        "instructions-l1",
+        {
+            "instructions": "instructions:u",
+            "l1d_accesses": "l1-dcache-loads:u",
+            "l1d_misses": "l1-dcache-load-misses:u",
+            "l1i_accesses": "l1-icache-loads:u",
+            "l1i_misses": "l1-icache-load-misses:u",
+        },
+    ),
+    (
+        "l2",
+        {
+            "l2_demand_hits": "l2_cache_req_stat.ic_dc_hit_in_l2:u",
+            "l2_prefetch_hits": "l2_pf_hit_l2:u",
+            "l2_demand_misses": "l2_cache_req_stat.ic_dc_miss_in_l2:u",
+            "l2_prefetch_hits_l3": "l2_pf_miss_l2_hit_l3:u",
+            "l2_prefetch_misses_l3": "l2_pf_miss_l2_l3:u",
+        },
+    ),
+)
 STACK_PACKAGES = (
     "wreath",
     "fastapi",
@@ -57,6 +100,9 @@ STACK_PACKAGES = (
     "jinja2",
     "protobuf",
     "msgspec",
+    "sanic",
+    "blacksheep",
+    "granian",
 )
 _RESPONSE_TOKENS = (
     b"Quarterly &lt;report&gt;",
@@ -110,6 +156,8 @@ def _environment(framework: str) -> dict[str, str]:
     env["WREATH_BENCH_DISABLE_TIMERS"] = "1"
     if framework == "wreath-optimal":
         env["WREATH_BENCH_OPTIMAL_COMPRESSION"] = "1"
+    if framework in {"sanic", "blacksheep"}:
+        env["WREATH_HOLISTIC_FRAMEWORK"] = framework
     return env
 
 
@@ -133,6 +181,55 @@ def _server_command(
             "--tls-cert",
             str(certificate),
             "--tls-key",
+            str(key),
+        ]
+    if framework == "sanic":
+        return [
+            *prefix,
+            "-m",
+            "benchmarks.sanic_server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--app",
+            "benchmarks.holistic_alternatives",
+            "--workers",
+            "1",
+            "--tls-cert",
+            str(certificate),
+            "--tls-key",
+            str(key),
+        ]
+    if framework == "blacksheep":
+        return [
+            *prefix,
+            "-m",
+            "granian",
+            "--interface",
+            "asgi",
+            "benchmarks.holistic_alternatives:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--workers",
+            "1",
+            "--runtime-threads",
+            "1",
+            "--blocking-threads",
+            "1",
+            "--runtime-mode",
+            "st",
+            "--loop",
+            "uvloop",
+            "--http",
+            "1",
+            "--no-access-log",
+            "--no-log",
+            "--ssl-certificate",
+            str(certificate),
+            "--ssl-keyfile",
             str(key),
         ]
     return [
@@ -278,14 +375,88 @@ def _verify(port: int, framework: str) -> None:
             raise RuntimeError("dictionary-mismatch fallback changed the response bytes")
 
 
-def _parse_instructions(stderr: str) -> int:
+def _parse_counters(stderr: str, events: dict[str, str]) -> dict[str, int]:
+    by_event = {event.removesuffix(":u"): name for name, event in events.items()}
+    counters: dict[str, int] = {}
     for line in stderr.splitlines():
         fields = line.split(";")
-        if len(fields) > 2 and fields[2].split(":", 1)[0] == "instructions":
-            value = fields[0].strip()
-            if value.isdigit():
-                return int(value)
-    raise RuntimeError(f"perf emitted no retired-instruction count:\n{stderr}")
+        if len(fields) <= 2:
+            continue
+        event = fields[2].removesuffix(":u")
+        name = by_event.get(event)
+        if name is None:
+            continue
+        value = fields[0].strip()
+        if not value.isdigit():
+            raise RuntimeError(
+                f"perf could not count {events[name]!r}; this benchmark requires "
+                f"that userspace hardware event on the selected CPU:\n{stderr}"
+            )
+        counters[name] = int(value)
+    missing = [events[name] for name in events.keys() - counters.keys()]
+    if missing:
+        raise RuntimeError(
+            f"perf emitted no counts for {', '.join(missing)}; this benchmark "
+            f"requires those userspace hardware events on the selected CPU:\n{stderr}"
+        )
+    return counters
+
+
+def _derive_metrics(counters: dict[str, float]) -> dict[str, float]:
+    prefetch_misses = (
+        counters["l2_prefetch_hits_l3"] + counters["l2_prefetch_misses_l3"]
+    )
+    return {
+        "instructions": counters["instructions"],
+        "l1d_hits": counters["l1d_accesses"] - counters["l1d_misses"],
+        "l1d_misses": counters["l1d_misses"],
+        "l1i_hits": counters["l1i_accesses"] - counters["l1i_misses"],
+        "l1i_misses": counters["l1i_misses"],
+        "l2_demand_hits": counters["l2_demand_hits"],
+        "l2_demand_misses": counters["l2_demand_misses"],
+        "l2_prefetch_hits": counters["l2_prefetch_hits"],
+        "l2_prefetch_misses": prefetch_misses,
+        "l2_all_hits": counters["l2_demand_hits"] + counters["l2_prefetch_hits"],
+        "l2_all_misses": counters["l2_demand_misses"] + prefetch_misses,
+    }
+
+
+def _perf_pid(framework: str, server_pid: int) -> int:
+    """Return the sole request-serving PID, excluding Granian's manager."""
+    if framework != "blacksheep":
+        return server_pid
+    children_path = Path(f"/proc/{server_pid}/task/{server_pid}/children")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            children = children_path.read_text(encoding="ascii").split()
+        except OSError:
+            children = []
+        workers = []
+        for child in children:
+            try:
+                command = Path(f"/proc/{child}/cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"multiprocessing.spawn" in command:
+                workers.append(child)
+        if len(workers) == 1:
+            return int(workers[0])
+        if len(workers) > 1:
+            raise RuntimeError(
+                f"Granian manager {server_pid} spawned {len(workers)} request workers; "
+                "the holistic benchmark requires exactly one"
+            )
+        time.sleep(0.02)
+    raise RuntimeError(f"Granian manager {server_pid} did not spawn its worker")
+
+
+def _summary(samples: list[float]) -> dict[str, float | list[float]]:
+    return {
+        "median": statistics.median(samples),
+        "range": [min(samples), max(samples)],
+        "samples": samples,
+    }
 
 
 def _one_count(
@@ -297,7 +468,8 @@ def _one_count(
     generator_cpu: int,
     certificate: Path,
     key: Path,
-) -> int:
+    events: dict[str, str],
+) -> dict[str, int]:
     port = _available_port()
     env = _environment(framework)
     server = subprocess.Popen(
@@ -310,6 +482,7 @@ def _one_count(
     try:
         _wait_ready(server, port)
         _verify(port, framework)
+        perf_pid = _perf_pid(framework, server.pid)
         generator_command = ["taskset", "-c", str(generator_cpu), str(PYTHON), "-c"]
         warmup_code = (
             "from benchmarks.bench_holistic_stack_instructions import _drive;"
@@ -323,18 +496,11 @@ def _one_count(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        perf_command = ["perf", "stat", "--no-big-num", "-x", ";"]
+        for event in events.values():
+            perf_command.extend(("-e", event))
         perf = subprocess.Popen(
-            [
-                "perf",
-                "stat",
-                "--no-big-num",
-                "-x",
-                ";",
-                "-e",
-                "instructions:u",
-                "-p",
-                str(server.pid),
-            ],
+            [*perf_command, "-p", str(perf_pid)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -356,11 +522,16 @@ def _one_count(
         finally:
             perf.send_signal(signal.SIGINT)
         _stdout, stderr = perf.communicate(timeout=10)
-        return _parse_instructions(stderr)
+        return _parse_counters(stderr, events)
     finally:
         server.terminate()
         try:
-            server.wait(timeout=10)
+            # The ecosystem peers' synthetic asyncpg server deliberately does
+            # not implement PostgreSQL's terminate exchange. Their graceful
+            # pool close therefore cannot complete; the process is disposable
+            # once its counters have been read.
+            timeout = 1 if framework in {"fastapi", "sanic", "blacksheep"} else 10
+            server.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait(timeout=5)
@@ -414,7 +585,7 @@ def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
     key_path.write_bytes(
         private_key.private_bytes(
             serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
         )
     )
@@ -425,13 +596,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--framework", choices=FRAMEWORKS, action="append")
     parser.add_argument("--arm", choices=ARMS, action="append")
-    parser.add_argument("--requests", type=int, default=1_500)
+    parser.add_argument("--requests", type=int, default=30)
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--connections", type=int, default=8)
-    parser.add_argument("--warmup", type=int, default=50)
+    parser.add_argument("--warmup", type=int, default=16)
     parser.add_argument("--server-cpu", type=int, default=8)
     parser.add_argument("--generator-cpu", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="retain compatible framework arms already present in --output",
+    )
     args = parser.parse_args(argv)
     if args.requests < 2 or args.trials < 3 or args.connections < 1 or args.warmup < 1:
         parser.error("requests >= 2, trials >= 3, connections >= 1 and warmup >= 1 required")
@@ -441,12 +617,27 @@ def main(argv: list[str] | None = None) -> int:
     selected_frameworks = args.framework or list(FRAMEWORKS)
     selected_arms = args.arm or list(ARMS)
     document: dict[str, Any] = {
-        "schema": "wreath/e2e-holistic-stack-instructions/2",
+        "schema": "wreath/e2e-holistic-stack-counters/4",
         "recorded": time.strftime("%Y-%m-%d"),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "cpu": _cpu_model(),
         "metric": "retired userspace instructions per successful request",
+        "metrics": {
+            "instructions": "retired userspace instructions per successful request",
+            "l1d_hits": "L1 data-cache load hits per successful request",
+            "l1d_misses": "L1 data-cache load misses per successful request",
+            "l1i_hits": "L1 instruction-cache load hits per successful request",
+            "l1i_misses": "L1 instruction-cache load misses per successful request",
+            "l2_demand_hits": "demand instruction/data requests hitting L2 per successful request",
+            "l2_demand_misses": (
+                "demand instruction/data requests missing L2 per successful request"
+            ),
+            "l2_prefetch_hits": "L2 prefetch requests hitting L2 per successful request",
+            "l2_prefetch_misses": "L2 prefetch requests missing L2 per successful request",
+            "l2_all_hits": "demand plus prefetch L2 hits per successful request",
+            "l2_all_misses": "demand plus prefetch L2 misses per successful request",
+        },
         "transport": "TLS 1.3 over HTTP/1.1 for every arm",
         "method": (
             "median of alternating N/N2 process slopes; fixed startup, imports, "
@@ -469,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
                 "fragment": "249-byte dynamic prefix plus cached stable suffix",
             },
             "fastapi": "Starlette gzip backed by zlib",
+            "sanic": "direct stdlib gzip on Sanic's native server",
+            "blacksheep": "direct stdlib gzip on Granian ASGI",
         },
         "measurement": {
             "requests_high": args.requests,
@@ -479,45 +672,79 @@ def main(argv: list[str] | None = None) -> int:
             "server_cpu": args.server_cpu,
             "generator_cpu": args.generator_cpu,
             "pythonhashseed": 0,
+            "counter_groups": {
+                name: list(events.values()) for name, events in COUNTER_GROUPS
+            },
+            "multiplexed": False,
         },
         "packages": _versions(),
         "arms": {},
     }
+    if args.merge and args.output.exists():
+        previous = json.loads(args.output.read_text(encoding="utf-8"))
+        if previous.get("schema") != document["schema"]:
+            parser.error(
+                f"cannot merge schema {previous.get('schema')!r}; expected "
+                f"{document['schema']!r}"
+            )
+        if previous.get("measurement") != document["measurement"]:
+            parser.error("cannot merge an artifact recorded with different measurement options")
+        document["arms"].update(previous.get("arms", {}))
     with tempfile.TemporaryDirectory(prefix="wreath-holistic-") as directory:
         certificate, key = _self_signed_certificate(Path(directory))
         for framework in selected_frameworks:
             rows: dict[str, Any] = {}
             for arm in selected_arms:
-                samples = []
+                samples: dict[str, list[float]] = {}
                 for trial in range(args.trials):
                     order = ("high", "low") if trial % 2 == 0 else ("low", "high")
-                    totals: dict[str, int] = {}
-                    for size_name in order:
-                        count = args.requests if size_name == "high" else args.requests // 2
-                        totals[size_name] = _one_count(
-                            framework,
-                            count,
-                            args.connections,
-                            args.warmup,
-                            args.server_cpu,
-                            args.generator_cpu,
-                            certificate,
-                            key,
-                        )
-                    slope = (totals["high"] - totals["low"]) / (
-                        args.requests - args.requests // 2
+                    slopes: dict[str, float] = {}
+                    counter_groups = (
+                        COUNTER_GROUPS if trial % 2 == 0 else tuple(reversed(COUNTER_GROUPS))
                     )
-                    samples.append(slope)
+                    for _group_name, events in counter_groups:
+                        totals: dict[str, dict[str, int]] = {}
+                        for size_name in order:
+                            count = (
+                                args.requests
+                                if size_name == "high"
+                                else args.requests // 2
+                            )
+                            totals[size_name] = _one_count(
+                                framework,
+                                count,
+                                args.connections,
+                                args.warmup,
+                                args.server_cpu,
+                                args.generator_cpu,
+                                certificate,
+                                key,
+                                events,
+                            )
+                        denominator = args.requests - args.requests // 2
+                        slopes.update(
+                            {
+                                name: (totals["high"][name] - totals["low"][name])
+                                / denominator
+                                for name in events
+                            }
+                        )
+                    metrics = _derive_metrics(slopes)
+                    for name, value in metrics.items():
+                        samples.setdefault(name, []).append(value)
                     print(
                         f"{framework:14s} {arm:11s} {trial + 1}/{args.trials}: "
-                        f"{slope:,.1f} instructions/request",
+                        f"{metrics['instructions']:,.1f} instructions, "
+                        f"L1D {metrics['l1d_hits']:,.1f}/{metrics['l1d_misses']:,.1f}, "
+                        f"L1I {metrics['l1i_hits']:,.1f}/{metrics['l1i_misses']:,.1f}, "
+                        f"L2 demand {metrics['l2_demand_hits']:,.1f}/"
+                        f"{metrics['l2_demand_misses']:,.1f}, prefetch "
+                        f"{metrics['l2_prefetch_hits']:,.1f}/"
+                        f"{metrics['l2_prefetch_misses']:,.1f} hits/misses per request",
                         flush=True,
                     )
-                rows[arm] = {
-                    "median": statistics.median(samples),
-                    "range": [min(samples), max(samples)],
-                    "samples": samples,
-                }
+                counters = {name: _summary(values) for name, values in samples.items()}
+                rows[arm] = {**counters["instructions"], "counters": counters}
             if "holistic" in rows and "holistic-aa" in rows:
                 rows["holistic-aa"]["absolute_delta_from_holistic"] = abs(
                     rows["holistic-aa"]["median"] - rows["holistic"]["median"]
@@ -533,18 +760,26 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     document["fairness"] = (
-        "All three arms receive the same nested operations-dashboard POST over TLS and are "
+        "All five arms receive the same nested operations-dashboard POST over TLS and are "
         "accepted only after matching security, CORS, session, compression and business "
         "response facts. All perform bearer and Cedar authorization, one PostgreSQL and "
-        "one overlapping HTTP wire round trip, sparse-to-dense 730 x 48 x 6 series work, "
-        "eleven chart paths, temporal, geospatial and vector calculations, ranked "
+        "one overlapping HTTP wire round trip, eleven requested chart rows projected "
+        "from a sparse 730 x 48 x 6 source, eleven chart paths, temporal, geospatial "
+        "and vector calculations, ranked "
         "pagination, protobuf and MessagePack exports, escaped templates and compressed HTML. "
         "Wreath uses its built-in native/declarative surfaces. FastAPI uses Starlette, "
-        "Pydantic, cedarpy, asyncpg, aiohttp, NumPy, Jinja, protobuf and msgspec. The "
+        "Pydantic and Uvicorn. Sanic uses its native server; BlackSheep uses Granian's "
+        "single-threaded ASGI runtime with uvloop. The three ecosystem arms use cedarpy, "
+        "asyncpg, aiohttp, NumPy, Jinja, protobuf and msgspec, and the Sanic/BlackSheep "
+        "pair shares the same typed business kernel. The "
         "algorithms are idiomatic implementations with equivalent output contracts, not "
-        "byte-identical internal representations. Real driver protocols terminate at the "
+        "byte-identical internal representations. Every request rebuilds the dense chart "
+        "projection and its paths in every arm; no arm reuses a final projection result. "
+        "Real driver protocols terminate at the "
         "same deterministic in-process peers. No external database, network, DNS, disk, "
-        "wall clock, cycles or IPC enters the result. The Wreath optimal arm serves RFC "
+        "wall clock, cycles or IPC enters the result. Cache events are collected in a "
+        "second non-multiplexed pass so counter scarcity cannot time-share them. The "
+        "Wreath optimal arm serves RFC "
         "9842 dcz only after an exact Available-Dictionary hash match and retains a "
         "standards-compatible prepared fragment-gzip fallback for ordinary clients."
     )

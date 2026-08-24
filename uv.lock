@@ -1821,13 +1821,18 @@ benchmark-panther = [
     { name = "panther" },
 ]
 dev = [
+    { name = "blacksheep" },
+    { name = "cedarpy" },
     { name = "cryptography" },
+    { name = "fastapi" },
     { name = "grpcio" },
+    { name = "msgspec" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "sanic" },
     { name = "setuptools" },
     { name = "ty" },
 ]
@@ -1870,13 +1875,18 @@ benchmark = [
 ]
 benchmark-panther = [{ name = "panther", specifier = ">=5.5" }]
 dev = [
+    { name = "blacksheep", specifier = ">=2.2" },
+    { name = "cedarpy", specifier = ">=4.1" },
     { name = "cryptography", specifier = ">=44" },
+    { name = "fastapi", specifier = ">=0.116" },
     { name = "grpcio", specifier = ">=1.60" },
+    { name = "msgspec", specifier = ">=0.19" },
     { name = "pytest", specifier = ">=8.4" },
     { name = "pytest-asyncio", specifier = ">=1.0" },
     { name = "pytest-xdist", specifier = ">=3.6" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", specifier = ">=0.12" },
+    { name = "sanic", specifier = ">=25.3" },
     { name = "setuptools", specifier = ">=77" },
     { name = "ty" },
 ]

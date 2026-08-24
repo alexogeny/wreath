@@ -429,6 +429,7 @@ class _GrpcResponse(StreamingResponse):
         status: Status = Status.OK,
         message: str = "",
         encoding: str = "identity",
+        trailers_only: bool = False,
     ) -> None:
         headers = [
             (b"content-type", CONTENT_TYPE.encode("ascii")),
@@ -445,9 +446,32 @@ class _GrpcResponse(StreamingResponse):
         super().__init__(body, status=200, headers=headers)
         self.grpc_status = status
         self.grpc_message = message
+        self.grpc_trailers_only = trailers_only
 
     async def __call__(self, send: Any) -> None:
         try:
+            status, message = self.grpc_status, self.grpc_message
+            if self.grpc_trailers_only:
+                # No DATA belongs between a refusal known before the first
+                # message and its status.  ASGI cannot express gRPC's single
+                # HEADERS-block Trailers-Only form, but the native server can
+                # emit the equivalent initial HEADERS + terminal HEADERS pair
+                # without a DATA frame or an intervening scheduling point.
+                trailers = [(b"grpc-status", str(int(status)).encode("ascii"))]
+                if message:
+                    trailers.append(
+                        (b"grpc-message", percent_encode(message).encode("ascii"))
+                    )
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": self.headers,
+                        "trailers": True,
+                    }
+                )
+                await send({"type": "http.response.trailers", "headers": trailers})
+                return
             await send(
                 {
                     "type": "http.response.start",
@@ -456,7 +480,6 @@ class _GrpcResponse(StreamingResponse):
                     "trailers": True,
                 }
             )
-            status, message = self.grpc_status, self.grpc_message
             try:
                 async for chunk in self.body:
                     await send(
@@ -638,7 +661,9 @@ class GrpcService:
                 # on it: there is no message to have compressed, and a coding
                 # header over an empty body is a claim about nothing.
                 status, detail = status_for(exc)
-                return _GrpcResponse(_empty(), status=status, message=detail)
+                return _GrpcResponse(
+                    _empty(), status=status, message=detail, trailers_only=True
+                )
 
         return endpoint
 
@@ -716,11 +741,36 @@ async def _with_deadline(awaitable: Any, deadline: float | None) -> Any:
         return await awaitable
     import asyncio
 
+    task = asyncio.ensure_future(awaitable)
+    # Leave a bounded slice of the caller's remaining budget for encoding and
+    # flushing grpc-status.  Expiring at the exact same instant as the client
+    # makes the peer's RST_STREAM race the terminal trailers; grpcio then saw
+    # the initial response headers but no status and reported UNKNOWN.  Ten
+    # milliseconds is enough for one local event-loop turn while remaining
+    # bounded for long calls; very short calls reserve only ten percent.
+    response_budget = min(0.010, deadline * 0.10)
+    handler_budget = max(0.0, deadline - response_budget)
     try:
-        async with asyncio.timeout(deadline):
-            return await awaitable
+        # `Wreath` eagerly drives a handler coroutine until its first genuine
+        # suspension before allocating an asyncio Task. Python 3.14 implements
+        # wait_for through asyncio.timeout(), which refuses in that pre-Task
+        # phase. Yield once after taking ownership of the child; continuation
+        # then runs in the dispatcher-owned Task and can arm the timer safely.
+        await asyncio.sleep(0)
+        return await asyncio.wait_for(task, timeout=handler_budget)
     except TimeoutError as exc:
         raise GrpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
+    except asyncio.CancelledError:
+        # A peer RST_STREAM can cancel the application task in the small window
+        # between constructing a handler coroutine and awaiting it.  Owning a
+        # Task before the timeout context means that coroutine is always either
+        # driven or explicitly cancelled, never leaked as "was never awaited".
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        raise
 
 
 async def _frames(

@@ -8,6 +8,7 @@ import re
 import pytest
 
 from wreath._docs import Nav, Page, Section, Site, build
+from wreath._docs._fenced import title_of
 from wreath._docs.markdown import render, slugify
 
 # --- config -----------------------------------------------------------------
@@ -47,6 +48,12 @@ def test_fenced_code_keeps_language_and_escapes() -> None:
     assert 'class="language-python"' in out.html
     assert "&lt;" in out.html and "<b" not in out.html   # `<` escaped, not raw markup
     assert 'class="tok-keyword">if' in out.html          # highlighted
+
+
+def test_fenced_title_ignores_an_unclosed_heading() -> None:
+    tokens = {"hero": '<h1 class="hero-title">unfinished'}
+
+    assert title_of(tokens, "hero-title") == ""
 
 
 def test_slugify_is_github_style() -> None:

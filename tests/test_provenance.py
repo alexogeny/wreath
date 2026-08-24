@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
 
 from wreath.provenance import (
     ArtifactChanged,
+    Attestation,
     InvalidProvenance,
     Provenance,
     ProvenanceKey,
@@ -54,3 +56,24 @@ def test_the_signed_quorum_cannot_be_lowered_at_verification() -> None:
         signed.verify(ARTIFACT, {"alice": ALICE.public})
     with pytest.raises(InvalidProvenance, match="signed quorum 2"):
         signed.verify(ARTIFACT, {"alice": ALICE.public}, quorum=1)
+
+
+def test_a_seed_must_be_bytes_even_when_its_length_is_correct() -> None:
+    seed: Any = bytearray(range(32))
+    with pytest.raises(InvalidProvenance, match="seed must be exactly 32 bytes"):
+        ProvenanceKey.from_seed("alice", seed)
+
+
+def test_an_attestation_signature_must_be_bytes_of_the_exact_length() -> None:
+    with pytest.raises(InvalidProvenance, match="64-byte"):
+        Attestation("alice", b"x" * 63)
+    signature: Any = bytearray(64)
+    with pytest.raises(InvalidProvenance, match="64-byte"):
+        Attestation("alice", signature)
+
+
+def test_verification_quorum_refuses_a_non_integer() -> None:
+    signed = Provenance.for_artifact(ARTIFACT).countersign(ARTIFACT, ALICE)
+    quorum: Any = 1.5
+    with pytest.raises(InvalidProvenance, match="quorum must be an integer"):
+        signed.verify(ARTIFACT, {"alice": ALICE.public}, quorum=quorum)

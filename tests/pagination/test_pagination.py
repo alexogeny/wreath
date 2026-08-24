@@ -25,6 +25,48 @@ def test_numeric_rank_workspace_returns_only_the_requested_indices() -> None:
     assert _rank_indices(scores, page=2, size=3, descending=True) == (0, 3)
 
 
+def test_numeric_rank_can_bound_and_transform_the_owned_source() -> None:
+    from wreath.pagination import _rank_indices
+
+    assert _rank_indices(
+        (-9.0, 2.0, -4.0, 100.0),
+        page=1,
+        size=2,
+        descending=True,
+        candidates=3,
+        absolute=True,
+    ) == (0, 2)
+
+
+def test_numeric_rank_partial_workspace_matches_python_sort() -> None:
+    """Small requested prefixes still keep exact score and tie ordering."""
+    from wreath.pagination import _rank_indices
+
+    for count in (0, 1, 7, 48, 129):
+        scores = tuple(((index * 37) % 19 - 9) / 3 for index in range(count))
+        for descending in (False, True):
+            ordered = sorted(range(count), key=lambda index: scores[index])
+            if descending:
+                # The established contract is ascending order reversed, so
+                # equal scores reverse their index order too.
+                ordered.reverse()
+            for page, size in ((1, 1), (1, 12), (2, 12), (5, 7), (20, 12)):
+                start = (page - 1) * size
+                assert _rank_indices(
+                    scores, page=page, size=size, descending=descending
+                ) == tuple(ordered[start:start + size])
+
+
+def test_numeric_rank_empty_page_still_validates_every_score() -> None:
+    """Skipping an unnecessary sort must not turn an empty page into a bypass."""
+    from wreath.pagination import _rank_indices
+
+    with pytest.raises(TypeError, match="rank score 1 must be int or float"):
+        _rank_indices((1.0, object()), page=20, size=12, descending=False)
+    with pytest.raises(ValueError, match="rank score 1 must be finite"):
+        _rank_indices((1.0, float("nan")), page=1, size=0, descending=False)
+
+
 def test_page_math():
     page = Page(items=[1, 2, 3], total=25, page=2, size=10)
     assert page.pages == 3

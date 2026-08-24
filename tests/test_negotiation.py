@@ -84,6 +84,20 @@ def test_parse_accept_ignores_empty_elements_and_media_ranges() -> None:
     ]
 
 
+def test_parse_accept_takes_the_first_q_not_the_last() -> None:
+    """RFC 9110 s12.4.2: `q` ends the media-range parameters and everything
+    after it is accept-ext, so a later `q=` is an extension that happens to be
+    spelled `q` rather than a restated weight.
+
+    The three copies of this walk disagreed here -- the two Accept-Language
+    readers stopped at the first `q`, this one let the last overwrite it -- so
+    the same header scored differently depending on which entry point read it.
+    """
+    assert parse_accept("application/json;q=0.9;q=0.1") == [
+        ("application/json", 0.9)
+    ]
+
+
 def test_negotiate_defaults_to_json() -> None:
     assert negotiate(None) is JSON
     assert negotiate("*/*") is JSON

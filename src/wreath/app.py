@@ -2636,7 +2636,8 @@ class Wreath:
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
         if native_response:
-            protocol = cast(Any, send).__self__
+            native_send: Any = send
+            protocol = native_send.__self__
             return protocol._wreath_response(response.status, response.headers, response.body)
         return self._finish_http_plain(response, send, method, scope, native_response)
 
@@ -2659,7 +2660,7 @@ class Wreath:
         """
         if not native_response:
             return self._handle_http_plain_auth(scope, receive, send, method, path, native_response)
-        classify = cast(Any, self._classify)
+        classify: Any = self._classify
         classification, payload = classify(method, path)
         if classification == 0 or scope.flight:
             return self._handle_http(scope, receive, send, method, path, native_response)
@@ -2692,7 +2693,7 @@ class Wreath:
                     verified,
                 )
             else:
-                identity = cast(Identity | None, verified)
+                identity = verified
         return self._activate_http_plain_auth_sync(
             scope,
             receive,
@@ -2757,11 +2758,12 @@ class Wreath:
     ) -> Awaitable[None]:
         """Resolve and invoke after synchronous native bearer identification."""
         if classification == 2:
-            resolve = cast(Any, self._resolve)
+            resolve: Any = self._resolve
+            resolve_identity: Any = self._resolve_identity
             matched = (
                 resolve(payload, 0)
                 if identity is None
-                else cast(Any, self._resolve_identity)(
+                else resolve_identity(
                     payload,
                     self._capability_descriptor,
                     identity.roles,
@@ -2828,7 +2830,8 @@ class Wreath:
                 request, error, send, method, scope, native_response
             )
         if json_body is not None:
-            protocol = cast(Any, send).__self__
+            native_send: Any = send
+            protocol = native_send.__self__
             size = len(json_body)
             length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
             headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
@@ -2998,7 +3001,8 @@ class Wreath:
         # both dispatchers keep one response-emission path between them.
         if policy is None or ingress_only_admitted:
             if json_body is not None:
-                protocol = cast(Any, send).__self__
+                native_send: Any = send
+                protocol = native_send.__self__
                 size = len(json_body)
                 length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
                 headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
@@ -3090,7 +3094,8 @@ class Wreath:
                 request, error, send, method, scope, native_response
             )
         if json_body is not None:
-            protocol = cast(Any, send).__self__
+            native_send: Any = send
+            protocol = native_send.__self__
             size = len(json_body)
             length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
             headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
@@ -3171,7 +3176,7 @@ class Wreath:
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
 
-        classify = cast(Any, self._classify)
+        classify: Any = self._classify
         classification, payload = classify(method, path)
         if classification == 0:
             await self._handle_http(scope, receive, send, method, path, native_response)
@@ -3193,13 +3198,13 @@ class Wreath:
                     if verified is None:
                         identity = None
                     elif self._bearer_verifier_is_async:
-                        identity = await cast(Awaitable[Identity | None], verified)
+                        identity = await verified
                     elif isinstance(verified, Identity):
                         identity = verified
                     elif is_awaitable(verified):
                         identity = await verified
                     else:
-                        identity = cast(Identity | None, verified)
+                        identity = verified
                 else:
                     request = _request_new(
                         _REQUEST_LAYOUT, scope, receive, None, self._limits, self
@@ -3213,13 +3218,13 @@ class Wreath:
                         if verified is None:
                             identity = None
                         elif self._bearer_verifier_is_async:
-                            identity = await cast(Awaitable[Identity | None], verified)
+                            identity = await verified
                         elif isinstance(verified, Identity):
                             identity = verified
                         elif is_awaitable(verified):
                             identity = await verified
                         else:
-                            identity = cast(Identity | None, verified)
+                            identity = verified
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 if request is None:
                     request = _request_new(
@@ -3230,11 +3235,12 @@ class Wreath:
                 return
 
         if classification == 2:
-            resolve = cast(Any, self._resolve)
+            resolve: Any = self._resolve
+            resolve_identity: Any = self._resolve_identity
             matched = (
                 resolve(payload, 0)
                 if identity is None
-                else cast(Any, self._resolve_identity)(
+                else resolve_identity(
                     payload,
                     self._capability_descriptor,
                     identity.roles,
@@ -3354,7 +3360,8 @@ class Wreath:
             response = await self._handle_exception(request, error)
         if policy is None or native_ingress_only:
             if json_body is not None:
-                protocol = cast(Any, send).__self__
+                native_send: Any = send
+                protocol = native_send.__self__
                 size = len(json_body)
                 length = _CONTENT_LENGTHS[size] if size < 1024 else str(size).encode("ascii")
                 headers = [_NATIVE_JSON_TYPE_HEADER, (b"content-length", length)]
@@ -3419,8 +3426,8 @@ class Wreath:
         # Both are guaranteed non-None by `_select_dispatch`, which is what
         # selected this method; bound locally so the guarantee is stated once
         # and the attribute is read once.
-        classify = cast(Any, self._classify)
-        programs = cast(dict[Any, tuple[Any, Any]], self._route_programs)
+        classify: Any = self._classify
+        programs: Any = self._route_programs
         classification, payload = classify(method, path)
         if classification != 1:
             await self._handle_http(scope, receive, send, method, path, native_response)
@@ -3682,13 +3689,13 @@ class Wreath:
                         if verified is None:
                             identity = None
                         elif self._bearer_verifier_is_async:
-                            identity = await cast(Awaitable[Identity | None], verified)
+                            identity = await verified
                         elif isinstance(verified, Identity):
                             identity = verified
                         elif is_awaitable(verified):
                             identity = await verified
                         else:
-                            identity = cast(Identity | None, verified)
+                            identity = verified
                     authentication_attempted = True
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
                     if global_hooks:
@@ -3717,10 +3724,11 @@ class Wreath:
                         active_global,
                     )
                     return
+                resolve_identity: Any = self._resolve_identity
                 matched = (
                     resolve(ticket, 0)
                     if identity is None
-                    else cast(Any, self._resolve_identity)(
+                    else resolve_identity(
                         ticket,
                         self._capability_descriptor,
                         identity.roles,
@@ -4108,8 +4116,9 @@ class Wreath:
         if method == "HEAD":
             await response(_head_send(send))
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
-            plain = cast(Response, response)
-            protocol = cast(Any, send).__self__
+            plain: Any = response
+            native_send: Any = send
+            protocol = native_send.__self__
             headers = (
                 _HTML_HEADERS[len(plain.body)]
                 if (policy is None or policy._native_ingress_only)
@@ -4133,7 +4142,8 @@ class Wreath:
                     await pending
         elif response.__class__ is PreparedResponse and native_response:
             prepared = response
-            protocol = cast(Any, send).__self__
+            native_send: Any = send
+            protocol = native_send.__self__
             headers = (
                 prepared.headers
                 if policy is None or policy._native_ingress_only
@@ -4145,7 +4155,7 @@ class Wreath:
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
-            plain = cast(Response, response)
+            plain: Any = response
             await send(
                 {
                     "type": "wreath.response",
@@ -4206,8 +4216,9 @@ class Wreath:
         if method == "HEAD":
             return response(_head_send(send))
         if type(response).__call__ is _RESPONSE_CALL and native_response:
-            plain = cast(Response, response)
-            protocol = cast(Any, send).__self__
+            plain: Any = response
+            native_send: Any = send
+            protocol = native_send.__self__
             headers = (
                 _HTML_HEADERS[len(plain.body)]
                 if plain.__class__ is HTMLResponse
@@ -4218,12 +4229,13 @@ class Wreath:
             return protocol._wreath_response(plain.status, headers, plain.body)
         if response.__class__ is PreparedResponse and native_response:
             prepared = response
-            protocol = cast(Any, send).__self__
+            native_send: Any = send
+            protocol = native_send.__self__
             return protocol._wreath_response(prepared.status, prepared.headers, prepared.body)
         if type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
-            plain = cast(Response, response)
+            plain: Any = response
             return send(
                 {
                     "type": "wreath.response",
@@ -4250,15 +4262,16 @@ class Wreath:
         if method == "HEAD":
             await response(_head_send(send))
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
-            plain = cast(Response, response)
-            protocol = cast(Any, send).__self__
+            plain: Any = response
+            native_send: Any = send
+            protocol = native_send.__self__
             pending = protocol._wreath_response_nowait(plain.status, plain.headers, plain.body)
             if pending is not None:
                 await pending
         elif type(response).__call__ is _RESPONSE_CALL and (
             extensions is not None and "wreath.response" in extensions
         ):
-            plain = cast(Response, response)
+            plain: Any = response
             await send(
                 {
                     "type": "wreath.response",
@@ -4381,7 +4394,7 @@ class Wreath:
             identity = request.identity
         websocket = WebSocket(scope, receive, send, path_params, identity=identity)
         try:
-            await cast("WebSocketHandler", handler)(websocket)
+            await handler(websocket)
         except WebSocketDisconnect:
             # The peer left; nothing further to send. Not a failure, so the
             # session's buffered records are discarded like a healthy request's.
@@ -5060,13 +5073,13 @@ class Wreath:
                     if verified is None:
                         identity = None
                     elif self._bearer_verifier_is_async:
-                        identity = await cast(Awaitable[Identity | None], verified)
+                        identity = await verified
                     elif isinstance(verified, Identity):
                         identity = verified
                     elif is_awaitable(verified):
                         identity = await verified
                     else:
-                        identity = cast(Identity | None, verified)
+                        identity = verified
                 request._set_identity(identity)
                 if "identity" in self._stage_hooks:
                     stage_response = await self._run_stage("identity", request)

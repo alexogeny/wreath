@@ -37,8 +37,11 @@ honours the same `native-lint: allow` waiver comments.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -530,13 +533,50 @@ def scan_c(path: Path, root: Path) -> list[Finding]:
 
 # --- the sweep --------------------------------------------------------------
 
-def discover(root: Path) -> list[Finding]:
-    """Every candidate under `root`, ordered for a stable baseline diff."""
-    findings: list[Finding] = []
-    for path in sorted(root.rglob("*.py")):
-        if "__pycache__" not in path.parts:
-            findings += scan_python(path, root)
-    for path in sorted(root.rglob("*")):
-        if path.suffix in {".c", ".h"}:
-            findings += scan_c(path, root)
-    return sorted(findings, key=lambda f: (f.file, f.line, f.code))
+def _source_paths(root: Path) -> list[Path]:
+    """Every source the discovery rules own, in stable order."""
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.suffix in {".py", ".c", ".h"}
+    )
+
+
+def _source_fingerprint(path: Path) -> str:
+    """Exact content identity for one cached discovery result."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _source_fingerprints(root: Path) -> dict[str, str]:
+    """Content identities for every discovery source, including clean files."""
+    return {
+        str(path.relative_to(root)): _source_fingerprint(path)
+        for path in _source_paths(root)
+    }
+
+
+def discover(
+    root: Path,
+    *,
+    cache: Mapping[str, tuple[str, Sequence[Finding]]] | None = None,
+) -> list[Finding]:
+    """Every candidate under `root`, ordered for a stable baseline diff.
+
+    An exact-content cache may supply findings for byte-identical files. Files
+    absent from it, including every new or edited source, are scanned normally;
+    cached files that were deleted are never visited. The caller owns
+    invalidating the whole cache when these scanner rules change.
+    """
+    per_file: list[Sequence[Finding]] = []
+    for path in _source_paths(root):
+        relative = str(path.relative_to(root))
+        cached = cache.get(relative) if cache is not None else None
+        if cached is not None and cached[0] == _source_fingerprint(path):
+            per_file.append(cached[1])
+            continue
+        per_file.append(
+            scan_python(path, root)
+            if path.suffix == ".py"
+            else scan_c(path, root)
+        )
+    return sorted(chain.from_iterable(per_file), key=lambda f: (f.file, f.line, f.code))

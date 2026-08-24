@@ -549,6 +549,42 @@ async def test_a_filter_selects_by_user_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_successful_filter_parse_is_reused_by_its_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._scim import router as router_module
+
+    original = router_module.parse_filter
+    calls = 0
+
+    def counted(source: str, *, attributes: frozenset[str] | None = None) -> Any:
+        nonlocal calls
+        calls += 1
+        return original(source, attributes=attributes)
+
+    monkeypatch.setattr(router_module, "parse_filter", counted)
+    async with directory().client() as client:
+        await provision(client, "alice@example.com")
+        path = '/scim/v2/Users?filter=userName eq "alice@example.com"'
+        first = await client.get(path, headers=AUTH)
+        second = await client.get(path, headers=AUTH)
+
+    assert first.json() == second.json()
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_filter_caches_do_not_cross_resource_attribute_vocabularies() -> None:
+    async with directory().client() as client:
+        group = await client.get("/scim/v2/Groups?filter=displayName pr", headers=AUTH)
+        user = await client.get("/scim/v2/Users?filter=displayName pr", headers=AUTH)
+
+    assert group.status == 200
+    assert user.status == 400
+    assert user.json()["scimType"] == "invalidFilter"
+
+
+@pytest.mark.asyncio
 async def test_a_filter_on_an_attribute_this_provider_lacks_is_refused() -> None:
     """The alternative is an empty page, which reads as "create them again"."""
     async with directory().client() as client:

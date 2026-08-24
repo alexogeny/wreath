@@ -23,13 +23,11 @@ from wreath.orm.types import (
     Sparsevec,
     SparseVector,
     Text,
-    bind_extension_oid,
-    declared_extension_types,
 )
 from wreath.queries import Param, Queries, query
 
-#: Shared with `tests/orm/test_sparsevec_codec.py`; a process resolves an
-#: extension type exactly once, so the number has to agree across suites.
+#: Shared with `tests/orm/test_sparsevec_codec.py`; this is an invented wire OID
+#: lent to individual columns only and must never be bound process-wide.
 SPARSEVEC_OID = 987656
 
 TERMS = SparseVector(30, {2: 1.0, 17: 0.5})
@@ -59,32 +57,22 @@ class Documents(Queries[Document]):
     )
 
 
-def _sparsevec_oid() -> int:
-    """The OID this process holds for `sparsevec`, binding a plausible one if none.
-
-    Binds unconditionally rather than returning early on the first bound type it
-    finds. `bind_extension_oid` walks the types declared *when it is called*, and
-    the ones declared in this module may not have existed when some earlier suite
-    called it -- an early return would leave this file's columns on OID 0 while
-    reporting success. It is idempotent for a repeated identical OID, which is
-    what makes binding again the cheap answer rather than a conflict.
-    """
-    oid = next(
-        (
-            item.oid
-            for item in declared_extension_types()
-            if item.type_name == "sparsevec" and item.oid
-        ),
-        SPARSEVEC_OID,
-    )
-    bind_extension_oid("sparsevec", oid)
-    return oid
-
-
 @pytest.fixture
-def registry() -> Registry:
-    _sparsevec_oid()
-    return Registry(Database(), [Document], validate_schema="off")
+def registry():
+    """Lend this module's one column a fake OID without binding the process.
+
+    `bind_extension_oid` deliberately makes a production-wide codec decision:
+    a process cannot safely decode the same extension type under two OIDs. A
+    compiler unit test does not own that decision, and binding its invented OID
+    poisoned whichever xdist worker later reached a real pgvector database.
+    """
+    pg_type = Document.terms.column.pg_type
+    previous = pg_type.oid
+    pg_type.oid = SPARSEVEC_OID
+    try:
+        yield Registry(Database(), [Document], validate_schema="off")
+    finally:
+        pg_type.oid = previous
 
 
 def _sql(registry: Registry, select: object) -> str:
@@ -184,7 +172,7 @@ def test_the_sparse_value_reaches_the_parameters_as_a_sparse_vector(
         registry, Document.select().order_by(Document.terms.l2_distance(TERMS))
     )
     assert compiled.bind_values == (TERMS,)
-    assert compiled.bind_oids == (_sparsevec_oid(),)
+    assert compiled.bind_oids == (SPARSEVEC_OID,)
 
 
 # -- the type gate ------------------------------------------------------------

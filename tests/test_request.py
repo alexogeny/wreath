@@ -24,6 +24,7 @@ from wreath.request import (
     RequestLimits,
     StreamConsumed,
     _multipart_boundary,
+    _valid_boundary,
 )
 
 HEADERS = [
@@ -354,6 +355,15 @@ def test_multipart_boundary_parameter_is_strict_and_supports_quotes() -> None:
         assert _multipart_boundary(b"multipart/form-data; boundary=" + invalid) is None
     assert _multipart_boundary(b'multipart/form-data; boundary="trailing "') is None
     assert _multipart_boundary(b"multipart/form-data; notboundary=B") is None
+
+
+def test_multipart_boundary_validation_matches_the_rfc_octet_set() -> None:
+    allowed = (
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        b"'()+_,-./:=? "
+    )
+    for byte in range(256):
+        assert _valid_boundary(b"A" + bytes((byte,)) + b"B") is (byte in allowed)
 
 
 @pytest.mark.asyncio

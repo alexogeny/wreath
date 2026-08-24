@@ -1044,10 +1044,20 @@ def _app(
     users: InMemoryUserStore,
     factors: InMemorySecondFactorStore,
     clock: _Clock,
+    *,
+    session_store: _MemorySessionStore | None = None,
     **options: Any,
 ) -> Wreath:
     app = Wreath()
-    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
+    app.configure_http_policy(
+        HttpPolicy(
+            session=SessionPolicy(
+                secret="s" * 32,
+                secure=False,
+                store=session_store,
+            )
+        )
+    )
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
@@ -1151,7 +1161,9 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
     """The ceremony end to end, through the router that mounts it."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    async with TestClient(_app(users, factors, clock)) as client:
+    store = _MemorySessionStore()
+    policy = SessionPolicy(secret="s" * 32, secure=False, store=store)
+    async with TestClient(_app(users, factors, clock, session_store=store)) as client:
         user = await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         await client.post("/users/logout", headers={"cookie": cookie})
@@ -1162,6 +1174,7 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
         cookie = _cookie(pending)
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
         cookie = _cookie(begun) or cookie
+        prior_sid = policy._load_sid(cookie.split("=", 1)[1])
         done = await client.post(
             "/auth/2fa/webauthn/verify",
             json={"id": b64url_encode(device.credential_id), **_wire(minted)},
@@ -1171,6 +1184,9 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
         assert done.json()["email"] == "ann@example.test"
         rotated = _cookie(done)
         assert rotated != cookie
+        rotated_sid = policy._load_sid(rotated.split("=", 1)[1])
+        assert rotated_sid is not None and rotated_sid != prior_sid
+        assert prior_sid not in store.rows
         session = (await client.get("/session", headers={"cookie": rotated})).json()
         assert session["principal"]["sub"] == user.id
         assert "pending_second_factor" not in session
@@ -1230,20 +1246,28 @@ async def test_the_user_verification_outcome_reaches_the_session() -> None:
     """A policy may care whether a PIN was entered, so it is written down."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    async with TestClient(_app(users, factors, clock)) as client:
+    store = _MemorySessionStore()
+    policy = SessionPolicy(secret="s" * 32, secure=False, store=store)
+    async with TestClient(_app(users, factors, clock, session_store=store)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(
             client, device, cookie, sign_count=1, user_verified=False
         )
         cookie = _cookie(begun) or cookie
+        prior_sid = policy._load_sid(cookie.split("=", 1)[1])
         done = await client.post(
             "/auth/2fa/webauthn/verify",
             json={"id": b64url_encode(device.credential_id), **_wire(minted)},
             headers={"cookie": cookie},
         )
         assert done.json() == {"status": "second_factor_verified"}
-        session = (await client.get("/session", headers={"cookie": _cookie(done)})).json()
+        rotated = _cookie(done)
+        assert rotated != cookie
+        rotated_sid = policy._load_sid(rotated.split("=", 1)[1])
+        assert rotated_sid is not None and rotated_sid != prior_sid
+        assert prior_sid not in store.rows
+        session = (await client.get("/session", headers={"cookie": rotated})).json()
         assert session["principal"]["second_factor_uv"] is False
         assert session["principal"]["second_factor_at"] == int(clock.now)
 

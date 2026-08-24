@@ -151,6 +151,19 @@ def test_the_offset_change_does_not_move_the_local_firing_time() -> None:
     assert winter.utcoffset() != summer.utcoffset()
 
 
+def test_next_after_keeps_only_the_identical_latest_moment() -> None:
+    recurrence = Recurrence.cron("0 3 * * *", tz=SYDNEY)
+    moment = Instant.parse("2026-08-01T00:00:00+00:00")
+    first = recurrence.next_after(moment)
+
+    assert recurrence.next_after(moment) is first
+
+    equal_moment = moment.replace()
+    second = recurrence.next_after(equal_moment)
+    assert second == first
+    assert second is not first
+
+
 # --- Recurrence: the two DST days ----------------------------------------------------
 
 

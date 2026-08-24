@@ -86,8 +86,8 @@ wreath_float_sequence(PyObject *Py_UNUSED(self), PyObject *args)
         expected_type("list or tuple of floats", value);
         return NULL;
     }
-    Py_ssize_t length = PySequence_Size(value);
-    if (length < 0) return NULL;
+    Py_ssize_t length = PyList_Check(value)
+        ? PyList_GET_SIZE(value) : PyTuple_GET_SIZE(value);
     if (length != dimension) {
         PyErr_Format(PyExc_ValueError,
                      half ? "halfvec(%zd) requires exactly %zd values, got %zd"
@@ -97,18 +97,24 @@ wreath_float_sequence(PyObject *Py_UNUSED(self), PyObject *args)
     }
     PyObject *out = PyList_New(length);
     if (out == NULL) return NULL;
+    PyObject **items = PySequence_Fast_ITEMS(value);
     for (Py_ssize_t i = 0; i < length; i++) {
-        PyObject *item = PyList_Check(value) ? PyList_GET_ITEM(value, i)
-                                             : PyTuple_GET_ITEM(value, i);
-        if (PyBool_Check(item) || (!PyLong_Check(item) && !PyFloat_Check(item))) {
-            expected_type("float", item);
-            Py_DECREF(out);
-            return NULL;
-        }
-        double number = PyFloat_AsDouble(item);
-        if (number == -1.0 && PyErr_Occurred()) {
-            Py_DECREF(out);
-            return NULL;
+        PyObject *item = items[i];
+        int exact_float = PyFloat_CheckExact(item);
+        double number;
+        if (PyFloat_Check(item)) {
+            number = PyFloat_AS_DOUBLE(item);
+        } else {
+            if (PyBool_Check(item) || !PyLong_Check(item)) {
+                expected_type("float", item);
+                Py_DECREF(out);
+                return NULL;
+            }
+            number = PyLong_AsDouble(item);
+            if (number == -1.0 && PyErr_Occurred()) {
+                Py_DECREF(out);
+                return NULL;
+            }
         }
         if (!isfinite(number)) {
             PyErr_SetString(PyExc_ValueError, half
@@ -124,8 +130,8 @@ wreath_float_sequence(PyObject *Py_UNUSED(self), PyObject *args)
             Py_DECREF(out);
             return NULL;
         }
-        PyObject *converted = PyFloat_CheckExact(item)
-            ? Py_NewRef(item) : PyFloat_FromDouble(number);
+        PyObject *converted = exact_float ? Py_NewRef(item)
+                                          : PyFloat_FromDouble(number);
         if (converted == NULL) {
             Py_DECREF(out);
             return NULL;
@@ -156,10 +162,14 @@ coerce_array_item(PyObject *item, long oid, PyObject *coerce)
             }
         }
     } else if (oid == 700 || oid == 701) {
+        if (PyFloat_CheckExact(item)) {
+            return PyFloat_FromDouble(PyFloat_AS_DOUBLE(item));
+        }
         if (PyBool_Check(item) || (!PyLong_Check(item) && !PyFloat_Check(item))) {
             expected = "float";
         } else {
-            double value = PyFloat_AsDouble(item);
+            double value = PyFloat_Check(item)
+                ? PyFloat_AS_DOUBLE(item) : PyFloat_AsDouble(item);
             if (value == -1.0 && PyErr_Occurred()) return NULL;
             return PyFloat_FromDouble(value);
         }
@@ -193,9 +203,9 @@ wreath_array_coerce(PyObject *Py_UNUSED(self), PyObject *args)
     if (length < 0) return NULL;
     PyObject *out = PyList_New(length);
     if (out == NULL) return NULL;
+    PyObject **items = PySequence_Fast_ITEMS(value);
     for (Py_ssize_t i = 0; i < length; i++) {
-        PyObject *item = PyList_Check(value) ? PyList_GET_ITEM(value, i)
-                                             : PyTuple_GET_ITEM(value, i);
+        PyObject *item = items[i];
         PyObject *converted;
         if (item == Py_None) {
             if (!nullable) {
@@ -246,35 +256,134 @@ wreath_map_nullable(PyObject *Py_UNUSED(self), PyObject *args)
     return out;
 }
 
+/* The dimension bound and the element mapping, shared by the two sparsevec
+ * entry points. On success the caller owns `*mapping_out` and `*keys_out`
+ * (keys sorted, so both build the same wire order); on failure both are NULL
+ * and an exception is set.
+ *
+ * One definition because the bound and its message are a pgvector contract:
+ * two copies of a range check is two places for the limit to be wrong in. */
+static int
+sparsevector_open_mapping(PyObject *dim_obj, PyObject *elements,
+                          long long *dim_out, PyObject **mapping_out)
+{
+    *mapping_out = NULL;
+    if (!PyLong_CheckExact(dim_obj)) {
+        PyErr_Format(PyExc_TypeError, "SparseVector dimension must be int, not %s",
+                     Py_TYPE(dim_obj)->tp_name);
+        return -1;
+    }
+    long long dim = PyLong_AsLongLong(dim_obj);
+    if (dim == -1 && PyErr_Occurred()) return -1;
+    if (dim < 1 || dim > 1000000000LL) {
+        PyErr_Format(PyExc_ValueError,
+                     "SparseVector(%R) is out of range; pgvector allows 1 to 1000000000 dimensions",
+                     dim_obj);
+        return -1;
+    }
+    PyObject *mapping = PyDict_Check(elements)
+        ? Py_NewRef(elements)
+        : PyObject_CallOneArg((PyObject *)&PyDict_Type, elements);
+    if (mapping == NULL) return -1;
+    *dim_out = dim;
+    *mapping_out = mapping;
+    return 0;
+}
+
+static int
+sparsevector_open(PyObject *dim_obj, PyObject *elements, long long *dim_out,
+                  PyObject **mapping_out, PyObject **keys_out)
+{
+    *keys_out = NULL;
+    if (sparsevector_open_mapping(
+            dim_obj, elements, dim_out, mapping_out) < 0) return -1;
+    PyObject *mapping = *mapping_out;
+    PyObject *keys = PyDict_Keys(mapping);
+    if (keys == NULL || PyList_Sort(keys) < 0) {
+        Py_XDECREF(keys);
+        Py_DECREF(mapping);
+        *mapping_out = NULL;
+        return -1;
+    }
+    *keys_out = keys;
+    return 0;
+}
+
+/* One element: a 1-based index inside the dimension, and a finite int or float
+ * value. 0 on success with `*position_out`/`*number_out` filled, -1 with an
+ * exception set. What each caller then does with the value differs; which
+ * values are legal at all does not, so it is decided once here. */
+static int
+sparsevector_element_value(PyObject *index, PyObject *item, long long dim,
+                           long long *position_out, double *number_out)
+{
+    if (!PyLong_CheckExact(index)) {
+        PyErr_Format(PyExc_TypeError, "sparsevec index %R must be int, not %s",
+                     index, Py_TYPE(index)->tp_name);
+        return -1;
+    }
+    long long position = PyLong_AsLongLong(index);
+    if ((position == -1 && PyErr_Occurred()) || position < 1 || position > dim) {
+        if (!PyErr_Occurred())
+            PyErr_Format(PyExc_ValueError,
+                         "sparsevec index %R is outside 1..%lld; indices are 1-based, the way pgvector writes them",
+                         index, dim);
+        return -1;
+    }
+    if (PyBool_Check(item) || (!PyLong_Check(item) && !PyFloat_Check(item))) {
+        PyErr_Format(PyExc_TypeError,
+                     "sparsevec value at index %R must be int or float, not %s",
+                     index, Py_TYPE(item)->tp_name);
+        return -1;
+    }
+    double number;
+    if (PyFloat_Check(item)) number = PyFloat_AS_DOUBLE(item);
+    else number = PyLong_AsDouble(item);
+    if (number == -1.0 && PyErr_Occurred()) return -1;
+    if (!isfinite(number)) {
+        PyErr_Format(PyExc_ValueError,
+                     "sparsevec value at index %R is %R; pgvector stores neither NaN nor infinity",
+                     index, item);
+        return -1;
+    }
+    *position_out = position;
+    *number_out = number;
+    return 0;
+}
+
+static int
+sparsevector_element(PyObject *mapping, PyObject *index, long long dim,
+                     long long *position_out, double *number_out)
+{
+    PyObject *item = PyDict_GetItemWithError(mapping, index);
+    if (item == NULL) return -1;
+    return sparsevector_element_value(
+        index, item, dim, position_out, number_out);
+}
+
+typedef struct {
+    int32_t index;
+    double value;
+} SparseVectorPair;
+
+static int
+sparsevector_pair_compare(const void *left_pointer, const void *right_pointer)
+{
+    const SparseVectorPair *left = left_pointer;
+    const SparseVectorPair *right = right_pointer;
+    return (left->index > right->index) - (left->index < right->index);
+}
+
 PyObject *
 wreath_sparsevector_parts(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *dim_obj, *elements;
     Py_ssize_t max_nnz;
+    long long dim;
+    PyObject *mapping, *keys;
     if (!PyArg_ParseTuple(args, "OOn:sparsevector_parts", &dim_obj, &elements,
                           &max_nnz)) return NULL;
-    if (!PyLong_CheckExact(dim_obj)) {
-        PyErr_Format(PyExc_TypeError, "SparseVector dimension must be int, not %s",
-                     Py_TYPE(dim_obj)->tp_name);
-        return NULL;
-    }
-    long long dim = PyLong_AsLongLong(dim_obj);
-    if (dim == -1 && PyErr_Occurred()) return NULL;
-    if (dim < 1 || dim > 1000000000LL) {
-        PyErr_Format(PyExc_ValueError,
-                     "SparseVector(%R) is out of range; pgvector allows 1 to 1000000000 dimensions",
-                     dim_obj);
-        return NULL;
-    }
-    PyObject *mapping = PyDict_Check(elements) ? Py_NewRef(elements)
-                                               : PyObject_CallOneArg((PyObject *)&PyDict_Type, elements);
-    if (mapping == NULL) return NULL;
-    PyObject *keys = PyDict_Keys(mapping);
-    if (keys == NULL || PyList_Sort(keys) < 0) {
-        Py_XDECREF(keys);
-        Py_DECREF(mapping);
-        return NULL;
-    }
+    if (sparsevector_open(dim_obj, elements, &dim, &mapping, &keys) < 0) return NULL;
     Py_ssize_t count = PyList_GET_SIZE(keys);
     PyObject *indices = PyTuple_New(count);
     PyObject *values = PyTuple_New(count);
@@ -282,35 +391,10 @@ wreath_sparsevector_parts(PyObject *Py_UNUSED(self), PyObject *args)
     Py_ssize_t used = 0;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *index = PyList_GET_ITEM(keys, i);
-        if (!PyLong_CheckExact(index)) {
-            PyErr_Format(PyExc_TypeError, "sparsevec index %R must be int, not %s",
-                         index, Py_TYPE(index)->tp_name);
+        long long position;
+        double number;
+        if (sparsevector_element(mapping, index, dim, &position, &number) < 0)
             goto sparse_error;
-        }
-        long long position = PyLong_AsLongLong(index);
-        if ((position == -1 && PyErr_Occurred()) || position < 1 || position > dim) {
-            if (!PyErr_Occurred())
-                PyErr_Format(PyExc_ValueError,
-                             "sparsevec index %R is outside 1..%lld; indices are 1-based, the way pgvector writes them",
-                             index, dim);
-            goto sparse_error;
-        }
-        PyObject *item = PyDict_GetItemWithError(mapping, index);
-        if (item == NULL) goto sparse_error;
-        if (PyBool_Check(item) || (!PyLong_Check(item) && !PyFloat_Check(item))) {
-            PyErr_Format(PyExc_TypeError,
-                         "sparsevec value at index %R must be int or float, not %s",
-                         index, Py_TYPE(item)->tp_name);
-            goto sparse_error;
-        }
-        double number = PyFloat_AsDouble(item);
-        if ((number == -1.0 && PyErr_Occurred())) goto sparse_error;
-        if (!isfinite(number)) {
-            PyErr_Format(PyExc_ValueError,
-                         "sparsevec value at index %R is %R; pgvector stores neither NaN nor infinity",
-                         index, item);
-            goto sparse_error;
-        }
         if (number == 0.0) continue;
         if (used == max_nnz) {
             PyErr_Format(PyExc_ValueError,
@@ -345,96 +429,82 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *dim_obj, *elements;
     Py_ssize_t max_nnz;
+    long long dim;
+    PyObject *mapping;
     if (!PyArg_ParseTuple(args, "OOn:sparsevector_data", &dim_obj, &elements,
                           &max_nnz)) return NULL;
-    if (!PyLong_CheckExact(dim_obj)) {
-        PyErr_Format(PyExc_TypeError, "SparseVector dimension must be int, not %s",
-                     Py_TYPE(dim_obj)->tp_name);
-        return NULL;
-    }
-    long long dim = PyLong_AsLongLong(dim_obj);
-    if (dim == -1 && PyErr_Occurred()) return NULL;
-    if (dim < 1 || dim > 1000000000LL) {
-        PyErr_Format(PyExc_ValueError,
-                     "SparseVector(%R) is out of range; pgvector allows 1 to 1000000000 dimensions",
-                     dim_obj);
-        return NULL;
-    }
-    PyObject *mapping = PyDict_Check(elements) ? Py_NewRef(elements)
-        : PyObject_CallOneArg((PyObject *)&PyDict_Type, elements);
-    if (mapping == NULL) return NULL;
-    PyObject *keys = PyDict_Keys(mapping);
-    if (keys == NULL || PyList_Sort(keys) < 0) {
-        Py_XDECREF(keys);
+    if (sparsevector_open_mapping(
+            dim_obj, elements, &dim, &mapping) < 0) return NULL;
+    Py_ssize_t source_count = PyDict_GET_SIZE(mapping);
+    if ((size_t)source_count > SIZE_MAX / sizeof(SparseVectorPair)) {
         Py_DECREF(mapping);
-        return NULL;
+        return PyErr_NoMemory();
     }
-    Py_ssize_t count = PyList_GET_SIZE(keys);
-    WreathSparseVector *data = PyMem_Calloc(1, sizeof(*data));
-    if (data == NULL) goto sparse_data_memory;
-    data->dimension = (int32_t)dim;
-    Py_ssize_t capacity = count < max_nnz ? count : max_nnz;
-    if (capacity > 0) {
-        data->indices = PyMem_Malloc((size_t)capacity * sizeof(*data->indices));
-        data->values = PyMem_Malloc((size_t)capacity * sizeof(*data->values));
-        if (data->indices == NULL || data->values == NULL) goto sparse_data_memory;
+    SparseVectorPair *pairs = source_count != 0
+        ? PyMem_Malloc((size_t)source_count * sizeof(*pairs)) : NULL;
+    if (source_count != 0 && pairs == NULL) {
+        Py_DECREF(mapping);
+        return PyErr_NoMemory();
     }
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *index = PyList_GET_ITEM(keys, i);
-        if (!PyLong_CheckExact(index)) {
-            PyErr_Format(PyExc_TypeError, "sparsevec index %R must be int, not %s",
-                         index, Py_TYPE(index)->tp_name);
+    Py_ssize_t count = 0;
+    Py_ssize_t position = 0;
+    PyObject *index = NULL;
+    PyObject *item = NULL;
+    WreathSparseVector *data = NULL;
+    while (PyDict_Next(mapping, &position, &index, &item)) {
+        long long sparse_index;
+        double number;
+        if (sparsevector_element_value(
+                index, item, dim, &sparse_index, &number) < 0)
             goto sparse_data_error;
-        }
-        long long position = PyLong_AsLongLong(index);
-        if ((position == -1 && PyErr_Occurred()) || position < 1 || position > dim) {
-            if (!PyErr_Occurred())
-                PyErr_Format(PyExc_ValueError,
-                             "sparsevec index %R is outside 1..%lld; indices are 1-based, the way pgvector writes them",
-                             index, dim);
-            goto sparse_data_error;
-        }
-        PyObject *item = PyDict_GetItemWithError(mapping, index);
-        if (item == NULL) goto sparse_data_error;
-        if (PyBool_Check(item) || (!PyLong_Check(item) && !PyFloat_Check(item))) {
-            PyErr_Format(PyExc_TypeError,
-                         "sparsevec value at index %R must be int or float, not %s",
-                         index, Py_TYPE(item)->tp_name);
-            goto sparse_data_error;
-        }
-        double number = PyFloat_AsDouble(item);
-        if (number == -1.0 && PyErr_Occurred()) goto sparse_data_error;
-        if (!isfinite(number)) {
-            PyErr_Format(PyExc_ValueError,
-                         "sparsevec value at index %R is %R; pgvector stores neither NaN nor infinity",
-                         index, item);
-            goto sparse_data_error;
-        }
         if (number == 0.0) continue;
-        if (data->count == max_nnz) {
+        if (count == max_nnz) {
             PyErr_Format(PyExc_ValueError,
                          "a sparsevec holds at most %zd non-zero elements; this one has more. A value that dense wants `Vector` or `Halfvec`, which store every position and index far better",
                          max_nnz);
             goto sparse_data_error;
         }
-        data->indices[data->count] = (int32_t)position;
-        data->values[data->count] = number;
-        data->count++;
+        pairs[count++] = (SparseVectorPair){(int32_t)sparse_index, number};
     }
-    Py_DECREF(keys);
+    if (count > 1)
+        qsort(pairs, (size_t)count, sizeof(*pairs), sparsevector_pair_compare);
+    data = PyMem_Calloc(1, sizeof(*data));
+    if (data == NULL) goto sparse_data_memory;
+    data->dimension = (int32_t)dim;
+    data->count = count;
+    if (count != 0) {
+        size_t index_bytes = (size_t)count * sizeof(*data->indices);
+        size_t value_offset = (index_bytes + sizeof(double) - 1) &
+                              ~(sizeof(double) - 1);
+        if ((size_t)count > (SIZE_MAX - value_offset) / sizeof(*data->values))
+            goto sparse_data_memory;
+        data->indices = PyMem_Malloc(
+            value_offset + (size_t)count * sizeof(*data->values));
+        if (data->indices == NULL) goto sparse_data_memory;
+        data->values = (double *)((char *)data->indices + value_offset);
+        for (Py_ssize_t sparse = 0; sparse < count; sparse++) {
+            data->indices[sparse] = pairs[sparse].index;
+            data->values[sparse] = pairs[sparse].value;
+        }
+    }
+    PyMem_Free(pairs);
     Py_DECREF(mapping);
-    return PyCapsule_New(
+    PyObject *capsule = PyCapsule_New(
         data, WREATH_SPARSE_VECTOR_CAPSULE, wreath_sparse_vector_destroy);
+    if (capsule == NULL) {
+        PyMem_Free(data->indices);
+        PyMem_Free(data);
+    }
+    return capsule;
 
 sparse_data_memory:
     PyErr_NoMemory();
 sparse_data_error:
+    PyMem_Free(pairs);
     if (data != NULL) {
         PyMem_Free(data->indices);
-        PyMem_Free(data->values);
         PyMem_Free(data);
     }
-    Py_DECREF(keys);
     Py_DECREF(mapping);
     return NULL;
 }
@@ -691,6 +761,300 @@ wreath_parse_qs(PyObject *Py_UNUSED(self), PyObject *args)
     }
     PyBuffer_Release(&query);
     return pairs;
+}
+
+enum { QUERY_STR = 0, QUERY_INT = 1, QUERY_FLOAT = 2, QUERY_BOOL = 3 };
+
+static int
+query_append_error(PyObject **errors, PyObject *alias, PyObject *message,
+                   const char *kind)
+{
+    if (*errors == Py_None) *errors = NULL;
+    if (*errors == NULL) {
+        *errors = PyList_New(0);
+        if (*errors == NULL) return -1;
+    }
+    PyObject *source = PyUnicode_FromString("query");
+    PyObject *loc = source == NULL ? NULL : PyList_New(2);
+    PyObject *type = PyUnicode_FromString(kind);
+    PyObject *error = NULL;
+    int result = -1;
+    if (loc != NULL) {
+        PyList_SET_ITEM(loc, 0, source); /* steals */
+        PyList_SET_ITEM(loc, 1, Py_NewRef(alias));
+    }
+    else {
+        Py_XDECREF(source);
+    }
+    if (loc == NULL || type == NULL || message == NULL) goto done;
+    error = _PyDict_NewPresized(3);
+    if (error == NULL ||
+        PyDict_SetItemString(error, "loc", loc) < 0 ||
+        PyDict_SetItemString(error, "msg", message) < 0 ||
+        PyDict_SetItemString(error, "type", type) < 0 ||
+        PyList_Append(*errors, error) < 0) goto done;
+    result = 0;
+done:
+    Py_XDECREF(error);
+    Py_XDECREF(type);
+    Py_XDECREF(loc);
+    Py_XDECREF(message);
+    return result;
+}
+
+static int
+query_append_raw_error(PyObject **errors, PyObject *alias, PyObject *raw,
+                       const char *format, const char *kind)
+{
+    return query_append_error(
+        errors, alias, PyUnicode_FromFormat(format, raw), kind);
+}
+
+static PyObject *
+query_convert_bool(PyObject *raw)
+{
+    PyObject *lower = PyObject_CallMethod(raw, "lower", NULL);
+    if (lower == NULL) return NULL;
+    int truth = PyUnicode_EqualToUTF8(lower, "1") ||
+                PyUnicode_EqualToUTF8(lower, "true") ||
+                PyUnicode_EqualToUTF8(lower, "yes") ||
+                PyUnicode_EqualToUTF8(lower, "on");
+    int falsehood = PyUnicode_EqualToUTF8(lower, "0") ||
+                    PyUnicode_EqualToUTF8(lower, "false") ||
+                    PyUnicode_EqualToUTF8(lower, "no") ||
+                    PyUnicode_EqualToUTF8(lower, "off");
+    Py_DECREF(lower);
+    if (truth) return Py_NewRef(Py_True);
+    if (falsehood) return Py_NewRef(Py_False);
+    return NULL;
+}
+
+static int
+query_scan_values(const uint8_t *data, Py_ssize_t len, PyObject *lookup,
+                  PyObject **raw_values, Py_ssize_t raw_count)
+{
+    Py_ssize_t start = 0;
+    for (Py_ssize_t i = 0; i <= len; i++) {
+        if (i < len && data[i] != '&') continue;
+        Py_ssize_t field_len = i - start;
+        if (field_len > 0) {
+            const uint8_t *field = data + start;
+            Py_ssize_t eq = 0;
+            while (eq < field_len && field[eq] != '=') eq++;
+            PyObject *key = component_to_str(field, eq);
+            if (key == NULL) return -1;
+            PyObject *positions = PyDict_GetItemWithError(lookup, key);
+            Py_DECREF(key);
+            if (positions == NULL) {
+                if (PyErr_Occurred()) return -1;
+            }
+            else {
+                if (!PyTuple_CheckExact(positions)) {
+                    PyErr_SetString(PyExc_TypeError,
+                                    "invalid compiled query binding positions");
+                    return -1;
+                }
+                Py_ssize_t count = PyTuple_GET_SIZE(positions);
+                int wanted = 0;
+                for (Py_ssize_t j = 0; j < count; j++) {
+                    Py_ssize_t index = PyLong_AsSsize_t(PyTuple_GET_ITEM(positions, j));
+                    if (index < 0 && PyErr_Occurred()) return -1;
+                    if (index < 0 || index >= raw_count) {
+                        PyErr_SetString(PyExc_RuntimeError,
+                                        "query binding position is out of range");
+                        return -1;
+                    }
+                    if (raw_values[index] == NULL) wanted = 1;
+                }
+                if (wanted) {
+                    PyObject *value = eq < field_len
+                        ? component_to_str(field + eq + 1, field_len - eq - 1)
+                        : PyUnicode_New(0, 127);
+                    if (value == NULL) return -1;
+                    for (Py_ssize_t j = 0; j < count; j++) {
+                        Py_ssize_t index = PyLong_AsSsize_t(PyTuple_GET_ITEM(positions, j));
+                        if (index < 0 && PyErr_Occurred()) {
+                            Py_DECREF(value);
+                            return -1;
+                        }
+                        if (index < 0 || index >= raw_count) {
+                            Py_DECREF(value);
+                            PyErr_SetString(PyExc_RuntimeError,
+                                            "query binding position is out of range");
+                            return -1;
+                        }
+                        if (raw_values[index] == NULL) {
+                            raw_values[index] = Py_NewRef(value);
+                        }
+                    }
+                    Py_DECREF(value);
+                }
+            }
+        }
+        start = i + 1;
+    }
+    return 0;
+}
+
+static int
+query_bind_entry(PyObject *entry, PyObject *raw, PyObject *kwargs,
+                 PyObject **errors)
+{
+    if (!PyTuple_CheckExact(entry) || PyTuple_GET_SIZE(entry) != 8) {
+        PyErr_SetString(PyExc_TypeError, "invalid compiled query binding entry");
+        return -1;
+    }
+    PyObject *name = PyTuple_GET_ITEM(entry, 0);
+    PyObject *alias = PyTuple_GET_ITEM(entry, 1);
+    int opcode = (int)PyLong_AsLong(PyTuple_GET_ITEM(entry, 2));
+    if (opcode < 0 && PyErr_Occurred()) return -1;
+    if (raw == Py_None) {
+        int required = PyObject_IsTrue(PyTuple_GET_ITEM(entry, 3));
+        if (required < 0) return -1;
+        if (required) {
+            PyObject *message = PyUnicode_FromString("parameter is required");
+            return query_append_error(errors, alias, message, "missing");
+        }
+        return PyDict_SetItem(kwargs, name, PyTuple_GET_ITEM(entry, 4));
+    }
+
+    PyObject *value = NULL;
+    if (opcode == QUERY_STR) value = Py_NewRef(raw);
+    else if (opcode == QUERY_INT) {
+        value = PyLong_FromUnicodeObject(raw, 10);
+        if (value == NULL && PyErr_ExceptionMatches(PyExc_ValueError)) {
+            PyErr_Clear();
+            return query_append_raw_error(
+                errors, alias, raw, "%R is not an integer", "int");
+        }
+    }
+    else if (opcode == QUERY_FLOAT) {
+        value = PyFloat_FromString(raw);
+        if (value == NULL && PyErr_ExceptionMatches(PyExc_ValueError)) {
+            PyErr_Clear();
+            return query_append_raw_error(
+                errors, alias, raw, "%R is not a number", "float");
+        }
+    }
+    else if (opcode == QUERY_BOOL) {
+        value = query_convert_bool(raw);
+        if (value == NULL && !PyErr_Occurred()) {
+            return query_append_raw_error(
+                errors, alias, raw, "%R is not a boolean", "bool");
+        }
+    }
+    else {
+        PyErr_SetString(PyExc_RuntimeError, "invalid query binding opcode");
+        return -1;
+    }
+    if (value == NULL) return -1;
+
+    PyObject *minimum = PyTuple_GET_ITEM(entry, 5);
+    PyObject *maximum = PyTuple_GET_ITEM(entry, 6);
+    int clamp = PyObject_IsTrue(PyTuple_GET_ITEM(entry, 7));
+    if (clamp < 0) {
+        Py_DECREF(value);
+        return -1;
+    }
+    if (minimum != Py_None) {
+        int below = PyObject_RichCompareBool(value, minimum, Py_LT);
+        if (below < 0) {
+            Py_DECREF(value);
+            return -1;
+        }
+        if (below) {
+            if (clamp) Py_SETREF(value, Py_NewRef(minimum));
+            else {
+                Py_DECREF(value);
+                return query_append_error(
+                    errors, alias,
+                    PyUnicode_FromFormat("value must be >= %S", minimum),
+                    "minimum");
+            }
+        }
+    }
+    if (maximum != Py_None) {
+        int above = PyObject_RichCompareBool(value, maximum, Py_GT);
+        if (above < 0) {
+            Py_DECREF(value);
+            return -1;
+        }
+        if (above) {
+            if (clamp) Py_SETREF(value, Py_NewRef(maximum));
+            else {
+                Py_DECREF(value);
+                return query_append_error(
+                    errors, alias,
+                    PyUnicode_FromFormat("value must be <= %S", maximum),
+                    "maximum");
+            }
+        }
+    }
+    int inserted = PyDict_SetItem(kwargs, name, value);
+    Py_DECREF(value);
+    return inserted;
+}
+
+PyObject *
+wreath_bind_query_into(PyObject *Py_UNUSED(self), PyObject *const *args,
+                       Py_ssize_t nargs)
+{
+    if (nargs != 4) {
+        PyErr_Format(PyExc_TypeError,
+                     "bind_query_into expected 4 arguments, got %zd", nargs);
+        return NULL;
+    }
+    Py_buffer query;
+    if (PyObject_GetBuffer(args[0], &query, PyBUF_SIMPLE) < 0) return NULL;
+    PyObject *compiled = args[1];
+    PyObject *kwargs = args[2];
+    PyObject *errors = args[3] == Py_None ? NULL : Py_NewRef(args[3]);
+    if (!PyTuple_CheckExact(compiled) || PyTuple_GET_SIZE(compiled) != 2 ||
+        !PyDict_CheckExact(kwargs) ||
+        (errors != NULL && !PyList_CheckExact(errors))) {
+        PyBuffer_Release(&query);
+        Py_XDECREF(errors);
+        PyErr_SetString(PyExc_TypeError, "invalid compiled query binding plan");
+        return NULL;
+    }
+    PyObject *lookup = PyTuple_GET_ITEM(compiled, 0);
+    PyObject *entries = PyTuple_GET_ITEM(compiled, 1);
+    if (!PyDict_CheckExact(lookup) || !PyTuple_CheckExact(entries)) {
+        PyBuffer_Release(&query);
+        Py_XDECREF(errors);
+        PyErr_SetString(PyExc_TypeError, "invalid compiled query binding plan");
+        return NULL;
+    }
+    Py_ssize_t count = PyTuple_GET_SIZE(entries);
+    PyObject *local_values[8] = {NULL};
+    PyObject **raw_values = local_values;
+    if (count > 8) {
+        raw_values = PyMem_Calloc((size_t)count, sizeof(*raw_values));
+        if (raw_values == NULL) {
+            PyErr_NoMemory();
+            goto fail;
+        }
+    }
+    if (query_scan_values(query.buf, query.len, lookup, raw_values, count) < 0) goto fail;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        if (query_bind_entry(PyTuple_GET_ITEM(entries, i),
+                             raw_values[i] == NULL ? Py_None : raw_values[i],
+                             kwargs, &errors) < 0) {
+            goto fail;
+        }
+    }
+    for (Py_ssize_t i = 0; i < count; i++) Py_XDECREF(raw_values[i]);
+    if (raw_values != local_values) PyMem_Free(raw_values);
+    PyBuffer_Release(&query);
+    return errors == NULL ? Py_NewRef(Py_None) : errors;
+fail:
+    if (raw_values != NULL) {
+        for (Py_ssize_t i = 0; i < count; i++) Py_XDECREF(raw_values[i]);
+        if (raw_values != local_values) PyMem_Free(raw_values);
+    }
+    Py_XDECREF(errors);
+    PyBuffer_Release(&query);
+    return NULL;
 }
 
 static int

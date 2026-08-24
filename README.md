@@ -130,44 +130,96 @@ This is not a plaintext race or a synthetic JSON payload. All three
 configurations render the same operations-intelligence dashboard from one
 successful request:
 HTTP policy and sessions, nested typed input, bearer authentication, Cedar,
-overlapping PostgreSQL and HTTP wire calls, a sparse-to-dense 730-day ×
-48-tenant × 6-measure projection, eleven chart paths, temporal, geospatial and
-vector work, ranked pagination, protobuf and MessagePack exports, an escaped
+overlapping PostgreSQL and HTTP wire calls, eleven requested rows projected
+from a sparse 730-day × 48-tenant × 6-measure source, eleven chart paths,
+temporal, geospatial and vector work, ranked pagination, protobuf and
+MessagePack exports, an escaped
 template, compression, and HTML emission.
 
-Retired userspace instructions per request, lower is better:
+Retired userspace instructions per request, lower is better. Five samples are
+too few for a meaningful histogram, and scaling every row independently made
+the old glyphs impossible to compare. This instead prints the observed range,
+its width relative to the median, and the median directly:
 
-```text
-Wreath: DCZ + fragment gzip  ▌                                               2,426,742
-Wreath: format-aware gzip    █                                               4,690,494
-FastAPI: gzip                ████████████████████████████████████████████████  226,270,075
-```
+| Stack | Five-sample range | Range width / median | Median |
+|---|---:|---:|---:|
+| Wreath: format-aware gzip | 7.211M–7.275M | 0.89% | **7.261M** |
+| Wreath: DCZ + fragment gzip | 4.022M–4.109M | 2.14% | **4.039M** |
+| FastAPI: Uvicorn | 209.549M–211.069M | 0.72% | **210.328M** |
+| Sanic: native server | 209.758M–216.695M | 3.28% | **211.290M** |
+| BlackSheep: Granian | 207.793M–211.982M | 2.00% | **209.515M** |
 
-Format-aware Wreath retired **48.24× fewer instructions** than FastAPI in this
-run. The dictionary-aware configuration retired **93.24× fewer instructions**,
-removing **2,263,752 instructions per request**—a further **48.26%** from Wreath's full
-request path. Its selected response is RFC 9842 `dcz`: a real response for
+The median hardware-counter account is:
+
+| Stack | Instructions | L1D hit / miss | L1I hit / miss | L2 demand hit / miss | L2 prefetch hit / miss | All L2 misses / kI |
+|---|---:|---:|---:|---:|---:|---:|
+| Wreath: format-aware gzip | **7,261,469** | 2,812,957 / 155,213 (94.77%) | 420,470 / 4,738 (98.89%) | 218,318 / 112,276 (66.04%) | 101,025 / 63,234 (61.50%) | 167,176 / 23.02 |
+| Wreath: DCZ + fragment gzip | **4,038,800** | 1,600,387 / 85,896 (94.91%) | 402,420 / 4,440 (98.91%) | 153,955 / 115,825 (57.07%) | 26,115 / 43,433 (37.55%) | 159,258 / 39.43 |
+| FastAPI: Uvicorn | **210,328,229** | 79,132,583 / 3,724,669 (95.50%) | 32,287,156 / 692,386 (97.90%) | 17,818,754 / 1,845,223 (90.62%) | 1,192,706 / 362,210 (76.71%) | 2,238,836 / 10.64 |
+| Sanic: native server | **211,289,930** | 79,422,207 / 3,707,624 (95.54%) | 32,124,452 / 691,043 (97.89%) | 17,586,395 / 2,126,588 (89.21%) | 1,129,875 / 570,852 (66.43%) | 2,811,521 / 13.31 |
+| BlackSheep: Granian | **209,514,762** | 78,703,071 / 3,649,008 (95.57%) | 31,556,106 / 673,125 (97.91%) | 17,474,065 / 2,175,424 (88.93%) | 1,223,612 / 472,673 (72.13%) | 2,592,360 / 12.37 |
+
+The denominators matter. An L1D percentage divides L1 data accesses; L1I
+divides instruction fetches. The two L2 percentages divide, separately, core
+demand requests and hardware-prefetch requests observed by
+[AMD's L2 events](https://docs.amd.com/r/en-US/57368-uProf-user-guide/4.6.3.-Performance-Metrics-for-AMD-EPYC-Zen-4-and-later-Core-Architecture-Processors).
+Neither is “the fraction of the L1 misses above that hit L2”, and combining
+demand with prefetch into one rate hides which population changed. “All L2
+misses / kI” therefore reports both the absolute median and misses per thousand
+retired instructions. The latter can rise when useful work is deleted: DCZ
+retires 44% fewer instructions than ordinary Wreath while its roughly fixed
+cache traffic is divided by a smaller instruction count.
+
+This is why Wreath's lower L2 percentage is not more L2 pressure. The optimized
+Wreath row records **159,258 total L2 misses per request**, versus
+BlackSheep's **2,592,360**—16.28× fewer—even though BlackSheep's demand hit
+percentage is higher. Moving work toward L1 means shrinking active data/code,
+eliminating copies, and keeping transient buffers contiguous; it does not mean
+optimizing the percentage itself. Every stack materializes only the eleven
+chart rows that reach the response. Wreath additionally reconciles consecutive
+measures from one series in one bucket walk, borrows exact numeric cells while
+their request owner stays alive, hashes each dense bucket and measure once into
+a call-owned lookup plan, and keeps row indices, values, presence bits and the
+LTTB selection workspace call-owned and contiguous. Coarse temporal counts skip
+zone reconstruction when the calendar gap alone proves the final bucket is
+before the end. Sparse-vector indices and values share one compact native
+allocation, while metrics insert first-seen exact integers directly and pay
+arbitrary-precision conversion only for duplicate sums. The ranker bounds and
+transforms its existing embedding in native workspace instead of building a
+Python score array; template emission borrows safe top-level scalars; and
+content-format dispatch no longer allocates normalized Python strings. Prepared
+template fragments can also carry policy-owned provenance, so gzip compresses
+only their dynamic edges and does not reread the full uncompressed stable
+suffix; ordinary byte bodies retain the exact comparison and safe
+full-compression fallback.
+
+Format-aware Wreath retired **28.96× fewer instructions** than FastAPI in this
+run. The dictionary-aware configuration retired **52.08× fewer instructions**,
+removing **3,222,669 instructions per request**—a further **44.38%** from Wreath's
+full request path. BlackSheep on Granian was the least instruction-heavy of the
+three ecosystem stacks, at 28.85× and 51.88× the two Wreath medians. The DCZ
+response is RFC 9842 `dcz`: a real response for
 neighbouring resource 41 is the client-held dictionary for resource 42, whose
 35,805-byte body differs at only two bytes. The same configuration falls back
 to standard concatenated gzip members for ordinary clients, recompressing the
 249-byte dynamic prefix while reusing the independently readable stable member.
 It does not claim that DCZ and gzip are nested in one response.
 
-All three rows use TLS 1.3 over HTTP/1.1 and are medians of five alternating
-30/15-request slopes. Ranges were 4,673,133–4,696,949 for format-aware Wreath,
-2,416,962–2,447,953 for the dictionary-aware configuration, and
-226,205,485–226,918,987 for FastAPI. The unchanged A/A controls differed from
-their medians by 0.03%, 0.10%, and 0.11%, respectively. The harness accepts a
-DCZ sample only after checking its dictionary hash, decoded response facts,
-secure transport, and both required `Vary` fields; it separately exercises and
-decodes the fragment-gzip fallback before attaching counters.
+All five rows use TLS 1.3 over HTTP/1.1 and are medians of five alternating
+30/15-request slopes. The unchanged A/A controls differed from the primary
+medians by 0.58%, 0.90%, 0.14%, 0.44%, and 0.11%, respectively. The harness
+accepts a DCZ sample only after checking its dictionary hash, decoded response
+facts, secure transport, and both required `Vary` fields; it separately
+exercises and decodes the fragment-gzip fallback before attaching counters.
 
-The FastAPI implementation is not a slow pure-Python foil. It uses the
-ecosystem stack a pragmatic service would assemble: Starlette policy
-middleware, Pydantic, Uvicorn/uvloop/httptools, `HTTPBearer`, `cedarpy`,
-`asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec. Wreath performs the
-corresponding transaction through its dependency-free declarative surfaces and
-native data kernels.
+The ecosystem implementations are not slow pure-Python foils. FastAPI uses
+Starlette policy middleware, Pydantic, and Uvicorn/uvloop/httptools. Sanic uses
+its native production server in single-process mode. BlackSheep uses Granian's
+single-threaded ASGI runtime with uvloop, the faster small-process mode its
+server documents. Sanic and BlackSheep share one msgspec-typed business kernel;
+all three use `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, msgspec,
+and standard gzip. Wreath performs the corresponding transaction through its
+dependency-free declarative surfaces and native data kernels.
 
 To make the framework layers independently auditable, a smaller companion
 request removes the dashboard calculations while keeping the same successful
@@ -175,24 +227,28 @@ routing, CORS, validation, auth, Cedar, PostgreSQL, HTTP, and JSON path:
 
 The cumulative decomposition shows where work enters:
 
-| Successful request includes | Wreath | FastAPI stack |
-|---|---:|---:|
-| route + JSON response | 36,006 | 426,899 |
-| + CORS | 47,156 | 490,826 |
-| + typed binding and validation | 115,305 | 776,764 |
-| + bearer authentication | 122,448 | 867,935 |
-| + Cedar authorization | 173,902 | 1,597,272 |
-| + PostgreSQL query | 225,857 | 1,809,675 |
-| + outbound HTTP | **269,110** | **2,133,383** |
+| Successful request includes | Wreath | BlackSheep + Granian | Sanic native | FastAPI + Uvicorn |
+|---|---:|---:|---:|---:|
+| route + JSON response | 35,221 | 104,326 | 220,806 | 425,757 |
+| + CORS | 46,542 | 143,283 | 241,150 | 491,308 |
+| + typed binding and validation | 107,943 | 222,511 | 275,629 | 774,667 |
+| + bearer authentication | 114,036 | 229,477 | 277,595 | 867,014 |
+| + Cedar authorization | 153,793 | 931,174 | 974,843 | 1,597,999 |
+| + PostgreSQL query | 206,037 | 1,104,737 | 1,145,880 | 1,811,778 |
+| + outbound HTTP | **249,844** | **1,444,119** | **1,443,892** | **2,107,179** |
 
-On this stripped companion, Wreath retired **7.93× fewer instructions**. Its
-purpose is decomposition; the holistic request above is the headline system
-comparison.
+On this stripped companion, Wreath retired **8.43× fewer instructions** than
+FastAPI and **5.78× fewer** than both Sanic and BlackSheep. BlackSheep has the
+lowest ecosystem route floor; the two lightweight stacks converge once the
+same Cedar, PostgreSQL and outbound HTTP work dominates. Its purpose is
+decomposition; the holistic request above is the headline system comparison.
 
 | Arm | Installed stack |
 |---|---|
-| Wreath | Wreath 0.3.2 for the holistic arm (0.3.1 for the retained cumulative control): metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
+| Wreath | Wreath 0.3.2: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
 | FastAPI | FastAPI 0.139, Starlette, Pydantic/pydantic-core, Uvicorn, uvloop, httptools, `HTTPBearer`, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
+| Sanic | Sanic 25.12.1 native server, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
+| BlackSheep | BlackSheep 2.6.3 on Granian 2.7.9 ASGI/uvloop, plus the same typed business stack as Sanic |
 
 CORS is Starlette's `CORSMiddleware`, which FastAPI already brings in. It is not
 padded into the stack as another package. `cedarpy` 4.8.7 has a stateless public
@@ -204,6 +260,10 @@ in-process PostgreSQL and HTTP peers. The verifier rejects a sample unless the
 security, CORS, session, compression, and business response facts agree.
 Imports, startup, compilation, pool creation, and warm-up cancel through N/N/2
 slopes. Server and generator are pinned separately with `PYTHONHASHSEED=0`.
+Instructions and the four L1 events share one non-multiplexed perf pass; five
+AMD component events split demand from prefetch L2 traffic in a second pass.
+L1 hits are accesses minus misses; aggregate L2 misses are retained only as an
+absolute and per-instruction normalization, not presented as one hit rate.
 The result contains no elapsed time, cycles, or IPC. It was recorded on CPython
 3.14.7 and Linux x86-64, on a Ryzen 7 7730U. SIMD dispatch can make another
 architecture retire a different count.

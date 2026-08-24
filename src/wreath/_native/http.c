@@ -4,30 +4,67 @@
 
 #include "simd.h"
 
-static const uint8_t TOKEN_CHARS[256] = {
-    /* RFC 9110 token characters: ALPHA / DIGIT / !#$%&'*+-.^_`|~ */
-    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
-    ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
-    ['`'] = 1, ['|'] = 1, ['~'] = 1,
-    ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1,
-    ['5'] = 1, ['6'] = 1, ['7'] = 1, ['8'] = 1, ['9'] = 1,
-    ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1,
-    ['G'] = 1, ['H'] = 1, ['I'] = 1, ['J'] = 1, ['K'] = 1, ['L'] = 1,
-    ['M'] = 1, ['N'] = 1, ['O'] = 1, ['P'] = 1, ['Q'] = 1, ['R'] = 1,
-    ['S'] = 1, ['T'] = 1, ['U'] = 1, ['V'] = 1, ['W'] = 1, ['X'] = 1,
-    ['Y'] = 1, ['Z'] = 1,
-    ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
-    ['g'] = 1, ['h'] = 1, ['i'] = 1, ['j'] = 1, ['k'] = 1, ['l'] = 1,
-    ['m'] = 1, ['n'] = 1, ['o'] = 1, ['p'] = 1, ['q'] = 1, ['r'] = 1,
-    ['s'] = 1, ['t'] = 1, ['u'] = 1, ['v'] = 1, ['w'] = 1, ['x'] = 1,
-    ['y'] = 1, ['z'] = 1,
-};
+/* The RFC 9110 token table is `wreath_ascii_token` in `ascii.h`, which
+ * `wreathcore.h` already brings in. This file used to define its own
+ * byte-identical copy, which `_server` then linked alongside the one in
+ * `server_common.c` -- two tables deciding the same question in one process. */
 
 static PyObject *
 malformed(const char *reason)
 {
     PyErr_SetString(PyExc_ValueError, reason);
     return NULL;
+}
+
+/* One `name: value CRLF` line. On success `*cursor` sits on the next line and
+ * the two spans point into the caller's buffer, with the value's leading and
+ * trailing OWS already trimmed; on failure the exception is set and `*cursor`
+ * is not meaningful.
+ *
+ * Every syntax decision a header line carries lives here -- rejecting obsolete
+ * folding, the token-only name, the dispatched value scan, the CRLF -- because
+ * the two passes over a head (the one that measures and validates, and the one
+ * that builds the tuple) each used to carry their own transcription of it, and
+ * a parser hardening fix applied to one silently missed the other. */
+static int
+http_header_line(const uint8_t **cursor, const uint8_t *end,
+                 const uint8_t **name_start, Py_ssize_t *name_len,
+                 const uint8_t **value_start, const uint8_t **value_end)
+{
+    const uint8_t *p = *cursor;
+    if (*p == ' ' || *p == '\t') {
+        malformed("obsolete header line folding is not supported");
+        return -1;
+    }
+    *name_start = p;
+    while (p < end && wreath_ascii_token[*p]) p++;
+    *name_len = p - *name_start;
+    if (*name_len == 0 || p >= end || *p != ':') {
+        malformed("malformed header name");
+        return -1;
+    }
+    p++;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    *value_start = p;
+    /* One dispatched scan stops on whatever ends the value: the CR that
+     * closes the line, or a byte no value may carry. Which one it was is
+     * decided below, exactly as the per-byte loop this replaces did.
+     * Values are the long part of a head -- a user-agent or a cookie runs
+     * far past a register -- so this is where the width pays. */
+    p += wreath_value_run((const char *)p, (ptrdiff_t)(end - p));
+    if (p < end && *p != '\r') {
+        malformed("invalid header value byte");
+        return -1;
+    }
+    if (end - p < 2 || p[1] != '\n') {
+        malformed("malformed header line ending");
+        return -1;
+    }
+    *value_end = p;
+    while (*value_end > *value_start &&
+           ((*value_end)[-1] == ' ' || (*value_end)[-1] == '\t')) (*value_end)--;
+    *cursor = p + 2;
+    return 0;
 }
 
 /* Common request methods and header names are returned as cached objects so
@@ -175,7 +212,7 @@ wreath_http_parse_request_parts(
     end = head_end + 2;
 
     method_start = p;
-    while (p < end && TOKEN_CHARS[*p]) p++;
+    while (p < end && wreath_ascii_token[*p]) p++;
     method_len = p - method_start;
     if (method_len == 0 || p >= end || *p != ' ') {
         malformed("malformed request line");
@@ -211,38 +248,8 @@ wreath_http_parse_request_parts(
         const uint8_t *value_start;
         const uint8_t *value_end;
         Py_ssize_t name_len;
-        if (*p == ' ' || *p == '\t') {
-            malformed("obsolete header line folding is not supported");
-            goto error;
-        }
-        name_start = p;
-        while (p < end && TOKEN_CHARS[*p]) p++;
-        name_len = p - name_start;
-        if (name_len == 0 || p >= end || *p != ':') {
-            malformed("malformed header name");
-            goto error;
-        }
-        p++;
-        while (p < end && (*p == ' ' || *p == '\t')) p++;
-        value_start = p;
-        /* One dispatched scan stops on whatever ends the value: the CR that
-         * closes the line, or a byte no value may carry. Which one it was is
-         * decided below, exactly as the per-byte loop this replaces did.
-         * Values are the long part of a head -- a user-agent or a cookie runs
-         * far past a register -- so this is where the width pays. */
-        p += wreath_value_run((const char *)p, (ptrdiff_t)(end - p));
-        if (p < end && *p != '\r') {
-            malformed("invalid header value byte");
-            goto error;
-        }
-        if (end - p < 2 || p[1] != '\n') {
-            malformed("malformed header line ending");
-            goto error;
-        }
-        value_end = p;
-        while (value_end > value_start &&
-               (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
-        p += 2;
+        if (http_header_line(&p, end, &name_start, &name_len,
+                             &value_start, &value_end) < 0) goto error;
         /* Folded a byte at a time, and measured to be the right way round.
          *
          * A vector fold of this loop looks obviously worthwhile -- fifteen
@@ -567,38 +574,8 @@ wreath_http_parse_response_parts(
         PyObject *name;
         PyObject *value;
         PyObject *pair;
-        if (*p == ' ' || *p == '\t') {
-            malformed("obsolete header line folding is not supported");
-            goto error;
-        }
-        name_start = p;
-        while (p < end && TOKEN_CHARS[*p]) p++;
-        name_len = p - name_start;
-        if (name_len == 0 || p >= end || *p != ':') {
-            malformed("malformed header name");
-            goto error;
-        }
-        p++;
-        while (p < end && (*p == ' ' || *p == '\t')) p++;
-        value_start = p;
-        /* One dispatched scan stops on whatever ends the value: the CR that
-         * closes the line, or a byte no value may carry. Which one it was is
-         * decided below, exactly as the per-byte loop this replaces did.
-         * Values are the long part of a head -- a user-agent or a cookie runs
-         * far past a register -- so this is where the width pays. */
-        p += wreath_value_run((const char *)p, (ptrdiff_t)(end - p));
-        if (p < end && *p != '\r') {
-            malformed("invalid header value byte");
-            goto error;
-        }
-        if (end - p < 2 || p[1] != '\n') {
-            malformed("malformed header line ending");
-            goto error;
-        }
-        value_end = p;
-        while (value_end > value_start &&
-               (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
-        p += 2;
+        if (http_header_line(&p, end, &name_start, &name_len,
+                             &value_start, &value_end) < 0) goto error;
 
         if (name_len == (Py_ssize_t)(sizeof("content-length") - 1) &&
             http_ascii_equals(name_start, name_len, "content-length")) {
@@ -1161,7 +1138,7 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
          * `wreath_value_run` would itself fall through to its scalar loop
          * below 16. Scalar by decision. */
         for (Py_ssize_t i = 0; i < len; i++) {
-            if (!TOKEN_CHARS[data[i]]) {
+            if (!wreath_ascii_token[data[i]]) {
                 PyErr_SetString(PyExc_ValueError, "invalid HTTP method");
                 goto error;
             }
@@ -1268,7 +1245,7 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
         view_count += 2;
         if (name->len == 0) invalid = 1;
         for (Py_ssize_t i = 0; i < name->len && !invalid; i++)
-            if (!TOKEN_CHARS[((const uint8_t *)name->buf)[i]]) invalid = 1;
+            if (!wreath_ascii_token[((const uint8_t *)name->buf)[i]]) invalid = 1;
         if (invalid) PyErr_SetString(PyExc_ValueError, "invalid header name");
         for (Py_ssize_t i = 0; i < value->len && !invalid; i++) {
             uint8_t c = ((const uint8_t *)value->buf)[i];

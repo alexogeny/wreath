@@ -514,6 +514,27 @@ async def test_outbound_destination_serializes_signs_and_sends() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outbound_destination_sends_a_bytearray_verbatim() -> None:
+    fake = _FakeHTTPClient()
+    destination = Wreath().webhooks("partners-bytes").destination(
+        "receiver",
+        client=fake,
+        path="/callbacks",
+        signer=HMACWebhookSigner(KEYS, key_id="current"),
+    )
+
+    result = await destination.send(
+        "widget.changed",
+        bytearray(b"opaque payload"),
+        event_id="evt-bytes",
+        timestamp=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+    )
+
+    assert result.outcome == "delivered"
+    assert fake.calls[0][2] == b"opaque payload"
+
+
+@pytest.mark.asyncio
 async def test_webhook_hub_exposes_narrow_csrf_exemption() -> None:
     app = Wreath()
     hooks = app.webhooks("csrf")

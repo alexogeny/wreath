@@ -16,6 +16,7 @@ import pytest
 
 from wreath._devtools.complexity_discover import (
     Finding,
+    _source_fingerprint,
     discover,
     infer_kinds,
     scan_c,
@@ -359,6 +360,81 @@ def test_discover_walks_python_and_c(tmp_path) -> None:
     codes = {f.code for f in discover(tmp_path)}
     assert "SL-IN-LOOP" in codes
     assert "CL-NEST" in codes
+
+
+def test_discover_reuses_only_byte_identical_cached_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text(textwrap.dedent(PLANTED["SL-IN-LOOP"]), encoding="utf-8")
+    second.write_text("def clean():\n    return 1\n", encoding="utf-8")
+    original = discover(tmp_path)
+    grouped = {
+        path.name: tuple(finding for finding in original if finding.file == path.name)
+        for path in (first, second)
+    }
+    cache = {
+        path.name: (_source_fingerprint(path), grouped[path.name])
+        for path in (first, second)
+    }
+    scanned: list[str] = []
+    original_scan = scan_python
+
+    def recording_scan(path, root):
+        scanned.append(path.name)
+        return original_scan(path, root)
+
+    monkeypatch.setattr(
+        "wreath._devtools.complexity_discover.scan_python",
+        recording_scan,
+    )
+
+    assert discover(tmp_path, cache=cache) == original
+    assert scanned == []
+
+    second.write_text(textwrap.dedent(PLANTED["SL-ACCUM-ADD"]), encoding="utf-8")
+    changed = discover(tmp_path, cache=cache)
+    assert scanned == ["second.py"]
+    assert any(finding.file == "second.py" for finding in changed)
+
+
+def test_repository_discovery_cache_is_invalidated_with_its_scanner(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._devtools import complexity_probe
+
+    source_root = tmp_path / "src" / "wreath"
+    source_root.mkdir(parents=True)
+    module = source_root / "clean.py"
+    module.write_text("def clean():\n    return 1\n", encoding="utf-8")
+    cached = Finding(
+        file="clean.py",
+        line=1,
+        code="SL-RECURSE",
+        func="clean",
+        depth=0,
+        confidence="low",
+        message="cached sentinel",
+        source="",
+    )
+    baseline = tmp_path / complexity_probe.DISCOVERY_PATH
+    baseline.parent.mkdir(parents=True)
+    document = {
+        "version": complexity_probe.DISCOVERY_VERSION,
+        "scanner": complexity_probe._discovery_scanner_identity(),
+        "sources": {"clean.py": _source_fingerprint(module)},
+        "keys": [cached.key],
+        "candidates": [cached.document()],
+    }
+    baseline.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(complexity_probe, "repo_root", lambda: tmp_path)
+
+    assert complexity_probe._run_discovery() == [cached]
+
+    document["scanner"] = {"source": "changed", "python": "changed"}
+    baseline.write_text(json.dumps(document), encoding="utf-8")
+    assert complexity_probe._run_discovery() == []
 
 
 def test_finding_key_survives_a_line_shift(tmp_path) -> None:

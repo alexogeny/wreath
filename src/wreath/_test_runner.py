@@ -1,4 +1,4 @@
-"""Pytest-compatible test activity, timing, and heat-map reporting.
+"""Pytest-compatible test activity, timing, and state-map reporting.
 
 ``wreath test`` deliberately keeps pytest as the semantic engine.  Fixtures,
 plugins, collection, capture, and tracebacks therefore remain pytest's, while
@@ -13,6 +13,7 @@ not inherit the UI merely because their parent is itself running a test.
 
 from __future__ import annotations
 
+import ast
 import atexit
 import collections
 import hashlib
@@ -52,6 +53,8 @@ _MEAN_WINDOW = 20
 _DEFAULT_HISTORY = ".wreath/test-history.json"
 _MAX_AUTO_WORKERS = 8
 _MAX_AUTO_MUTANT_WORKERS = 3
+_MIN_SHARD_MODULES_PER_WORKER = 4
+_SHARD_HISTORY_COVERAGE = 0.8
 
 _ENTER_SCREEN = "\x1b[?1049h\x1b[?25l"
 _LEAVE_SCREEN = "\x1b[?25h\x1b[?1049l"
@@ -71,6 +74,7 @@ class RunnerConfig:
     mutation_mode: str = "off"
     mutation_samples: int = 0
     mutation_activity: str | None = None
+    collection_shards: tuple[tuple[str, int], ...] = ()
 
     def as_json(self) -> str:
         return json.dumps(
@@ -83,6 +87,7 @@ class RunnerConfig:
                 "mutation_mode": self.mutation_mode,
                 "mutation_samples": self.mutation_samples,
                 "mutation_activity": self.mutation_activity,
+                "collection_shards": self.collection_shards,
             },
             separators=(",", ":"),
         )
@@ -100,6 +105,7 @@ class RunnerConfig:
         mutation_mode = value.get("mutation_mode", "off")
         mutation_samples = value.get("mutation_samples", 0)
         mutation_activity = value.get("mutation_activity")
+        collection_shards = value.get("collection_shards", ())
         if grid not in {"auto", "always", "never"}:
             raise ValueError(f"unknown test grid mode {grid!r}")
         if not isinstance(workers, str):
@@ -116,6 +122,21 @@ class RunnerConfig:
             raise ValueError("mutation sample count must be a non-negative integer")
         if mutation_activity is not None and not isinstance(mutation_activity, str):
             raise ValueError("mutation activity path must be text")
+        if not isinstance(collection_shards, list | tuple):
+            raise ValueError("test collection shards must be a sequence")
+        parsed_shards: list[tuple[str, int]] = []
+        for shard in collection_shards:
+            if (
+                not isinstance(shard, list | tuple)
+                or len(shard) != 2
+                or not isinstance(shard[0], str)
+                or not isinstance(shard[1], int)
+                or shard[1] < 0
+            ):
+                raise ValueError(
+                    "each test collection shard must be a path and non-negative worker"
+                )
+            parsed_shards.append((shard[0], shard[1]))
         return cls(
             grid=grid,
             workers=workers,
@@ -125,6 +146,7 @@ class RunnerConfig:
             mutation_mode=mutation_mode,
             mutation_samples=mutation_samples,
             mutation_activity=mutation_activity,
+            collection_shards=tuple(parsed_shards),
         )
 
 
@@ -197,6 +219,7 @@ class MutationActivity:
     counts: dict[str, int] = field(default_factory=dict)
     mutating_files: frozenset[str] = frozenset()
     verified_files: frozenset[str] = frozenset()
+    failed_mutation_files: frozenset[str] = frozenset()
     baseline_failures: int = 0
     live_probes: int = 0
     live_completed: int = 0
@@ -429,24 +452,17 @@ class RunActivity:
         }
 
 
-def _heat_bucket(duration: float, completed: list[float]) -> int:
-    if not completed:
-        return 0
-    ordered = sorted(completed)
-    below = sum(value <= duration for value in ordered)
-    return min(4, max(0, math.ceil(below / len(ordered) * 5) - 1))
-
-
 _COLOURS = {
-    "untested": (238, 238, 238, 238, 238),
-    "running": (24, 31, 38, 45, 51),
-    "passed": (22, 28, 34, 40, 46),
-    "mixed": (58, 94, 130, 166, 202),
-    "skipped": (58, 94, 130, 166, 202),
-    "failed": (52, 88, 124, 160, 196),
-    "error": (52, 88, 124, 160, 196),
-    "mutating": (53, 89, 125, 161, 201),
-    "verified": (136, 178, 214, 220, 226),
+    "untested": 238,
+    "running": 33,
+    "passed": 46,
+    "mixed": 202,
+    "skipped": 202,
+    "failed": 196,
+    "error": 196,
+    "mutating": 201,
+    "verified": 226,
+    "mutation_failed": 93,
 }
 
 _SYMBOLS = {
@@ -459,43 +475,35 @@ _SYMBOLS = {
     "error": "✕",
     "mutating": "▣",
     "verified": "▰",
+    "mutation_failed": "▤",
 }
 
 
 def _tile(
     file_state: FileState,
     *,
-    completed: list[float],
     colour: bool,
     mutating: bool = False,
     verified: bool = False,
+    mutation_failed: bool = False,
 ) -> str:
     outcome = file_state.outcome
     if outcome == "passed":
         if mutating:
             outcome = "mutating"
+        elif mutation_failed:
+            outcome = "mutation_failed"
         elif verified:
             outcome = "verified"
-    symbol = "◆" if outcome == "running" else "■"
     if not colour:
         return _SYMBOLS[outcome]
-    if outcome in {"mutating", "verified"}:
-        symbol = _SYMBOLS[outcome]
-    bucket = _heat_bucket(file_state.duration, completed)
-    code = _COLOURS[outcome][bucket]
-    return f"\x1b[38;5;{code}m{symbol}{_RESET}"
+    return f"\x1b[38;5;{_COLOURS[outcome]}m■{_RESET}"
 
 
-def _legend_tile(outcome: str, bucket: int, *, colour: bool) -> str:
+def _legend_tile(outcome: str, *, colour: bool) -> str:
     if not colour:
         return _SYMBOLS[outcome]
-    code = _COLOURS[outcome][bucket]
-    symbol = (
-        _SYMBOLS[outcome]
-        if outcome in {"running", "mutating", "verified"}
-        else "■"
-    )
-    return f"\x1b[38;5;{code}m{symbol}{_RESET}"
+    return f"\x1b[38;5;{_COLOURS[outcome]}m■{_RESET}"
 
 
 def _rating_text(label: str, tone: str, *, colour: bool) -> str:
@@ -514,7 +522,7 @@ def _rating_text(label: str, tone: str, *, colour: bool) -> str:
 
 
 def _mutation_lines(mutation: MutationActivity, *, colour: bool) -> list[str]:
-    mutation_tile = _legend_tile("mutating", 4, colour=colour)
+    mutation_tile = _legend_tile("mutating", colour=colour)
     if mutation.state == "running":
         scope = f" · {mutation.total} sampled controls" if mutation.total else ""
         action = (
@@ -542,7 +550,7 @@ def _mutation_lines(mutation: MutationActivity, *, colour: bool) -> list[str]:
     unreached = counts.get("unreached", 0)
     undecided = counts.get("timeout", 0) + counts.get("error", 0)
     equivalent = counts.get("equivalent", 0)
-    verified_tile = _legend_tile("verified", 4, colour=colour)
+    verified_tile = _legend_tile("verified", colour=colour)
     verified_count = len(mutation.verified_files)
     verified_label = "file" if verified_count == 1 else "files"
     lines = [
@@ -589,9 +597,6 @@ def render_activity(
     counts = activity.counts()
     elapsed = activity.wall_seconds or max(0.0, time.perf_counter() - activity.started)
     file_states = sorted(activity.files.values(), key=lambda file_state: file_state.path)
-    completed = [
-        file_state.duration for file_state in file_states if file_state.finished > 0
-    ]
     lines = [
         "Test activity   current run",
         (
@@ -613,7 +618,6 @@ def render_activity(
             lines.append("  " + " ".join(
                 _tile(
                     file_state,
-                    completed=completed,
                     colour=colour,
                     mutating=(
                         mutation is not None
@@ -623,25 +627,27 @@ def render_activity(
                         mutation is not None
                         and file_state.path in mutation.verified_files
                     ),
+                    mutation_failed=(
+                        mutation is not None
+                        and file_state.path in mutation.failed_mutation_files
+                    ),
                 )
                 for file_state in row
             ))
     else:
         lines.append("  collecting tests …")
 
-    heat_scale = " ".join(
-        _legend_tile("passed", bucket, colour=colour) for bucket in range(5)
-    )
     outcomes = " · ".join((
-        f"{_legend_tile('untested', 2, colour=colour)} queued",
-        f"{_legend_tile('running', 4, colour=colour)} running",
-        f"{_legend_tile('passed', 4, colour=colour)} pass",
-        f"{_legend_tile('mutating', 4, colour=colour)} mutation testing",
-        f"{_legend_tile('verified', 4, colour=colour)} pass + killed mutant",
-        f"{_legend_tile('mixed', 4, colour=colour)} skip/mixed",
-        f"{_legend_tile('failed', 4, colour=colour)} fail/error",
+        f"{_legend_tile('untested', colour=colour)} queued",
+        f"{_legend_tile('running', colour=colour)} running",
+        f"{_legend_tile('passed', colour=colour)} pass",
+        f"{_legend_tile('mutating', colour=colour)} mutation testing",
+        f"{_legend_tile('verified', colour=colour)} pass + killed mutant",
+        f"{_legend_tile('mutation_failed', colour=colour)} mutation failed",
+        f"{_legend_tile('mixed', colour=colour)} skip/mixed",
+        f"{_legend_tile('failed', colour=colour)} fail/error",
     ))
-    lines.extend(("", f"  Duration   Less {heat_scale} More", f"  Outcome    {outcomes}"))
+    lines.extend(("", f"  State      {outcomes}"))
     if mutation is not None:
         lines.extend(_mutation_lines(mutation, colour=colour))
     finished = [test for test in activity.tests.values() if test.finished]
@@ -750,6 +756,7 @@ class ActivityRenderer:
         *,
         mutating_files: frozenset[str],
         verified_files: frozenset[str],
+        failed_mutation_files: frozenset[str],
     ) -> None:
         """Animate live per-file mutation state in the same activity grid."""
         if self.disabled:
@@ -760,6 +767,7 @@ class ActivityRenderer:
             total=total,
             mutating_files=mutating_files,
             verified_files=verified_files,
+            failed_mutation_files=failed_mutation_files,
         )
         if not self.interactive:
             if not self._mutation_announced:
@@ -1075,6 +1083,49 @@ class HistoricalSchedulerPlugin:
         return HistoricalLoadScheduling(config, log)
 
 
+class CollectionShardPlugin:
+    """Keep each collected test module in exactly one fresh xdist worker."""
+
+    def __init__(self, shards: tuple[tuple[str, int], ...]) -> None:
+        self.shards = {Path(path): worker for path, worker in shards}
+        self.root = Path(os.path.commonpath(tuple(self.shards)))
+        self.workers = max(self.shards.values()) + 1
+
+    def pytest_ignore_collect(self, collection_path: Path, config: Any) -> bool | None:
+        worker = getattr(config, "workerinput", None)
+        if not isinstance(worker, dict) or not collection_path.is_file():
+            return None
+        path = collection_path.resolve()
+        owner = self.shards.get(path)
+        if owner is None and path.name != "conftest.py" and path.is_relative_to(self.root):
+            digest = hashlib.sha256(os.fsencode(path)).digest()
+            owner = int.from_bytes(digest[:8], "little") % self.workers
+        if owner is None:
+            return None
+        worker_id = str(worker.get("workerid", ""))
+        try:
+            worker_index = int(worker_id.removeprefix("gw"))
+        except ValueError as error:
+            raise ValueError(
+                f"xdist worker id {worker_id!r} must have the form 'gwN'"
+            ) from error
+        return owner != worker_index
+
+    def pytest_sessionfinish(self, session: Any) -> None:
+        output = getattr(session.config, "workeroutput", None)
+        if output is not None:
+            output["wreath_collection_shard"] = True
+
+
+class CollectionShardSchedulerPlugin:
+    """Run each worker's disjoint collection without replicating another shard."""
+
+    def pytest_xdist_make_scheduler(self, config: Any, log: Any) -> Any:
+        from xdist.scheduler.each import EachScheduling
+
+        return EachScheduling(config, log)
+
+
 class MutationTracePlugin:
     """Capture selected mutation-line hits during the ordinary pytest run."""
 
@@ -1167,6 +1218,9 @@ class ActivityPlugin:
             total=self.mutation_event_state.total,
             mutating_files=frozenset(self.mutation_event_state.mutating_files),
             verified_files=frozenset(self.mutation_event_state.verified_files),
+            failed_mutation_files=frozenset(
+                self.mutation_event_state.failed_mutation_files
+            ),
         )
 
     def pytest_sessionstart(self, session: Any) -> None:
@@ -1258,13 +1312,23 @@ def install_activity_plugin(config: Any) -> None:
         return
     runner_config = RunnerConfig.from_json(raw)
     _install_mutation_trace_plugin(config)
+    if runner_config.collection_shards:
+        config.pluginmanager.register(
+            CollectionShardPlugin(runner_config.collection_shards),
+            f"{_PLUGIN_NAME}-collection-shard",
+        )
     if hasattr(config, "workerinput"):
         return
     if not _controller_process() or config.pluginmanager.hasplugin(_PLUGIN_NAME):
         return
     workers = _workers_from_pytest_config(config, runner_config.workers)
 
-    if runner_config.history and workers > 1:
+    if runner_config.collection_shards:
+        config.pluginmanager.register(
+            CollectionShardSchedulerPlugin(),
+            f"{_PLUGIN_NAME}-collection-shard-scheduler",
+        )
+    elif runner_config.history and workers > 1:
         test_weights, file_weights = _history_weights(Path(runner_config.history))
         if test_weights:
             config.pluginmanager.register(
@@ -1348,6 +1412,235 @@ def _has_xdist_distribution(arguments: list[str]) -> bool:
         argument == "--dist" or argument.startswith("--dist=")
         for argument in arguments
     )
+
+
+def _has_xdist_restart(arguments: list[str]) -> bool:
+    return any(
+        argument == "--max-worker-restart"
+        or argument.startswith("--max-worker-restart=")
+        for argument in arguments
+    )
+
+
+def _explicit_test_paths(arguments: list[str]) -> tuple[Path, ...]:
+    """Return existing positional-looking paths; auto mode treats any as focused."""
+    paths: list[Path] = []
+    for argument in arguments:
+        if argument.startswith("-"):
+            continue
+        raw_path = argument.split("::", 1)[0]
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if path.exists():
+            paths.append(path.resolve())
+    return tuple(dict.fromkeys(paths))
+
+
+def _has_focused_expression(arguments: list[str]) -> bool:
+    """Whether pytest will deselect tests after modules have been assigned.
+
+    Collection sharding assigns whole files before pytest evaluates `-m` and
+    `-k`. A focused expression can leave one or more workers with an empty
+    shard; xdist then contributes NO_TESTS_COLLECTED (5) even while other
+    workers run green tests. An explicitly empty expression is broad and keeps
+    sharding eligible.
+    """
+    names = {"-m", "--markexpr", "-k", "--keyword"}
+    for index, argument in enumerate(arguments):
+        if argument in names:
+            return index + 1 >= len(arguments) or bool(arguments[index + 1])
+        for prefix in ("--markexpr=", "--keyword="):
+            if argument.startswith(prefix):
+                return bool(argument.removeprefix(prefix))
+        if argument.startswith(("-m", "-k")) and argument not in names:
+            return bool(argument[2:])
+    return False
+
+
+def _ignored_test_path(path: Path) -> bool:
+    return any(part.startswith(".") or part == "__pycache__" for part in path.parts)
+
+
+def _collection_modules(arguments: list[str], *, forced: bool) -> tuple[Path, ...]:
+    explicit = _explicit_test_paths(arguments)
+    if explicit and not forced:
+        return ()
+    roots = explicit
+    if not roots:
+        default = Path("tests")
+        roots = ((default if default.is_dir() else Path.cwd()).resolve(),)
+
+    modules: set[Path] = set()
+    for root in roots:
+        candidates = (root,) if root.is_file() else root.rglob("*.py")
+        for candidate in candidates:
+            if candidate.name == "conftest.py":
+                continue
+            if not (
+                candidate.name.startswith("test_")
+                or candidate.name.endswith("_test.py")
+            ):
+                continue
+            relative = candidate.resolve().relative_to(root.parent if root.is_file() else root)
+            if _ignored_test_path(relative):
+                continue
+            modules.add(candidate.resolve())
+    return tuple(sorted(modules))
+
+
+def _declared_xdist_group(node: ast.Call) -> str | None:
+    values = [keyword.value for keyword in node.keywords if keyword.arg == "name"]
+    if not values and node.args:
+        values.append(node.args[0])
+    if len(values) != 1 or not isinstance(values[0], ast.Constant):
+        return None
+    name = values[0].value
+    return name if isinstance(name, str) else None
+
+
+def _cross_module_xdist_group(modules: tuple[Path, ...]) -> str | None:
+    """Name a group sharding cannot preserve, including a dynamic declaration."""
+    owners: dict[str, set[Path]] = {}
+    for module in modules:
+        source = module.read_bytes()
+        if b"xdist_group" not in source:
+            continue
+        tree = ast.parse(source, filename=str(module))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "xdist_group"
+            ):
+                continue
+            name = _declared_xdist_group(node)
+            if name is None:
+                return f"dynamic xdist_group in {module}"
+            owners.setdefault(name, set()).add(module)
+    for name, paths in owners.items():
+        if len(paths) > 1:
+            return f"xdist_group {name!r} spans {len(paths)} modules"
+    return None
+
+
+def _recent_file_weights(path: Path) -> dict[Path, float]:
+    """Read file costs from the newest broad run, excluding stale gated files."""
+    try:
+        history = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(history, dict) or history.get("version") != 1:
+        return {}
+    runs = history.get("runs")
+    if not isinstance(runs, list):
+        return {}
+    valid_runs = [
+        run
+        for run in runs
+        if isinstance(run, dict)
+        and isinstance(run.get("counts"), dict)
+        and isinstance(run["counts"].get("collected"), int)
+        and isinstance(run.get("finished_at"), str)
+    ]
+    if not valid_runs:
+        return {}
+    largest = max(int(run["counts"]["collected"]) for run in valid_runs)
+    broad = [
+        run for run in valid_runs if int(run["counts"]["collected"]) >= largest * 0.9
+    ]
+    stamp = str(broad[-1]["finished_at"])
+    files = history.get("files")
+    if not isinstance(files, dict):
+        return {}
+    result: dict[Path, float] = {}
+    for name, row in files.items():
+        if not isinstance(name, str) or not isinstance(row, dict):
+            continue
+        seconds = row.get("last_seconds")
+        if (
+            row.get("last_seen") != stamp
+            or row.get("last_outcome") == "skipped"
+            or not isinstance(seconds, int | float)
+            or seconds < 0.0
+        ):
+            continue
+        result[Path(name).resolve()] = float(seconds)
+    return result
+
+
+def _collection_shards(
+    modules: tuple[Path, ...],
+    *,
+    workers: int,
+    weights: dict[Path, float],
+) -> tuple[tuple[str, int], ...]:
+    """Greedily balance whole modules, preserving module fixture locality."""
+    loads = [0.0] * workers
+    costs: list[tuple[float, Path]] = []
+    for module in modules:
+        collection_cost = 0.001 + module.stat().st_size / 10_000_000
+        costs.append((max(weights.get(module, 0.0), collection_cost), module))
+    shards: list[tuple[str, int]] = []
+    ordered = sorted(costs, key=lambda row: (-row[0], str(row[1])))
+    for cost, module in ordered:
+        owner = min(range(workers), key=loads.__getitem__)
+        loads[owner] += cost
+        shards.append((str(module), owner))
+    return tuple(sorted(shards))
+
+
+def _prepare_collection_shards(
+    mode: str,
+    arguments: list[str],
+    *,
+    workers: int,
+    history: Path | None,
+) -> tuple[tuple[str, int], ...]:
+    if mode == "replicated" or workers < 2:
+        return ()
+    if mode == "auto" and _has_focused_expression(arguments):
+        return ()
+    if _has_xdist_distribution(arguments):
+        if mode == "sharded":
+            raise ValueError(
+                "--collection sharded cannot be combined with pytest --dist; "
+                "use --collection replicated with --dist"
+            )
+        return ()
+    if _has_xdist_argument(arguments):
+        if mode == "sharded":
+            raise ValueError(
+                "--collection sharded cannot be combined with pytest -n; "
+                "use the wreath test --workers option"
+            )
+        return ()
+    if _has_xdist_restart(arguments):
+        if mode == "sharded":
+            raise ValueError(
+                "--collection sharded cannot restart a worker with a different "
+                "shard id; use --collection replicated with --max-worker-restart"
+            )
+        return ()
+    modules = _collection_modules(arguments, forced=mode == "sharded")
+    if len(modules) < workers * _MIN_SHARD_MODULES_PER_WORKER:
+        return ()
+    incompatible_group = _cross_module_xdist_group(modules)
+    if incompatible_group is not None:
+        if mode == "sharded":
+            raise ValueError(
+                f"--collection sharded cannot preserve {incompatible_group}; "
+                "use --collection replicated"
+            )
+        return ()
+    weights = _recent_file_weights(history) if history is not None else {}
+    unknown_paths = weights.keys() - set(modules)
+    if mode == "auto" and any(path.exists() for path in unknown_paths):
+        return ()
+    coverage = len(set(modules) & weights.keys()) / len(modules)
+    if mode == "auto" and coverage < _SHARD_HISTORY_COVERAGE:
+        return ()
+    return _collection_shards(modules, workers=workers, weights=weights)
 
 
 def _resolve_workers(raw: str) -> int:
@@ -1634,6 +1927,7 @@ class _MutationEventState:
     total: int = 0
     mutating_files: set[str] = field(default_factory=set)
     verified_files: set[str] = field(default_factory=set)
+    failed_mutation_files: set[str] = field(default_factory=set)
     active: dict[int, set[str]] = field(default_factory=dict)
 
 
@@ -1660,7 +1954,7 @@ def _consume_mutation_events(path: Path, state: _MutationEventState) -> None:
                 }
                 state.mutating_files = set().union(*state.active.values())
         elif event == "finished":
-            state.active.pop(int(value.get("ordinal", 0)), None)
+            tested = state.active.pop(int(value.get("ordinal", 0)), set())
             state.mutating_files = (
                 set().union(*state.active.values()) if state.active else set()
             )
@@ -1670,6 +1964,8 @@ def _consume_mutation_events(path: Path, state: _MutationEventState) -> None:
                     state.verified_files.update(
                         _path_from_nodeid(str(nodeid)) for nodeid in killers
                     )
+            elif value.get("outcome") == "survived":
+                state.failed_mutation_files.update(tested)
     state.processed = len(lines)
 
 
@@ -1701,6 +1997,10 @@ def _mutation_activity_from_report(mode: str, report: dict[str, Any]) -> Mutatio
             )
     verified_files = frozenset(verified)
     report["verified_test_files"] = sorted(verified_files)
+    failed_value = report.get("failed_mutation_test_files")
+    failed_mutation_files = frozenset(
+        str(path) for path in failed_value
+    ) if isinstance(failed_value, list) else frozenset()
     baseline_failures = 0
     baseline_value = report.get("baseline")
     if isinstance(baseline_value, dict):
@@ -1728,6 +2028,7 @@ def _mutation_activity_from_report(mode: str, report: dict[str, Any]) -> Mutatio
         rating_tone=tone,
         counts=counts,
         verified_files=verified_files,
+        failed_mutation_files=failed_mutation_files,
         baseline_failures=baseline_failures,
         live_probes=live_probes,
         live_completed=live_completed,
@@ -1811,6 +2112,9 @@ def _finish_mutation_process(
                     mutation.event_state.total,
                     mutating_files=frozenset(mutation.event_state.mutating_files),
                     verified_files=frozenset(mutation.event_state.verified_files),
+                    failed_mutation_files=frozenset(
+                        mutation.event_state.failed_mutation_files
+                    ),
                 )
             elif not announced:
                 print(f"\nMutation activity   {namespace.mutant}", file=sys.stderr)
@@ -1834,6 +2138,9 @@ def _finish_mutation_process(
     if not isinstance(report, dict):
         raise ValueError("mutation confidence report must be an object")
     report["baseline_reused"] = mutation.baseline_reused
+    report["failed_mutation_test_files"] = sorted(
+        mutation.event_state.failed_mutation_files
+    )
     activity = _mutation_activity_from_report(str(namespace.mutant), report)
     survived = activity.counts.get("survived", 0)
     unreached = activity.counts.get("unreached", 0)
@@ -1894,6 +2201,7 @@ def execute(namespace: Any) -> int:
     ]
     if pytest_arguments[:1] == ["--"]:
         pytest_arguments.pop(0)
+    selection_arguments = list(pytest_arguments)
     requested_workers = str(namespace.workers)
     workers = _resolve_workers(requested_workers)
     if not _has_xdist_argument(pytest_arguments) and workers > 1:
@@ -1910,6 +2218,16 @@ def execute(namespace: Any) -> int:
                 # shared fixture can opt its consumers into one worker instead
                 # of being rebuilt independently on every worker that gets one.
                 pytest_arguments.extend(("--dist", "loadgroup"))
+
+    history_path = None if namespace.no_history else Path(namespace.history)
+    collection_shards = _prepare_collection_shards(
+        str(namespace.collection),
+        selection_arguments,
+        workers=workers,
+        history=history_path,
+    )
+    if collection_shards:
+        pytest_arguments.append("--max-worker-restart=0")
 
     with tempfile.TemporaryDirectory(prefix="wreath-test-") as temporary:
         temporary_path = Path(temporary)
@@ -1953,6 +2271,7 @@ def execute(namespace: Any) -> int:
                 if prepared_mutation is not None
                 else None
             ),
+            collection_shards=collection_shards,
         )
         previous_config = os.environ.get(_CONFIG_ENV)
         previous_pid = os.environ.get(_CONTROLLER_PID_ENV)

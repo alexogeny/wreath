@@ -373,6 +373,52 @@ def test_an_instant_round_trips_through_iso(
     assert Instant.parse(format_iso(moment)).timestamp() == moment.timestamp()
 
 
+def test_builtin_datetime_iso_formatter_matches_the_stdlib_definition() -> None:
+    """The native request path is held to an implementation-independent oracle."""
+    zones = (
+        None,
+        datetime.UTC,
+        datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
+        datetime.timezone(
+            -datetime.timedelta(hours=3, seconds=1, microseconds=2)
+        ),
+    )
+    values = [
+        datetime.datetime(year, 2, 3, 4, 5, 6, microsecond, tzinfo=tz)
+        for year in (1, 99, 999, 2026, 9999)
+        for microsecond in (0, 1, 12_000, 999_999)
+        for tz in zones
+    ]
+    values.extend(
+        datetime.datetime(
+            2026, 4, 5, 2, 30,
+            tzinfo=ZoneInfo(SYDNEY),
+            fold=fold,
+        )
+        for fold in (0, 1)
+    )
+    values.extend(
+        Instant.parse(text)
+        for text in (
+            "2026-08-23T00:00:00+00:00",
+            "2026-08-23T00:00:00.123456+10:00",
+        )
+    )
+
+    assert len(values) == 84
+    assert [format_iso(value) for value in values] == [
+        value.isoformat() for value in values
+    ]
+
+
+def test_datetime_subclasses_keep_their_isoformat_override() -> None:
+    class CustomDateTime(datetime.datetime):
+        def isoformat(self, *args, **kwargs) -> str:
+            return "custom-iso"
+
+    assert format_iso(CustomDateTime(2026, 8, 23)) == "custom-iso"
+
+
 @pytest.mark.fuzz
 def test_every_instant_in_the_sweep_round_trips_through_iso() -> None:
     """754 aware moments, and the count is asserted so a domain that quietly

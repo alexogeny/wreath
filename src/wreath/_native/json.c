@@ -10,6 +10,7 @@
  */
 #include "wreathcore.h"
 #include "bytes_writer.h"
+#include "ryu/ryu.h"
 
 #include "simd.h"
 
@@ -217,13 +218,16 @@ write_double(WreathBytesWriter *w, double value)
         PyErr_SetString(PyExc_ValueError, "JSON values must be finite numbers");
         return -1;
     }
-    char *text = PyOS_double_to_string(value, 'r', 0, Py_DTSF_ADD_DOT_0, NULL);
-    if (text == NULL) {
+    if (wreath_writer_reserve(w, 25) < 0) {
         return -1;
     }
-    int rc = wreath_writer_write(w, text, (Py_ssize_t)strlen(text));
-    PyMem_Free(text);
-    return rc;
+    int length = wreath_ryu_d2s(value, w->buf + w->len);
+    if (length < 0) {
+        PyErr_SetString(PyExc_ValueError, "JSON values must be finite numbers");
+        return -1;
+    }
+    w->len += length;
+    return 0;
 }
 
 /* Set once by `json_configure`; both NULL until then, and the encoder simply

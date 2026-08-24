@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import importlib
 import json
 import math
@@ -47,7 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .complexity_discover import Finding, discover
+from . import complexity_discover as _complexity_discover
+from .complexity_discover import Finding, _source_fingerprints, discover
 from .native_lint import repo_root
 
 ProbeFn = Callable[[int], "float | tuple[float, dict[str, int]]"]
@@ -60,6 +62,7 @@ BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
 #: scenery. See `complexity_discover`.
 DISCOVERY_PATH = Path("docs/agents/complexity-discovery.json")
 BASELINE_VERSION = 1
+DISCOVERY_VERSION = 2
 
 #: exponent -> printable class, in fit order. Past cubic the names exist so a
 #: scan can *report* what it measured; nothing in this tree is expected to be
@@ -356,7 +359,8 @@ def _wheel_fire_batch(k: int):
     start = time.perf_counter()
     due = w.advance(0.100)
     elapsed = time.perf_counter() - start
-    assert len(due) == k, (len(due), k)
+    if len(due) != k:
+        raise RuntimeError(f"timing wheel returned {len(due)} of {k} due timers")
     del handles
     return elapsed, {"slot_rescans": w.slot_rescans - rescans}
 
@@ -433,7 +437,8 @@ def _bitset_uniform_literal_miss(r: int):
     for _ in range(loops):
         result = table.match("GET", miss)
     elapsed = (time.perf_counter() - start) / loops
-    assert result is None, result
+    if result is not None:
+        raise RuntimeError(f"uniform-literal miss unexpectedly matched {result!r}")
     after = dict(table.probe_stats())
     verified = (after.get("verify_routes", 0) -
                 before.get("verify_routes", 0)) // loops
@@ -460,7 +465,8 @@ def _loop_timer_churn(k: int):
         for handle in handles:
             handle.cancel()
         elapsed = time.perf_counter() - start
-        assert loop._wheel is not None
+        if loop._wheel is None:
+            raise RuntimeError("metal loop did not construct its timing wheel")
         retained = loop._wheel.count
     finally:
         loop.close()
@@ -616,7 +622,8 @@ def _http1_fragmented_head(n: int):
     request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"x" * n + b"\r\n\r\n"
     chunks = tuple(request[index:index + 1] for index in range(len(request)))
     elapsed, written = asyncio.run(_http1_bridge_trial(chunks))
-    assert written > 0
+    if written <= 0:
+        raise RuntimeError("fragmented HTTP/1 request emitted no response bytes")
     return elapsed
 
 
@@ -663,7 +670,10 @@ def _http1_pipelined_requests(n: int):
         elapsed = time.perf_counter() - start
         protocol.connection_lost(None)
         await asyncio.sleep(0)
-        assert transport.bytes_written > n
+        if transport.bytes_written <= n:
+            raise RuntimeError(
+                f"{n} pipelined requests emitted only {transport.bytes_written} bytes"
+            )
         return elapsed
 
     return asyncio.run(run())
@@ -685,7 +695,10 @@ def _http1_response_headers(n: int):
     elapsed, written = asyncio.run(
         _http1_bridge_trial(request, response_headers=headers)
     )
-    assert written > n * 16
+    if written <= n * 16:
+        raise RuntimeError(
+            f"{n} response headers emitted only {written} bytes"
+        )
     return elapsed
 
 
@@ -746,7 +759,11 @@ def _http1_chunked_body_frames(n: int):
         elapsed = time.perf_counter() - start
         protocol.connection_lost(None)
         await asyncio.sleep(0)
-        assert received == n * len(payload)
+        expected = n * len(payload)
+        if received != expected:
+            raise RuntimeError(
+                f"chunked HTTP/1 body delivered {received} of {expected} bytes"
+            )
         return elapsed, {"body_bytes": received}
 
     return asyncio.run(run())
@@ -782,11 +799,13 @@ def _wheel_colliding_slot_chain(k: int):
     # of them: one slot, k distinct deadlines, k rotations apart.
     for index in range(1, k + 1):
         wheel.schedule_call(nslots * index * resolution, noop, (), context)
-    assert wheel.count == k
+    if wheel.count != k:
+        raise RuntimeError(f"colliding wheel retained {wheel.count} of {k} timers")
     start = time.perf_counter()
     fired = wheel.advance_run(nslots * (k + 1) * resolution)
     elapsed = time.perf_counter() - start
-    assert fired == k
+    if fired != k:
+        raise RuntimeError(f"colliding wheel fired {fired} of {k} timers")
     return elapsed, {"slot_rescans": wheel.slot_rescans}
 
 
@@ -817,11 +836,13 @@ def _wheel_spread_slot_chain(k: int):
     context = contextvars.copy_context()
     for index in range(1, k + 1):
         wheel.schedule_call(index * resolution, noop, (), context)
-    assert wheel.count == k
+    if wheel.count != k:
+        raise RuntimeError(f"spread wheel retained {wheel.count} of {k} timers")
     start = time.perf_counter()
     fired = wheel.advance_run((k + 2) * resolution)
     elapsed = time.perf_counter() - start
-    assert fired == k
+    if fired != k:
+        raise RuntimeError(f"spread wheel fired {fired} of {k} timers")
     return elapsed, {"slot_rescans": wheel.slot_rescans}
 
 
@@ -861,7 +882,8 @@ def _metal_egress_writelines_chunks(n: int):
         transport.writelines(chunks)
         elapsed = time.perf_counter() - start
         queued = transport.get_write_buffer_size()
-        assert queued > 0
+        if queued <= 0:
+            raise RuntimeError("blocked writelines probe retained no response bytes")
         transport.abort()
         loop.run_until_complete(asyncio.sleep(0))
         return elapsed, {"queued_bytes": queued}
@@ -899,7 +921,8 @@ def _metal_egress_backpressure(n: int):
             transport.write(payload)
         elapsed = time.perf_counter() - start
         queued = transport.get_write_buffer_size()
-        assert queued > 0
+        if queued <= 0:
+            raise RuntimeError("blocked write probe retained no response bytes")
         transport.abort()
         loop.run_until_complete(asyncio.sleep(0))
         return elapsed, {"queued_bytes": queued}
@@ -1353,7 +1376,12 @@ def _middleware_tape_mixed_dispatch(n: int):
         endpoint,
         tuple(MiddlewareHooks(before=before, after=after) for _ in range(n)),
     )
-    assert len(tape.operations) == 2 * n + 1
+    expected_operations = 2 * n + 1
+    if len(tape.operations) != expected_operations:
+        raise RuntimeError(
+            f"middleware tape has {len(tape.operations)} operations, "
+            f"expected {expected_operations}"
+        )
     request: Any = object()
     loops = 2000
 
@@ -1439,7 +1467,10 @@ def _pagination_apply_sort(n: int):
     start = time.perf_counter()
     shaped = apply_sort(base, tokens, allow=("name",))
     elapsed = time.perf_counter() - start
-    assert len(shaped.orderings) == n
+    if len(shaped.orderings) != n:
+        raise RuntimeError(
+            f"pagination retained {len(shaped.orderings)} of {n} sort tokens"
+        )
     return elapsed
 
 
@@ -1538,7 +1569,8 @@ def _static_mount_match_scale(mounts: int):
     for _ in range(loops):
         result = matcher.match(path)
     elapsed = time.perf_counter() - start
-    assert result is not None
+    if result is None:
+        raise RuntimeError("last registered static mount did not match")
     return elapsed
 
 
@@ -1568,7 +1600,8 @@ def _static_mount_path_length(length: int):
     for _ in range(loops):
         result = matcher.match(path)
     elapsed = time.perf_counter() - start
-    assert result is None
+    if result is not None:
+        raise RuntimeError(f"unmounted static path unexpectedly matched {result!r}")
     return elapsed
 
 
@@ -1601,7 +1634,11 @@ def _graphql_parse_scale(fields: int):
     for _ in range(loops):
         document = parse(source, limits)
     elapsed = (time.perf_counter() - start) / loops
-    assert document.complexity == fields
+    if document.complexity != fields:
+        raise RuntimeError(
+            f"GraphQL parser counted complexity {document.complexity}, "
+            f"expected {fields}"
+        )
     return elapsed
 
 
@@ -1638,6 +1675,7 @@ def _graphql_depth_rejection(depth: int):
         max_document_bytes=len(source) + 1,
     )
     loops = 20
+    code: str | None = None
     start = time.perf_counter()
     for _ in range(loops):
         try:
@@ -1645,7 +1683,8 @@ def _graphql_depth_rejection(depth: int):
         except GraphQLSyntaxError as error:
             code = error.code
     elapsed = (time.perf_counter() - start) / loops
-    assert code == "depth", code
+    if code != "depth":
+        raise RuntimeError(f"GraphQL depth probe refused with {code!r}, expected 'depth'")
     return elapsed
 
 
@@ -1875,7 +1914,8 @@ def _cedar_set_literal_eval(n: int):
             principal=principal, action=action, resource=resource,
             entities=[entity])
     elapsed = (time.perf_counter() - start) / loops
-    assert decision.allowed, decision
+    if not decision.allowed:
+        raise RuntimeError(f"Cedar membership probe unexpectedly denied: {decision!r}")
     return elapsed
 
 
@@ -1998,8 +2038,14 @@ def _cancel_harness(k: int, order: str):
         for operation in victims:
             connection._cancel_operation(operation)
         elapsed = time.perf_counter() - start
-        assert connection._waiting_live == 0
-        assert len(connection._waiting) == k  # tombstones drain later in _flush
+        if connection._waiting_live != 0:
+            raise RuntimeError(
+                f"operation cancellation left {connection._waiting_live} live waiters"
+            )
+        if len(connection._waiting) != k:
+            raise RuntimeError(
+                f"operation queue kept {len(connection._waiting)} of {k} tombstones"
+            )
         for operation in operations:
             operation.future.cancel()
         return elapsed, {"cancelled": len(operations)}
@@ -3804,7 +3850,10 @@ def _css_media_harness(n: int, *, media: bool) -> float:
     from wreath._audit.contrast import _strip_media
 
     block = "@media screen{.x{color:red}}"
-    css = block * n if media else "x" * (len(block) * n)
+    # Keep one almost-matching prefix per block in the control. A plain run of
+    # "x" lets the regex engine's literal-prefix search reject the whole buffer
+    # below the timer noise floor, so it does not price a same-size scan at all.
+    css = block * n if media else block.replace("@media", "@mediX") * n
     loops = 50
     before = time.perf_counter()
     for _ in range(loops):
@@ -4036,7 +4085,50 @@ def _discovery_path() -> Path:
 
 
 def _run_discovery() -> list[Finding]:
-    return discover(repo_root() / "src" / "wreath")
+    root = repo_root() / "src" / "wreath"
+    try:
+        document = json.loads(_discovery_path().read_text(encoding="utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("version") != DISCOVERY_VERSION
+            or document.get("scanner") != _discovery_scanner_identity()
+        ):
+            return discover(root)
+        sources = document.get("sources")
+        candidates = document.get("candidates")
+        if not isinstance(sources, dict) or not isinstance(candidates, list):
+            return discover(root)
+        grouped: dict[str, list[Finding]] = {}
+        for row in candidates:
+            if not isinstance(row, dict):
+                return discover(root)
+            finding = Finding(
+                file=str(row["file"]),
+                line=int(row["line"]),
+                code=str(row["code"]),
+                func=str(row["function"]),
+                depth=int(row["loop_depth"]),
+                confidence=str(row["confidence"]),
+                message=str(row["message"]),
+                source=str(row["source"]),
+            )
+            grouped.setdefault(finding.file, []).append(finding)
+        cache = {
+            str(relative): (str(fingerprint), tuple(grouped.get(str(relative), ())))
+            for relative, fingerprint in sources.items()
+        }
+    except (KeyError, OSError, TypeError, ValueError):
+        return discover(root)
+    return discover(root, cache=cache)
+
+
+def _discovery_scanner_identity() -> dict[str, str]:
+    """Everything that can change the meaning of a cached scanner result."""
+    scanner_path = Path(_complexity_discover.__file__)
+    return {
+        "source": hashlib.sha256(scanner_path.read_bytes()).hexdigest(),
+        "python": sys.implementation.cache_tag,
+    }
 
 
 def _print_discovery(findings: list[Finding]) -> None:
@@ -4059,7 +4151,7 @@ def _print_discovery(findings: list[Finding]) -> None:
 def _write_discovery(findings: list[Finding]) -> int:
     """Record every current candidate as acknowledged."""
     payload = {
-        "version": 1,
+        "version": DISCOVERY_VERSION,
         "note": "Acknowledged output of the static superlinear sweep "
                 "(wreath-complexity-probe --discover). A candidate here has "
                 "been seen, not necessarily fixed: most are bounded by "
@@ -4068,6 +4160,8 @@ def _write_discovery(findings: list[Finding]) -> int:
                 "introduced tomorrow arrives as a diff rather than as scenery.",
         "keys": sorted({finding.key for finding in findings}),
         "candidates": [finding.document() for finding in findings],
+        "scanner": _discovery_scanner_identity(),
+        "sources": _source_fingerprints(repo_root() / "src" / "wreath"),
     }
     path = _discovery_path()
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -4109,6 +4203,38 @@ def _write_baseline(names: list[str]) -> int:
         print("wreath-complexity-probe: refusing to record a failing/unresolved baseline",
               file=sys.stderr)
         return 1
+    path = _baseline_path()
+    recorded: dict[str, Any] = {}
+    if len(names) != len(_REGISTRY) and path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            print(
+                f"wreath-complexity-probe: cannot update selected probes because "
+                f"{BASELINE_PATH} is unreadable: {error}",
+                file=sys.stderr,
+            )
+            return 1
+        existing_probes = existing.get("probes") if isinstance(existing, dict) else None
+        if (
+            not isinstance(existing, dict)
+            or existing.get("version") != BASELINE_VERSION
+            or not isinstance(existing_probes, dict)
+        ):
+            print(
+                "wreath-complexity-probe: cannot merge selected probes into an "
+                "invalid or version-mismatched baseline; update all probes",
+                file=sys.stderr,
+            )
+            return 1
+        recorded.update(existing_probes)
+    recorded.update({
+        result.probe.name: {
+            "contract": _contract(result.probe),
+            "observation": _result_document(result),
+        }
+        for result in results
+    })
     payload = {
         "version": BASELINE_VERSION,
         "note": (
@@ -4116,15 +4242,8 @@ def _write_baseline(names: list[str]) -> int:
             "Timings are observations, not absolute performance gates; --check "
             "reruns each probe and enforces its declared global and tail exponent bound."
         ),
-        "probes": {
-            result.probe.name: {
-                "contract": _contract(result.probe),
-                "observation": _result_document(result),
-            }
-            for result in results
-        },
+        "probes": dict(sorted(recorded.items())),
     }
-    path = _baseline_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"wreath-complexity-probe: wrote {BASELINE_PATH}")

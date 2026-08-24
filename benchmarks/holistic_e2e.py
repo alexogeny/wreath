@@ -105,7 +105,7 @@ from wreath.request import UploadedFile
 from wreath.response import HTMLResponse, SSEResponse
 from wreath.rooms import RoomRegistry
 from wreath.router import Router
-from wreath.series import ChartData, Range, Series, avg, count, sum_
+from wreath.series import Range, Series, avg, count, project_chart_text, sum_
 from wreath.sync import Sync
 from wreath.templates import Template
 from wreath.temporal import (
@@ -311,8 +311,9 @@ _PAGE = Template.from_string(
 
 # A full in-memory calculated-view result. The sparse readings are immutable
 # benchmark fixture data; every request still pays for the DST-correct dense
-# range, 730 × 48 × 6 reconciliation, downsampling, tick selection, gap-aware
-# path emission, and template egress. The range stays native-owned until final
+# range and projects eleven requested rows out of the 730 x 48 x 6 source,
+# including reconciliation, downsampling, tick selection, gap-aware path
+# emission, and template egress. The range stays native-owned until final
 # paths and axes materialise. This is deliberately much larger than a screen
 # needs: the target exists to make ownership drift visible in retired
 # instructions, not to model a minimalist dashboard.
@@ -328,6 +329,8 @@ _SERIES_FILLS = {
     "errors": 0.0,
     "queue": None,
 }
+_SERIES_DOWNSAMPLE_ROWS = (0, 3, 6, 9, 12, 15, 18, 21)
+_SERIES_FULL_ROWS = (1, 3, 5)
 _SERIES_SPARSE = {
     (f"tenant-{tenant:02d}", False): {
         bucket: {
@@ -349,7 +352,6 @@ _SERIES_SPARSE = {
     }
     for tenant in range(48)
 }
-_SERIES_DATA = ChartData(_SERIES_BUCKETS, _SERIES_SPARSE, _SERIES_FILLS)
 _DEPOT = Coordinate(lat=-27.4698, lon=153.0251)
 _SITE = Coordinate(lat=-33.8688, lon=151.2093)
 _HOURLY_START = Instant.of(datetime.datetime(2026, 3, 20, 11, tzinfo=datetime.UTC))
@@ -774,9 +776,12 @@ async def holistic(
         buckets=(Week, Month),
         in_zone=_SERIES_ZONE,
     )
-    series_count, series_keys, paths, tick_text, tick_count = _SERIES_DATA.project_chart_text(
-        downsample_rows=range(0, 24, 3),
-        full_rows=(1, 3, 5),
+    series_count, series_keys, paths, tick_text, tick_count = project_chart_text(
+        _SERIES_BUCKETS,
+        _SERIES_SPARSE,
+        _SERIES_FILLS,
+        downsample_rows=_SERIES_DOWNSAMPLE_ROWS,
+        full_rows=_SERIES_FULL_ROWS,
         threshold=128,
         tick_target=9,
     )
@@ -801,11 +806,21 @@ async def holistic(
     )
     reverse = pagination.sort == ("-score",)
     candidate_count = 48
-    scores = tuple(abs(embedding[index]) for index in range(candidate_count))
-    selected = _rank_indices(scores, page=pagination.page, size=pagination.size, descending=reverse)
+    selected = _rank_indices(
+        embedding,
+        page=pagination.page,
+        size=pagination.size,
+        descending=reverse,
+        candidates=candidate_count,
+        absolute=True,
+    )
     incident_page = Page(
         tuple(
-            {"id": index + 1, "score": scores[index], "tenant": series_keys[index][0]}
+            {
+                "id": index + 1,
+                "score": abs(embedding[index]),
+                "tenant": series_keys[index][0],
+            }
             for index in selected
         ),
         total=candidate_count,

@@ -20,7 +20,7 @@ Run them individually while you work:
 | `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |
 | `uv run wreath-native-lint` | C complexity patterns; its siblings `wreath-native-error-lint`, `wreath-native-gil-lint`, and `wreath-native-memory-lint` cover error-handling, GIL, and memory. `0` means clean. |
 | `uv run wreath-request-trace --check` | The Python↔native boundary — that you didn't add crossings. |
-| `uv run wreath-complexity-probe --discover-check` | That you added no *new* superlinear shape. A static sweep of `src/wreath` for a linear operation inside a loop that does not shrink, checked against the acknowledged set in `docs/agents/complexity-discovery.json`. |
+| `uv run wreath-complexity-probe --discover-check` | That you added no *new* superlinear shape. A static sweep of `src/wreath` for a linear operation inside a loop that does not shrink, checked against the acknowledged set in `docs/agents/complexity-discovery.json`. Exact source fingerprints reuse acknowledged findings for byte-identical files; new and edited files are scanned, and a scanner change invalidates the whole cache. |
 | `uv run wreath-port-golden` | That `tests/port/golden/` still matches the emitter. `--update` rewrites what drifted. |
 
 ## The two reports that are not gates

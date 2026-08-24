@@ -321,7 +321,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'testing',
-        'capability': 'An in-process test client that runs the real lifespan, including WebSocket sessions, a `pytest11` fixture plugin, and `wreath test` for a live per-file heat map, duration profiling, and overlapping mutation confidence over unchanged pytest semantics',
+        'capability': 'An in-process test client that runs the real lifespan, including WebSocket sessions, a `pytest11` fixture plugin, and `wreath test` for adaptive collection sharding, a live per-file state map, duration profiling, and overlapping mutation confidence over unchanged pytest semantics',
         'modules': ('wreath.testing',),
         'guides': ('docs/guides/testing.md',),
         'replaces': ('httpx', 'pytest-django'),

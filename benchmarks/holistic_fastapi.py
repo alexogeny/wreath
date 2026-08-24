@@ -46,28 +46,6 @@ from .e2e_upstream import BenchPostgres, BenchUpstreamHttp
 _protobuf_descriptor: Any = descriptor_pb2
 _protobuf_pool: Any = descriptor_pool
 
-REQUEST_METHOD = "POST"
-REQUEST_PATH = "/v1/holistic/42?limit=3&page=1&size=12&sort=-score"
-REQUEST_BODY = (
-    b'{"title":"Quarterly <report>","lines":['
-    b'{"sku":"alpha-1","quantity":2,"price":12.5},'
-    b'{"sku":"beta-2","quantity":1,"price":7.25},'
-    b'{"sku":"gamma-3","quantity":4,"price":3.5}'
-    b'],"labels":{"active":true,"reviewed":false}}'
-)
-REQUEST_HEADERS = {
-    "Authorization": "Bearer holistic-user",
-    "Accept-Encoding": "gzip",
-    "Content-Type": "application/json",
-    "Host": "operations.example.com",
-    "Origin": "https://example.com",
-    "Sec-Fetch-Site": "same-origin",
-    "X-Trace": "holistic-trace-42",
-    "Cookie": "session=holistic-session",
-    "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
-    "X-Forwarded-For": "4.1.1.1",
-}
-
 _CEDAR_POLICY = """
 @id("authenticated-render")
 permit(principal, action == Action::"render", resource)
@@ -220,39 +198,55 @@ _SPARSE_VALUES = (
     + (_SPARSE_ROWS // _MEASURES) * 0.17
     + np.sin((_SPARSE_DAYS + _SPARSE_ROWS // _MEASURES) / 19.0)
 ).astype(np.float64)
+_DOWNSAMPLE_ROWS = tuple(range(0, 24, 3))
+_FULL_ROWS = (1, 3, 5)
+_PROJECT_ROWS = _DOWNSAMPLE_ROWS + _FULL_ROWS
+_ROW_FILLS = np.array([0.0, np.nan, 0.0, np.nan, 0.0, np.nan])
+_PROJECT_SPARSE = tuple(
+    (
+        _SPARSE_DAYS[_SPARSE_ROWS == row],
+        _SPARSE_VALUES[_SPARSE_ROWS == row],
+    )
+    for row in _PROJECT_ROWS
+)
+_DAY_INDICES = np.arange(_DAYS, dtype=np.int32)
+_DOWNSAMPLE_WINDOWS = tuple(np.array_split(_DAY_INDICES, 128))
 _TRAJECTORY_INDEX = np.arange(_DAYS, dtype=np.float64)
 _TRAJECTORY_LAT = -27.7 + 0.3 * np.sin(_TRAJECTORY_INDEX / 31.0)
 _TRAJECTORY_LON = 152.8 + 0.3 * np.cos(_TRAJECTORY_INDEX / 29.0)
 
 
 def _project_series() -> tuple[int, list[str], str, int]:
-    dense = np.full((_ROWS, _DAYS), np.nan, dtype=np.float64)
-    dense[_SPARSE_ROWS, _SPARSE_DAYS] = _SPARSE_VALUES
-    fills = np.array([0.0, np.nan, 0.0, np.nan, 0.0, np.nan])
-    missing = np.isnan(dense)
-    row_fills = np.tile(fills, _TENANTS)[:, None]
-    dense[missing] = np.broadcast_to(row_fills, dense.shape)[missing]
+    # Materialize only the eleven requested output rows. The former 288 x 730
+    # array made every ecosystem arm reconcile 278 rows that never reached the
+    # response, while Wreath's fused projector correctly stayed output-driven.
+    # Row-local fills also remove the full-size isnan/tile/broadcast copies.
+    dense = np.empty((len(_PROJECT_ROWS), _DAYS), dtype=np.float64)
+    for output, (row, (days, values)) in enumerate(
+        zip(_PROJECT_ROWS, _PROJECT_SPARSE, strict=True)
+    ):
+        dense[output].fill(_ROW_FILLS[row % _MEASURES])
+        dense[output, days] = values
 
     # Eight representative screen series are reduced to 128 samples; three
     # diagnostic series retain their full 730 points. The deterministic
     # max-deviation selection is vectorized within each window, the shape a
     # NumPy-backed FastAPI service would naturally use.
     paths: list[str] = []
-    for row in range(0, 24, 3):
-        values = dense[row]
-        windows = np.array_split(np.arange(_DAYS), 128)
+    for output in range(len(_DOWNSAMPLE_ROWS)):
+        values = dense[output]
         chosen = np.fromiter(
             (
                 window[np.nanargmax(np.abs(values[window] - np.nanmean(values[window])))]
-                for window in windows
+                for window in _DOWNSAMPLE_WINDOWS
             ),
             dtype=np.int32,
             count=128,
         )
         paths.append(_svg_path(chosen, values[chosen]))
-    for row in (1, 3, 5):
-        paths.append(_svg_path(np.arange(_DAYS), dense[row]))
-    tick_rows = dense[range(0, 24, 3)]
+    for output in range(len(_DOWNSAMPLE_ROWS), len(_PROJECT_ROWS)):
+        paths.append(_svg_path(_DAY_INDICES, dense[output]))
+    tick_rows = dense[: len(_DOWNSAMPLE_ROWS)]
     tick_values = np.nanquantile(tick_rows, np.linspace(0.0, 1.0, 9), axis=1)
     tick_text = " ".join(f"{value:.9g}" for value in tick_values.ravel())
     return _ROWS, paths, tick_text, int(tick_values.size)

@@ -12,6 +12,7 @@ from .._compression import (
     _prepare_dcz_dictionary,
     require_zstd,
 )
+from .._native import _core
 from .._webpolicy import (
     NO_TRANSFORM,
     _select_prepared_content_encoding,
@@ -38,27 +39,7 @@ _ETAG_SUFFIX = {"dcz": b"--dcz", "gzip": b"--gzip", "zstd": b"--zstd"}
 _FORMAT_COUNT = 7
 
 
-def _format_index(value: str | bytes) -> int:
-    text = value.decode("ascii", "ignore") if isinstance(value, bytes) else value
-    media = text.partition(";")[0].strip().lower()
-    if media in {"json", "application/json"} or media.endswith("+json"):
-        return 1
-    if media == "chaotic-json":
-        return 2
-    if media in {"html", "text/html"}:
-        return 3
-    if media in {"graphql", "application/graphql", "application/graphql-query"}:
-        return 4
-    if media in {
-        "log",
-        "application/x-ndjson",
-        "application/jsonlines",
-        "text/x-log",
-    }:
-        return 5
-    if media in {"plaintext", "text/plain"}:
-        return 6
-    return 0
+_format_index = _core.gzip_format
 
 
 def _encoded_etag(value: bytes, coding: str) -> bytes | None:
@@ -164,6 +145,7 @@ class CompressionPolicy:
 
     __slots__ = (
         "_dcz_dictionaries",
+        "_gzip_fragment_bodies",
         "_gzip_fragments",
         "compress_authenticated",
         "compress_streaming",
@@ -195,6 +177,13 @@ class CompressionPolicy:
         self._dcz_dictionaries: list[tuple[bytes, bytes, object] | None] = [None] * _FORMAT_COUNT
         self._gzip_fragments: tuple[
             tuple[int, int, bytes, bytes, int] | None, ...
+        ] = (None,) * _FORMAT_COUNT
+        # The latest exact body and its already-owned dynamic edges per format.
+        # Seven strong references are a bounded application-owned provenance
+        # table; replacement can only turn a concurrent older body into the
+        # checked fallback, never make a different body trusted.
+        self._gzip_fragment_bodies: tuple[
+            tuple[bytes, bytes, bytes, object] | None, ...
         ] = (None,) * _FORMAT_COUNT
         self.zstd_level = zstd_level
         self.compress_streaming = compress_streaming
@@ -235,6 +224,50 @@ class CompressionPolicy:
             self.gzip_level,
         )
         self._gzip_fragments = tuple(fragments)
+        bodies = list(self._gzip_fragment_bodies)
+        bodies[_format_index(format)] = None
+        self._gzip_fragment_bodies = tuple(bodies)
+
+    def _gzip_fragment_body(
+        self,
+        format: str | bytes,
+        prefix: bytes,
+        suffix: bytes = b"",
+    ) -> bytes:
+        """Join dynamic edges to this policy's exact prepared stable span.
+
+        The policy retains this exact bytes object and its already-owned edges
+        as unforgeable provenance for the stable middle. Gzip can therefore
+        compress only the two dynamic edges and
+        splice the cached member without scanning the full uncompressed middle
+        again. A template can render just its dynamic prefix/suffix programs;
+        the stable bytes are copied once here rather than emitted and reread.
+        """
+        index = _format_index(format)
+        entry = self._gzip_fragments[index]
+        if entry is None:
+            raise RuntimeError(
+                f"gzip fragment format {format!r} is not prepared; call "
+                "_configure_gzip_fragment() for that format first"
+            )
+        prefix_bytes, suffix_bytes, stable, _cached, prepared_level = entry
+        if prepared_level != self.gzip_level:
+            raise RuntimeError("prepared gzip fragment no longer matches gzip_level")
+        if type(prefix) is not bytes or len(prefix) != prefix_bytes:
+            raise ValueError(
+                f"gzip fragment prefix must be exactly {prefix_bytes} bytes"
+            )
+        if type(suffix) is not bytes or len(suffix) != suffix_bytes:
+            raise ValueError(
+                f"gzip fragment suffix must be exactly {suffix_bytes} bytes"
+            )
+        # join allocates the final wire body once. Chained `+` would allocate
+        # and reread the stable middle again when a suffix is present.
+        body = b"".join((prefix, stable, suffix))
+        bodies = list(self._gzip_fragment_bodies)
+        bodies[index] = (body, prefix, suffix, entry)
+        self._gzip_fragment_bodies = tuple(bodies)
+        return body
 
     def describe(self):
         """What negotiation this policy takes part in.
@@ -299,7 +332,8 @@ class CompressionPolicy:
         content_type = find_response_header(headers, b"content-type")
         if content_type is None or not is_compressible_content_type(content_type):
             return response
-        dcz_entry = self._dcz_dictionaries[_format_index(content_type)]
+        format_index = _format_index(content_type)
+        dcz_entry = self._dcz_dictionaries[format_index]
         dcz_available = (
             dcz_entry is not None
             and request.scheme == "https"
@@ -318,12 +352,16 @@ class CompressionPolicy:
         if isinstance(response, Response):
             if len(response.body) < self.minimum_size:
                 return response
+            prepared_body = self._gzip_fragment_bodies[format_index]
+            fragment_parts = None
+            if prepared_body is not None and response.body is prepared_body[0]:
+                fragment_parts = prepared_body[1:]
             response.body = (
                 _dcz_compress(dcz_entry, response.body, level)
                 if coding == "dcz" and dcz_entry is not None
                 else _gzip_fragment_compress_with(
                     self._gzip_workspace,
-                    response.body,
+                    fragment_parts if fragment_parts is not None else response.body,
                     level,
                     content_type,
                     self._gzip_fragments,

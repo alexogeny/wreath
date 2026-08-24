@@ -7,15 +7,26 @@ replays recordings through the owned pipeline (`wreath replay`). Use
 `wreath --help` for the full flag list; run options map onto
 [`ServerConfig`](server.md).
 
-`wreath test` runs an unchanged pytest suite behind an animated per-file heat
+`wreath test` runs an unchanged pytest suite behind an animated per-file state
 map, then reports duration percentiles, practical 100 ms/250 ms/1 s tail counts,
 the Tukey outlier threshold and count, worker utilization, and the
 slowest tests. A 192-control `--mutant auto` sample runs whenever the ordinary
 run has passing tests, reusing their selected-line coverage and stopping each
 killed mutant at its first failure. Baseline failures remain red, are excluded
-as killers, and still determine the command's exit status. Purple `▣` tiles are currently under
-mutation and solid gold `▰` tiles contain a test that killed one, the grid's highest
-state; the final confidence summary also names how many test files earned gold.
+as killers, and still determine the command's exit status. Mutation candidates
+are pink while running, yellow after killing a mutant, and purple when a mutant
+survives them. Duration remains in the numeric report and never changes a tile's
+colour; the final confidence summary also names how many test files earned
+verification.
+Broad runs use `--collection auto`: once timing history covers at least 80% of
+their test modules, each module is collected by exactly one fresh worker and
+the modules are balanced by their newest broad-run cost. Focused, cold-history,
+and cross-module `xdist_group` runs keep replicated collection and dynamic load
+balancing. `--collection replicated` forces the old xdist shape;
+`--collection sharded` forces disjoint conventional Python modules and refuses
+when it cannot preserve a cross-module group. It also disables xdist worker
+restart so a crashed shard fails closed rather than being replaced under a new
+shard id.
 `--mutant off|sample|changed|full` and the
 remaining `--mutant-*` flags configure source, tests, operators, sample size,
 per-mutant deadlines, up to three concurrent mutant workers, the non-failing

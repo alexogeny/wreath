@@ -482,6 +482,34 @@ def compile_declared_values(
         for item in select.orderings:
             _append_declared_values(item.expression, placeholder, program)
 
+    suffix: tuple[Any, ...] = ()
+    if select.limit_ is not None:
+        suffix += (select.limit_,)
+    if select.offset_ is not None:
+        suffix += (select.offset_,)
+    return _compile_declared_value_program(program, suffix)
+
+
+def compile_declared_expression_values(
+    expressions: Iterable[Expression], placeholder: type
+) -> Callable[[dict[str, Any]], tuple[Any, ...]]:
+    """Compile direct bind extraction for a fixed expression sequence.
+
+    Declared calculated views emit their predicates more than once inside one
+    statement. They need the same parameter/literal program as a declared ORM
+    query, without first manufacturing a `Select` merely to reach it.
+    """
+    program: list[tuple[str, Any, Any]] = []
+    for expression in expressions:
+        _append_declared_values(expression, placeholder, program)
+    return _compile_declared_value_program(program)
+
+
+def _compile_declared_value_program(
+    program: list[tuple[str, Any, Any]], suffix: tuple[Any, ...] = ()
+) -> Callable[[dict[str, Any]], tuple[Any, ...]]:
+    """Build the shared straight-line extractor for declared bind values."""
+
     types: list[Any] = []
     literals: list[Any] = []
     lines = ["def extract(values):"]
@@ -492,6 +520,8 @@ def compile_declared_values(
         if kind == "parameter":
             if not isinstance(value, str) or not value.isidentifier():
                 raise ValueError(f"refusing to generate a binder for parameter {value!r}")
+            # Four source lines per parameter: the extended tuple is constant,
+            # not another sequence whose length grows with `program`.
             lines.extend(
                 (
                     "    try:",
@@ -505,10 +535,7 @@ def compile_declared_values(
             literal_index = len(literals)
             literals.append(value)
             expressions.append(f"_types[{type_index}].to_wire(_literals[{literal_index}])")
-    if select.limit_ is not None:
-        expressions.append(repr(select.limit_))
-    if select.offset_ is not None:
-        expressions.append(repr(select.offset_))
+    expressions.extend(repr(value) for value in suffix)
     body = ", ".join(expressions)
     if len(expressions) == 1:
         body += ","
@@ -814,7 +841,7 @@ def compile_update_where(
     """Compile one explicitly bounded set-based update.
 
     This is deliberately a Wreath query, not a compatibility manager. Only an
-    unadorned, predicate-bearing ``Select`` is accepted: ordering, paging,
+    unadorned, predicate-bearing `Select` is accepted: ordering, paging,
     projection and eager loading have no coherent meaning for a set-based
     write. Relationship predicates are refused because PostgreSQL needs a
     different ``UPDATE ... FROM`` plan; callers with that shape should select
@@ -1856,6 +1883,7 @@ __all__ = [
     "SqlBuilder",
     "check_predicate_columns",
     "compile_count",
+    "compile_declared_expression_values",
     "compile_declared_values",
     "compile_rebind",
     "compile_select",

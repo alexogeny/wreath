@@ -702,15 +702,26 @@ class Workflow:
         for index, step in enumerate(self._steps):
             if step.name in results:
                 continue
-            witness = _StepWitness(
-                self, recorder, key, step, index, completed, trace_context
-            )
+            witness = None
             try:
-                with witness.observing(), _nplusone.scope_for(
-                    _nplusone.Origin(kind="step", label=step.name, identifier=key),
-                    budget=step.query_budget,
+                if (
+                    recorder is None
+                    and step.query_budget is None
+                    and not _nplusone.WATCHING
                 ):
+                    # The usual production shape asked for neither recording nor
+                    # query observation. Keep it out of two null context managers,
+                    # an Origin allocation and a StepWitness/list copy per step.
                     results[step.name] = await _call(step.run, context)
+                else:
+                    witness = _StepWitness(
+                        self, recorder, key, step, index, completed, trace_context
+                    )
+                    with witness.observing(), _nplusone.scope_for(
+                        _nplusone.Origin(kind="step", label=step.name, identifier=key),
+                        budget=step.query_budget,
+                    ):
+                        results[step.name] = await _call(step.run, context)
             except BaseException as error:
                 undone: list[tuple[str, str]] = []
                 if compensate:
@@ -725,11 +736,13 @@ class Workflow:
                 # reproducible state in the framework, and "which compensations
                 # ran" is most of what makes it so; a record written at the
                 # moment of the raise could not carry any of them.
-                witness.write(error, undone)
+                if witness is not None:
+                    witness.write(error, undone)
                 if reporter is not None:
                     reporter.fail(error, f"step {step.name!r} failed")
                 raise
-            witness.write(None, ())
+            if witness is not None:
+                witness.write(None, ())
             await store.complete_step(key, step.name, results[step.name])
             completed.append(step)
             if reporter is not None:
@@ -793,9 +806,8 @@ class _StepWitness:
     """Watches one step for a recorder, and writes it down if the policy arms.
 
     Kept out of `_execute_bound` because that function is the saga, and a run
-    with no recorder must read as though this did not exist -- `observing()` is
-    a null context and `write` returns immediately, so an unarmed saga pays one
-    attribute test per step and nothing else.
+    with no recorder must read as though this did not exist. `_execute_bound`
+    does not construct a witness unless recording or query observation is armed.
 
     Nothing here can raise into the saga. The recorder's own `write` never does,
     by contract, and the two things this adds -- deciding the outcome and

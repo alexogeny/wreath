@@ -13,6 +13,8 @@ from .errors import DeclarationError
 from .expressions import BinaryExpr, ColumnExpr, OrderExpr, Predicate
 from .relations import LoadOption
 
+_UNSET = object()
+
 
 class Select:
     """A compiled-on-demand SELECT for one model."""
@@ -50,7 +52,10 @@ class Select:
         #: a *distance* carries a bound value and an operator, and both have to
         #: reach the key -- so those queries take the Python path deliberately
         #: rather than by catching an AttributeError out of C.
-        self.plain_orderings = all(
+        # No ORDER BY is the dominant `Model.select()` shape.  Do not construct
+        # and drain a generator merely to prove that an empty tuple contains no
+        # non-column expression.
+        self.plain_orderings = not orderings or all(
             isinstance(item.expression, ColumnExpr) for item in orderings
         )
         self.limit_ = limit_
@@ -68,16 +73,28 @@ class Select:
         projection = tuple(_check_field(model, item) for item in fields)
         return cls(model, projection, (), (), (), None, None, False)
 
-    def _replace(self, **changes: Any) -> Select:
+    def _replace(
+        self,
+        *,
+        model: Any = _UNSET,
+        projection: Any = _UNSET,
+        predicates: Any = _UNSET,
+        includes: Any = _UNSET,
+        orderings: Any = _UNSET,
+        limit_: Any = _UNSET,
+        offset_: Any = _UNSET,
+        for_update_: Any = _UNSET,
+    ) -> Select:
+        """Copy this immutable query without a temporary keyword dictionary."""
         return Select(
-            changes.get("model", self.model),
-            changes.get("projection", self.projection),
-            changes.get("predicates", self.predicates),
-            changes.get("includes", self.includes),
-            changes.get("orderings", self.orderings),
-            changes.get("limit_", self.limit_),
-            changes.get("offset_", self.offset_),
-            changes.get("for_update_", self.for_update_),
+            self.model if model is _UNSET else model,
+            self.projection if projection is _UNSET else projection,
+            self.predicates if predicates is _UNSET else predicates,
+            self.includes if includes is _UNSET else includes,
+            self.orderings if orderings is _UNSET else orderings,
+            self.limit_ if limit_ is _UNSET else limit_,
+            self.offset_ if offset_ is _UNSET else offset_,
+            self.for_update_ if for_update_ is _UNSET else for_update_,
         )
 
     def where(self, *predicates: Predicate) -> Select:
@@ -192,7 +209,9 @@ class Select:
             raise ValueError(f"page must be an integer >= 1, got {page!r}")
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             raise ValueError(f"size must be an integer >= 1, got {size!r}")
-        return self.limit(size).offset((page - 1) * size)
+        # Both bounds are known here.  Publishing one immutable successor keeps
+        # pagination from allocating an otherwise unreachable LIMIT-only query.
+        return self._replace(limit_=size, offset_=(page - 1) * size)
 
     def for_update(self) -> Select:
         """Lock matched rows; requires a write session inside a transaction."""

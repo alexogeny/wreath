@@ -229,6 +229,21 @@ def test_a_global_middleware_that_also_scopes_itself_is_refused() -> None:
         generate_openapi(app)
 
 
+def test_only_one_global_preflight_handler_can_be_registered() -> None:
+    class Preflight:
+        async def before(self, request: Any) -> None:
+            return None
+
+        async def handle_preflight(self, request: Any) -> None:
+            return None
+
+    app = Wreath()
+    app.add_global_middleware(Preflight())
+
+    with pytest.raises(ValueError, match="only one global CORS preflight handler"):
+        app.add_global_middleware(Preflight())
+
+
 # --- precedence -------------------------------------------------------------
 
 

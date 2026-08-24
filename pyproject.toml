@@ -9,7 +9,7 @@ description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = "==3.14.*"
 license = "MPL-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "src/wreath/_native/ryu/LICENSE-Boost"]
 authors = [{ name = "Wreath contributors" }]
 dependencies = []
 classifiers = [
@@ -44,6 +44,15 @@ Changelog = "https://alexogeny.github.io/wreath/release_notes/index.html"
 
 [dependency-groups]
 dev = [
+  # The e2e stack contracts import each pragmatic competitor application to
+  # prove that every framework/arm pair constructs exactly one callable app.
+  # Keep these in `benchmark` too: they remain competitor and test
+  # dependencies, never Wreath runtime dependencies.
+  "blacksheep>=2.2",
+  "cedarpy>=4.1",
+  "fastapi>=0.116",
+  "msgspec>=0.19",
+  "sanic>=25.3",
   # Generating the throwaway self-signed certificates the TLS and HTTP/3 tests
   # need. Declared here deliberately: it used to arrive only as a transitive of
   # the benchmark group, so any `uv sync` without that group pruned it and 21

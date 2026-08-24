@@ -74,6 +74,23 @@ async def test_the_detail_view_renders_every_shown_column(account_model: type) -
     assert "password_hash" not in body
 
 
+async def test_display_labels_are_compiled_when_the_admin_router_is_built(
+    account_model: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FakeSession(_rows(account_model, 1))
+    handlers = _handlers(account_model, session, list_columns=("name", "email"))
+
+    def unexpected_label(_: str) -> str:
+        raise AssertionError("request-time label transformation")
+
+    monkeypatch.setattr("wreath._admin.registry._label", unexpected_label)
+
+    await handlers[("GET", "/admin/account/")](Request())
+    await handlers[("GET", "/admin/account/{pk}")](
+        Request(path_params={"pk": "1"})
+    )
+
+
 async def test_a_missing_row_is_a_404_page(account_model: type) -> None:
     handlers = _handlers(account_model, FakeSession())
     response = await handlers[("GET", "/admin/account/{pk}")](

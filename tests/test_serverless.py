@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from wreath import Wreath
 from wreath.response import JSONResponse
 from wreath.serverless import GoogleFunctionAdapter, azure_function_app
@@ -38,6 +40,7 @@ def test_google_function_runs_the_same_asgi_app_and_lifespan() -> None:
         return JSONResponse({
             "query": request.query_string.decode(),
             "body": (await request.body()).decode(),
+            "client": request.scope["client"],
             "google": "wreath.google" in request.scope["extensions"],
         })
 
@@ -47,9 +50,22 @@ def test_google_function_runs_the_same_asgi_app_and_lifespan() -> None:
     assert status == 200
     assert b'"query":"x=1"' in body
     assert b'"body":"payload"' in body
+    assert b'"client":["203.0.113.9",null]' in body
     assert b'"google":true' in body
     assert ("content-type", "application/json") in headers
     assert lifecycle == ["start", "stop"]
+
+
+def test_google_function_refuses_headers_without_a_mapping_interface() -> None:
+    app = Wreath()
+    request = GoogleRequest()
+    request.headers = object()
+    adapter = GoogleFunctionAdapter(app)
+    try:
+        with pytest.raises(TypeError, match="mapping-like headers"):
+            adapter(request)
+    finally:
+        adapter.close()
 
 
 def test_azure_uses_the_platforms_native_asgi_adapter(monkeypatch) -> None:

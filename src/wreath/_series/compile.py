@@ -7,10 +7,11 @@ renders the predicate itself. A calculated view's `where()` is therefore the
 same filter language a `Select` takes, compiled by the same code — which is
 the point, and is why a predicate that works in one works in the other.
 
-Following `compile_count` rather than `compile_select`, none of this is
-plan-cached. A declaration runs once per chart request, not once per row, so
-rendering fresh is simpler and lets bound values be captured directly. Claiming
-a cache would pay here would need a measurement nobody has taken.
+The compiler remains the independent source of SQL and placeholder order. An
+unsealed `Series` stores that immutable plan in its registry after the first
+run, then executes a startup-compiled value program on hits. That removes the
+repeated join planning, quoting, and SQL assembly without changing this module
+into a second cache owner or weakening the compiler comparison in the tests.
 """
 
 from __future__ import annotations
