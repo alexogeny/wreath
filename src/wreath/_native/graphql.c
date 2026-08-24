@@ -978,9 +978,19 @@ graphql_plain_fields_clear(GraphqlPlainField *plan, Py_ssize_t count)
     PyMem_Free(plan);
 }
 
+/* Compile the field list into a plan: 1 on success, 0 when a field declines
+ * the fast path (a resolver, a relationship, or no attribute to read), -1 with
+ * an exception set.
+ *
+ * `want_key_json` pre-renders each key's JSON form, which the writer path needs
+ * and the dict path would only throw away. It is a parameter rather than a
+ * second copy of the loop: this walk is thirty lines of paired refcounts and
+ * five `goto`s, and `graphql_project_plain` used to carry its own transcription
+ * of it -- so a leak fixed on one path stayed on the other. */
 static int
 graphql_plain_fields_compile(PyObject *schema_fields, PyObject *fields,
-                             GraphqlPlainField **out, Py_ssize_t *count)
+                             GraphqlPlainField **out, Py_ssize_t *count,
+                             int want_key_json)
 {
     GraphqlPlainField *plan = NULL;
     Py_ssize_t field_count = PySequence_Fast_GET_SIZE(fields);
@@ -1036,8 +1046,10 @@ graphql_plain_fields_compile(PyObject *schema_fields, PyObject *fields,
         if (plan[index].attribute == Py_None) goto declined;
         plan[index].key = graphql_getattr(field, GQ_ATTR_KEY);
         if (plan[index].key == NULL) goto error;
-        plan[index].key_json = wreath_json_dumps(NULL, plan[index].key);
-        if (plan[index].key_json == NULL) goto error;
+        if (want_key_json) {
+            plan[index].key_json = wreath_json_dumps(NULL, plan[index].key);
+            if (plan[index].key_json == NULL) goto error;
+        }
     }
     *out = plan;
     *count = field_count;
@@ -1092,7 +1104,7 @@ wreath_graphql_project_json(PyObject *Py_UNUSED(self), PyObject *args)
         goto error;
     }
     compiled = graphql_plain_fields_compile(
-        schema_fields, fields, &projection->fields, &projection->field_count);
+        schema_fields, fields, &projection->fields, &projection->field_count, 1);
     if (compiled < 0) goto error;
     if (compiled == 0) {
         PyMem_Free(projection);
@@ -1181,7 +1193,10 @@ wreath_graphql_project_plain(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *fields = NULL;
     PyObject *results = NULL;
     GraphqlPlainField *plan = NULL;
-    Py_ssize_t field_count;
+    /* `compile` frees the plan and leaves `plan` NULL on both non-success
+     * paths, so the labels below clear a null plan and a zero count. */
+    Py_ssize_t field_count = 0;
+    int compiled;
     if (!PyArg_ParseTuple(args, "OOO:graphql_project_plain", &instances_object,
                           &schema_fields, &fields_object)) return NULL;
     if (!PyDict_Check(schema_fields)) {
@@ -1191,60 +1206,10 @@ wreath_graphql_project_plain(PyObject *Py_UNUSED(self), PyObject *args)
     instances = PySequence_Fast(instances_object, "instances must be a sequence");
     fields = PySequence_Fast(fields_object, "fields must be a sequence");
     if (instances == NULL || fields == NULL) goto error;
-    field_count = PySequence_Fast_GET_SIZE(fields);
-    plan = PyMem_Calloc((size_t)(field_count > 0 ? field_count : 1), sizeof(*plan));
-    if (plan == NULL) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    for (Py_ssize_t index = 0; index < field_count; index++) {
-        PyObject *field = PySequence_Fast_GET_ITEM(fields, index);
-        PyObject *name = graphql_getattr(field, GQ_ATTR_NAME);
-        PyObject *schema_field = NULL;
-        PyObject *resolver = NULL;
-        PyObject *relationship = NULL;
-        PyObject *column = NULL;
-        if (name == NULL) goto error;
-        if (PyDict_GetItemRef(schema_fields, name, &schema_field) < 0) {
-            Py_DECREF(name);
-            goto error;
-        }
-        Py_DECREF(name);
-        if (schema_field == NULL) goto declined;
-        resolver = graphql_getattr(schema_field, GQ_ATTR_RESOLVER);
-        relationship = graphql_getattr(schema_field, GQ_ATTR_RELATIONSHIP);
-        if (resolver == NULL || relationship == NULL) {
-            Py_XDECREF(relationship);
-            Py_XDECREF(resolver);
-            Py_DECREF(schema_field);
-            goto error;
-        }
-        if (resolver != Py_None || relationship != Py_None) {
-            Py_DECREF(relationship);
-            Py_DECREF(resolver);
-            Py_DECREF(schema_field);
-            goto declined;
-        }
-        Py_DECREF(relationship);
-        Py_DECREF(resolver);
-        column = graphql_getattr(schema_field, GQ_ATTR_COLUMN);
-        if (column == NULL) {
-            Py_DECREF(schema_field);
-            goto error;
-        }
-        if (column != Py_None) {
-            plan[index].attribute = graphql_getattr(column, GQ_ATTR_PYTHON_NAME);
-        }
-        else {
-            plan[index].attribute = graphql_getattr(schema_field, GQ_ATTR_ATTRIBUTE);
-        }
-        Py_DECREF(column);
-        Py_DECREF(schema_field);
-        if (plan[index].attribute == NULL) goto error;
-        if (plan[index].attribute == Py_None) goto declined;
-        plan[index].key = graphql_getattr(field, GQ_ATTR_KEY);
-        if (plan[index].key == NULL) goto error;
-    }
+    compiled = graphql_plain_fields_compile(
+        schema_fields, fields, &plan, &field_count, 0);
+    if (compiled < 0) goto error;
+    if (compiled == 0) goto declined;
     results = PyList_New(PySequence_Fast_GET_SIZE(instances));
     if (results == NULL) goto error;
     for (Py_ssize_t row = 0; row < PySequence_Fast_GET_SIZE(instances); row++) {

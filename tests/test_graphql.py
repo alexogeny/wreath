@@ -471,6 +471,37 @@ async def test_the_parse_cache_reuses_a_repeated_document(
     assert first is second
 
 
+def test_a_validated_schema_reuses_the_cached_documents_weight(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The schema-bound walk is retained only after declarations freeze."""
+    import wreath.graphql as graphql_module
+
+    api = GraphQL(registry, models=[User, Post])
+    source = "{ users { id email } }"
+    original = graphql_module.weigh
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> int:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(graphql_module, "weigh", counted)
+
+    # A direct `run()` may precede router construction and further field/cost
+    # declarations, so an unfrozen schema must not publish a stale cost fact.
+    api._prepare(source, None)
+    api._prepare(source, None)
+    assert calls == 2
+
+    api.validate()
+    first = api._prepare(source, None)
+    second = api._prepare(source, None)
+    assert calls == 3
+    assert first is second
+
+
 # --- authorization -----------------------------------------------------------
 #
 # Two kinds of test live here, and the distinction is the point: a double is
@@ -617,6 +648,27 @@ async def test_a_field_no_cedar_policy_permits_is_denied_with_the_engines_reason
     assert body["errors"] == [
         {"message": "no permit policy matched", "path": ["user", "email"]}
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_reasonless_authorization_denial_names_the_resource(
+    registry: Registry,
+) -> None:
+    class Reasonless(_RequirementOnly):
+        async def authorize(self, request: Any, requirement: Any) -> Any:
+            self._requirement(requirement)
+
+            class Decision:
+                allowed = False
+                reason = None
+
+            return Decision()
+
+    api = GraphQL(registry, models=[User, Post], authorizer=Reasonless())
+
+    body = await api.run("{ users { id } }", Session(registry, "read"))
+
+    assert body["errors"][0]["message"] == "not authorized to read Query.users"
     assert api.resolver_errors == 0
 
 
