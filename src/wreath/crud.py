@@ -550,7 +550,7 @@ def crud_router(
             session = open_session(request)
             try:
                 page, size = _page_params(request, page_size)
-                query = spec.select().limit(size).offset((page - 1) * size)
+                query = spec.select().paginate(page, size)
                 rows = await session.fetch(query)
                 if object_authorizer is not None:
                     # The same row-level check the other operations run. Without
