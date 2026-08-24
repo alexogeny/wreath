@@ -23,6 +23,7 @@ from wreath.authorization import (
     EntityUid,
     authorize,
 )
+from wreath.request import Request
 from wreath.state import State
 
 ALICE = EntityUid("User", "alice")
@@ -151,6 +152,12 @@ def test_parse_errors_carry_position() -> None:
     with pytest.raises(CedarParseError) as excinfo:
         CedarPolicies("permit(principal action, resource);")
     assert "line 1" in str(excinfo.value)
+
+
+def test_a_member_operator_requires_a_name_immediately_after_the_dot() -> None:
+    source = "permit(principal, action, resource) when { principal. };"
+    with pytest.raises(CedarParseError, match="attribute or method name after"):
+        CedarPolicies(source)
 
 
 def test_entity_uid_parses_cedar_and_bare_forms() -> None:
@@ -287,6 +294,41 @@ def test_batched_decisions_match_scalar_resource_and_context_semantics() -> None
         entities=(),
         stop_on_denied=False,
     ) == (context_free.is_authorized(principal=ALICE, action=READ, resource=DOC),)
+
+
+@pytest.mark.asyncio
+async def test_authorizer_native_batch_uses_the_native_engine_entrypoint() -> None:
+    sentinel = object()
+
+    class Engine:
+        def _is_authorized_many_native(self, **arguments: object) -> object:
+            return sentinel
+
+        def _is_authorized_many(self, **arguments: object) -> object:
+            raise AssertionError("materialized batch authorization ran")
+
+        def is_authorized(self, **arguments: object) -> bool:
+            raise AssertionError("scalar authorization ran")
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/documents", "headers": []},
+        receive,
+    )
+    request._set_identity(Identity("alice"))
+    authorizer = CedarAuthorizer(engine=Engine())
+
+    result = await authorizer._authorize_resources(
+        request,
+        "read",
+        (DOC,),
+        stop_on_denied=False,
+        native=True,
+    )
+
+    assert result is sentinel
 
 
 def test_action_context_inventory_excludes_entity_attributes() -> None:

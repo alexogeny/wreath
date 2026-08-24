@@ -166,7 +166,7 @@ def _resolve_flags(
     for every fact and this one is not a second copy of it. `request_flags`
     stays as the function it was, sharing the same cache slot.
     """
-    from ..flags import Flag, _flag_resolver
+    from ..flags import FeatureFlags, Flag, _flag_resolver
 
     provider = _flag_resolver(provider)
     identity = request.identity
@@ -179,6 +179,10 @@ def _resolve_flags(
             frozenset(name for name, on in resolve_all(context).items() if on)
             if callable(resolve_all)
             else _NO_FLAGS
+        )
+    if type(provider) is FeatureFlags:
+        return frozenset(
+            name for name in vocabulary if provider.enabled(name, context)
         )
     return frozenset(
         name for name in vocabulary
