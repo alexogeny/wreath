@@ -12,6 +12,7 @@ from wreath.series import (
     nice_ticks,
     project_chart,
     project_chart_spine,
+    project_chart_text,
     reconcile,
     series_path,
 )
@@ -135,6 +136,65 @@ class TestChartProjection:
         assert paths == regular[2]
         assert tick_text == ";".join(",".join(f"{tick:g}" for tick in axis) for axis in regular[3])
         assert tick_count == sum(len(axis) for axis in regular[3])
+
+    def test_one_shot_text_projection_matches_numeric_tick_projection(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {"count": bucket / 7}
+                for bucket in buckets
+                if bucket not in (3, 8)
+            }
+        }
+        regular = project_chart(
+            buckets,
+            sparse,
+            {"count": None},
+            downsample_rows=(0,),
+            full_rows=(0,),
+            threshold=6,
+            tick_target=5,
+        )
+
+        projected = project_chart_text(
+            buckets,
+            sparse,
+            {"count": None},
+            downsample_rows=(0,),
+            full_rows=(0,),
+            threshold=6,
+            tick_target=5,
+        )
+
+        assert projected[:3] == regular[:3]
+        assert projected[3] == ";".join(
+            ",".join(f"{tick:g}" for tick in axis) for axis in regular[3]
+        )
+        assert projected[4] == sum(len(axis) for axis in regular[3])
+
+    def test_prepared_data_keeps_only_its_latest_projection_shape(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {"count": bucket / 7} for bucket in buckets
+            }
+        }
+        prepared = ChartData(buckets, sparse, {"count": None})
+        first = prepared.project_chart_text(
+            downsample_rows=(0,), threshold=6, tick_target=5
+        )
+
+        assert prepared.project_chart_text(
+            downsample_rows=[0], threshold=6, tick_target=5
+        ) is first
+
+        second = prepared.project_chart_text(
+            downsample_rows=(0,), threshold=7, tick_target=5
+        )
+        assert second is not first
+        assert prepared.project_chart_text(
+            downsample_rows=(0,), threshold=6, tick_target=5
+        ) is not first
 
     def test_it_matches_the_individual_data_kernels(self):
         buckets = tuple(range(9))

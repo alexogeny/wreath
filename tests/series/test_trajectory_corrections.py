@@ -139,6 +139,18 @@ class TestAWindowedDistanceAddsUp:
         }
         assert speed == pytest.approx(window.speed)
 
+    def test_grid_summary_keeps_only_the_identical_latest_window(self):
+        path = Trajectory(BASE)
+        lattice = grid(BoundingBox(-29.5, -28.5, 149.5, 150.5), metres=20_000)
+        first = path.grid_summary(MONDAY, WEDNESDAY, lattice)
+
+        assert path.grid_summary(MONDAY, WEDNESDAY, lattice) is first
+
+        equal_start = MONDAY.replace()
+        second = path.grid_summary(equal_start, WEDNESDAY, lattice)
+        assert second == first
+        assert second is not first
+
 
 class TestATrajectoryRefusesWhatItCannotMeasure:
     """The constructor's own guards, which `between()`'s tests cannot reach.

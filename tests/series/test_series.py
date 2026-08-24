@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import pytest
 
+from wreath._series.compile import compile_series
 from wreath.queries import Param
-from wreath.series import Range, Series, SeriesError, avg, count, reconcile, sum_
+from wreath.series import Range, Series, SeriesError, _instant, avg, count, reconcile, sum_
 from wreath.temporal import Day, Month, zone
 
 from .conftest import Herd, Trek, utc
@@ -98,6 +99,27 @@ class TestTopN:
         survivors = sql[sql.index('"survivors"') : sql.index('"agg"')]
         assert "date_trunc" not in survivors, "ranked across the range, not within a bucket"
         assert "ORDER BY COUNT(*) DESC NULLS LAST, 1 ASC" in survivors
+
+    async def test_an_unfiltered_survivor_query_starts_its_range_with_where(
+        self, session, database
+    ):
+        await run(self._view(), session, database, [])
+        sql = sql_of(database)
+        survivors = sql[sql.index('"survivors"') : sql.index('"agg"')]
+
+        assert " WHERE " in survivors
+        assert " FROM \"treks\" AS \"t0\" AND " not in survivors
+
+    async def test_a_filtered_survivor_query_appends_its_range_with_and(
+        self, session, database
+    ):
+        view = self._view().where(Trek.grade == "open")
+        await run(view, session, database, [])
+        sql = sql_of(database)
+        survivors = sql[sql.index('"survivors"') : sql.index('"agg"')]
+
+        assert survivors.count(" WHERE ") == 1
+        assert " AND (\"t0\".\"started_at\" >=" in survivors
 
     async def test_ties_break_on_the_key_so_the_survivor_set_is_stable(
         self, session, database
@@ -344,6 +366,45 @@ class TestParameters:
         await run(view, session, database, [])
         assert "INNER JOIN" in sql_of(database)
         assert Herd in view.sources
+
+    @pytest.mark.parametrize("grouped", (False, True))
+    @pytest.mark.parametrize("compared", (False, True))
+    async def test_a_cached_plan_rebinds_every_series_shape(
+        self, session, database, grouped, compared
+    ):
+        view = series().measure(n=count()).where(
+            Trek.herd_id == Param("herd"), Trek.grade == "open"
+        )
+        if grouped:
+            view = view.by(Trek.paddock_id, top=2)
+        if compared:
+            view = view.compare(previous=Month)
+
+        await run(view, session, database, [], herd=41)
+        assert session.registry.cached_plan_count == 1
+
+        later = Range(utc(2026, 2, 2), utc(2026, 2, 8))
+        await run(
+            view,
+            session,
+            database,
+            [],
+            herd=84,
+            range=later,
+            zone="Europe/London",
+        )
+        actual = database.connection.calls[-1]
+        expected_sql, expected_args, _oids = compile_series(
+            session.registry,
+            view,
+            view._bind({"herd": 84}),
+            start=_instant(later.start),
+            end=_instant(later.end),
+            zone_name="Europe/London",
+            compare=view._compare,
+        )
+        assert actual == (expected_sql, expected_args)
+        assert session.registry.cached_plan_count == 1
 
 
 class TestRunArguments:

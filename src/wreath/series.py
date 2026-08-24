@@ -94,7 +94,11 @@ from ._series.tiers import build as _build_ladder
 from ._series.tiers import plan as _plan_tiers
 from ._series.tiers import width as _grain_width
 from .geospatial import grid as _grid
-from .orm.compiler import check_predicate_columns, compile_rebind
+from .orm.compiler import (
+    check_predicate_columns,
+    compile_declared_expression_values,
+    compile_rebind,
+)
 from .orm.errors import DeclarationError
 from .orm.expressions import ColumnExpr, Predicate, RelatedColumnExpr
 from .orm.types import (
@@ -264,7 +268,7 @@ class ChartData:
     database-derived snapshot serves more than one projection.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ("_chart_cache", "_chart_text_cache", "_data")
 
     def __init__(
         self,
@@ -273,6 +277,11 @@ class ChartData:
         fills: dict[str, Any],
     ) -> None:
         self._data = _core.series_data(buckets, sparse, fills)
+        # One immutable snapshot usually serves one stable chart shape. Keep
+        # only its latest projection: operation-owned, bounded, and enough to
+        # turn a repeated application write into a close-object cache hit.
+        self._chart_cache = None
+        self._chart_text_cache = None
 
     def project_chart(
         self,
@@ -289,13 +298,26 @@ class ChartData:
     ]:
         """Project this snapshot to final SVG paths and tick axes."""
 
-        return _core.series_data_chart(
+        downsample = tuple(downsample_rows)
+        full = tuple(full_rows)
+        key = (downsample, full, threshold, tick_target)
+        cacheable = (
+            all(type(row) is int for row in downsample)
+            and all(type(row) is int for row in full)
+        )
+        cached = self._chart_cache
+        if cacheable and cached is not None and cached[0] == key:
+            return cached[1]
+        result = _core.series_data_chart(
             self._data,
-            downsample_rows,
-            full_rows,
+            downsample,
+            full,
             threshold,
             tick_target,
         )
+        if cacheable:
+            self._chart_cache = (key, result)
+        return result
 
     def project_chart_text(
         self,
@@ -307,13 +329,26 @@ class ChartData:
     ) -> tuple[int, tuple[tuple[Any, bool], ...], tuple[str, ...], str, int]:
         """Serialize tick axes at their final text egress boundary."""
 
-        return _core.series_data_chart_text(
+        downsample = tuple(downsample_rows)
+        full = tuple(full_rows)
+        key = (downsample, full, threshold, tick_target)
+        cacheable = (
+            all(type(row) is int for row in downsample)
+            and all(type(row) is int for row in full)
+        )
+        cached = self._chart_text_cache
+        if cacheable and cached is not None and cached[0] == key:
+            return cached[1]
+        result = _core.series_data_chart_text(
             self._data,
-            downsample_rows,
-            full_rows,
+            downsample,
+            full,
             threshold,
             tick_target,
         )
+        if cacheable:
+            self._chart_text_cache = (key, result)
+        return result
 
 
 def project_chart(
@@ -339,6 +374,34 @@ def project_chart(
     into Python.
     """
     return _core.series_chart(
+        buckets,
+        sparse,
+        fills,
+        downsample_rows,
+        full_rows,
+        threshold,
+        tick_target,
+    )
+
+
+def project_chart_text(
+    buckets: Any,
+    sparse: dict[tuple[Any, bool], dict[Any, dict[str, Any]]],
+    fills: dict[str, Any],
+    *,
+    downsample_rows: Any,
+    full_rows: Any = (),
+    threshold: int = 128,
+    tick_target: int = 9,
+) -> tuple[int, tuple[tuple[Any, bool], ...], tuple[str, ...], str, int]:
+    """Project one sparse snapshot while serializing only final tick text.
+
+    Dense values and one reusable LTTB selection workspace stay owned by this
+    call. Unlike :class:`ChartData`, this operation deliberately retains no
+    projection result, so it is the appropriate boundary when input is rebuilt
+    or may change for every request.
+    """
+    return _core.series_chart_text(
         buckets,
         sparse,
         fills,
@@ -698,6 +761,40 @@ class _Declaration:
     group: Any = None
     fills: dict[str, Any] = field(default_factory=dict)
     cell: _CellAxis | None = None
+    _binders: tuple[Any, ...] = field(init=False, repr=False, compare=False)
+    _parameters: tuple[str, ...] = field(init=False, repr=False, compare=False)
+    _parameter_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    _value_program: Any = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Compile the fixed predicate walks while the declaration is built."""
+        binders: list[Any] = []
+        found: list[Any] = []
+        for predicate in self.predicates:
+            binders.append(compile_rebind(predicate, Placeholder, found))
+        parameters = tuple(item.name for item in found)
+        object.__setattr__(self, "_binders", tuple(binders))
+        object.__setattr__(self, "_parameters", parameters)
+        object.__setattr__(self, "_parameter_set", frozenset(parameters))
+        object.__setattr__(
+            self,
+            "_value_program",
+            compile_declared_expression_values(self.predicates, Placeholder),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledSeriesPlan:
+    """Registry-owned statement facts shared by equivalent declarations."""
+
+    sql: str
+    bind_oids: tuple[int, ...]
+
+
+def _series_plan_key(sql: str, bind_oids: tuple[int, ...]) -> bytes:
+    """An exact, collision-free registry-cache key for one Series statement."""
+    encoded_oids = b"".join(oid.to_bytes(4, "big") for oid in bind_oids)
+    return b"\x00series\x00" + sql.encode("utf-8") + b"\x00oids\x00" + encoded_oids
 
 
 class _Builder:
@@ -913,27 +1010,29 @@ class _Builder:
 
     def _bind(self, values: dict[str, Any]) -> tuple[Predicate, ...]:
         """This view's predicates with each `Param` replaced by its value."""
-        # Two passes, because binding a missing name raises a bare KeyError from
-        # inside the placeholder and the caller needs to be told *which*
-        # parameter they left out, not which dict lookup failed.
-        binders: list[Any] = []
-        expected: list[str] = []
-        expected_set: set[str] = set()
-        for predicate in self._d.predicates:
-            found: list[Any] = []
-            binders.append(compile_rebind(predicate, Placeholder, found))
-            expected.extend(item.name for item in found)
-            expected_set.update(item.name for item in found)
-        missing = [name for name in expected if name not in values]
-        if missing:
-            raise TypeError(f"run() is missing parameter {missing[0]!r}")
-        unexpected = [name for name in values if name not in expected_set]
-        if unexpected:
-            raise TypeError(f"run() got an unexpected parameter {unexpected[0]!r}")
+        self._check_values(values)
         return tuple(
             predicate if binder is None else binder(values)
-            for predicate, binder in zip(self._d.predicates, binders, strict=True)
+            for predicate, binder in zip(
+                self._d.predicates, self._d._binders, strict=True
+            )
         )
+
+    def _check_values(self, values: dict[str, Any]) -> None:
+        """Refuse missing and extra parameters before a compiled extractor runs."""
+        missing = [name for name in self._d._parameters if name not in values]
+        if missing:
+            raise TypeError(f"run() is missing parameter {missing[0]!r}")
+        # `_parameter_set` is a startup-compiled frozenset. The discovery scan
+        # cannot carry that field type through `_d`, but membership is O(1).
+        unexpected = [name for name in values if name not in self._d._parameter_set]
+        if unexpected:
+            raise TypeError(f"run() got an unexpected parameter {unexpected[0]!r}")
+
+    def _predicate_values(self, values: dict[str, Any]) -> tuple[Any, ...]:
+        """Wire-ready predicate values in the compiler's fixed render order."""
+        self._check_values(values)
+        return self._d._value_program(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1595,6 +1694,56 @@ class Series(_Builder):
             params_key(values),
         )
 
+    def _compiled_args(
+        self,
+        values: dict[str, Any],
+        *,
+        start: Any,
+        end: Any,
+        zone_name: str,
+    ) -> tuple[Any, ...]:
+        """Bind one run to the immutable SQL shape in placeholder order.
+
+        This is the value-only mirror of ``compile_series``. The compiler's
+        statement emits the declared predicates twice for an ordinary grouped
+        view, then repeats the range and zone at the aggregate, spine, and
+        final projection. Keeping that fixed sequence here lets a cache hit
+        skip identifier quoting, join planning, and SQL assembly entirely.
+        Tests compare this tuple with the compiler's independently collected
+        values for every grouped/comparison shape, so a new bind added to the
+        statement cannot silently drift from this program.
+        """
+        predicates = self._predicate_values(values)
+        bound: list[Any] = []
+        grouped = self._d.group is not None
+        compared = self._compare is not None
+        if grouped:
+            bound.extend(predicates)
+            bound.extend((start, end, self._top))
+        bound.append(zone_name)
+        if compared:
+            bound.append(start)
+        bound.extend(predicates)
+        bound.extend((start, end))
+        if compared:
+            bound.extend((start, zone_name, zone_name, end, zone_name, zone_name))
+            bound.extend(
+                (
+                    start,
+                    zone_name,
+                    end,
+                    zone_name,
+                    start,
+                    zone_name,
+                    end,
+                    zone_name,
+                )
+            )
+        else:
+            bound.extend((start, zone_name, end, zone_name))
+        bound.append(zone_name)
+        return tuple(bound)
+
     async def run(
         self,
         session: Any,
@@ -1631,23 +1780,41 @@ class Series(_Builder):
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         if self._compare is not None:
             _refuse_overlap(range, self._compare, zone_name)
-        predicates = self._bind(values)
         if self._tiers is not None:
+            predicates = self._bind(values)
             result = await self._run_tiered(
                 session, predicates, range, zone_name, values, now, allow_coarsening
             )
         elif self._seal is not None:
+            predicates = self._bind(values)
             result = await self._run_sealed(session, predicates, range, zone_name, values, now)
         else:
-            sql, args, _oids = compile_series(
-                session.registry,
-                self,
-                predicates,
-                start=_instant(range.start),
-                end=_instant(range.end),
-                zone_name=zone_name,
-                compare=self._compare,
-            )
+            start = _instant(range.start)
+            end = _instant(range.end)
+            cached = session.registry.cached_prepared_plan(self)
+            if cached is None:
+                predicates = self._bind(values)
+                sql, args, oids = compile_series(
+                    session.registry,
+                    self,
+                    predicates,
+                    start=start,
+                    end=end,
+                    zone_name=zone_name,
+                    compare=self._compare,
+                )
+                shape_key = _series_plan_key(sql, oids)
+                plan = session.registry.store_plan(
+                    shape_key, _CompiledSeriesPlan(sql, oids)
+                )
+                session.registry.remember_prepared_shape(self, shape_key)
+                sql = plan.sql
+            else:
+                _shape_key, plan = cached
+                sql = plan.sql
+                args = self._compiled_args(
+                    values, start=start, end=end, zone_name=zone_name
+                )
             rows = await session.declared(sql, args)
             result = self._envelope(rows, range, zone_name)
         if self._events is None:
