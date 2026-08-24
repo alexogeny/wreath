@@ -128,6 +128,8 @@ def test_pack_is_thirty_two_bytes_per_tenant() -> None:
         {"status": 9},
         {"generation": 2**32},
         {"checksum": 2**64},
+        {"tenant_id": 2**64},
+        {"migration": 2**64},
     ],
 )
 def test_invalid_tenant_state_is_rejected(kwargs: dict) -> None:

@@ -103,7 +103,7 @@ def test_duration_report_practical_tail_boundaries_are_inclusive() -> None:
     assert durations["over_1s"] == 1
 
 
-def test_render_is_a_stable_file_heat_map_with_duration_statistics() -> None:
+def test_render_is_a_stable_file_state_map_with_duration_statistics() -> None:
     activity = runner.RunActivity(workers=1)
     activity.collect((
         "tests/a/test_alpha.py::test_a",
@@ -126,10 +126,10 @@ def test_render_is_a_stable_file_heat_map_with_duration_statistics() -> None:
     assert "Test activity   current run" in text
     assert "2 tests · 2 files" in text
     assert "■ ·" in text
-    assert "Duration   Less ■ ■ ■ ■ ■ More" in text
+    assert "Duration   Less" not in text
     assert (
-        "Outcome    · queued · ◆ running · ■ pass · ▣ mutation testing · "
-        "▰ pass + killed mutant · ▲ skip/mixed · ✕ fail/error"
+        "State      · queued · ◆ running · ■ pass · ▣ mutation testing · "
+        "▰ pass + killed mutant · ▤ mutation failed · ▲ skip/mixed · ✕ fail/error"
     ) in text
     assert "average 250.0ms" in text
     assert "slow tail   1 >=100ms · 1 >=250ms · 0 >=1s · Tukey 0 >250.0ms" in text
@@ -143,15 +143,16 @@ def test_render_is_a_stable_file_heat_map_with_duration_statistics() -> None:
         slowest=0,
     )
     assert "\x1b[38;5;238m■\x1b[0m queued" in coloured
-    assert "\x1b[38;5;51m◆\x1b[0m running" in coloured
+    assert "\x1b[38;5;33m■\x1b[0m running" in coloured
     assert "\x1b[38;5;46m■\x1b[0m pass" in coloured
-    assert "\x1b[38;5;201m▣\x1b[0m mutation testing" in coloured
-    assert "\x1b[38;5;226m▰\x1b[0m pass + killed mutant" in coloured
+    assert "\x1b[38;5;201m■\x1b[0m mutation testing" in coloured
+    assert "\x1b[38;5;226m■\x1b[0m pass + killed mutant" in coloured
+    assert "\x1b[38;5;93m■\x1b[0m mutation failed" in coloured
     assert "\x1b[38;5;202m■\x1b[0m skip/mixed" in coloured
     assert "\x1b[38;5;196m■\x1b[0m fail/error" in coloured
 
 
-def test_mutation_tiles_advance_from_active_to_verified() -> None:
+def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
     activity = runner.RunActivity(workers=1)
     first = "tests/test_policy.py::test_refuses"
     second = "tests/test_other.py::test_passes"
@@ -196,6 +197,18 @@ def test_mutation_tiles_advance_from_active_to_verified() -> None:
             live_first_started_seconds=0.24,
         ),
     )
+    failed = runner.render_activity(
+        activity,
+        width=100,
+        height=30,
+        colour=False,
+        slowest=0,
+        mutation=runner.MutationActivity(
+            mode="auto",
+            state="complete",
+            failed_mutation_files=frozenset({"tests/test_policy.py"}),
+        ),
+    )
 
     assert "■ ▣" in active
     assert "Mutation   ▣ auto · 1 sampled controls · testing controls" in active
@@ -204,6 +217,7 @@ def test_mutation_tiles_advance_from_active_to_verified() -> None:
     assert "▰ 1 gold test file · 1 killed" in verified
     assert "live overlap · 2 started · 1 completed before seal · first at 0.24s" in verified
     assert "1 stopped at seal" in verified
+    assert "■ ▤" in failed
 
     plural = runner.render_activity(
         activity,
@@ -229,6 +243,22 @@ def test_mutation_report_requires_a_complete_rating() -> None:
 
     with pytest.raises(ValueError, match="rating is incomplete"):
         runner._mutation_activity_from_report("auto", report)
+
+
+def test_mutation_report_keeps_survived_candidate_files_purple() -> None:
+    report = {
+        "counts": {"survived": 1},
+        "rating": {
+            "label": "REVIEW ASSERTIONS",
+            "action": "Add an objection.",
+            "tone": "attention",
+        },
+        "failed_mutation_test_files": ["tests/test_policy.py"],
+    }
+
+    activity = runner._mutation_activity_from_report("auto", report)
+
+    assert activity.failed_mutation_files == frozenset({"tests/test_policy.py"})
 
 
 def test_mutation_event_stream_moves_only_killers_to_verified(tmp_path: Path) -> None:
@@ -283,6 +313,7 @@ def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
     runner._consume_mutation_events(path, state)
 
     assert state.mutating_files == set()
+    assert state.failed_mutation_files == {"tests/test_b.py"}
 
 
 def test_alternate_screen_and_cursor_are_always_restored(
@@ -593,6 +624,131 @@ def test_an_xdist_group_is_handed_to_one_worker_whole(
     ], "a group must go out in one send, or it is not on one worker"
 
 
+def test_collection_shards_keep_whole_modules_and_balance_recorded_costs(
+    tmp_path: Path,
+) -> None:
+    modules = tuple(tmp_path / f"test_{index}.py" for index in range(8))
+    for module in modules:
+        module.write_text("def test_one(): pass\n", encoding="utf-8")
+    weights = {module: float(index + 1) for index, module in enumerate(modules)}
+
+    shards = runner._collection_shards(modules, workers=2, weights=weights)
+
+    assert {Path(path) for path, _owner in shards} == set(modules)
+    loads = [0.0, 0.0]
+    for path, owner in shards:
+        loads[owner] += weights[Path(path)]
+    assert loads == [18.0, 18.0]
+
+
+def test_auto_collection_sharding_requires_a_broad_history_backed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    modules = []
+    for index in range(8):
+        module = tests / f"test_{index}.py"
+        module.write_text("def test_one(): pass\n", encoding="utf-8")
+        modules.append(module)
+    stamp = "2026-08-23T00:00:00+00:00"
+    history = tmp_path / "history.json"
+    history.write_text(
+        json.dumps({
+            "version": 1,
+            "runs": [{
+                "finished_at": stamp,
+                "counts": {"collected": len(modules)},
+            }],
+            "files": {
+                str(module.relative_to(tmp_path)): {
+                    "last_seen": stamp,
+                    "last_seconds": 1.0,
+                    "last_outcome": "passed",
+                }
+                for module in modules
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    shards = runner._prepare_collection_shards(
+        "auto", [], workers=2, history=history
+    )
+
+    assert len(shards) == len(modules)
+    assert runner._prepare_collection_shards(
+        "auto", [str(modules[0])], workers=2, history=history
+    ) == ()
+    for focused in (["-m", "fuzz"], ["--markexpr=fuzz"], ["-kneedle"]):
+        assert runner._prepare_collection_shards(
+            "auto", focused, workers=2, history=history
+        ) == ()
+    assert runner._prepare_collection_shards(
+        "auto", ["-m", ""], workers=2, history=history
+    )
+    assert runner._prepare_collection_shards(
+        "auto", [], workers=2, history=None
+    ) == ()
+
+
+def test_forced_collection_sharding_needs_no_timing_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for index in range(8):
+        (tests / f"test_{index}.py").write_text(
+            "def test_one(): pass\n", encoding="utf-8"
+        )
+    monkeypatch.chdir(tmp_path)
+
+    shards = runner._prepare_collection_shards(
+        "sharded", [], workers=2, history=None
+    )
+
+    assert len(shards) == 8
+    assert {owner for _path, owner in shards} == {0, 1}
+
+    with pytest.raises(ValueError, match="collection replicated.*max-worker-restart"):
+        runner._prepare_collection_shards(
+            "sharded",
+            ["--max-worker-restart=1"],
+            workers=2,
+            history=None,
+        )
+
+
+def test_collection_sharding_refuses_a_group_that_spans_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    grouped = (
+        "import pytest\n"
+        "pytestmark = pytest.mark.xdist_group(name='shared')\n"
+        "def test_one(): pass\n"
+    )
+    for index in range(8):
+        (tests / f"test_{index}.py").write_text(
+            grouped if index < 2 else "def test_one(): pass\n",
+            encoding="utf-8",
+        )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match="xdist_group 'shared' spans 2 modules.*collection replicated",
+    ):
+        runner._prepare_collection_shards(
+            "sharded", [], workers=2, history=None
+        )
+
+
 def test_a_parametrised_id_containing_an_at_sign_is_not_a_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -731,6 +887,7 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
 
     assert result == 17
     assert received[0].workers == "1"
+    assert received[0].collection == "auto"
     assert received[0].mutant_samples == cli_parser._DEFAULT_MUTANT_SAMPLES == 192
     assert received[0].mutant_budget == 50.0
     assert received[0].pytest_args == [
@@ -853,6 +1010,67 @@ def test_real_parallel_pytest_run_reports_pass_fail_and_skip(tmp_path: Path) -> 
         "passed",
         "skipped",
     }
+
+
+def test_sharded_collection_imports_each_module_once_and_runs_every_test(
+    tmp_path: Path,
+) -> None:
+    tests = tmp_path / "tests"
+    imports = tmp_path / "imports"
+    tests.mkdir()
+    imports.mkdir()
+    report_path = tmp_path / "report.json"
+    for index in range(8):
+        (tests / f"test_shard_{index}.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            f"LOG = Path({str(imports / f'{index}.log')!r})\n"
+            "with LOG.open('a', encoding='utf-8') as stream:\n"
+            "    stream.write(os.environ['PYTEST_XDIST_WORKER'] + '\\n')\n"
+            "COMMON = tuple((value, str(value)) for value in range(100))\n"
+            "\n"
+            "def test_first():\n"
+            "    assert COMMON[1] == (1, '1')\n"
+            "\n"
+            "def test_second():\n"
+            "    assert COMMON[99] == (99, '99')\n",
+            encoding="utf-8",
+        )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "wreath",
+            "test",
+            "--workers",
+            "2",
+            "--collection",
+            "sharded",
+            "--grid",
+            "never",
+            "--no-history",
+            "--mutant",
+            "off",
+            "--report",
+            str(report_path),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    assert document["counts"]["collected"] == 16
+    assert document["counts"]["passed"] == 16
+    import_counts = [
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in imports.iterdir()
+    ]
+    assert import_counts == [1] * 8
 
 
 def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
