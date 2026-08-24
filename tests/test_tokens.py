@@ -52,6 +52,16 @@ def test_single_use_declaration_requires_an_explicit_ledger() -> None:
         )
 
 
+def test_token_purpose_names_must_be_unique() -> None:
+    duplicate = TokenPurpose("invite", 60)
+    with pytest.raises(ValueError, match="purpose 'invite' is declared twice"):
+        ActionTokens(
+            {"active": KEY_A},
+            current="active",
+            purposes=[duplicate, duplicate],
+        )
+
+
 def test_token_fingerprint_is_stable_and_does_not_include_the_token() -> None:
     fingerprint = token_fingerprint("secret-token")
     assert fingerprint == token_fingerprint("secret-token")

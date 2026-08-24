@@ -18,6 +18,8 @@ from _saml_fixtures import ACS, AUDIENCE, ISSUER, SigningIdentity, signed_respon
 from wreath.sso import (
     IdentityProviderConfig,
     IdentityProviderDirectory,
+    PendingLogin,
+    PendingLoginStore,
     SamlServiceProvider,
     SsoRefusal,
     UnknownIdentityProvider,
@@ -118,6 +120,16 @@ def test_the_organisation_is_read_from_the_login_that_began(provider) -> None:
     indirection further along."""
     begun = provider.begin_login(organization=GLOBEX)
     assert provider.organization_for_request(begun.request_id) == GLOBEX
+
+
+def test_an_expired_pending_login_is_named_and_never_returned() -> None:
+    store = PendingLoginStore(ttl=10)
+    store.put(PendingLogin("_old", "relay", ACME, 100.0))
+
+    with pytest.raises(SsoRefusal, match="issued 11s ago") as raised:
+        store.spend("_old", now=111.0)
+
+    assert raised.value.reason == "expired-request"
 
 
 # --- the assertion consumer -------------------------------------------------

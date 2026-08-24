@@ -5,8 +5,10 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._auth.requirements import SetRequirement
 from wreath.auth import BearerTokenBackend, Identity
-from wreath.authorization import CedarAuthorizer, authorize, roles
+from wreath.authorization import AuthRequirement, CedarAuthorizer, authorize, roles
+from wreath.request import Request
 
 try:
     from wreath._native import _core
@@ -132,6 +134,49 @@ async def test_true_404_does_not_authenticate() -> None:
 
     assert sent[0]["status"] == 404
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_matching_local_role_reaches_the_handler() -> None:
+    async def verify(token: str) -> Identity:
+        return Identity(token, roles=frozenset({"admin"}))
+
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend(verify))
+
+    @app.get("/admin")
+    @roles("admin")
+    async def admin(request):
+        return "allowed"
+
+    sent = await invoke(app, "/admin", authorization=b"Bearer alice")
+
+    assert sent[0]["status"] == 200
+    assert sent[1]["body"] == b"allowed"
+
+
+@pytest.mark.asyncio
+async def test_python_authorization_fallback_accepts_a_matching_role() -> None:
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/admin", "headers": []},
+        receive,
+    )
+    request._set_identity(Identity("alice", roles=frozenset({"admin"})))
+    requirement = AuthRequirement(
+        role_checks=(SetRequirement(frozenset({"admin"}), "all"),)
+    )
+
+    response = await Wreath()._authorize_request(
+        request,
+        requirement,
+        authentication_attempted=True,
+        access_resolved=False,
+    )
+
+    assert response is None
 
 
 @pytest.mark.asyncio

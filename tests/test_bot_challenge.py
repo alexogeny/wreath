@@ -56,6 +56,16 @@ async def test_turnstile_fails_closed_on_action_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_turnstile_accepts_a_success_without_an_optional_challenge_time() -> None:
+    client = Client({"success": True})
+    request = Request({"type": "http", "headers": []}, receive)
+
+    result = await Turnstile(client, secret="secret").verify("token", request)
+
+    assert result.challenge_at is None
+
+
+@pytest.mark.asyncio
 async def test_dependency_layers_over_the_bot_challenge_protocol() -> None:
     seen: list[str] = []
 

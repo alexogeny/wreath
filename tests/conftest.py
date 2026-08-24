@@ -113,13 +113,19 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
 def pytest_testnodedown(node: Any, error: Any) -> None:
     """Fold a finished worker's counts in, taking the max rather than the sum.
 
-    Every worker collects the whole suite and deselects the same items, so all
-    of them report the same number. Summing would claim six times reality on
-    ``-n 6``.
+    Replicated xdist workers collect the whole suite and report the same number,
+    so those counts take the maximum. Wreath's collection shards are disjoint,
+    so their counts are summed instead; the worker plugin names that mode in
+    ``workeroutput`` rather than making this conftest infer a scheduler.
     """
-    counts = (getattr(node, "workeroutput", None) or {}).get("gated_deselected")
+    output = getattr(node, "workeroutput", None) or {}
+    counts = output.get("gated_deselected")
     if counts:
-        _DESELECTED.update(merge_worker_counts(_DESELECTED, counts))
+        if output.get("wreath_collection_shard"):
+            for name, count in counts.items():
+                _DESELECTED[name] = _DESELECTED.get(name, 0) + count
+        else:
+            _DESELECTED.update(merge_worker_counts(_DESELECTED, counts))
 
 
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:

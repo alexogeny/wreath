@@ -291,6 +291,27 @@ def test_the_pipeline_exports_logs_on_its_tick(runtime: log.LogRuntime) -> None:
     assert pipeline.stats["exported_logs"] == 1
 
 
+def test_an_empty_log_tick_does_not_probe_the_transport(
+    runtime: log.LogRuntime,
+) -> None:
+    from wreath._export import ExportPipeline
+
+    class Transport:
+        def export_traces(self, request: dict) -> None: ...
+        def export_metrics(self, request: dict) -> None: ...
+
+        @property
+        def export_logs(self):
+            raise AssertionError("an empty queue reached the exporter")
+
+    pipeline = ExportPipeline(Transport(), log_registry=runtime.registry)
+
+    pipeline._tick()
+
+    assert pipeline.stats["exported_logs"] == 0
+    assert pipeline.stats["log_errors"] == 0
+
+
 def test_a_transport_without_export_logs_is_counted_not_crashed(
     runtime: log.LogRuntime,
 ) -> None:

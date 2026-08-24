@@ -275,6 +275,60 @@ def test_capture_cli_arm_status_disarm(tmp_path, capsys) -> None:
         thread.join(timeout=5)
 
 
+def test_capture_status_prints_a_finite_remaining_match_count(capsys) -> None:
+    from wreath._cli import _print_capture
+
+    _print_capture(
+        "status",
+        {
+            "ceiling": {
+                "capture_slabs": 2,
+                "max_capture_bytes": 4096,
+                "body": False,
+            },
+            "arms": [
+                {
+                    "arm_id": 7,
+                    "expires_in": 30,
+                    "remaining_matches": 3,
+                    "headers": [],
+                }
+            ],
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert "#7: expires in 30s, 3 matches" in output
+    assert "unlimited" not in output
+
+
+def test_capture_status_prints_an_unlimited_match_count(capsys) -> None:
+    from wreath._cli import _print_capture
+
+    _print_capture(
+        "status",
+        {
+            "ceiling": {
+                "capture_slabs": 2,
+                "max_capture_bytes": 4096,
+                "body": False,
+            },
+            "arms": [
+                {
+                    "arm_id": 8,
+                    "expires_in": 30,
+                    "remaining_matches": -1,
+                    "headers": [],
+                }
+            ],
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert "#8: expires in 30s, unlimited matches" in output
+    assert "-1 matches" not in output
+
+
 def test_registry_caps_concurrent_arms() -> None:
     from wreath.recording import CaptureBudget, CapturePolicy, RecordingPolicyError
 

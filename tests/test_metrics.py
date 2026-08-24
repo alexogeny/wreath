@@ -152,6 +152,21 @@ def test_flatten_sums_instances_because_a_flat_sink_cannot_hold_them_apart() -> 
     assert metrics.flatten(readings) == {"wreath_jobs_run_errors": 7}
 
 
+def test_flatten_normalizes_int_subclasses_to_plain_ints() -> None:
+    class CounterInt(int):
+        pass
+
+    readings = (
+        Counters(subsystem="jobs", instance="work", values={"runs": CounterInt(2)}),
+        Counters(subsystem="jobs", instance="mail", values={"queued": True}),
+    )
+
+    flattened = metrics.flatten(readings)
+
+    assert flattened == {"wreath_jobs_runs": 2, "wreath_jobs_queued": 1}
+    assert all(type(value) is int for value in flattened.values())
+
+
 # --- the Prometheus exposition --------------------------------------------------------
 
 

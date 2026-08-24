@@ -125,3 +125,13 @@ def test_the_json_form_carries_the_reason_each_row_matched(capsys) -> None:
     assert payload["term"] == "celery"
     assert {row["reason"] for row in payload["matches"]} == {"replaces"}
     assert "jobs" in {row["name"] for row in payload["matches"]}
+
+
+def test_the_json_form_without_a_word_lists_every_capability(capsys) -> None:
+    assert main(["capabilities", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["term"] is None
+    assert len(payload["matches"]) == len(index())
+    assert {row["name"] for row in payload["matches"]} == {
+        capability.name for capability in index()
+    }
