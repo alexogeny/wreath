@@ -16,6 +16,15 @@ from benchmarks.bench_holistic_stack_instructions import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_holistic_counter_helpers_do_not_import_benchmark_frameworks() -> None:
+    code = (
+        "import sys; import benchmarks.bench_holistic_stack_instructions; "
+        "assert 'benchmarks.holistic_fastapi' not in sys.modules; "
+        "assert 'aiohttp' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 @pytest.mark.parametrize(
     "arm",
     ["route", "cors", "binding", "auth", "cedar", "postgres", "complete-aa"],

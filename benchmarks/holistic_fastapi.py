@@ -46,28 +46,6 @@ from .e2e_upstream import BenchPostgres, BenchUpstreamHttp
 _protobuf_descriptor: Any = descriptor_pb2
 _protobuf_pool: Any = descriptor_pool
 
-REQUEST_METHOD = "POST"
-REQUEST_PATH = "/v1/holistic/42?limit=3&page=1&size=12&sort=-score"
-REQUEST_BODY = (
-    b'{"title":"Quarterly <report>","lines":['
-    b'{"sku":"alpha-1","quantity":2,"price":12.5},'
-    b'{"sku":"beta-2","quantity":1,"price":7.25},'
-    b'{"sku":"gamma-3","quantity":4,"price":3.5}'
-    b'],"labels":{"active":true,"reviewed":false}}'
-)
-REQUEST_HEADERS = {
-    "Authorization": "Bearer holistic-user",
-    "Accept-Encoding": "gzip",
-    "Content-Type": "application/json",
-    "Host": "operations.example.com",
-    "Origin": "https://example.com",
-    "Sec-Fetch-Site": "same-origin",
-    "X-Trace": "holistic-trace-42",
-    "Cookie": "session=holistic-session",
-    "User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/126.0 Mobile Safari/537.36",
-    "X-Forwarded-For": "4.1.1.1",
-}
-
 _CEDAR_POLICY = """
 @id("authenticated-render")
 permit(principal, action == Action::"render", resource)
