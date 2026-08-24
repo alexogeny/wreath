@@ -39,6 +39,69 @@ def _local_policy() -> DestinationPolicy:
     return DestinationPolicy(allow_private=True, allow_loopback=True)
 
 
+def _buffered_reader(wire: bytes) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    reader.feed_data(wire)
+    reader.feed_eof()
+    return reader
+
+
+def test_ipv6_socket_scope_is_preserved_exactly_once() -> None:
+    assert HTTPClient._address(socket.AF_INET6, ("fe80::1", 443, 0, 7)) == "fe80::1%7"
+    assert HTTPClient._address(socket.AF_INET6, ("fe80::1%eth0", 443, 0, 7)) == (
+        "fe80::1%eth0"
+    )
+    assert HTTPClient._address(socket.AF_INET6, ("2001:db8::1", 443, 0, 0)) == (
+        "2001:db8::1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_python_response_head_reader_translates_codec_refusals() -> None:
+    client = HTTPClient(
+        "malformed-head-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(b"not-http\r\n\r\n")
+
+    with pytest.raises(ProtocolError, match="response|status|HTTP"):
+        await client._read_head(reader)
+
+
+@pytest.mark.asyncio
+async def test_python_response_body_reader_keeps_content_length_framing() -> None:
+    client = HTTPClient(
+        "length-body-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(b"body")
+
+    body, framed = await client._read_body(
+        reader,
+        "GET",
+        200,
+        [(b"content-length", b"4")],
+    )
+
+    assert body == b"body"
+    assert framed is True
+
+
+@pytest.mark.asyncio
+async def test_python_chunk_reader_refuses_a_malformed_chunk_terminator() -> None:
+    client = HTTPClient(
+        "chunk-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(b"1\r\nxNO")
+
+    with pytest.raises(ProtocolError, match="malformed response chunk terminator"):
+        await client._read_chunked(reader)
+
+
 @pytest.mark.parametrize(("over_tls", "keep_open"), [(False, True), (True, False)])
 @pytest.mark.asyncio
 async def test_client_stream_eof_only_keeps_plaintext_transport_open(

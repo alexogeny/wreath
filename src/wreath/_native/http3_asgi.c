@@ -999,7 +999,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->body_received = 0;
     s->body_frames = 0;
     s->receive_waiter = NULL;
-    s->request_ended = s->disconnected = 0;
+    s->request_ended = s->request_refused = s->disconnected = 0;
     s->response_started = s->response_ended = 0;
     s->resp_chunks = NULL;
     s->resp_chunks_cap = s->resp_chunks_len = 0;
@@ -1039,6 +1039,39 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
 
 static void h3_reject_stream(WreathH3Stream *s, uint64_t app_error);
 
+/* Refuse a request whose complete failure is known before ASGI activation.
+ * Header callbacks stop materialising Python pairs as soon as the configured
+ * count is reached, but nghttp3 is allowed to finish the compressed block. A
+ * STOP_SENDING or RESET_STREAM here makes standards-conforming clients report
+ * a QUIC error even if response bytes follow; the bounded answer is therefore
+ * an ordinary empty 431 once END_HEADERS arrives. */
+static int
+h3_refuse_unstarted_request(WreathH3Stream *s, int status)
+{
+    if (s->response_started) return 0;
+    WreathH3Conn *c = s->conn;
+    if (c == NULL) return 0;
+    if (s->body_buffer != NULL) {
+        Py_ssize_t queued = PyByteArray_GET_SIZE(s->body_buffer);
+        c->queued_body_bytes -= queued;
+        if (queued > 0 && c->queued_body_messages > 0) {
+            c->queued_body_messages--;
+        }
+        if (PyByteArray_Resize(s->body_buffer, 0) < 0) return -1;
+    }
+
+    PyObject *headers = PyTuple_New(0);
+    if (headers == NULL) return -1;
+    Py_XSETREF(s->resp_headers, headers);
+    s->request_ended = 1;
+    s->request_refused = 1;
+    s->response_started = 1;
+    s->resp_eof = 1;
+    s->status = status;
+    h3_release_receiver(s);
+    return submit_response(s, status);
+}
+
 static int
 recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
                nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t flags,
@@ -1046,10 +1079,11 @@ recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
 {
     (void)conn; (void)stream_id; (void)token; (void)flags; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
-    if (s == NULL || s->disconnected) return 0;
+    if (s == NULL || s->disconnected || s->request_refused) return 0;
     if (wreath_headers_count(s->header_list) >=
         s->conn->endpoint->max_header_count) {
-        h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
+        s->request_refused = 1;
+        s->status = 431;
         return 0;
     }
     nghttp3_vec nv = nghttp3_rcbuf_get_buf(name);
@@ -1440,6 +1474,10 @@ end_headers_cb(nghttp3_conn *conn, int64_t stream_id, int fin, void *cu, void *s
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL || s->disconnected) return 0;
     if (fin) s->request_ended = 1;
+    if (s->request_refused) {
+        return h3_refuse_unstarted_request(s, s->status) < 0
+            ? NGHTTP3_ERR_CALLBACK_FAILURE : 0;
+    }
     int started = start_request(s);
     if (started < 0) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -1490,7 +1528,7 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
 {
     (void)conn; (void)stream_id; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
-    if (s == NULL || s->disconnected) return 0;
+    if (s == NULL || s->disconnected || s->request_refused) return 0;
     WreathH3Conn *c = s->conn;
 
     if (datalen > 0) {

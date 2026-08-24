@@ -64,6 +64,7 @@ typedef struct {
     Py_ssize_t body_frames;      /* non-empty DATA callbacks accepted */
     PyObject *receive_waiter;    /* Future or NULL */
     int request_ended;
+    int request_refused;         /* owned 4xx submitted before ASGI activation */
     int disconnected;
 
     int response_started;

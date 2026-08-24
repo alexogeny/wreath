@@ -80,6 +80,22 @@ class TestAcceptLanguageQuality:
     def test_a_malformed_header_falls_back(self):
         assert self._locale(";;;") == "en"
 
+    def test_a_refused_tag_is_not_returned(self):
+        """`q=0` means "not acceptable" (RFC 9110 §12.4.2), so the only tag
+        offered being refused leaves nothing to prefer and falls back.
+
+        `validation_errors.select_language` already reads `q=0` as a refusal;
+        this is the same header parsed by the same rules through the other
+        entry point, and it answered `de` -- the one language the client said
+        it did not want."""
+        assert self._locale("de;q=0") == "en"
+
+    def test_a_refused_tag_loses_to_an_accepted_one(self):
+        assert self._locale("de;q=0, fr;q=0.5") == "fr"
+
+    def test_every_tag_refused_falls_back(self):
+        assert self._locale("de;q=0, fr;q=0") == "en"
+
 
 class TestCorsPreflightValidation:
     """G-61: the preflight echoes the configured allow-list without checking

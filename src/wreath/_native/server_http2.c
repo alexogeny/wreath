@@ -1551,7 +1551,7 @@ is_lowercase_token(const char *p, Py_ssize_t n)
     }
     for (Py_ssize_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)p[i];
-        if (!wreath_field_token[c] || (c >= 'A' && c <= 'Z')) {
+        if (!wreath_ascii_token[c] || (c >= 'A' && c <= 'Z')) {
             return 0;
         }
     }
