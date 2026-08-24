@@ -658,6 +658,31 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
             }
             ip++;
         } else if (op == OP_VAR) {
+            /* The compiled program and request context own a top-level scalar
+             * for the complete render. Emit exact builtins from their borrowed
+             * dict slot instead of manufacturing an owned reference only to
+             * drop it after one append. Restrict this to types whose string
+             * conversion cannot re-enter Python and mutate the context. */
+            if (instr->binding < 0 &&
+                PyTuple_GET_SIZE(instr->first) == 1) {
+                PyObject *borrowed = PyDict_GetItemWithError(
+                    context, PyTuple_GET_ITEM(instr->first, 0));
+                if (borrowed == NULL && PyErr_Occurred()) {
+                    failed = 1;
+                    break;
+                }
+                if (borrowed != NULL &&
+                    (PyUnicode_CheckExact(borrowed) ||
+                     PyLong_CheckExact(borrowed) ||
+                     PyFloat_CheckExact(borrowed) ||
+                     PyBool_Check(borrowed) || borrowed == Py_None ||
+                     Py_TYPE(borrowed) == (PyTypeObject *)T_Markup)) {
+                    if (emit_value(&buf, borrowed) < 0)
+                        goto overflow_or_error;
+                    ip++;
+                    continue;
+                }
+            }
             if (instr->binding >= 0 &&
                 frames[instr->binding].sequence_kind == 3 &&
                 PyTuple_GET_SIZE(instr->first) == 2) {

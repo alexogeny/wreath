@@ -56,4 +56,39 @@ wreath_ascii_equal_ci_str(const char *data, ptrdiff_t length, const char *litera
     return wreath_ascii_equal_ci(data, length, literal, (ptrdiff_t)strlen(literal));
 }
 
+/* Nonzero for the RFC 9110 token characters: ALPHA / DIGIT / !#$%&'*+-.^_`|~
+ *
+ * Which octets a field name may carry decides whether two parsers in one
+ * process agree about where a header ends, so `server.h` already argues this
+ * rule has to live in exactly one place: HTTP/1.1 and HTTP/2 once disagreed,
+ * and a disagreement is a request-splitting primitive for any downstream that
+ * re-serializes to HTTP/1.1.
+ *
+ * It did not live in one place. `server_common.c` and the `http.c` head parser
+ * each carried a byte-identical copy, and `_server` linked both -- so the
+ * argument was written down beside one of two tables. Here it is one table,
+ * and the file that already owns "every module had grown its own" is where it
+ * belongs.
+ *
+ * `static const` rather than an `extern`: `http.c` is `#include`d into three
+ * extensions rather than compiled once, so a single definition would be a
+ * duplicate symbol in some links and a missing one in others. */
+static const uint8_t wreath_ascii_token[256] = {
+    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+    ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
+    ['`'] = 1, ['|'] = 1, ['~'] = 1,
+    ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1,
+    ['5'] = 1, ['6'] = 1, ['7'] = 1, ['8'] = 1, ['9'] = 1,
+    ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1,
+    ['G'] = 1, ['H'] = 1, ['I'] = 1, ['J'] = 1, ['K'] = 1, ['L'] = 1,
+    ['M'] = 1, ['N'] = 1, ['O'] = 1, ['P'] = 1, ['Q'] = 1, ['R'] = 1,
+    ['S'] = 1, ['T'] = 1, ['U'] = 1, ['V'] = 1, ['W'] = 1, ['X'] = 1,
+    ['Y'] = 1, ['Z'] = 1,
+    ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
+    ['g'] = 1, ['h'] = 1, ['i'] = 1, ['j'] = 1, ['k'] = 1, ['l'] = 1,
+    ['m'] = 1, ['n'] = 1, ['o'] = 1, ['p'] = 1, ['q'] = 1, ['r'] = 1,
+    ['s'] = 1, ['t'] = 1, ['u'] = 1, ['v'] = 1, ['w'] = 1, ['x'] = 1,
+    ['y'] = 1, ['z'] = 1,
+};
+
 #endif /* WREATH_ASCII_H */

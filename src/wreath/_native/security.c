@@ -109,6 +109,36 @@ sign_message(PyObject *secret, const char *message, Py_ssize_t message_len, char
     return 0;
 }
 
+/* The whole token for an already-drawn nonce: "v1.<issued>.<nonce>.<sig>".
+ *
+ * `nonce` is read for exactly 43 characters and need not be NUL-terminated --
+ * `csrf_new_token` mints one into a bare `char[43]`. Both entry points reach
+ * the layout through here, so the format string, the buffer bounds and the two
+ * range errors have one definition rather than a matching pair. */
+static PyObject *
+csrf_mint(PyObject *secret, long long issued, const char *nonce)
+{
+    char message[80];
+    char signature[43];
+    int message_len = snprintf(message, sizeof(message), "v1.%lld.%.*s",
+                               issued, 43, nonce);
+    if (message_len < 0 || (size_t)message_len >= sizeof(message)) {
+        PyErr_SetString(PyExc_ValueError, "csrf issued timestamp out of range");
+        return NULL;
+    }
+    if (sign_message(secret, message, message_len, signature) < 0) {
+        return NULL;
+    }
+    char token[128];
+    int token_len = snprintf(token, sizeof(token), "%.*s.%.*s",
+                             message_len, message, 43, signature);
+    if (token_len < 0 || (size_t)token_len >= sizeof(token)) {
+        PyErr_SetString(PyExc_ValueError, "csrf token too long");
+        return NULL;
+    }
+    return PyUnicode_DecodeASCII(token, token_len, "strict");
+}
+
 /* csrf_sign(secret: bytes, issued: int, nonce: str) -> str */
 PyObject *
 wreath_csrf_sign(PyObject *self, PyObject *args)
@@ -117,9 +147,6 @@ wreath_csrf_sign(PyObject *self, PyObject *args)
     long long issued;
     const char *nonce;
     Py_ssize_t nonce_len;
-    char message[80];
-    char signature[43];
-    int message_len;
     (void)self;
 
     if (!PyArg_ParseTuple(args, "SLs#:csrf_sign", &secret, &issued, &nonce, &nonce_len)) {
@@ -129,25 +156,7 @@ wreath_csrf_sign(PyObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "csrf nonce must be 43 characters");
         return NULL;
     }
-    message_len = snprintf(message, sizeof(message), "v1.%lld.%.*s",
-                           issued, (int)nonce_len, nonce);
-    if (message_len < 0 || (size_t)message_len >= sizeof(message)) {
-        PyErr_SetString(PyExc_ValueError, "csrf issued timestamp out of range");
-        return NULL;
-    }
-    if (sign_message(secret, message, message_len, signature) < 0) {
-        return NULL;
-    }
-    {
-        char token[128];
-        int token_len = snprintf(token, sizeof(token), "%.*s.%.*s",
-                                 message_len, message, 43, signature);
-        if (token_len < 0 || (size_t)token_len >= sizeof(token)) {
-            PyErr_SetString(PyExc_ValueError, "csrf token too long");
-            return NULL;
-        }
-        return PyUnicode_DecodeASCII(token, token_len, "strict");
-    }
+    return csrf_mint(secret, issued, nonce);
 }
 
 /* Fill `out` with `len` cryptographically secure bytes.
@@ -253,9 +262,6 @@ wreath_csrf_new_token(PyObject *self, PyObject *args)
     long long issued;
     unsigned char seed[32];
     char nonce[43];
-    char message[80];
-    char signature[43];
-    int message_len;
     (void)self;
 
     if (!PyArg_ParseTuple(args, "SL:csrf_new_token", &secret, &issued)) {
@@ -265,24 +271,7 @@ wreath_csrf_new_token(PyObject *self, PyObject *args)
         return NULL;
     }
     b64url_32(seed, nonce);
-    message_len = snprintf(message, sizeof(message), "v1.%lld.%.*s", issued, 43, nonce);
-    if (message_len < 0 || (size_t)message_len >= sizeof(message)) {
-        PyErr_SetString(PyExc_ValueError, "csrf issued timestamp out of range");
-        return NULL;
-    }
-    if (sign_message(secret, message, message_len, signature) < 0) {
-        return NULL;
-    }
-    {
-        char token[128];
-        int token_len = snprintf(token, sizeof(token), "%.*s.%.*s",
-                                 message_len, message, 43, signature);
-        if (token_len < 0 || (size_t)token_len >= sizeof(token)) {
-            PyErr_SetString(PyExc_ValueError, "csrf token too long");
-            return NULL;
-        }
-        return PyUnicode_DecodeASCII(token, token_len, "strict");
-    }
+    return csrf_mint(secret, issued, nonce);
 }
 
 /* csrf_validate(secret: bytes, token: str, now: int, max_age: int)
