@@ -21,6 +21,7 @@
 recursive-include src/wreath/_native *.c
 recursive-include src/wreath/_native *.h
 recursive-include src/wreath/_native *.md
+recursive-include src/wreath/_native/ryu LICENSE*
 
 # setup.py reads these at build time.
 include setup.py
