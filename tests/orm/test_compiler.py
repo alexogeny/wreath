@@ -274,6 +274,18 @@ def test_non_integer_bounds_are_rejected(value: object) -> None:
         User.select().limit(value)  # type: ignore[arg-type]
 
 
+def test_paginate_sets_both_bounds_without_losing_the_query_shape() -> None:
+    base = User.select(User.id).where(User.email == "a@b.c").order_by(User.id)
+
+    page = base.paginate(3, 20)
+
+    assert page.limit_ == 20
+    assert page.offset_ == 40
+    assert page.projection is base.projection
+    assert page.predicates is base.predicates
+    assert page.orderings is base.orderings
+
+
 # -- caching -------------------------------------------------------------------
 
 
