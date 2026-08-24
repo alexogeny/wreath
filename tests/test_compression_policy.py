@@ -80,6 +80,18 @@ async def test_prepared_compression_ladder_is_dcz_fragment_then_format_gzip() ->
     first_member.decompress(fragment.body)
     assert first_member.unused_data.startswith(b"\x1f\x8b")
 
+    prepared_body = policy._gzip_fragment_body(
+        "application/json", prefix, suffix
+    )
+    assert type(prepared_body) is bytes
+    assert prepared_body == document
+    prepared = Response(prepared_body, media_type=b"application/json")
+    await policy.after(request(b":wrong:"), prepared)
+    assert gzip.decompress(prepared.body) == document
+    first_member = zlib.decompressobj(wbits=31)
+    assert first_member.decompress(prepared.body) == prefix
+    assert first_member.unused_data.startswith(b"\x1f\x8b")
+
     changed = prefix + stable[:-1] + b"!" + suffix
     format_gzip = Response(changed, media_type=b"application/json")
     await policy.after(request(b":wrong:"), format_gzip)

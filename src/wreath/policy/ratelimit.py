@@ -736,7 +736,9 @@ class TieredRateLimitPolicy:
         ValueError: `tiers` is empty.
     """
 
-    __slots__ = ("_children", "_default", "_dispatch", "_tier", "_tiers")
+    __slots__ = (
+        "_children", "_default", "_dispatch", "_tier", "_tier_rates", "_tiers"
+    )
 
     def __init__(
         self,
@@ -784,6 +786,12 @@ class TieredRateLimitPolicy:
             )
             children.append(child)
         self._children = tuple(children)
+        # Child construction above remains the validation owner for non-positive
+        # windows. Compile the generosity comparison only after those declarations
+        # have been accepted, so the request path neither divides nor allocates.
+        self._tier_rates = {
+            name: limit / window for name, (limit, window) in self._tiers.items()
+        }
 
     @property
     def schema_owners(self) -> tuple[Any, ...]:
@@ -803,10 +811,15 @@ class TieredRateLimitPolicy:
         identity = request.identity
         if identity is None:
             return None
-        matched = [role for role in identity.roles if role in self._tiers]
-        if not matched:
-            return None
-        return max(matched, key=lambda role: self._tiers[role][0] / self._tiers[role][1])
+        selected = None
+        selected_rate = -1.0
+        rates = self._tier_rates
+        for role in identity.roles:
+            rate = rates.get(role)
+            if rate is not None and rate > selected_rate:
+                selected = role
+                selected_rate = rate
+        return selected
 
     async def _ingress(self, request: Request) -> Any | None:
         """Charge this request to its tier's bucket.

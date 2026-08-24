@@ -178,6 +178,8 @@ def test_traffic_classes_refuse_empty_or_ambiguous_declarations() -> None:
     declaration = TrafficClass("bot", claimed_agent=True)
     with pytest.raises(ValueError, match="duplicate traffic class"):
         TrafficPolicy(ClientFactsProvider(), (declaration, declaration))
+    with pytest.raises(ValueError, match="default 'bot'.*duplicates a declared class"):
+        TrafficPolicy(ClientFactsProvider(), (declaration,), default="bot")
 
 
 def test_compiled_traffic_membership_matches_the_public_declaration() -> None:
