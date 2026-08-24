@@ -208,3 +208,54 @@ def test_router_refuses_an_invalid_status_code(status: int) -> None:
     router = Router()
     with pytest.raises(ValueError, match="status_code"):
         router.get("/items", status_code=status)
+
+
+# --- Wreath and Router declare the same route options -------------------------
+#
+# `Wreath.route` and `Router.route` spell out the same nineteen keyword options,
+# because on a public API the parameter list *is* the documentation and folding
+# it into `**kwargs` would cost every caller their editor's help. The price of
+# keeping both readable is that they can drift, and the failure is quiet: a new
+# option reaches one of them, the other keeps accepting the call and silently
+# dropping the argument.
+#
+# `router.py` already argues that "`Router` and `Wreath` differ in where they
+# store the result, not in what a declaration means". These assert that.
+
+
+def _keyword_options(function: object) -> dict[str, object]:
+    """The keyword-only parameters of `function`, minus the receiver."""
+    import inspect
+
+    return {
+        name: parameter
+        for name, parameter in inspect.signature(function).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+
+
+def test_route_declares_the_same_options_on_wreath_and_router() -> None:
+    app_options = _keyword_options(Wreath.route)
+    router_options = _keyword_options(Router.route)
+
+    assert set(app_options) == set(router_options), (
+        "Wreath.route and Router.route accept different options; one of them "
+        "will silently ignore an argument the other honours"
+    )
+    assert app_options
+    for name, app_parameter in app_options.items():
+        router_parameter = router_options[name]
+        assert app_parameter.default == router_parameter.default, (
+            f"route option {name!r} defaults to {app_parameter.default!r} on "
+            f"Wreath and {router_parameter.default!r} on Router"
+        )
+        assert app_parameter.annotation == router_parameter.annotation, (
+            f"route option {name!r} is annotated differently on the two"
+        )
+
+
+@pytest.mark.parametrize("verb", ["get", "post", "put", "patch", "delete"])
+def test_verb_wrappers_declare_the_same_options_on_wreath_and_router(verb: str) -> None:
+    assert _keyword_options(getattr(Wreath, verb)) == _keyword_options(
+        getattr(Router, verb)
+    )
