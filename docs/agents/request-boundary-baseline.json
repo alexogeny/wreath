@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 121,
+        "c": 105,
         "python": 2
       },
       "pre_activation": {
@@ -21,7 +21,7 @@
           "python": 0
         },
         "handler": {
-          "c": 47,
+          "c": 31,
           "python": 1
         },
         "egress": {
@@ -30,8 +30,8 @@
         }
       },
       "c_calls": {
-        "dict.get": 39,
-        "builtins.isinstance": 11,
+        "dict.get": 23,
+        "builtins.isinstance": 10,
         "str.encode": 6,
         "builtins.getattr": 6,
         "builtins.len": 4,
@@ -45,6 +45,7 @@
         "list.append": 2,
         "dict.clear": 2,
         "wreath._native._core.replace_response_header": 2,
+        "wreath._native._core.request_new": 1,
         "TrustedNetworks.contains": 1,
         "wreath._native._core.build_header_map": 1,
         "TrustedNetworks.forwarded_client": 1,
@@ -113,10 +114,11 @@
         }
       },
       "c_calls": {
-        "builtins.isinstance": 3,
+        "builtins.isinstance": 2,
         "dict.get": 2,
         "UserAgentDB.blocked_headers": 1,
         "PolicyRouteTable.match": 1,
+        "wreath._native._core.request_new": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,
         "builtins.len": 1

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from hashlib import new as new_hash
 from hmac import compare_digest
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
@@ -378,7 +378,7 @@ class FormData:
 
 
 #: RFC 2046 §5.1.1: 1..70 characters from this set, not ending in a space.
-_BOUNDARY_CHARS = frozenset(
+_BOUNDARY_CHARS = (
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? "
 )
 
@@ -394,7 +394,10 @@ def _valid_boundary(value: bytes) -> bool:
     return (
         1 <= len(value) <= 70
         and not value.endswith(b" ")
-        and all(byte in _BOUNDARY_CHARS for byte in value)
+        # Strip permitted bytes from both ends in one built-in scan. If every
+        # byte is permitted nothing remains; the first invalid byte stops the
+        # scan and therefore survives in the result.
+        and not value.strip(_BOUNDARY_CHARS)
     )
 
 
@@ -671,7 +674,7 @@ class Request:
         """
         context = self._context
         if context is not None:
-            return cast("str | None", context._bearer_token())
+            return context._bearer_token()
         return _core.bearer_token(self.headers)
 
     def _bearer_verify(self, verifier: Any) -> Any:
@@ -717,7 +720,7 @@ class Request:
         # State wins when it exists: a hook may have overwritten the value.
         state = self._state
         if state is not None:
-            return cast("str | None", state.get("route_outcome"))
+            return state.get("route_outcome")
         return self._route_outcome
 
     @property
@@ -846,7 +849,7 @@ class Request:
         """
         context = self._context
         if context is not None:
-            return cast("tuple[str, int | None] | None", context.client)
+            return context.client
         scope = self._scope
         if scope is None:
             raise RuntimeError("request scope is unavailable")
@@ -875,7 +878,7 @@ class Request:
         """
         context = self._context
         if context is not None:
-            return cast(str, context.scheme)
+            return context.scheme
         scope = self._scope
         if scope is None:
             raise RuntimeError("request scope is unavailable")
@@ -966,9 +969,9 @@ class Request:
         # Parsed once and cached request-locally, like `_body` and
         # `_header_map`: repeated reads are common (session, CSRF, auth) and
         # each one otherwise rescanned the header list and rebuilt the dict.
-        cached = getattr(self, "_cookies", _MISSING)
+        cached: Any = getattr(self, "_cookies", _MISSING)
         if cached is not _MISSING:
-            return cast(dict[str, str], cached)
+            return cached
         # HTTP/2 permits Cookie to be split across field lines. Combine every
         # line with the RFC cookie separator while enforcing the limit before
         # allocating the joined value; first-line-only creates proxy/app auth
@@ -1036,7 +1039,7 @@ class Request:
         context = self._context
         native_single = None if context is None else getattr(context, "_single_header", None)
         if native_single is not None:
-            return cast("bytes | None", native_single(name))
+            return native_single(name)
         found = None
         for candidate, value in self.headers:
             if candidate != name:
@@ -1162,11 +1165,11 @@ class Request:
                 See `_check_body` -- ingress cannot do this check, because the
                 body has not arrived when global middleware runs.
         """
-        cached = getattr(self, "_body", _MISSING)
+        cached: Any = getattr(self, "_body", _MISSING)
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
             raise StreamConsumed("request body stream has already been consumed")
         if cached is not _MISSING:
-            return cast(bytes, cached)
+            return cached
 
         first_chunk: bytes | None = None
         buffer: bytearray | None = None
@@ -1210,7 +1213,7 @@ class Request:
         if expected is None:
             return None
         state.__setattr__(BODY_CHECK_SLOT, None)
-        return cast("tuple[str, bytes]", expected)
+        return expected
 
     def _check_body(self, body: bytes) -> None:
         """Refuse a body that does not hash to what its signature covered."""
@@ -1240,11 +1243,11 @@ class Request:
         Raises:
             BadRequest: a covered `Content-Digest` does not match these bytes.
         """
-        cached = getattr(self, "_body", _MISSING)
+        cached: Any = getattr(self, "_body", _MISSING)
         if cached is _STREAMING or cached is _STREAM_CONSUMED:
             raise StreamConsumed("request body stream has already been consumed")
         if cached is not _MISSING:
-            body = cast(bytes, cached)
+            body = cached
             if body:
                 yield body
             return
@@ -1367,9 +1370,9 @@ class Request:
             PayloadTooLarge: the body, the parts, or the field count exceed a limit
             ClientDisconnect: the peer went away before the body finished
         """
-        cached = getattr(self, "_form", _MISSING)
+        cached: Any = getattr(self, "_form", _MISSING)
         if cached is not _MISSING:
-            return cast(FormData, cached)
+            return cached
         # Via the `headers` property, not `self.scope`: on the native path the
         # ASGI scope is lazily built, and reading one header should not force it.
         content_type = find_header(self.headers, b"content-type")
