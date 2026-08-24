@@ -60,10 +60,23 @@ class InvalidPagination(BadRequest, ValueError):
 
 
 def _rank_indices(
-    scores: Sequence[float], *, page: int, size: int, descending: bool
+    scores: Sequence[float],
+    *,
+    page: int,
+    size: int,
+    descending: bool,
+    candidates: int | None = None,
+    absolute: bool = False,
 ) -> tuple[int, ...]:
-    """Select a numeric page while the sort workspace remains native-owned."""
-    return _core.rank_indices(scores, (page - 1) * size, size, descending)
+    """Select a numeric page while transforms and workspace remain native-owned."""
+    return _core.rank_indices(
+        scores,
+        (page - 1) * size,
+        size,
+        descending,
+        -1 if candidates is None else candidates,
+        absolute,
+    )
 
 
 __all__ = [
