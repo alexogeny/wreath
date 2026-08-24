@@ -630,8 +630,9 @@ class Trajectory:
     spatial engine.
     """
 
-    __slots__ = ("_native",)
+    __slots__ = ("_grid_cache", "_native")
 
+    _grid_cache: Any
     _native: Any
 
     def __init__(self, fixes: Iterable[tuple[Any, Coordinate]]) -> None:
@@ -642,11 +643,13 @@ class Trajectory:
                 fixes, GeospatialError, Coordinate, _DATETIME_CAPI
             ),
         )
+        object.__setattr__(self, "_grid_cache", None)
 
     @classmethod
     def _from_native(cls, native: Any) -> Trajectory:
         result = object.__new__(cls)
         object.__setattr__(result, "_native", native)
+        object.__setattr__(result, "_grid_cache", None)
         return result
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -737,7 +740,15 @@ class Trajectory:
             )
         if end < start:
             raise GeospatialError(f"grid_summary() end {end!r} is before start {start!r}")
-        return _core_module.geo_trajectory_grid_summary(
+        cached = self._grid_cache
+        if (
+            cached is not None
+            and cached[0] is start
+            and cached[1] is end
+            and cached[2] is lattice
+        ):
+            return cached[3]
+        result = _core_module.geo_trajectory_grid_summary(
             self._native,
             start,
             end,
@@ -751,6 +762,11 @@ class Trajectory:
             lattice.columns,
             _DATETIME_CAPI,
         )
+        # The trajectory and lattice are immutable. Identity matching keeps
+        # this one-entry operation cache away from arbitrary equality methods
+        # while covering repeated summaries over application-owned windows.
+        object.__setattr__(self, "_grid_cache", (start, end, lattice, result))
+        return result
 
     def __repr__(self) -> str:
         return f"<Trajectory {len(self)} fixes, {self.distance:.1f} m>"
