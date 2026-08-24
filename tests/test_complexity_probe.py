@@ -1,8 +1,11 @@
 """Regression tests for the empirical complexity-contract harness."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from wreath._devtools import complexity_probe as complexity
 from wreath._devtools.complexity_probe import (
     _REGISTRY,
     Probe,
@@ -96,6 +99,30 @@ def test_contract_records_the_scaled_axis_and_assumption() -> None:
     assert contract["axis"] == "items"
     assert contract["assumption"] == "work is at most linear in items"
     assert contract["stage"] == "test"
+
+
+def test_updating_selected_probes_preserves_the_rest_of_the_baseline(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "complexity-baseline.json"
+    path.write_text(
+        json.dumps({
+            "version": complexity.BASELINE_VERSION,
+            "probes": {"existing-probe": {"contract": {}, "observation": {}}},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(complexity, "_baseline_path", lambda: path)
+    monkeypatch.setattr(
+        complexity,
+        "run_probe",
+        lambda registered: Result(registered, [1.0, 2.0, 4.0, 8.0], [{}] * 4),
+    )
+
+    assert complexity._write_baseline(["css-no-media-control"]) == 0
+
+    recorded = json.loads(path.read_text(encoding="utf-8"))["probes"]
+    assert set(recorded) == {"existing-probe", "css-no-media-control"}
 
 
 # --- fix-later marks -------------------------------------------------------
