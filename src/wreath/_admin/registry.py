@@ -103,6 +103,24 @@ def _display(value: Any) -> str:
     return str(value)
 
 
+def _cells(
+    instance: Any,
+    columns: tuple[tuple[str, str], ...],
+    allowed: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Project one row with registration-compiled column labels."""
+    return [
+        {"label": label, "value": WITHHELD_MARKER, "withheld": True}
+        if name not in allowed
+        else {
+            "label": label,
+            "value": _display(getattr(instance, name, None)),
+            "withheld": False,
+        }
+        for name, label in columns
+    ]
+
+
 def _form_value(value: Any) -> str:
     """One column value as a form control's `value`. Empty for absent."""
     if value is None:
@@ -418,6 +436,11 @@ class Admin:
         csrf = self._csrf
         root = f"{base}/{entry.slug}"
         admin_id = id(entry)
+        # Labels depend only on registered Python field names. Compile them in
+        # the admin's existing per-model closure rather than allocating and
+        # transforming the same strings for every rendered row.
+        columns = tuple((name, _label(name)) for name in entry.columns)
+        list_columns = tuple((name, _label(name)) for name in entry.list_columns)
 
         async def readable(request: Any) -> frozenset[str]:
             return await resolve_readable(
@@ -430,21 +453,6 @@ class Admin:
                 request, _authorizer(request), entry.field_access,
                 entry.editable, entry.resource, admin_id,
             )
-
-        def cells(instance: Any, names: tuple[str, ...], allowed: frozenset[str]) -> list[dict]:
-            """The one path a column value takes into a render context.
-
-            A name outside `allowed` is never read off the instance: the
-            withheld marker is a constant, so the value does not reach the
-            template even as something the template chooses not to draw.
-            """
-            return [
-                {"label": _label(name), "value": WITHHELD_MARKER, "withheld": True}
-                if name not in allowed
-                else {"label": _label(name), "value": _display(getattr(instance, name, None)),
-                      "withheld": False}
-                for name in names
-            ]
 
         if "list" in entry.operations:
 
@@ -468,14 +476,14 @@ class Admin:
                     "model_label": entry.label,
                     "caption": f"{entry.label} rows {page.total} in total",
                     "headers": [
-                        {"label": _label(name),
+                        {"label": label,
                          "sort_url": _sort_url(root, query, name, entry)}
-                        for name in entry.list_columns
+                        for name, label in list_columns
                     ],
                     "rows": [
                         {"url": f"{root}/{quote(str(getattr(row, entry.primary_key)), safe='')}",
                          "label": f"{entry.label} {getattr(row, entry.primary_key)}",
-                         "cells": cells(row, entry.list_columns, allowed)}
+                         "cells": _cells(row, list_columns, allowed)}
                         for row in page.items
                     ],
                     "empty": not page.items,
@@ -510,7 +518,7 @@ class Admin:
                     "title": f"{entry.label} {key} — {self._title}",
                     "heading": f"{entry.label} {key}",
                     "model_label": entry.label,
-                    "fields": cells(instance, entry.columns, allowed),
+                    "fields": _cells(instance, columns, allowed),
                     "list_url": f"{root}/",
                     "can_edit": "update" in entry.operations,
                     "edit_url": f"{root}/{quote(str(key), safe='')}/edit",
@@ -669,7 +677,7 @@ class Admin:
                         f"This permanently deletes {entry.label} {key}. "
                         "The audit trail keeps the record of the deletion."
                     ),
-                    "fields": cells(instance, entry.columns, allowed),
+                    "fields": _cells(instance, columns, allowed),
                     "action": f"{root}/{quote(str(key), safe='')}/delete",
                     "submit_label": f"Delete {entry.label} {key}",
                     "cancel_url": f"{root}/{quote(str(key), safe='')}",
