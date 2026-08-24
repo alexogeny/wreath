@@ -74,7 +74,10 @@ while a sibling is running tests produces failures nobody can attribute.
   anyone measures it. It is a ratchet, not a gate: most candidates are bounded
   by something the scanner cannot read, so the whole current set is recorded in
   `docs/agents/complexity-discovery.json` and `--discover-check` fails only on a
-  **new** one. Acknowledge with `--update-discovery` and say why in the change.
+  **new** one. The baseline also carries exact source fingerprints: byte-identical
+  files reuse their acknowledged findings, while new or edited files are scanned
+  and any scanner change invalidates the whole cache. Acknowledge with
+  `--update-discovery` and say why in the change.
   The two rules that make it readable were both learned by getting them wrong:
   membership against a `set`/`dict` is O(1) and is not a finding at all, and
   iterating `d.values()` *is* the loop rather than an extra linear op inside
@@ -362,7 +365,7 @@ uv run wreath-bench --framework wreath starlette fastapi   # installs competitor
 # The individual gates, when you want one of them.
 # ** Run the suite with `wreath test`, not with `pytest`. ** It is the routine
 # check: it picks min(8, cpu_count) workers itself, keeps pytest's semantics
-# exactly, and adds the heat map, timing history and bounded mutation
+# exactly, and adds the state map, timing history and bounded mutation
 # confidence. A bare `uv run pytest` takes no `-n` of its own, so it runs one
 # worker and is several times slower for no extra evidence.
 uv run wreath test             # THE routine suite: grid, timings, auto confidence
@@ -402,7 +405,7 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   no faster in the clean samples, so prefer `-n 8` over `-n auto` on a wide
   machine. **Prefer `uv run wreath test` for routine agent runs.** It applies
   `min(8, cpu_count)`, keeps pytest's
-  semantics, and adds the heat map, timing history, and bounded mutation
+  semantics, and adds the state map, timing history, and bounded mutation
   confidence; a bare `uv run pytest` stays the serial process you attach a
   debugger to. This recommendation is measured rather than aspirational: on the
   12,002-test default-marker suite, three warm runs with mutation disabled were
@@ -414,6 +417,17 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   after source changes also builds the mutation candidate catalog; its planning
   and compilation overlap the ordinary workers without collecting the whole
   suite again. One hundred ninety-two sampled controls are watched by default.
+
+  Broad history-backed runs also stop making every xdist worker import every
+  test module. `--collection auto` assigns each conventional module to one
+  fresh worker once at least 80% have current broad-run timings, then greedily
+  balances whole modules by those timings. Focused, cold-history, explicitly
+  distributed, and cross-module `xdist_group` runs retain replicated dynamic
+  scheduling. `--collection replicated|sharded` makes the A/B explicit. On an
+  8,000-test synthetic corpus with 80 repeated immutable module objects, three
+  interleaved eight-worker rounds measured 11.94s ± 1.11s replicated against
+  6.62s ± 0.19s sharded. That is evidence for repeated collection only, not a
+  claimed full-suite wall time.
 
   **The curve below does not reproduce, and the sample count is very nearly
   free.** It reads as though controls dominate the mutation phase; measured as an
