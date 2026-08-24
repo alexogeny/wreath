@@ -132,6 +132,14 @@ wreath_gzip_format_object(PyObject *value, int *format)
     return 0;
 }
 
+PyObject *
+wreath_gzip_format(PyObject *Py_UNUSED(self), PyObject *value)
+{
+    int format;
+    if (wreath_gzip_format_object(value, &format) < 0) return NULL;
+    return PyLong_FromLong(format);
+}
+
 static void
 wreath_gzip_encoder_capsule_free(PyObject *capsule)
 {
@@ -333,6 +341,9 @@ wreath_gzip_fragment_compress_workspace(PyObject *workspace, PyObject *data,
     size_t position = 0;
     size_t written;
     int format;
+    int input_acquired = 0;
+    const unsigned char *prefix_data;
+    const unsigned char *suffix_data;
 
     if (level < 0 || level > 9) {
         PyErr_SetString(PyExc_ValueError, "gzip level must be between 0 and 9");
@@ -369,15 +380,40 @@ wreath_gzip_fragment_compress_workspace(PyObject *workspace, PyObject *data,
     }
     encoder = PyCapsule_GetPointer(workspace, WREATH_GZIP_ENCODER_CAPSULE);
     if (encoder == NULL) return NULL;
-    if (PyObject_GetBuffer(data, &input, PyBUF_SIMPLE) < 0) return NULL;
     Py_ssize_t middle = PyBytes_GET_SIZE(expected);
-    if (prefix > input.len || suffix > input.len - prefix ||
-        middle != input.len - prefix - suffix ||
-        memcmp((const unsigned char *)input.buf + prefix,
-               PyBytes_AS_STRING(expected), (size_t)middle) != 0) {
-        PyBuffer_Release(&input);
-        return wreath_gzip_compress_workspace(
-            workspace, data, level, format_object);
+    /* A policy-created pair carries the exact table entry by identity, so the
+     * stable member needs no second content walk. Five alternating 20k-call
+     * instruction runs on a 35.5 KiB middle measured 57,595 down to 52,757
+     * instructions/call (-8.40%); ordinary byte bodies retain the memcmp and
+     * full-compression fallback below. */
+    if (PyTuple_CheckExact(data) && PyTuple_GET_SIZE(data) == 3 &&
+        PyTuple_GET_ITEM(data, 2) == entry) {
+        PyObject *prefix_object = PyTuple_GET_ITEM(data, 0);
+        PyObject *suffix_object = PyTuple_GET_ITEM(data, 1);
+        if (!PyBytes_CheckExact(prefix_object) ||
+            !PyBytes_CheckExact(suffix_object) ||
+            PyBytes_GET_SIZE(prefix_object) != prefix ||
+            PyBytes_GET_SIZE(suffix_object) != suffix) {
+            PyErr_SetString(
+                PyExc_RuntimeError, "invalid prepared gzip fragment provenance");
+            return NULL;
+        }
+        prefix_data = (const unsigned char *)PyBytes_AS_STRING(prefix_object);
+        suffix_data = (const unsigned char *)PyBytes_AS_STRING(suffix_object);
+    }
+    else {
+        if (PyObject_GetBuffer(data, &input, PyBUF_SIMPLE) < 0) return NULL;
+        input_acquired = 1;
+        if (prefix > input.len || suffix > input.len - prefix ||
+            middle != input.len - prefix - suffix ||
+            memcmp((const unsigned char *)input.buf + prefix,
+                   PyBytes_AS_STRING(expected), (size_t)middle) != 0) {
+            PyBuffer_Release(&input);
+            return wreath_gzip_compress_workspace(
+                workspace, data, level, format_object);
+        }
+        prefix_data = input.buf;
+        suffix_data = (const unsigned char *)input.buf + input.len - suffix;
     }
 
     prefix_bound = prefix != 0
@@ -387,12 +423,12 @@ wreath_gzip_fragment_compress_workspace(PyObject *workspace, PyObject *data,
     if (prefix_bound > SIZE_MAX - suffix_bound ||
         prefix_bound + suffix_bound >
             SIZE_MAX - (size_t)PyBytes_GET_SIZE(cached)) {
-        PyBuffer_Release(&input);
+        if (input_acquired) PyBuffer_Release(&input);
         return PyErr_NoMemory();
     }
     capacity = prefix_bound + suffix_bound + (size_t)PyBytes_GET_SIZE(cached);
     if (capacity > (size_t)PY_SSIZE_T_MAX) {
-        PyBuffer_Release(&input);
+        if (input_acquired) PyBuffer_Release(&input);
         return PyErr_NoMemory();
     }
     result = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)capacity);
@@ -400,7 +436,7 @@ wreath_gzip_fragment_compress_workspace(PyObject *workspace, PyObject *data,
     wreath_gzip_encoder_enc_set_format(encoder, format);
     if (prefix != 0) {
         written = wreath_gzip_encoder_encode(
-            encoder, input.buf, (size_t)prefix,
+            encoder, prefix_data, (size_t)prefix,
             PyBytes_AS_STRING(result), capacity, wreath_gzip_profile(level));
         if (written == 0 || written > capacity) goto failed;
         position = written;
@@ -410,7 +446,7 @@ wreath_gzip_fragment_compress_workspace(PyObject *workspace, PyObject *data,
     position += (size_t)PyBytes_GET_SIZE(cached);
     if (suffix != 0) {
         written = wreath_gzip_encoder_encode(
-            encoder, (const unsigned char *)input.buf + input.len - suffix,
+            encoder, suffix_data,
             (size_t)suffix, PyBytes_AS_STRING(result) + position,
             capacity - position, wreath_gzip_profile(level));
         if (written == 0 || written > capacity - position) goto failed;
@@ -423,7 +459,7 @@ failed:
     Py_CLEAR(result);
     PyErr_SetString(PyExc_RuntimeError, "Wreath gzip fragment encoder failed");
 done:
-    PyBuffer_Release(&input);
+    if (input_acquired) PyBuffer_Release(&input);
     return result;
 }
 
