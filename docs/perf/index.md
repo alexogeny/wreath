@@ -25,38 +25,46 @@ field" at a glance.
 ## A production-shaped instruction account
 
 The broad comparison is a successful POST through a service stack, not a
-plaintext endpoint. Both arms route, apply CORS, validate a typed path, query and
-body, authenticate a bearer token, authorize through Cedar, query PostgreSQL,
-fetch an upstream HTTP resource, and emit the same verified JSON response.
+plaintext endpoint. All four arms route, apply CORS, validate a typed path,
+query and body, authenticate a bearer token, authorize through Cedar, query
+PostgreSQL, fetch an upstream HTTP resource, and emit the same verified JSON
+response.
 
 ```text
 Retired userspace instructions/request — lower is better
 
-Wreath    ████                              269,110
-FastAPI   ████████████████████████████████  2,133,383
+Wreath       ████                              249,844
+BlackSheep   ██████████████████████          1,444,119
+Sanic        ██████████████████████          1,443,892
+FastAPI      ████████████████████████████████ 2,107,179
 ```
 
-That is **7.93× fewer retired instructions** for Wreath on this workload. The
-comparison stack is deliberately pragmatic: FastAPI 0.139, its Starlette
-`CORSMiddleware`, Pydantic, Uvicorn with uvloop and httptools, `HTTPBearer`,
-`cedarpy`, `asyncpg`, and `aiohttp`. Wreath uses the corresponding built-in
-surfaces and has no mandatory third-party runtime dependencies.
+That is **8.43× fewer retired instructions** than FastAPI and **5.78× fewer**
+than Sanic and BlackSheep on this workload. The comparison stacks are
+deliberately pragmatic: FastAPI uses Starlette CORS, Pydantic, Uvicorn/uvloop/
+httptools and `HTTPBearer`; Sanic uses its native server and response middleware;
+BlackSheep uses its built-in CORS policy on Granian/uvloop. All ecosystem arms
+use `cedarpy`, `asyncpg`, and `aiohttp`; Sanic and BlackSheep use msgspec binding.
+Wreath uses corresponding built-in surfaces and has no mandatory third-party
+runtime dependencies.
 
-| Cumulative successful request | Wreath | FastAPI stack |
-|---|---:|---:|
-| route + JSON | 36,006 | 426,899 |
-| + CORS | 47,156 | 490,826 |
-| + binding and validation | 115,305 | 776,764 |
-| + bearer authentication | 122,448 | 867,935 |
-| + Cedar authorization | 173,902 | 1,597,272 |
-| + PostgreSQL | 225,857 | 1,809,675 |
-| + outbound HTTP | **269,110** | **2,133,383** |
+| Cumulative successful request | Wreath | BlackSheep | Sanic | FastAPI |
+|---|---:|---:|---:|---:|
+| route + JSON | 35,221 | 104,326 | 220,806 | 425,757 |
+| + CORS | 46,542 | 143,283 | 241,150 | 491,308 |
+| + binding and validation | 107,943 | 222,511 | 275,629 | 774,667 |
+| + bearer authentication | 114,036 | 229,477 | 277,595 | 867,014 |
+| + Cedar authorization | 153,793 | 931,174 | 974,843 | 1,597,999 |
+| + PostgreSQL | 206,037 | 1,104,737 | 1,145,880 | 1,811,778 |
+| + outbound HTTP | **249,844** | **1,444,119** | **1,443,892** | **2,107,179** |
 
 Each number is the median of five alternating N/N/2 slopes after 500 warm-up
 requests, with server and generator pinned separately. The complete-arm ranges
-are 268,866–269,510 and 2,118,638–2,153,023. Identical A/A rebuilds differ by
-0.06% and 0.29% at the median. Only `instructions:u` is collected: no wall
-clock, cycles, or IPC appears in the artifact.
+are 249,578–250,003, 1,439,650–1,448,804, 1,435,400–1,450,872 and
+2,085,545–2,133,905 for Wreath, BlackSheep, Sanic and FastAPI. Identical A/A
+rebuilds differ by 0.04%, 0.21%, 0.19% and 1.64% at the median. Only
+`instructions:u` is collected: no wall clock, cycles, or IPC appears in the
+artifact.
 
 The database and HTTP clients speak their real wire protocols to the same
 deterministic in-process peers. That keeps driver work and orchestration in the
