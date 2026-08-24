@@ -59,12 +59,12 @@ def _gzip_compress_with(workspace: object, data: bytes, level: int, format: str 
 
 def _gzip_fragment_compress_with(
     workspace: object,
-    data: bytes,
+    data: bytes | tuple[bytes, bytes, object],
     level: int,
     format: str | bytes,
     fragments: tuple[object | None, ...],
 ) -> bytes:
-    """Use an exact prepared gzip member when this format's stable span matches."""
+    """Use a checked byte body or an owner-attested prefix/suffix pair."""
     return _core.gzip_fragment_compress_with(workspace, data, level, format, fragments)
 
 
