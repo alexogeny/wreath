@@ -189,8 +189,8 @@ anything except a test-isolation bug.
 
 Once a suite is large enough, a row of dots hides the two things you usually
 want to know: *what is still running?* and *where did the time go?* `wreath test`
-runs the same pytest collection, fixtures, plugins, capture, and tracebacks, but
-puts every collected test file on a stable heat-map tile:
+runs pytest's collection, fixtures, plugins, capture, and tracebacks, but
+puts every collected test file on a stable state-map tile:
 
 ```bash
 wreath test
@@ -198,17 +198,15 @@ wreath test tests/auth/ -k refresh
 wreath test --workers 1 --grid never tests/test_login.py
 ```
 
-An untested file is dim, a running file is blue, passing files are green,
-skipped or mixed files are amber, and failures are red. `▣` marks a green file
-whose tests are currently running against a mutant;
-`▰` is the ceiling, awarded only when a test in that file kills one. The live
-tile is purple and the verified tile is a solid gold ingot, but the distinct
-symbols keep the states readable under `NO_COLOR`. A mutant that *survives*
-does not earn the gold state: that is a finding, not verification. Within each
-outcome the shade is the file's
-duration percentile: the more intense tile is the more expensive file. Positions
-are sorted by path and do not move while the run is in progress, so the grid
-becomes familiar rather than reshuffling itself around the latest result.
+Queued files are gray, running files blue, passing files green, skipped or mixed
+files orange, and failures red. During mutation confidence, candidate test files
+are pink while a control is running, yellow after one of their tests kills a
+mutant, and purple when a mutant survives those tests. Colour is categorical:
+it never grades duration, because a file's percentile is relative to this one
+run and is not a portable claim about that file. Distinct symbols keep the
+states readable under `NO_COLOR`. Positions are sorted by path and do not move
+while the run is in progress, so the grid becomes familiar rather than
+reshuffling itself around the latest result.
 
 The animation uses the terminal's alternate screen and restores the original
 screen before pytest prints its normal failure and skip summaries. In CI, when
@@ -226,12 +224,33 @@ Setup, call, and teardown time all count: a slow fixture is part of what the tes
 costs, not invisible overhead. Wreath keeps a bounded per-file history in
 `.wreath/test-history.json`; use `--no-history` for an entirely stateless run or
 `--history PATH` to put it elsewhere. The cache is local and ignored by version
-control. On later parallel runs, a controller-side longest-processing-time queue
-starts the tests with the largest historical mean first, distributes its first
-two rounds across workers, and then keeps only two tests queued per worker. That
-does not make an individual test faster; it prevents one worker from hoarding
-the slow prefix and lets whichever worker finishes refill from the shared tail.
-Tests with no history keep their pytest collection order behind known work.
+control. On a broad run where at least 80% of conventional test modules have
+current timing history, `auto` collection assigns each whole module to one
+fresh xdist worker before import. That worker alone constructs the module's
+parameters and immutable test data, and module-scoped fixtures remain alive for
+all of its tests. Modules are longest-processing-time balanced from the newest
+broad run, so preserving locality does not leave one worker with the slow tail.
+A focused path, a cold or disabled history, fewer than four modules per worker,
+a caller-supplied xdist mode, or an `xdist_group` spanning modules keeps
+replicated xdist collection and the existing dynamic historical queue instead.
+
+Use `--collection replicated` for an exact A/B against xdist's collection, or
+`--collection sharded` to force conventional Python modules into disjoint
+workers. The forced form refuses a cross-module `xdist_group`, naming
+`replicated` as the correct form, because silently separating that group would
+change its contract. Sharding does not share a mutable fixture or fork a live
+pytest process: every test still runs in a fresh worker interpreter. It deletes
+duplicate construction rather than making test state shared.
+Because a replacement xdist process receives a new worker id, sharded mode sets
+`--max-worker-restart=0`: a crashed shard fails the run instead of returning
+green after collecting somebody else's modules. An explicit restart policy
+therefore selects replicated mode, and forcing both is refused.
+
+On an 8,000-test synthetic corpus (80 modules, 100 parameters and one immutable
+5,000-row object per module), three interleaved warm rounds measured
+`replicated` at 11.94s ± 1.11s and `sharded` at 6.62s ± 0.19s wall time on the
+same eight workers, a 45% reduction. This prices repeated collection; it is not
+a claim that every Wreath test file has that object shape.
 
 For a complete artifact, `--report PATH` writes versioned JSON with every test
 and file outcome and duration:
@@ -260,14 +279,16 @@ therefore spends a small budget at file heads. The final line gives an
 actionable, colour-coded rating -- `SAMPLE WATCHED`, `REVIEW ASSERTIONS`, `ADD
 COVERAGE`, or `FINISH THE SAMPLE` -- while keeping `killed`, `survived`,
 `unreached`, and undecided controls separate. It does not average distinct
-findings into a percentage. During this phase candidate test files turn purple
-with `▣`; a file turns gold with `▰` only after one of its tests kills the
-mutant. A JSON test report gains the complete `mutation` document, its structured
-rating, and `verified_test_files` for that same evidence.
+findings into a percentage. During this phase candidate test files turn pink;
+a file turns yellow only after one of its tests kills the mutant, while a
+survivor leaves its candidate files purple. A JSON test report gains the
+complete `mutation` document, its structured rating, and
+`verified_test_files` and `failed_mutation_test_files` for that same evidence.
 
 Mutation uses only tests that passed in the ordinary run as eligible killers.
 That keeps the evidence honest without throwing away the rest of a large run:
-red files stay red, while green candidate files can turn purple and then gold.
+red files stay red, while green candidate files can turn pink and then yellow
+or purple.
 Baseline-failing tests are excluded and named in JSON, the rating says that its
 evidence is limited to green tests, and the command still exits with pytest's
 failure status. If no test passed, Wreath prints `not measured` instead of
