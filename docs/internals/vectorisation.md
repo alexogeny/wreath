@@ -134,9 +134,13 @@ lessons:
   ns/byte, roughly five times `memcpy`, which looked like reallocation churn.
   Doubling the growth factor instead of adding half: 113 424 ns against
   113 734. `realloc` was extending in place all along. Reverted.
-- **Floats.** 177 ns per element in the encoder is `PyOS_double_to_string` in
-  its entirety — `repr(1.5)` alone costs 260 ns. Beating it means implementing
-  a shortest-round-trip formatter, which is a different kind of project.
+- **Floats were algorithmic, not SIMD.** `PyOS_double_to_string`, its temporary
+  allocation, `strlen`, copy, and free cost 3,877 retired instructions per
+  element. The bundled Ryū formatter now writes the same shortest-round-trip
+  spelling directly into the JSON buffer: 1,383 instructions per element
+  (64.3% fewer), while the integer control stayed flat. It is differentially
+  checked byte-for-byte against the stdlib across decimal boundaries and raw
+  binary64 patterns; vector lanes would not help heterogeneous Python objects.
 - **CSRF's own base64.** 28.6 ns for 32 bytes, twice per token, against a token
   costing 2433 ns. Vectorising it would recover under two percent. It is still
   scalar, deliberately.

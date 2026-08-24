@@ -9,6 +9,8 @@
 typedef struct {
     int32_t dimension;
     Py_ssize_t count;
+    /* One compact allocation: indices first, then an aligned value span.
+     * `values` is an interior pointer and must not be freed separately. */
     int32_t *indices;
     double *values;
 } WreathSparseVector;
@@ -28,7 +30,6 @@ wreath_sparse_vector_destroy(PyObject *capsule)
         return;
     }
     PyMem_Free(data->indices);
-    PyMem_Free(data->values);
     PyMem_Free(data);
 }
 
