@@ -168,6 +168,20 @@ async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_apply_refuses_an_unknown_registry_before_reading_credentials() -> None:
+    application = SimpleNamespace(_orm_registries={})
+    namespace = argparse.Namespace(
+        database="missing",
+        dsn_env="MIGRATION_DSN",
+        artifact="migration.bin",
+        allow_destructive=False,
+    )
+
+    with pytest.raises(ValueError, match="no ORM registry 'missing'.*configured: none"):
+        await _migrations_cli._apply(namespace, application)
+
+
+@pytest.mark.asyncio
 async def test_status_never_falls_back_to_request_pool_credentials(
     monkeypatch,
     tmp_path,
@@ -328,6 +342,33 @@ def test_check_returns_one_for_drift_and_keeps_json_output(monkeypatch, capsys) 
 
     assert result == 1
     assert json.loads(capsys.readouterr().out)["operation_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [(True, "schema is current"), (False, "schema drift detected")],
+)
+def test_detect_text_names_whether_the_schema_is_current(
+    monkeypatch,
+    capsys,
+    current: bool,
+    expected: str,
+) -> None:
+    async def detect(namespace, application, *, with_passes=False):
+        assert with_passes is False
+        return {"current": current, "operation_count": 0}
+
+    monkeypatch.setattr(_migrations_cli, "_detect", detect)
+    namespace = argparse.Namespace(
+        migration_action="detect",
+        target="example:app",
+        factory=False,
+        database="main",
+        json=False,
+    )
+
+    assert _migrations_cli.execute(namespace, lambda target, factory: "application") == 0
+    assert capsys.readouterr().out.splitlines()[0] == expected
 
 
 @pytest.mark.asyncio

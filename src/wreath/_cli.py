@@ -527,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_mutant_arguments(mutant_parser)
     test_parser = commands.add_parser(
         "test",
-        help="run pytest with an animated file heat map and duration profiling",
+        help="run pytest with an animated file state map and duration profiling",
         description=(
             "Run a pytest-compatible suite with Wreath's activity grid and timing report. "
             "Arguments not recognized here are forwarded to pytest in their original order."
@@ -544,6 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         metavar="N",
         help="pytest worker processes: auto (capped at 8) or a positive integer",
+    )
+    test_parser.add_argument(
+        "--collection",
+        choices=("auto", "replicated", "sharded"),
+        default="auto",
+        help="worker collection: auto shards broad history-backed suites, "
+        "replicated keeps xdist collection, sharded forces one worker per module",
     )
     test_parser.add_argument(
         "--slowest",
