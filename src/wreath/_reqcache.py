@@ -36,7 +36,7 @@ each subsystem rebuild a provider-to-value dictionary.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any
 
 #: Distinct from every value a resolver may legitimately return, including
 #: `None` and every falsy builtin. Private: a caller comparing against it is
@@ -62,7 +62,7 @@ def resolve_once[T](request: Any, slot: str, resolve: Callable[[], T]) -> T:
     state = request.state
     cached = state.get(slot, _MISSING)
     if cached is not _MISSING:
-        return cast(T, cached)
+        return cached
     resolved = resolve()
     state.__setattr__(slot, resolved)
     return resolved
@@ -82,7 +82,7 @@ async def resolve_once_async[T](
     state = request.state
     cached = state.get(slot, _MISSING)
     if cached is not _MISSING:
-        return cast(T, cached)
+        return cached
     resolved = await resolve()
     state.__setattr__(slot, resolved)
     return resolved
@@ -101,7 +101,7 @@ def resolve_keyed_once[K, T](
         if not isinstance(cache, dict):
             raise TypeError(f"request.state.{slot} must be a keyed request cache")
         if key in cache:
-            return cast(T, cache[key])
+            return cache[key]
     resolved = resolve()
     if cache is _MISSING:
         cache = {}
@@ -123,7 +123,7 @@ async def resolve_keyed_once_async[K, T](
         if not isinstance(cache, dict):
             raise TypeError(f"request.state.{slot} must be a keyed request cache")
         if key in cache:
-            return cast(T, cache[key])
+            return cache[key]
     resolved = await resolve()
     if cache is _MISSING:
         cache = {}
