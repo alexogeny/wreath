@@ -39,6 +39,20 @@ __all__ = [
 ]
 
 _BRAND = re.compile(r'"([^"\\]{1,128})"\s*;\s*v="([^"\\]{1,32})"')
+_COUNT_NAMES = (
+    "resolutions",
+    "ip_known",
+    "ip_forwarded",
+    "ipv4",
+    "ipv6",
+    "geo_known",
+    "ua_known",
+    "bot",
+    "bot_verified",
+    "bot_claimed_verified",
+    "mobile_known",
+    "mobile",
+)
 
 
 def _builtin_database(name: str) -> bytes:
@@ -118,7 +132,9 @@ class ClientFactsProvider:
 
     __slots__ = (
         "_counts",
+        "_countries",
         "_geoip",
+        "_geoip_packed",
         "_lock",
         "_name",
         "_signatures",
@@ -136,26 +152,22 @@ class ClientFactsProvider:
         if not name:
             raise ValueError("client-facts provider name must be non-empty")
         self._geoip = geoip
+        self._geoip_packed = (
+            geoip._lookup_packed if type(geoip) is WreathGeoIP else None
+        )
         self._name = name
         if signatures is not None and not callable(getattr(signatures, "facts", None)):
             raise TypeError("client-facts signatures must expose facts(request)")
         self._signatures = signatures
         self._user_agents = user_agents or UserAgentDatabase()
         self._lock = threading.Lock()
-        self._counts = {
-            "resolutions": 0,
-            "ip_known": 0,
-            "ip_forwarded": 0,
-            "ipv4": 0,
-            "ipv6": 0,
-            "geo_known": 0,
-            "ua_known": 0,
-            "bot": 0,
-            "bot_verified": 0,
-            "bot_claimed_verified": 0,
-            "mobile_known": 0,
-            "mobile": 0,
-        }
+        # The fixed readings are updated together on every resolution. Keep
+        # their integer cells contiguous instead of hashing twelve constant
+        # strings into a dispersed dict twelve times per request. Country is
+        # the only dynamic dimension and remains separately bounded by ISO's
+        # two-letter namespace; counters() materializes the published mapping.
+        self._counts = [0] * len(_COUNT_NAMES)
+        self._countries: dict[str, int] = {}
 
     def resolve(self, request: Request) -> ClientFacts:
         return resolve_keyed_once(
@@ -168,7 +180,8 @@ class ClientFactsProvider:
     def _resolve_uncached(self, request: Request) -> ClientFacts:
         """Resolve one provider after the request-cache miss is established."""
         raw = request.header("user-agent", "") or ""
-        brands = tuple(_BRAND.findall(request.header("sec-ch-ua", "") or ""))
+        brand_hint = request.header("sec-ch-ua")
+        brands = () if not brand_hint else tuple(_BRAND.findall(brand_hint))
         try:
             db_browser, db_version, db_platform, db_mobile, db_bot, rule_id = (
                 self._user_agents._classify(raw)
@@ -181,11 +194,11 @@ class ClientFactsProvider:
             db_mobile = None
             db_bot = False
             rule_id = 0
-        selected_brand = next(
-            ((brand, version) for brand, version in brands
-             if "not" not in brand.lower()),
-            None,
-        )
+        selected_brand = None
+        for brand, version in brands:
+            if "not" not in brand.lower():
+                selected_brand = (brand, version)
+                break
         browser = db_browser if selected_brand is None else selected_brand[0]
         browser_version = db_version if selected_brand is None else selected_brand[1]
         platform_hint = request.header("sec-ch-ua-platform")
@@ -214,6 +227,17 @@ class ClientFactsProvider:
                 pass
             else:
                 address = str(parsed)
+                geoip = self._geoip
+                packed_lookup = self._geoip_packed
+                geo = (
+                    None
+                    if geoip is None
+                    else (
+                        packed_lookup(parsed.packed)
+                        if packed_lookup is not None
+                        else geoip.lookup(address)
+                    )
+                )
                 ip = IPFacts(
                     address=address,
                     source=request.client_source,
@@ -221,7 +245,7 @@ class ClientFactsProvider:
                     is_global=parsed.is_global,
                     is_private=parsed.is_private,
                     is_loopback=parsed.is_loopback,
-                    geo=None if self._geoip is None else self._geoip.lookup(address),
+                    geo=geo,
                 )
         signature_facts = (
             None if self._signatures is None else self._signatures.facts(request)
@@ -238,27 +262,28 @@ class ClientFactsProvider:
         self._record_flight(request, facts)
         with self._lock:
             counts = self._counts
-            counts["resolutions"] += 1
-            counts["ua_known"] += int(
+            counts[0] += 1
+            counts[6] += int(
                 ua.browser is not None
                 or ua.platform is not None
                 or ua.mobile is not None
                 or ua.bot
             )
-            counts["bot"] += int(ua.bot)
-            counts["bot_verified"] += int(agent.verified)
-            counts["bot_claimed_verified"] += int(agent.claimed and agent.verified)
-            counts["mobile_known"] += int(ua.mobile is not None)
-            counts["mobile"] += int(ua.mobile is True)
+            counts[7] += int(ua.bot)
+            counts[8] += int(agent.verified)
+            counts[9] += int(agent.claimed and agent.verified)
+            counts[10] += int(ua.mobile is not None)
+            counts[11] += int(ua.mobile is True)
             if ip is not None:
-                counts["ip_known"] += 1
-                counts["ip_forwarded"] += int(ip.source == "forwarded")
-                counts["ipv4" if ip.version == 4 else "ipv6"] += 1
-                counts["geo_known"] += int(ip.geo is not None)
+                counts[1] += 1
+                counts[2] += int(ip.source == "forwarded")
+                counts[3 if ip.version == 4 else 4] += 1
+                counts[5] += int(ip.geo is not None)
                 country = _country_code(ip.geo)
                 if country is not None:
                     key = f"country_{country.lower()}"
-                    counts[key] = counts.get(key, 0) + 1
+                    countries = self._countries
+                    countries[key] = countries.get(key, 0) + 1
         return facts
 
     def __call__(self, request: Request) -> ClientFacts:
@@ -268,6 +293,11 @@ class ClientFactsProvider:
     @staticmethod
     def _record_flight(request: Request, facts: ClientFacts) -> None:
         context = getattr(request, "_context", None)
+        # Native contexts expose this integer precisely so optional recorder
+        # work is free while telemetry is off.  A third-party context without
+        # the marker retains the existing duck-typed recording path.
+        if getattr(context, "flight", None) == 0:
+            return
         record = getattr(context, "_flight_client_facts", None)
         if not callable(record):
             return
@@ -291,7 +321,8 @@ class ClientFactsProvider:
         from .metrics import Counters
 
         with self._lock:
-            values = dict(self._counts)
+            values = dict(zip(_COUNT_NAMES, self._counts, strict=True))
+            values.update(self._countries)
         return Counters("client_facts", self._name, values)
 
 
@@ -440,5 +471,9 @@ class WreathGeoIP:
 
     def lookup(self, address: str) -> GeoIPRecord | None:
         packed = ipaddress.ip_address(address).packed
+        return self._lookup_packed(packed)
+
+    def _lookup_packed(self, packed: bytes) -> GeoIPRecord | None:
+        """Look up an address already parsed by the owning facts provider."""
         country = self._database.lookup(packed)
         return None if country is None else GeoIPRecord(country=country)

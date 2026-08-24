@@ -88,6 +88,105 @@ def test_client_facts_distinguish_socket_from_trusted_forwarding() -> None:
     assert after.user_agent.mobile is False
 
 
+def test_client_hints_skip_grease_brand_before_the_real_brand() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "client": ("203.0.113.8", None),
+            "headers": [
+                (b"user-agent", b"Mozilla/5.0 Chrome/120 Linux"),
+                (b"sec-ch-ua", b'"Not_A Brand";v="99", "Chromium";v="120"'),
+            ],
+        },
+        receive,
+    )
+
+    facts = ClientFactsProvider().resolve(request)
+
+    assert facts.user_agent.brands == (("Not_A Brand", "99"), ("Chromium", "120"))
+    assert (facts.user_agent.browser, facts.user_agent.browser_version) == (
+        "Chromium",
+        "120",
+    )
+
+
+def test_exact_builtin_geoip_reuses_the_provider_ip_parse(monkeypatch) -> None:
+    geoip = WreathGeoIP()
+    provider = ClientFactsProvider(geoip)
+
+    def parsed_again(_self, _address):
+        raise AssertionError("the exact built-in GeoIP provider parsed the address twice")
+
+    monkeypatch.setattr(WreathGeoIP, "lookup", parsed_again)
+    request = Request(
+        {"type": "http", "client": ("4.1.1.1", None), "headers": []},
+        receive,
+    )
+
+    facts = provider.resolve(request)
+
+    assert facts.ip is not None
+    assert facts.ip.geo == GeoIPRecord(country="US")
+
+
+def test_client_facts_skip_only_an_explicitly_unarmed_flight_context() -> None:
+    facts = ClientFacts(
+        ip=None,
+        user_agent=UserAgentFacts(
+            raw="curl/8", browser="curl", browser_version="8", rule_id=7
+        ),
+        agent=AgentFacts(claimed=False, verified=False),
+    )
+
+    class Context:
+        def __init__(self, flight: int) -> None:
+            self.flight = flight
+            self.recorded: tuple[int, int, str] | None = None
+
+        def _flight_client_facts(self, flags: int, rule_id: int, country: str) -> None:
+            self.recorded = (flags, rule_id, country)
+
+    off = Context(0)
+    ClientFactsProvider._record_flight(SimpleNamespace(_context=off), facts)
+    assert off.recorded is None
+
+    armed = Context(1)
+    ClientFactsProvider._record_flight(SimpleNamespace(_context=armed), facts)
+    assert armed.recorded == (1, 7, "")
+
+
+def test_client_facts_record_the_resolved_country_in_an_armed_flight() -> None:
+    facts = ClientFacts(
+        ip=IPFacts(
+            address="203.0.113.8",
+            source="forwarded",
+            version=4,
+            is_global=True,
+            is_private=False,
+            is_loopback=False,
+            geo=GeoIPRecord(country="au"),
+        ),
+        user_agent=UserAgentFacts(raw="curl/8", rule_id=7),
+        agent=AgentFacts(claimed=False, verified=False),
+    )
+
+    class Context:
+        flight = 1
+        recorded: tuple[int, int, str] | None = None
+
+        def _flight_client_facts(self, flags: int, rule_id: int, country: str) -> None:
+            self.recorded = (flags, rule_id, country)
+
+    context = Context()
+    ClientFactsProvider._record_flight(SimpleNamespace(_context=context), facts)
+
+    assert context.recorded is not None
+    flags, rule_id, country = context.recorded
+    assert flags & (1 << 7)
+    assert rule_id == 7
+    assert country == "AU"
+
+
 def test_client_fact_metrics_are_fixed_aggregate_counts() -> None:
     request = Request(
         {
@@ -159,6 +258,26 @@ def test_client_fact_attributes_follow_otel_names_without_identifiers() -> None:
     }
     assert facts.ip.address not in attributes.values()
     assert facts.user_agent.raw not in attributes.values()
+
+
+def test_client_fact_attributes_omit_an_oversized_browser_version() -> None:
+    facts = ClientFacts(
+        ip=None,
+        user_agent=UserAgentFacts(raw="custom", browser_version="v" * 65),
+        agent=AgentFacts(claimed=False, verified=False),
+    )
+
+    assert "user_agent.version" not in client_fact_attributes(facts)
+
+
+def test_client_fact_attributes_omit_an_absent_browser_version() -> None:
+    facts = ClientFacts(
+        ip=None,
+        user_agent=UserAgentFacts(raw="custom", browser_version=None),
+        agent=AgentFacts(claimed=False, verified=False),
+    )
+
+    assert "user_agent.version" not in client_fact_attributes(facts)
 
 
 def test_provider_caches_and_fuses_verified_agent_once_per_request() -> None:
