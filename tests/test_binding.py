@@ -580,6 +580,34 @@ async def test_query_invalid_syntax_still_errors_before_clamp() -> None:
     assert excinfo.value.errors[0]["type"] == "int"
 
 
+async def test_exact_query_binding_keeps_first_alias_and_form_decoding() -> None:
+    """The compiled exact-scalar scan preserves generic query semantics.
+
+    One encoded spelling and one literal spelling name the same alias; the
+    first value wins for both handler parameters that deliberately share it.
+    An unrelated field is ignored without changing declaration-order binding.
+    """
+
+    async def handler(
+        request: Any,
+        label: Annotated[str, Query(alias="display")],
+        repeated: Annotated[str, Query(alias="display")],
+        enabled: Annotated[bool, Query()],
+        ratio: Annotated[float, Query()],
+    ) -> Any:
+        return label, repeated, enabled, ratio
+
+    bound = compile_binder(handler, "/")
+    result = await bound(
+        _query_request(
+            b"noise=discarded&dis%70lay=first+value&display=second"
+            b"&enabled=YES&ratio=1.25"
+        )
+    )
+
+    assert result == ("first value", "first value", True, 1.25)
+
+
 def test_query_bad_overflow_policy_rejected() -> None:
 
     with pytest.raises(ValueError):
