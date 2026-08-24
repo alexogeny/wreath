@@ -320,7 +320,8 @@ int wreath_http2_feed_external(PyObject *, const char *, Py_ssize_t);
  * accepted over h2 exactly the octets it refused over h1. That disagreement is
  * a request-splitting primitive for any downstream that re-serializes the
  * headers to HTTP/1.1, so the rule now lives in one place. */
-extern const uint8_t wreath_field_token[256];
+/* The table itself is `wreath_ascii_token` in `ascii.h`, shared with the
+ * `http.c` head parser that used to carry its own copy of it. */
 
 /* A non-empty RFC 9110 token, any case. */
 int wreath_field_name_valid(const char *data, Py_ssize_t size);
