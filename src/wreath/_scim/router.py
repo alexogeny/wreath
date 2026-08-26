@@ -133,6 +133,24 @@ def _parsed_filter(
     return node
 
 
+def _sortable_value(value: Any) -> tuple[bool, str]:
+    if isinstance(value, list):
+        primary = next(
+            (
+                item
+                for item in value
+                if isinstance(item, Mapping) and item.get("primary") is True
+            ),
+            value[0] if value else None,
+        )
+        value = primary.get("value") if isinstance(primary, Mapping) else primary
+    if value is None:
+        return True, ""
+    if isinstance(value, bool):
+        return False, "1" if value else "0"
+    return False, str(value).casefold()
+
+
 def scim_router(
     app: Any,
     *,
@@ -473,7 +491,7 @@ def scim_router(
         if requested is None:
             return documents
         key = requested.lower()
-        if "." in key or key not in shape.queryable:
+        if key not in shape.queryable:
             raise PatchError(
                 "invalidValue",
                 f"sortBy names unsupported attribute {requested!r}; expected one of "
@@ -488,19 +506,7 @@ def scim_router(
         wire_name = shape.canonical[key]
 
         def sortable(document: dict[str, Any]) -> tuple[bool, str]:
-            value = document.get(wire_name)
-            if isinstance(value, list):
-                primary = next(
-                    (item for item in value
-                     if isinstance(item, Mapping) and item.get("primary") is True),
-                    value[0] if value else None,
-                )
-                value = primary.get("value") if isinstance(primary, Mapping) else primary
-            if value is None:
-                return True, ""
-            if isinstance(value, bool):
-                return False, "1" if value else "0"
-            return False, str(value).casefold()
+            return _sortable_value(document.get(wire_name))
 
         present = [document for document in documents if not sortable(document)[0]]
         missing = [document for document in documents if sortable(document)[0]]
