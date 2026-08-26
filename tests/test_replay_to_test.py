@@ -19,6 +19,9 @@ import pytest
 from wreath import Wreath
 from wreath.replay import (
     ReplayError,
+    SegmentKind,
+    TransportRecording,
+    TransportSegment,
     generate_test,
     record_transport_segments,
     recorded_request,
@@ -91,6 +94,23 @@ def test_a_request_split_across_segments_is_reassembled() -> None:
     assert request.body == b'{"name": "Bea"}\n'
 
 
+def test_non_data_segments_never_become_request_bytes() -> None:
+    recording = TransportRecording(
+        (
+            TransportSegment(0, int(SegmentKind.DATA), GET),
+            TransportSegment(1, int(SegmentKind.RESET), b"not request bytes"),
+        )
+    )
+
+    assert recorded_request(recording).path == "/llamas/7"
+
+
+def test_an_empty_content_length_is_zero() -> None:
+    raw = b"GET /llamas/7 HTTP/1.1\r\nhost: x\r\ncontent-length:\r\n\r\n"
+
+    assert recorded_request(_recording(raw)).body == b""
+
+
 def test_a_recording_with_no_request_is_refused() -> None:
     with pytest.raises(ReplayError, match="no request"):
         recorded_request(_recording(b""))
@@ -134,6 +154,74 @@ async def test_the_generated_test_reproduces_the_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generated_paths_preserve_query_presence_exactly() -> None:
+    queried = await generate_test(_app(), _recording(GET), target="herd.app:app")
+    plain = await generate_test(
+        _app(),
+        _recording(b"GET /llamas/7 HTTP/1.1\r\nhost: herd.example\r\n\r\n"),
+        target="herd.app:app",
+    )
+
+    assert "'/llamas/7?include=treks'" in queried
+    assert "'/llamas/7'" in plain
+    assert "'/llamas/7?'" not in plain
+
+
+@pytest.mark.asyncio
+async def test_generation_replays_the_query_when_observing_the_response() -> None:
+    app = Wreath()
+
+    @app.get("/echo")
+    async def echo(request) -> dict:
+        return {"query": request.query_string.decode("latin-1")}
+
+    recording = _recording(
+        b"GET /echo?mode=deep HTTP/1.1\r\nhost: example.test\r\n\r\n"
+    )
+    source = await generate_test(app, recording, target="echo.app:app")
+
+    response_assertion = source.split("assert response.body ==", 1)[1]
+    assert '"query":"mode=deep"' in response_assertion
+
+
+@pytest.mark.asyncio
+async def test_generated_headers_exclude_transport_framing() -> None:
+    source = await generate_test(
+        _app(),
+        _recording(
+            b"GET /llamas/7 HTTP/1.1\r\n"
+            b"host: herd.example\r\n"
+            b"content-length: 0\r\n"
+            b"connection: close\r\n"
+            b"accept: application/json\r\n\r\n"
+        ),
+        target="herd.app:app",
+    )
+
+    request_headers = source.split("headers=", 1)[1].split(",\n", 1)[0]
+    assert "accept" in request_headers
+    assert "host" not in request_headers
+    assert "content-length" not in request_headers
+    assert "connection" not in request_headers
+
+
+@pytest.mark.asyncio
+async def test_generation_does_not_replay_the_recorded_host_header() -> None:
+    app = Wreath()
+
+    @app.get("/host")
+    async def host(request) -> dict:
+        return {"host": request.header("host")}
+
+    recording = _recording(
+        b"GET /host HTTP/1.1\r\nhost: recorded.example\r\nconnection: close\r\n\r\n"
+    )
+    source = await generate_test(app, recording, target="host.app:app")
+
+    assert "recorded.example" not in source.split("assert response.body ==", 1)[1]
+
+
+@pytest.mark.asyncio
 async def test_the_generated_test_asserts_the_observed_body() -> None:
     source = await generate_test(_app(), _recording(GET), target="herd.app:app")
     assert b'"name":"Bea"' in source.encode() or '\\"name\\":\\"Bea\\"' in source
@@ -171,6 +259,14 @@ async def test_a_post_body_is_carried_into_the_generated_test() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_empty_body_does_not_emit_a_content_argument() -> None:
+    source = await generate_test(_app(), _recording(GET), target="herd.app:app")
+
+    request_call = source.split("response = await client.request(", 1)[1].split(")", 1)[0]
+    assert "content=" not in request_call
+
+
+@pytest.mark.asyncio
 async def test_the_name_is_derived_from_the_request() -> None:
     source = await generate_test(_app(), _recording(GET), target="herd.app:app")
     assert "async def test_get_llamas_7(" in source
@@ -195,9 +291,25 @@ async def test_the_generated_test_says_where_it_came_from() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generated_test_without_origin_does_not_invent_one() -> None:
+    source = await generate_test(_app(), _recording(GET), target="herd.app:app")
+
+    assert "Captured from" not in source
+
+
+@pytest.mark.asyncio
 async def test_a_module_only_target_imports_the_module() -> None:
     source = await generate_test(_app(), _recording(GET), target="herd.app")
     assert "import herd.app" in source
+    assert "TestClient(herd.app.app)" in source
+
+
+@pytest.mark.asyncio
+async def test_explicit_target_uses_the_imported_attribute_directly() -> None:
+    source = await generate_test(_app(), _recording(GET), target="herd.app:application")
+
+    assert "from herd.app import application" in source
+    assert "TestClient(application)" in source
 
 
 @pytest.mark.asyncio

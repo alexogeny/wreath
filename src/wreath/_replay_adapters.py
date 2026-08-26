@@ -457,7 +457,7 @@ class _ConnectionDouble:
         self._query += 1
         double = self._double
         text = " ".join(sql.split()) if isinstance(sql, str) else None
-        if text is not None and text in double.poisoned:
+        if text in double.poisoned:
             # Second and every subsequent execution of a statement whose
             # parameter type was inferred once and cannot be encoded again.
             raise _db_error(AdapterFault.PREPARED_POISON)
