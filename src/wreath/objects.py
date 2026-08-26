@@ -1921,7 +1921,7 @@ class S3ObjectStore:
         """
         key = normalize_key(key)
         resp = self._ok(await self._send("HEAD", self._obj_path(key)), 200)
-        size = int((resp.header(b"content-length") or b"0").decode("ascii") or 0)
+        size = int((resp.header(b"content-length") or b"0").decode("ascii"))
         etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
         ctype = resp.header(b"content-type")
         return ObjectStat(
