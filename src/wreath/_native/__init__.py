@@ -1,6 +1,6 @@
 """The one place that loads compiled extensions for Python facades.
 
-The five extensions built into every base wheel are required. Capability
+The nine extensions built into every base wheel are required. Capability
 extensions return ``None`` when their companion wheel is not installed or the
 platform cannot contain them.
 
@@ -24,13 +24,33 @@ from typing import Any
 #: Every extension `setup.py` builds. A name absent from here is a typo, not a
 #: build without it.
 #:
-#: `_core`, `_client`, `_edge`, `_server`, and `_postgres` are present in every
-#: base wheel. `_reactor` is installed by `wreath[linux]`, `_http3` by
+#: `_core`, `_client`, `_docs`, `_dupscan`, `_edge`, `_lint`, `_server`,
+#: `_postgres`, and `_testrunner` are present in every base wheel. `_reactor` is installed by
+#: `wreath[linux]`, `_http3` by
 #: `wreath[h3]`/`wreath[http3]`, and `_flight` is platform-gated.
 _EXTENSIONS: frozenset[str] = frozenset(
-    {"_core", "_client", "_postgres", "_server", "_reactor", "_edge", "_flight", "_http3"}
+    {
+        "_core",
+        "_client",
+        "_docs",
+        "_dupscan",
+        "_postgres",
+        "_server",
+        "_testrunner",
+        "_reactor",
+        "_edge",
+        "_flight",
+        "_http3",
+        "_lint",
+    }
 )
-_REQUIRED_EXTENSIONS = frozenset({"_core", "_client", "_postgres", "_server", "_edge"})
+_REQUIRED_EXTENSIONS = frozenset(
+    {
+        "_core", "_client", "_docs", "_dupscan", "_lint", "_postgres",
+        "_server", "_edge", "_testrunner",
+    }
+)
+
 
 def extension(name: str) -> Any | None:
     """Load one compiled extension.
