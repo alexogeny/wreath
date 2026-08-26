@@ -203,7 +203,8 @@ wreath-roadmap-lint = "wreath._devtools.roadmap_lint:main"
 wreath-sql-lint = "wreath._devtools.sql_lint:main"
 # Checks (--update regenerates) the pinned `wreath port` emitter output.
 wreath-port-golden = "wreath._devtools.port_golden:main"
-# Reports function bodies sharing a structure. A report, not a gate.
+# Reports shared whole-body structures and native-scanned copied fragments.
+# A report, not a gate.
 wreath-dup-scan = "wreath._devtools.dup_scan:main"
 wreath-mutant = "wreath._mutant.cli:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"
@@ -326,6 +327,11 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "BLE", "RUF100", "S102", "S310"]
 extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 
 [tool.ruff.lint.per-file-ignores]
+# A native test worker is a process fault boundary: any ordinary exception must
+# become a serialized worker failure so the controller can count it against each
+# owned case. KeyboardInterrupt/SystemExit remain outside `Exception` and are not
+# swallowed; the controller also treats a missing payload as a crashed worker.
+"src/wreath/_native_test_runner.py" = ["BLE001"]
 # The `wreath port` rule catalog is a data table, not code: one line per rule,
 # `rule_id -> (construct, category, tag, message)`, where the message is the
 # prose a reviewer reads in the report. Rule ids appear in that report so a

@@ -1,6 +1,7 @@
 """Build configuration for the wreath._native C extensions.
 
-Every wheel contains `_core`, `_client`, `_edge`, `_server`, and `_postgres`.
+Every wheel contains `_core`, `_client`, `_docs`, `_dupscan`, `_edge`, `_lint`,
+`_server`, `_postgres`, and `_testrunner`.
 Routing, protocols, database access and codecs therefore have one installed
 implementation. A default build needs only a C compiler and CPython headers.
 
@@ -277,6 +278,26 @@ else:
 
 
 ext_modules = [
+        Extension(
+            "wreath._native._dupscan",
+            sources=["src/wreath/_native/_dupscanmodule.c"],
+            extra_compile_args=extra_compile_args,
+        ),
+        Extension(
+            "wreath._native._docs",
+            sources=["src/wreath/_native/_docsmodule.c"],
+            extra_compile_args=extra_compile_args,
+        ),
+        Extension(
+            "wreath._native._lint",
+            sources=["src/wreath/_native/_lintmodule.c"],
+            extra_compile_args=extra_compile_args,
+        ),
+        Extension(
+            "wreath._native._testrunner",
+            sources=["src/wreath/_native/_testrunnermodule.c"],
+            extra_compile_args=extra_compile_args,
+        ),
         Extension(
             "wreath._native._core",
             sources=[
