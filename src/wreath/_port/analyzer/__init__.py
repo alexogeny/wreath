@@ -8,6 +8,7 @@ targets resolve cross-module; (2) classify constructs into findings.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -105,7 +106,14 @@ class TreeContext:
     django: DjangoImage = dataclass_field(default_factory=DjangoImage)
 
     @classmethod
-    def of(cls, files: list[Path], on_skip=None, *, opinionated: bool = False) -> TreeContext:
+    def of(
+        cls,
+        files: list[Path],
+        on_skip=None,
+        *,
+        opinionated: bool = False,
+        trees: Mapping[Path, ast.Module] | None = None,
+    ) -> TreeContext:
         (
             index,
             orm_columns,
@@ -115,13 +123,11 @@ class TreeContext:
             positional_calls,
             class_bases,
             class_members,
-        ) = _index_tree(
-            files, on_skip=on_skip
-        )
+        ) = _index_tree(files, on_skip=on_skip, trees=trees)
         # A Django model is an ORM model: its columns and relations answer the
         # same questions ormar's do, and the query rules read them by the same
         # names. Merged rather than kept apart so one rewrite path serves both.
-        image = django_image(files, on_skip=on_skip)
+        image = django_image(files, on_skip=on_skip, trees=trees)
         orm_columns = {**image.columns, **orm_columns}
         orm_relations = {**image.relations, **orm_relations}
         orm_tables = {**image.tables, **orm_tables}
@@ -150,7 +156,7 @@ class TreeContext:
             else (frozenset(), frozenset())
         )
         return cls(
-            tree_pk_types(files, on_skip=on_skip),
+            tree_pk_types(files, on_skip=on_skip, trees=trees),
             index,
             orm_columns,
             orm_relations,
@@ -232,13 +238,21 @@ def analyze(root) -> Report:
         skipped.setdefault(key, SkippedFile(key, _skip_reason(exc), _skip_detail(exc)))
 
     files = list(_iter_py(root, on_error=lambda exc: record(exc.filename or root, exc)))
-    context = TreeContext.of(files, on_skip=record)
+    trees: dict[Path, ast.Module] = {}
+    for path in files:
+        try:
+            trees[path] = _parse_file(path)
+        except _SKIPPABLE as exc:
+            record(path, exc)
+    context = TreeContext.of(files, on_skip=record, trees=trees)
     findings: list[Finding] = []
     signals: dict[str, ModuleSignals] = {}
     analyzed = 0
     for path in files:
+        tree = trees.get(path)
+        if tree is None:
+            continue
         try:
-            tree = _parse_file(path)
             imports = _Imports().visit(tree)
             found = module_findings(path, root, tree, imports, context)
         except _SKIPPABLE as exc:

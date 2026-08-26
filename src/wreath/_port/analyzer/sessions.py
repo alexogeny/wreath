@@ -64,8 +64,10 @@ def _function_query_names(
                 and node.value.attr == "objects"):
             continue
         call = parents.get(id(node))
+        if not isinstance(call, ast.Call):
+            continue
         rule_id = query_rule(
-            node.attr, call if isinstance(call, ast.Call) else None,
+            node.attr, call,
             chain_tail(node, parents),
             model=ast.unparse(node.value.value),
             relations=orm_relations,
@@ -73,7 +75,7 @@ def _function_query_names(
             tables=orm_tables,
             unique_constraints=orm_unique_constraints,
             plain_mappings=plain_filter_mappings(
-                call if isinstance(call, ast.Call) else None, parents
+                call, parents
             ),
         )
         owner = enclosing.get(id(node))

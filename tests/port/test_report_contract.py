@@ -10,7 +10,13 @@ port = pytest.importorskip("wreath.port")
 VALID_TAGS = {"translated", "needs-review", "unsupported"}
 
 
-def test_report_shape(corpus_app_roots):
+def test_report_shape_and_every_query_is_still_reported(corpus_app_roots):
+    """Pin the JSON contract and ensure every ORM query receives a verdict.
+
+    Design 07 §6: no ``.objects.`` chain goes unmentioned, whatever its verdict.
+    The two contracts consume the same immutable report, so the corpus is
+    deliberately analyzed once.
+    """
     doc = port.analyze_all(corpus_app_roots).as_dict()
     assert set(doc) >= {"counts", "findings"}
     assert set(doc["counts"]) >= {"translated", "needs_review", "unsupported"}
@@ -19,20 +25,14 @@ def test_report_shape(corpus_app_roots):
         assert finding["tag"] in VALID_TAGS
         assert isinstance(finding["line"], int)
 
-
-def test_every_query_is_still_reported(corpus_app_roots):
-    """Design 07 §6: no ``.objects.`` chain goes unmentioned, whatever its verdict.
-
-    This used to assert that no query is ever tagged ``translated``. That was a
-    proxy for "the emitter does not rewrite queries", and it stopped being one
-    once the analyzer began reading arguments: ``filter(id=x)`` has a fully
-    determined target and says so, while the emitter still copies the body
-    byte-for-byte. The rewrite contract is pinned directly in
-    ``test_query_classification.test_the_emitter_never_rewrites_a_query``; what
-    matters here is that every chain still produces a finding, because silence
-    is the only genuinely useless verdict.
-    """
-    doc = port.analyze_all(corpus_app_roots).as_dict()
+    # This used to assert that no query is ever tagged ``translated``. That was a
+    # proxy for "the emitter does not rewrite queries", and it stopped being one
+    # once the analyzer began reading arguments: ``filter(id=x)`` has a fully
+    # determined target and says so, while the emitter still copies the body
+    # byte-for-byte. The rewrite contract is pinned directly in
+    # ``test_query_classification.test_the_emitter_never_rewrites_a_query``; what
+    # matters here is that every chain still produces a finding, because silence
+    # is the only genuinely useless verdict.
     query_findings = [f for f in doc["findings"] if f["construct"] == "orm_query"]
     assert query_findings, "corpus deliberately contains .objects. query calls"
     assert all(f["tag"] in {"translated", "needs-review", "unsupported"}

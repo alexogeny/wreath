@@ -31,18 +31,16 @@ CATEGORY_FLOORS = {
 }
 
 
-def test_each_app_root_analyzes(corpus_app_roots):
-    for root in corpus_app_roots:
-        report = port.analyze(root)
+def test_corpus_analysis_is_complete_and_meets_coverage_floors(corpus_app_roots):
+    reports = [port.analyze(root) for root in corpus_app_roots]
+    for root, report in zip(corpus_app_roots, reports, strict=True):
         assert report.recognized_constructs > 0
         # Nothing in the corpus is unreadable, so a skip here means the walk or
         # the reader broke — the coverage above would be over a shrunken tree.
         assert report.skipped == [], root
         assert report.files_analyzed > 0
 
-
-def test_category_coverage_floors(corpus_app_roots):
-    report = port.analyze_all(corpus_app_roots)
+    report = port.Report.merge(reports)
     for category, floor in CATEGORY_FLOORS.items():
         measured = report.coverage(category)
         # `None` means the category recognized nothing at all — which used to
@@ -51,9 +49,6 @@ def test_category_coverage_floors(corpus_app_roots):
         assert measured is not None, f"{category}: nothing recognized"
         assert measured >= floor, category
 
-
-def test_overall_coverage_is_honest(corpus_app_roots):
-    report = port.analyze_all(corpus_app_roots)
     # Design 07 §5 expected ~45-60%; reading constructs by *shape* rather than by
     # name first took it to ~0.78. Exact primary-key reads, statically proven
     # field mappings, and local TestClient lifetimes now take it to ~0.83; each

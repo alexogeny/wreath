@@ -241,7 +241,7 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
             if existing is positional[0] and len(positional) > 1:
                 s = self.buf.start_of(positional[1])
                 self.buf._edits.append((s, s, f"{star}{extra}".encode()))
-            elif existing is not None and star + extra:
+            elif existing is not None:
                 end = self.buf.end_of(existing)
                 self.buf._edits.append((end, end, f", {star}{extra}".rstrip(" ,").encode()))
             else:
