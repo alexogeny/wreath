@@ -8,16 +8,58 @@ string literals, one-time cached imports, and a single-line loop body.
 
 from __future__ import annotations
 
+import random
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+from _native_lint_reference import loop_depth_map as _loop_depth_map_reference
+from _native_lint_reference import strip_c as _strip_c_reference
 
-from wreath._devtools.native_lint import RULES, main, scan_text
+from wreath._devtools.native_lint import (
+    RULES,
+    _c_tape,
+    _enclosing_function,
+    _function_map,
+    main,
+    scan_text,
+)
 
 
 def _codes(source: str) -> list[str]:
     return [f.code for f in scan_text("fixture.c", source)]
+
+
+def test_native_c_tape_matches_the_independent_python_definition() -> None:
+    """The fast lexical image must preserve the old scanner exactly."""
+    pieces = (
+        "static int f(void) {\n",
+        "for (int i = 0; i < 3; i++) {\n",
+        "while ((item = next()) != NULL) { call(item); }\n",
+        "/* block { for (;;) and λ */\n",
+        "// line } while (0)\n",
+        'const char *s = "escaped \\\\" // still a string";\n',
+        "char c = '\\\\'';\n",
+        "if (ready) { use(); }\n",
+        "}\n",
+        "",
+    )
+    rng = random.Random(20260826)
+    corpus = [
+        "".join(rng.choice(pieces) for _ in range(rng.randint(1, 24)))
+        for _ in range(256)
+    ]
+    corpus.extend(("", "\n", "for (;;) {\n}\n", "for\n(;;)\n{\n}\n"))
+
+    for source in corpus:
+        expected_lines = _strip_c_reference(source)
+        expected_depth = _loop_depth_map_reference(expected_lines)
+        assert _c_tape(source) == (expected_lines, expected_depth)
+        assert _function_map(expected_lines) == [
+            _enclosing_function(expected_lines, index)
+            for index in range(len(expected_lines))
+        ]
 
 
 def test_front_deletion_is_reported() -> None:
@@ -250,10 +292,20 @@ def test_the_native_tree_is_clean() -> None:
     assert main([]) == 0, "wreath-native-lint reported findings in src/wreath/_native"
 
 
-@pytest.mark.parametrize("args", [["--list-rules"], ["--format", "json"]])
-def test_cli_entrypoint_runs(args: list[str]) -> None:
+@pytest.mark.parametrize(
+    ("args", "needs_source"),
+    [(["--list-rules"], False), (["--format", "json"], True)],
+)
+def test_cli_entrypoint_runs(
+    args: list[str], needs_source: bool, tmp_path: Path
+) -> None:
+    paths: list[str] = []
+    if needs_source:
+        source = tmp_path / "clean.c"
+        source.write_text("static int clean(void) { return 0; }\n", encoding="utf-8")
+        paths.append(str(source))
     result = subprocess.run(
-        [sys.executable, "-m", "wreath._devtools.native_lint", *args],
+        [sys.executable, "-m", "wreath._devtools.native_lint", *paths, *args],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr
