@@ -10,6 +10,7 @@ import pytest
 
 from wreath import Response, Wreath
 from wreath.policy import (
+    AIScrapingPolicy,
     CorsPolicy,
     HttpPolicy,
     RequestIdPolicy,
@@ -23,6 +24,7 @@ from wreath.server import ServerConfig
 from wreath.signatures import robots_txt
 
 _server = importlib.import_module("wreath._native._server")
+app_module = importlib.import_module("wreath.app")
 
 
 class Recorder(asyncio.Transport):
@@ -184,6 +186,128 @@ async def test_explicit_ai_scraping_opt_in_keeps_the_policy_free_fast_path() -> 
         b"GET / HTTP/1.1\r\nhost: allowed.test\r\nuser-agent: GPTBot/1.0\r\n\r\n",
     )
     assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+
+
+@pytest.mark.asyncio
+async def test_policy_free_native_json_uses_the_one_shot_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded: list[object] = []
+    original = app_module._json_dumps
+
+    def watched(value: object) -> bytes:
+        encoded.append(value)
+        return original(value)
+
+    monkeypatch.setattr(app_module, "_json_dumps", watched)
+    app = Wreath(ai_scraping="allow")
+
+    @app.get("/")
+    async def home():
+        return {"ready": True}
+
+    app._compile_routes()
+    response = await serve(app, b"GET / HTTP/1.1\r\nhost: allowed.test\r\n\r\n")
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert encoded == [{"ready": True}]
+
+
+@pytest.mark.asyncio
+async def test_ingress_only_policy_keeps_native_json_egress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded: list[object] = []
+    original = app_module._json_dumps
+
+    def watched(value: object) -> bytes:
+        encoded.append(value)
+        return original(value)
+
+    monkeypatch.setattr(app_module, "_json_dumps", watched)
+    app = Wreath(
+        http_policy=HttpPolicy(
+            ai_scraping=AIScrapingPolicy(allow=True),
+        ),
+        ai_scraping="allow",
+    )
+
+    @app.get("/")
+    async def home():
+        return {"ready": True}
+
+    app._compile_routes()
+    response = await serve(app, b"GET / HTTP/1.1\r\nhost: allowed.test\r\n\r\n")
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert encoded == [{"ready": True}]
+
+
+@pytest.mark.asyncio
+async def test_egress_policy_still_wraps_a_raw_json_handler_result() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy()),
+        ai_scraping="allow",
+    )
+
+    @app.get("/")
+    async def home():
+        return {"ready": True}
+
+    app._compile_routes()
+    response = await serve(app, b"GET / HTTP/1.1\r\nhost: allowed.test\r\n\r\n")
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"x-content-type-options: nosniff\r\n" in response
+
+
+def test_a_route_without_middleware_does_not_invoke_the_chain_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiled: list[tuple[object, object]] = []
+    original = app_module.compile_middleware
+
+    def watched(endpoint: object, middleware: object, **options: object) -> object:
+        compiled.append((endpoint, middleware))
+        return original(endpoint, middleware, **options)
+
+    monkeypatch.setattr(app_module, "compile_middleware", watched)
+    app = Wreath(ai_scraping="allow")
+
+    @app.get("/")
+    async def home() -> str:
+        return "ready"
+
+    app._compile_routes()
+
+    assert compiled == []
+
+
+def test_a_route_with_middleware_does_invoke_the_chain_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiled: list[tuple[object, object]] = []
+    original = app_module.compile_middleware
+
+    def watched(endpoint: object, middleware: object, **options: object) -> object:
+        compiled.append((endpoint, middleware))
+        return original(endpoint, middleware, **options)
+
+    monkeypatch.setattr(app_module, "compile_middleware", watched)
+    app = Wreath(ai_scraping="allow")
+
+    async def transparent(request: Any, call_next: Any) -> object:
+        return await call_next(request)
+
+    app.add_middleware(transparent)
+
+    @app.get("/")
+    async def home() -> str:
+        return "ready"
+
+    app._compile_routes()
+
+    assert compiled
 
 
 @pytest.mark.asyncio
