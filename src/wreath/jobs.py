@@ -1394,8 +1394,8 @@ class JobRunner:
         arguments = self._attempts.policy.capture_arguments(
             task=job.task,
             handler=None if registered is None else registered.func,
-            args=job.args or (),
-            kwargs=getattr(job, "kwargs", None) or {},
+            args=job.args,
+            kwargs={},
             # `handler.func(ctx, *job.args)` -- the context is this process's
             # object and never the payload's, so it is aligned past rather than
             # offered as a nameable parameter.
