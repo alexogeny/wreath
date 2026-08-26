@@ -23,6 +23,9 @@ four migration modules beside the `wreath_load_u32_le` that already exists in
 
     uv run wreath-dup-scan                       # the default report
     uv run wreath-dup-scan --lang native --near  # the C half, near-copies too
+    uv run wreath-dup-scan --fragments --min-tokens 50
+    uv run wreath-dup-scan --normalization alpha --summary
+    uv run wreath-dup-scan --context 2 --format json
     uv run wreath-dup-scan --min-lines 12        # only bigger bodies
     uv run wreath-dup-scan --top 40 --format json
     uv run wreath-dup-scan --path src/wreath/_devtools
@@ -31,6 +34,17 @@ four migration modules beside the `wreath_load_u32_le` that already exists in
 an exact hash cannot see at all: one added statement changes the digest and the
 pair disappears. That is how those four `read_u32_le` copies stayed invisible.
 It is off by default because it costs a second pass and reads noisier.
+
+`--fragments` finds a copied interior even when the containing functions have
+different prefixes and suffixes. Its tokenizer, rolling-window index and
+maximal-match extension are one operation-local C pass; Python retains source
+discovery, function boundaries and reporting. Both `--min-lines` and
+`--min-tokens` must clear, which stops a long expression or a run of tiny lines
+from gaming either ruler. `--normalization alpha` preserves identifier-use
+relationships, attributes and literals while still accepting consistent local
+renames. JSON reports exact source ranges, optional `--context`, and every file
+that was discovered, scanned or skipped. `--summary` aggregates duplicate
+involvement by file and directory.
 
 **This is a report, and deliberately not a gate.** Plenty of its findings are
 legitimate near-twins -- `query`/`mutation`, `insert_settled`/
@@ -55,10 +69,13 @@ import hashlib
 import json
 import re
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .._native import _dupscan
 from .native_lint import repo_root
+
+_fragment_scan = _dupscan.scan
 
 #: Where the scan runs when no `--path` is given.
 DEFAULT_ROOTS: tuple[str, ...] = ("src/wreath",)
@@ -75,6 +92,7 @@ DEFAULT_TOP = 25
 #: The languages, and the suffixes each owns.
 LANGS: tuple[str, ...] = ("python", "native")
 SUFFIXES: dict[str, tuple[str, ...]] = {"python": (".py",), "native": (".c", ".h")}
+NORMALIZATIONS: tuple[str, ...] = ("shape", "alpha")
 
 #: How similar two shapes must be before `--near` calls them a pair. Tuned on
 #: this repository: at 0.75 the report is every genuine near-twin and little
@@ -172,6 +190,65 @@ def _structure(value: object, out: bytearray) -> None:
         for prefix, name in fields:
             out += prefix
             _structure(getattr(value, name), out)
+        return
+    out += b"V"
+    _word(out, repr(value))
+
+
+def _alpha_structure(
+    value: object,
+    out: bytearray,
+    names: dict[str, int],
+) -> None:
+    """Append a higher-precision shape that preserves name relationships.
+
+    Local names are numbered by first appearance, so a consistent rename keeps
+    the same image while ``combine(value, value)`` remains different from
+    ``combine(value, other)``. Attributes, keyword names and literal values stay
+    visible: in those positions the spelling commonly *is* the operation rather
+    than an incidental local chosen by the author.
+    """
+    if isinstance(value, ast.Name):
+        out += b"N"
+        canonical = names.setdefault(value.id, len(names))
+        out += canonical.to_bytes(4)
+        _alpha_structure(value.ctx, out, names)
+        return
+    if isinstance(value, ast.Attribute):
+        out += b"R"
+        _alpha_structure(value.value, out, names)
+        _word(out, value.attr)
+        _alpha_structure(value.ctx, out, names)
+        return
+    if isinstance(value, ast.Constant):
+        out += b"C"
+        _word(out, type(value.value).__name__)
+        _word(out, repr(value.value))
+        return
+    if isinstance(value, list):
+        out += b"L"
+        out += len(value).to_bytes(4)
+        for item in value:
+            _alpha_structure(item, out, names)
+        return
+    if isinstance(value, ast.arg):
+        out += b"G"
+        canonical = names.setdefault(value.arg, len(names))
+        out += canonical.to_bytes(4)
+        return
+    if isinstance(value, ast.keyword):
+        out += b"K0" if value.arg is None else b"K1"
+        if value.arg is not None:
+            _word(out, value.arg)
+        _alpha_structure(value.value, out, names)
+        return
+    if isinstance(value, ast.AST):
+        kind = type(value)
+        head, fields = _GENERIC.get(kind) or _generic(kind)
+        out += head
+        for prefix, name in fields:
+            out += prefix
+            _alpha_structure(getattr(value, name), out, names)
         return
     out += b"V"
     _word(out, repr(value))
@@ -277,7 +354,10 @@ def _c_body(src: str, brace: int) -> tuple[str, int]:
     return src[brace + 1:], end
 
 
-def _c_shape(body: str) -> tuple[bytearray, int]:
+def _c_shape(
+    body: str,
+    normalization: str = "shape",
+) -> tuple[bytearray, int]:
     """The anonymised token shape of a C body, and its significant line count.
 
     Significant lines are those carrying at least one token, so a body's weight
@@ -291,21 +371,38 @@ def _c_shape(body: str) -> tuple[bytearray, int]:
     # which on a 4,484-line module is the difference between a report and a wait.
     scanned = 0
     count = body.count
+    names: dict[str, int] = {}
+    attribute_follows = False
     for match in _C_TOKEN.finditer(body):
         kind = match.lastgroup
         if kind == "skip":
             continue
         if kind == "literal":
-            shape += b"C"
+            if normalization == "alpha":
+                shape += _token(b"C", match.group())
+            else:
+                shape += b"C"
+            attribute_follows = False
         else:
             text = match.group()
             if kind == "name":
-                shape += _C_KEYWORD_TOKENS.get(text) or b"I"
+                keyword = _C_KEYWORD_TOKENS.get(text)
+                if keyword is not None:
+                    shape += keyword
+                elif normalization == "shape":
+                    shape += b"I"
+                elif attribute_follows:
+                    shape += _token(b"A", text)
+                else:
+                    canonical = names.setdefault(text, len(names))
+                    shape += b"I" + canonical.to_bytes(4)
+                attribute_follows = False
             else:
                 token = _C_OPERATOR_TOKENS.get(text)
                 if token is None:
                     token = _C_OPERATOR_TOKENS[text] = _token(b"O", text)
                 shape += token
+                attribute_follows = text in {".", "->"}
         start = match.start()
         if count("\n", scanned, start) or not lines:
             lines += 1
@@ -322,11 +419,36 @@ class Site:
     line: int
     lines: int
     qualname: str = ""
+    body_start: int = 0
+    body_end: int = 0
 
     @property
     def identity_name(self) -> str:
         """Qualified Python name, or the native/top-level spelling."""
         return self.qualname or self.name
+
+    def as_dict(self, root: Path | None = None, context: int = 0) -> dict:
+        """A stable location, optionally enriched with its exact source range."""
+        start = self.body_start or self.line
+        end = self.body_end or start + self.lines - 1
+        result = {
+            "path": self.path,
+            "name": self.identity_name,
+            "line": self.line,
+            "lines": self.lines,
+            "start_line": start,
+            "end_line": end,
+        }
+        if root is not None and context >= 0:
+            try:
+                source_lines = (root / self.path).read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
+                result["source"] = ""
+            else:
+                first = max(1, start - context)
+                last = min(len(source_lines), end + context)
+                result["source"] = "\n".join(source_lines[first - 1:last])
+        return result
 
 
 @dataclass(frozen=True)
@@ -341,20 +463,12 @@ class Group:
         """Lines a collapse would remove: everything after the first copy."""
         return sum(site.lines for site in self.sites[1:])
 
-    def as_dict(self) -> dict:
+    def as_dict(self, root: Path | None = None, context: int = 0) -> dict:
         return {
             "digest": self.digest,
             "redundant_lines": self.redundant_lines,
             "copies": len(self.sites),
-            "sites": [
-                {
-                    "path": s.path,
-                    "name": s.identity_name,
-                    "line": s.line,
-                    "lines": s.lines,
-                }
-                for s in self.sites
-            ],
+            "sites": [s.as_dict(root, context) for s in self.sites],
         }
 
 
@@ -738,13 +852,11 @@ class Pair:
     right: Site
     similarity: float
 
-    def as_dict(self) -> dict:
+    def as_dict(self, root: Path | None = None, context: int = 0) -> dict:
         return {
             "similarity": round(self.similarity, 3),
-            "left": {"path": self.left.path, "name": self.left.identity_name,
-                     "line": self.left.line, "lines": self.left.lines},
-            "right": {"path": self.right.path, "name": self.right.identity_name,
-                      "line": self.right.line, "lines": self.right.lines},
+            "left": self.left.as_dict(root, context),
+            "right": self.right.as_dict(root, context),
         }
 
 
@@ -755,6 +867,58 @@ class Body:
     site: Site
     digest: str
     shape: bytes
+    fragment_source: bytes = b""
+    fragment_start: int = 0
+    language: int = 0
+
+
+@dataclass(frozen=True)
+class Fragment:
+    """One maximal equal token run inside two otherwise distinct bodies."""
+
+    left: Site
+    right: Site
+    tokens: int
+
+    @property
+    def lines(self) -> int:
+        return min(self.left.lines, self.right.lines)
+
+    def as_dict(self, root: Path | None = None, context: int = 0) -> dict:
+        return {
+            "lines": self.lines,
+            "tokens": self.tokens,
+            "left": self.left.as_dict(root, context),
+            "right": self.right.as_dict(root, context),
+        }
+
+
+@dataclass(frozen=True)
+class SkippedSource:
+    path: str
+    reason: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"path": self.path, "reason": self.reason}
+
+
+@dataclass
+class Coverage:
+    """What one CLI scan did and did not manage to read."""
+
+    discovered_files: int = 0
+    scanned_files: int = 0
+    skipped_files: list[SkippedSource] = field(default_factory=list)
+
+    def skip(self, path: str, reason: str) -> None:
+        self.skipped_files.append(SkippedSource(path, reason))
+
+    def as_dict(self) -> dict:
+        return {
+            "discovered_files": self.discovered_files,
+            "scanned_files": self.scanned_files,
+            "skipped_files": [item.as_dict() for item in self.skipped_files],
+        }
 
 
 def _sources(root: Path, relatives: tuple[str, ...],
@@ -816,33 +980,205 @@ def _definitions(
     return found
 
 
-def _python_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
+def _scope_catalog(
+    tree: ast.Module,
+) -> tuple[
+    list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]],
+    dict[int, list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]],
+]:
+    """Definitions plus direct child scopes from one statement-block walk."""
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
+    children: dict[
+        int,
+        list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef],
+    ] = defaultdict(list)
+    todo = deque([(tree, "", None)])
+    while todo:
+        node, parent, owner = todo.popleft()
+        child_parent = parent
+        child_owner = owner
+        if isinstance(node, ast.ClassDef):
+            if owner is not None:
+                children[id(owner)].append(node)
+            child_parent = f"{parent}.{node.name}" if parent else node.name
+            child_owner = node
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if owner is not None:
+                children[id(owner)].append(node)
+            qualified = f"{parent}.{node.name}" if parent else node.name
+            found.append((node, qualified))
+            child_parent = f"{qualified}.<locals>"
+            child_owner = node
+        for name in _BLOCKS:
+            block = getattr(node, name, None)
+            if block:
+                todo.extend((item, child_parent, child_owner) for item in block)
+    return found, children
+
+
+def _python_bodies(
+    path: Path,
+    relative: str,
+    min_lines: int,
+    normalization: str = "shape",
+    coverage: Coverage | None = None,
+    build_structure: bool = True,
+) -> list[Body]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
+        source = path.read_bytes()
+        tree = ast.parse(source)
+    except OSError as error:
         # A file that cannot be read or parsed contributes no functions. It is
         # not a duplication finding, and failing the scan over one would make the
         # tool unusable on a tree mid-edit.
+        if coverage is not None:
+            coverage.skip(relative, f"could not read source: {error.strerror or error}")
         return []
+    except SyntaxError as error:
+        if coverage is not None:
+            line = error.lineno or 1
+            coverage.skip(relative, f"invalid Python syntax at line {line}")
+        return []
+    except ValueError as error:
+        if coverage is not None:
+            coverage.skip(relative, f"invalid Python source: {error}")
+        return []
+    source_lines = source.splitlines(keepends=True)
+    definitions = _definitions(tree)
+    deep_scopes = any(
+        qualname.count(".<locals>.") >= 8
+        for _, qualname in definitions
+    )
+    if not build_structure or not deep_scopes:
+        bodies = []
+        for node, qualname in definitions:
+            body = _significant_body(node)
+            if not body or _is_stub(body):
+                continue
+            span = _body_lines(body)
+            if span < min_lines:
+                continue
+            shape = bytearray()
+            if build_structure:
+                if normalization == "alpha":
+                    _alpha_structure(body, shape, {})
+                else:
+                    _structure(body, shape)
+            body_start = body[0].lineno
+            body_end = body[-1].end_lineno or body[-1].lineno
+            fragment_source = b"".join(source_lines[body_start - 1:body_end])
+            bodies.append(Body(
+                Site(
+                    relative,
+                    node.name,
+                    node.lineno,
+                    span,
+                    qualname,
+                    body_start,
+                    body_end,
+                ),
+                _digest(shape),
+                bytes(shape),
+                fragment_source,
+                body_start,
+                0,
+            ))
+        return bodies
+
+    # Deep chains use fixed-size child images.  Ordinary source stays on the
+    # tighter direct normalizer above: this branch pays for its catalog only
+    # once nesting is deep enough for repeated descendant walks to dominate.
+    definitions, scope_children = _scope_catalog(tree)
+    function_bodies = {
+        id(defined): _significant_body(defined)
+        for defined, _ in definitions
+    }
+    structures: dict[int, bytes] = {}
+    scope_images: dict[int, bytes] = {}
+    if build_structure:
+        def build_scope(defined: ast.AST) -> bytes:
+            existing = scope_images.get(id(defined))
+            if existing is not None:
+                return existing
+            if isinstance(defined, ast.FunctionDef | ast.AsyncFunctionDef):
+                significant = function_bodies[id(defined)]
+            elif isinstance(defined, ast.ClassDef):
+                significant = list(defined.body)
+            else:
+                raise TypeError(
+                    f"nested scope must be a function or class, got "
+                    f"{type(defined).__name__}"
+                )
+            for child in scope_children.get(id(defined), ()):
+                child_image = build_scope(child)
+                # The parsed tree belongs to this one collection operation.
+                # Replacing only the child's body with its immutable image lets
+                # the ordinary normalizer retain its tight two-argument loop;
+                # the saved body lists above still own each function's source.
+                child.__dict__["body"] = child_image
+            shape = bytearray()
+            if normalization == "alpha":
+                _alpha_structure(significant, shape, {})
+            else:
+                _structure(significant, shape)
+            frozen = bytes(shape)
+            structures[id(defined)] = frozen
+            image = hashlib.blake2s(
+                frozen,
+                digest_size=12,
+            ).digest()
+            scope_images[id(defined)] = image
+            return image
     bodies = []
-    for node, qualname in _definitions(tree):
-        body = _significant_body(node)
+    for node, qualname in definitions:
+        body = function_bodies[id(node)]
         if not body or _is_stub(body):
             continue
         span = _body_lines(body)
         if span < min_lines:
             continue
-        shape = bytearray()
-        _structure(body, shape)
-        bodies.append(Body(Site(relative, node.name, node.lineno, span, qualname),
-                           _digest(shape), bytes(shape)))
+        if build_structure:
+            build_scope(node)
+        shape = structures.get(id(node), b"")
+        body_start = body[0].lineno
+        body_end = body[-1].end_lineno or body[-1].lineno
+        fragment_source = b"".join(source_lines[body_start - 1:body_end])
+        bodies.append(Body(
+            Site(
+                relative,
+                node.name,
+                node.lineno,
+                span,
+                qualname,
+                body_start,
+                body_end,
+            ),
+            _digest(shape),
+            shape,
+            fragment_source,
+            body_start,
+            0,
+        ))
     return bodies
 
 
-def _native_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
+def _native_bodies(
+    path: Path,
+    relative: str,
+    min_lines: int,
+    normalization: str = "shape",
+    coverage: Coverage | None = None,
+    build_structure: bool = True,
+) -> list[Body]:
     try:
         source = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as error:
+        if coverage is not None:
+            coverage.skip(relative, f"could not read source: {error.strerror or error}")
+        return []
+    except UnicodeError:
+        if coverage is not None:
+            coverage.skip(relative, "native source is not valid UTF-8")
         return []
     bodies = []
     line = 1
@@ -854,24 +1190,60 @@ def _native_bodies(path: Path, relative: str, min_lines: int) -> list[Body]:
         if name in _C_NOT_A_DEFINITION:
             continue
         brace = source.index("{", match.end() - 1)
-        body, _ = _c_body(source, brace)
-        shape, lines = _c_shape(body)
+        body, end = _c_body(source, brace)
+        shape, lines = _c_shape(body, normalization)
+        if not build_structure:
+            shape.clear()
         if lines < min_lines:
             continue
-        bodies.append(Body(Site(relative, name, line, lines, name),
-                           _digest(shape), bytes(shape)))
+        body_start = source.count("\n", 0, brace) + 1
+        body_end = source.count("\n", 0, end) + 1
+        bodies.append(Body(
+            Site(relative, name, line, lines, name, body_start, body_end),
+            _digest(shape),
+            bytes(shape),
+            body.encode(),
+            body_start,
+            1,
+        ))
     return bodies
 
 
-def collect(root: Path, relatives: tuple[str, ...], min_lines: int,
-            langs: tuple[str, ...] = LANGS) -> list[Body]:
+def collect(
+    root: Path,
+    relatives: tuple[str, ...],
+    min_lines: int,
+    langs: tuple[str, ...] = LANGS,
+    *,
+    normalization: str = "shape",
+    coverage: Coverage | None = None,
+    build_structure: bool = True,
+) -> list[Body]:
     """Every body worth comparing, in both languages."""
+    if normalization not in NORMALIZATIONS:
+        raise ValueError(
+            f"normalization must be one of {', '.join(NORMALIZATIONS)}; "
+            f"got {normalization!r}"
+        )
     read = {"python": _python_bodies, "native": _native_bodies}
-    return [
-        body
-        for path, lang in _sources(root, relatives, langs)
-        for body in read[lang](path, str(path.relative_to(root)), min_lines)
-    ]
+    sources = _sources(root, relatives, langs)
+    if coverage is not None:
+        coverage.discovered_files = len(sources)
+    bodies = []
+    for path, lang in sources:
+        relative = str(path.relative_to(root))
+        skipped_before = len(coverage.skipped_files) if coverage is not None else 0
+        bodies.extend(read[lang](
+            path,
+            relative,
+            min_lines,
+            normalization,
+            coverage,
+            build_structure,
+        ))
+        if coverage is not None and len(coverage.skipped_files) == skipped_before:
+            coverage.scanned_files += 1
+    return bodies
 
 
 def scan(
@@ -881,9 +1253,22 @@ def scan(
     langs: tuple[str, ...] = LANGS,
     *,
     include_excluded: bool = False,
+    normalization: str = "shape",
 ) -> tuple[list[Group], int]:
     """Group bodies by shape, omitting exact intentional groups by default."""
-    bodies = collect(root, relatives, min_lines, langs)
+    bodies = collect(root, relatives, min_lines, langs, normalization=normalization)
+    return _scan_bodies(bodies, include_excluded=include_excluded)
+
+
+def _scan_bodies(
+    bodies: list[Body], *, include_excluded: bool = False,
+) -> tuple[list[Group], int]:
+    """Group one already-normalised body image.
+
+    ``--near`` needs the same image for its similarity pass. Keeping grouping
+    separate from collection lets that command parse and normalise every source
+    once without changing the standalone ``scan()`` contract.
+    """
     groups: dict[str, list[Site]] = defaultdict(list)
     for body in bodies:
         groups[body.digest].append(body.site)
@@ -934,16 +1319,34 @@ def _similarity(left: tuple[int, ...], right: tuple[int, ...]) -> float:
     present in both sets. When a body is small enough that its sketch is its
     whole shingle set, this is not an estimate but the exact answer.
     """
-    union = sorted(set(left) | set(right))[:_SKETCH]
+    # `_sketch` returns sorted unique tuples of at most `_SKETCH` hashes. Merge
+    # them directly: constructing two sets and sorting their union for every
+    # candidate pair dominated the near-copy report (roughly half a million
+    # pairs on this tree).
+    left_at = right_at = union = both = 0
+    while union < _SKETCH and (left_at < len(left) or right_at < len(right)):
+        if left_at >= len(left):
+            right_at += 1
+        elif right_at >= len(right):
+            left_at += 1
+        elif left[left_at] == right[right_at]:
+            both += 1
+            left_at += 1
+            right_at += 1
+        elif left[left_at] < right[right_at]:
+            left_at += 1
+        else:
+            right_at += 1
+        union += 1
     if not union:
         return 0.0
-    both = set(left) & set(right)
-    return sum(1 for shingle in union if shingle in both) / len(union)
+    return both / union
 
 
 def near_clones(root: Path, relatives: tuple[str, ...], min_lines: int,
                 langs: tuple[str, ...] = LANGS,
-                similarity: float = DEFAULT_SIMILARITY) -> list[Pair]:
+                similarity: float = DEFAULT_SIMILARITY,
+                *, normalization: str = "shape") -> list[Pair]:
     """Bodies that are almost, but not exactly, the same shape.
 
     Exact grouping cannot see these at all -- one added statement changes the
@@ -954,7 +1357,12 @@ def near_clones(root: Path, relatives: tuple[str, ...], min_lines: int,
     Pairs already grouped as exact copies are excluded, because reporting a
     finding twice is how a report stops being read.
     """
-    bodies = collect(root, relatives, min_lines, langs)
+    bodies = collect(root, relatives, min_lines, langs, normalization=normalization)
+    return _near_bodies(bodies, similarity)
+
+
+def _near_bodies(bodies: list[Body], similarity: float) -> list[Pair]:
+    """Find near copies in one already-normalised body image."""
     sketches = [_sketch(body.shape) for body in bodies]
 
     # Two bodies sharing many shingles are overwhelmingly likely to share one of
@@ -992,6 +1400,143 @@ def near_clones(root: Path, relatives: tuple[str, ...], min_lines: int,
     return pairs
 
 
+def _fragment_bodies(
+    bodies: list[Body],
+    min_lines: int,
+    min_tokens: int,
+    normalization: str,
+) -> list[Fragment]:
+    """Run the native maximal token-window matcher over one body image."""
+    mode = NORMALIZATIONS.index(normalization)
+    native = _fragment_scan(
+        [
+            (body.fragment_source, body.fragment_start, body.language)
+            for body in bodies
+        ],
+        min_lines,
+        min_tokens,
+        mode,
+    )
+    fragments = []
+    for (
+        left_index,
+        left_start,
+        left_end,
+        right_index,
+        right_start,
+        right_end,
+        tokens,
+    ) in native:
+        left_body = bodies[left_index]
+        right_body = bodies[right_index]
+        left = Site(
+            left_body.site.path,
+            left_body.site.name,
+            left_start,
+            left_end - left_start + 1,
+            left_body.site.qualname,
+            left_start,
+            left_end,
+        )
+        right = Site(
+            right_body.site.path,
+            right_body.site.name,
+            right_start,
+            right_end - right_start + 1,
+            right_body.site.qualname,
+            right_start,
+            right_end,
+        )
+        fragments.append(Fragment(left, right, tokens))
+    by_pair: dict[tuple[str, str, str, str], list[Fragment]] = defaultdict(list)
+    for fragment in fragments:
+        key = (
+            fragment.left.path,
+            fragment.left.identity_name,
+            fragment.right.path,
+            fragment.right.identity_name,
+        )
+        by_pair[key].append(fragment)
+    maximal = []
+    for candidates in by_pair.values():
+        candidates.sort(
+            key=lambda fragment: (
+                fragment.left.line,
+                fragment.right.line,
+                -fragment.tokens,
+            )
+        )
+        left_end = right_end = 0
+        for fragment in candidates:
+            if fragment.left.line <= left_end and fragment.right.line <= right_end:
+                continue
+            maximal.append(fragment)
+            left_end = fragment.left.body_end
+            right_end = fragment.right.body_end
+    maximal.sort(
+        key=lambda fragment: (
+            -fragment.lines,
+            -fragment.tokens,
+            fragment.left.path,
+            fragment.left.line,
+            fragment.right.path,
+            fragment.right.line,
+        )
+    )
+    return maximal
+
+
+def fragment_clones(
+    root: Path,
+    relatives: tuple[str, ...],
+    min_lines: int,
+    min_tokens: int,
+    langs: tuple[str, ...] = LANGS,
+    *,
+    normalization: str = "shape",
+) -> list[Fragment]:
+    """Maximal duplicated token fragments inside otherwise distinct bodies."""
+    bodies = collect(
+        root,
+        relatives,
+        min_lines,
+        langs,
+        normalization=normalization,
+        build_structure=False,
+    )
+    return _fragment_bodies(bodies, min_lines, min_tokens, normalization)
+
+
+def summarize(groups: list[Group]) -> dict[str, list[dict]]:
+    """Aggregate exact duplicate involvement by source file and directory."""
+    files: dict[str, dict] = {}
+    directories: dict[str, dict] = {}
+    for group_number, group in enumerate(groups):
+        for site in group.sites:
+            directory = str(Path(site.path).parent)
+            for table, path in ((files, site.path), (directories, directory)):
+                record = table.setdefault(
+                    path,
+                    {"path": path, "duplicated_lines": 0, "_groups": set()},
+                )
+                record["duplicated_lines"] += site.lines
+                record["_groups"].add(group_number)
+
+    def ranked(table: dict[str, dict]) -> list[dict]:
+        rows = [
+            {
+                "path": record["path"],
+                "duplicated_lines": record["duplicated_lines"],
+                "groups": len(record["_groups"]),
+            }
+            for record in table.values()
+        ]
+        rows.sort(key=lambda row: (-row["duplicated_lines"], row["path"]))
+        return rows
+
+    return {"files": ranked(files), "directories": ranked(directories)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-dup-scan",
@@ -1011,6 +1556,35 @@ def main(argv: list[str] | None = None) -> int:
                         help="also report pairs that are almost the same shape, "
                              "which exact grouping cannot see")
     parser.add_argument(
+        "--fragments",
+        action="store_true",
+        help="also report maximal copied token runs inside distinct function bodies",
+    )
+    parser.add_argument(
+        "--min-tokens",
+        type=int,
+        default=50,
+        help="minimum tokens in a --fragments match (default 50)",
+    )
+    parser.add_argument(
+        "--normalization",
+        choices=NORMALIZATIONS,
+        default="shape",
+        help="shape erases names/literals; alpha preserves their relationships",
+    )
+    parser.add_argument(
+        "--context",
+        type=int,
+        default=0,
+        metavar="LINES",
+        help="include exact source ranges plus this many surrounding lines",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="aggregate exact duplicate involvement by file and directory",
+    )
+    parser.add_argument(
         "--show-excluded",
         action="store_true",
         help="also show exact intentional groups and the reason each is filtered",
@@ -1024,9 +1598,64 @@ def main(argv: list[str] | None = None) -> int:
     root = repo_root()
     relatives = tuple(args.path) if args.path else DEFAULT_ROOTS
     langs = LANGS if args.lang == "all" else (args.lang,)
+    if args.min_lines < 1:
+        parser.error("--min-lines must be at least 1")
+    if args.min_tokens < 1:
+        parser.error("--min-tokens must be at least 1")
+    if args.context < 0:
+        parser.error("--context must be non-negative")
+    if not 0.0 <= args.similarity <= 1.0:
+        parser.error("--similarity must be between 0 and 1")
+    resolved_root = root.resolve()
+    for relative in relatives:
+        target = root / relative
+        if not target.exists():
+            parser.error(
+                f"{relative} does not exist; use a repository-relative file or directory"
+            )
+        try:
+            target.resolve().relative_to(resolved_root)
+        except ValueError:
+            parser.error(
+                f"{relative} is outside the repository; "
+                "use a repository-relative file or directory"
+            )
+
+    # The exact and near passes consume the same normalised bodies. The ordinary
+    # exact-only command retains the public ``scan()`` entry point, while
+    # richer reports collect once and share the image between every operation.
+    detailed = (
+        args.near
+        or args.fragments
+        or args.format == "json"
+        or args.summary
+        or args.context > 0
+        or args.normalization != "shape"
+    )
+    coverage = Coverage()
+    bodies = (
+        collect(
+            root,
+            relatives,
+            args.min_lines,
+            langs,
+            normalization=args.normalization,
+            coverage=coverage if args.format == "json" else None,
+        )
+        if detailed
+        else None
+    )
     if args.show_excluded:
-        all_groups, scanned = scan(
-            root, relatives, args.min_lines, langs, include_excluded=True
+        all_groups, scanned = (
+            _scan_bodies(bodies, include_excluded=True)
+            if bodies is not None
+            else scan(
+                root,
+                relatives,
+                args.min_lines,
+                langs,
+                include_excluded=True,
+            )
         )
         excluded = [
             (group, reason)
@@ -1035,23 +1664,54 @@ def main(argv: list[str] | None = None) -> int:
         ]
         groups = [group for group in all_groups if intentional_reason(group) is None]
     else:
-        groups, scanned = scan(root, relatives, args.min_lines, langs)
+        groups, scanned = (
+            _scan_bodies(bodies)
+            if bodies is not None
+            else scan(
+                root,
+                relatives,
+                args.min_lines,
+                langs,
+            )
+        )
         excluded = []
-    pairs = (near_clones(root, relatives, args.min_lines, langs, args.similarity)
-             if args.near else [])
+    pairs = (
+        _near_bodies(bodies, args.similarity)
+        if args.near and bodies is not None
+        else []
+    )
+    fragments = (
+        _fragment_bodies(
+            bodies,
+            args.min_lines,
+            args.min_tokens,
+            args.normalization,
+        )
+        if args.fragments and bodies is not None
+        else []
+    )
     shown = groups if args.top <= 0 else groups[: args.top]
 
     if args.format == "json":
+        evidence_root = root if args.context > 0 else None
         print(json.dumps({
             "scanned_functions": scanned,
             "min_lines": args.min_lines,
+            "min_tokens": args.min_tokens,
             "langs": list(langs),
-            "groups": [g.as_dict() for g in groups],
+            "normalization": args.normalization,
+            "coverage": coverage.as_dict(),
+            "groups": [g.as_dict(evidence_root, args.context) for g in groups],
             "excluded_groups": [
-                {**group.as_dict(), "reason": reason}
+                {**group.as_dict(evidence_root, args.context), "reason": reason}
                 for group, reason in excluded
             ],
-            "near": [p.as_dict() for p in pairs],
+            "near": [p.as_dict(evidence_root, args.context) for p in pairs],
+            "fragments": [
+                fragment.as_dict(evidence_root, args.context)
+                for fragment in fragments
+            ],
+            **({"summary": summarize(groups)} if args.summary else {}),
         }, indent=2))
         return 0
 
@@ -1067,6 +1727,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"{first.lines} lines each")
             for site in group.sites:
                 print(f"{'':>19}{site.path}:{site.line} {site.identity_name}")
+                if args.context > 0:
+                    source = site.as_dict(root, args.context).get("source", "")
+                    for source_line in source.splitlines():
+                        print(f"{'':>21}| {source_line}")
         if len(groups) > len(shown):
             print(f"\n... and {len(groups) - len(shown)} more group(s); --top 0 for all.")
         total = sum(g.redundant_lines for g in groups)
@@ -1083,6 +1747,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             for site in group.sites:
                 print(f"{'':>19}{site.path}:{site.line} {site.identity_name}")
+                if args.context > 0:
+                    source = site.as_dict(root, args.context).get("source", "")
+                    for source_line in source.splitlines():
+                        print(f"{'':>21}| {source_line}")
             print(f"{'':>19}reason: {reason}")
         if len(excluded) > len(excluded_shown):
             print(
@@ -1099,10 +1767,60 @@ def main(argv: list[str] | None = None) -> int:
                   f"{pair.left.identity_name}  <->  "
                   f"{pair.right.path}:{pair.right.line} "
                   f"{pair.right.identity_name}")
+            if args.context > 0:
+                for site in (pair.left, pair.right):
+                    source = site.as_dict(root, args.context).get("source", "")
+                    for source_line in source.splitlines():
+                        print(f"{'':>21}| {source_line}")
         if len(pairs) > len(near_shown):
             print(f"\n... and {len(pairs) - len(near_shown)} more pair(s); "
                   f"--top 0 for all.")
         print(f"\nwreath-dup-scan: {len(pairs)} near pair(s).")
+
+    if args.fragments:
+        fragment_shown = fragments if args.top <= 0 else fragments[: args.top]
+        print(
+            f"\nfragments (>= {args.min_lines} lines and {args.min_tokens} tokens, "
+            "not whole-body exact)"
+        )
+        for fragment in fragment_shown:
+            print(
+                f"{fragment.lines:>9}  {fragment.tokens:>6}  "
+                f"{fragment.left.path}:{fragment.left.line} "
+                f"{fragment.left.identity_name}  <->  "
+                f"{fragment.right.path}:{fragment.right.line} "
+                f"{fragment.right.identity_name}"
+            )
+            if args.context > 0:
+                for site in (fragment.left, fragment.right):
+                    source = site.as_dict(root, args.context).get("source", "")
+                    for source_line in source.splitlines():
+                        print(f"{'':>21}| {source_line}")
+        if len(fragments) > len(fragment_shown):
+            print(
+                f"\n... and {len(fragments) - len(fragment_shown)} more fragment(s); "
+                "--top 0 for all."
+            )
+        print(f"\nwreath-dup-scan: {len(fragments)} fragment(s).")
+
+    if args.summary:
+        hotspots = summarize(groups)
+        file_rows = hotspots["files"] if args.top <= 0 else hotspots["files"][:args.top]
+        directory_rows = (
+            hotspots["directories"]
+            if args.top <= 0
+            else hotspots["directories"][:args.top]
+        )
+        print("\nduplicate hotspots by file")
+        for row in file_rows:
+            print(
+                f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}"
+            )
+        print("\nduplicate hotspots by directory")
+        for row in directory_rows:
+            print(
+                f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}"
+            )
     return 0
 
 
