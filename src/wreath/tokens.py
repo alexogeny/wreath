@@ -116,8 +116,7 @@ class ActionTokens:
                 "or an application-owned ledger with register() and consume()"
             )
         if (
-            isinstance(max_token_bytes, bool)
-            or not isinstance(max_token_bytes, int)
+            not isinstance(max_token_bytes, int)
             or max_token_bytes < 128
             or max_token_bytes > MAX_TOKEN_BYTES
         ):
@@ -199,7 +198,7 @@ class ActionTokens:
             }:
                 return None
             key_id = payload["k"]
-            key = self._keys.get(key_id) if isinstance(key_id, str) else None
+            key = self._keys.get(key_id)
             if key is None:
                 return None
             expected = hmac.digest(key, body.encode("ascii"), "sha256")
