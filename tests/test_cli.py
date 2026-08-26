@@ -17,10 +17,44 @@ from wreath import cli
 from wreath._cli import (
     CliError,
     _ensure_cwd_importable,
+    _execute_flight_replay,
     build_parser,
     load_application,
     options_from_namespace,
 )
+
+
+def test_flight_replay_turns_a_replay_refusal_into_a_stable_cli_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_module = importlib.import_module("wreath._cli")
+    replay_module = importlib.import_module("wreath.replay")
+    recording_module = importlib.import_module("wreath.recording")
+    monkeypatch.setattr(recording_module, "read_ring_file", lambda _path: object())
+    monkeypatch.setattr(cli_module, "load_application", lambda *_a, **_k: object())
+    monkeypatch.setattr(replay_module, "open_recording", lambda _path: object())
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise replay_module.ReplayError("no request was in flight")
+
+    monkeypatch.setattr(replay_module, "reproduce_from_ring", refuse)
+    namespace = type(
+        "Namespace",
+        (),
+        {
+            "path": "crash.ring",
+            "target": "example:app",
+            "factory": False,
+            "recording": "request.wrr",
+            "request_id": None,
+            "as_json": False,
+        },
+    )()
+
+    with pytest.raises(CliError, match="no request was in flight") as caught:
+        _execute_flight_replay(namespace)
+
+    assert caught.value.exit_code == 2
 
 
 def _write_app(tmp_path: Path, body: str) -> str:
@@ -91,6 +125,37 @@ def test_multiple_workers_are_explicitly_metal_only() -> None:
     )
     with pytest.raises(CliError, match="at least 1"):
         options_from_namespace(namespace)
+
+
+def test_one_worker_keeps_single_process_options_available() -> None:
+    """Each multi-worker guard must retain its worker-count operand.
+
+    Exercising only invalid multi-worker cases cannot detect mutations that
+    make their loop and fixed-port restrictions apply to a single worker.
+    """
+    ordinary = build_parser().parse_args(
+        ["run", "example:app", "--loop", "asyncio", "--workers", "1"]
+    )
+    ephemeral = build_parser().parse_args(
+        [
+            "run",
+            "example:app",
+            "--loop",
+            "asyncio",
+            "--workers",
+            "1",
+            "--port",
+            "0",
+        ]
+    )
+
+    ordinary_options = options_from_namespace(ordinary)
+    ephemeral_options = options_from_namespace(ephemeral)
+
+    assert ordinary_options.workers == 1
+    assert ordinary_options.loop == "asyncio"
+    assert ephemeral_options.workers == 1
+    assert ephemeral_options.port == 0
 
 
 def test_run_parser_configures_default_response_headers() -> None:
