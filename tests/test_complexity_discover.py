@@ -16,6 +16,7 @@ import pytest
 
 from wreath._devtools.complexity_discover import (
     Finding,
+    _owned_statements,
     _source_fingerprint,
     discover,
     infer_kinds,
@@ -219,6 +220,33 @@ def test_accumulator_binding_does_not_suppress_its_own_finding(tmp_path) -> None
     assert accum and accum[0].confidence == "high"
 
 
+def test_cached_recursion_is_not_a_finding(tmp_path) -> None:
+    findings = _scan_source(tmp_path, """
+        @cache
+        def fib(n):
+            if n < 2:
+                return n
+            return fib(n - 1) + fib(n - 2)
+    """)
+    assert [finding for finding in findings if finding.code == "SL-RECURSE"] == []
+
+
+def test_self_calls_in_a_nested_scope_still_belong_to_the_outer_function(tmp_path) -> None:
+    """Fusing the recursion pass must retain its complete-subtree semantics."""
+    findings = _scan_source(tmp_path, """
+        def outer():
+            def inner(n):
+                if n:
+                    return outer()
+                return outer()
+            return inner
+    """)
+    recursive = [finding for finding in findings if finding.code == "SL-RECURSE"]
+    assert [(finding.func, finding.message) for finding in recursive] == [
+        ("outer", "2 self-recursive call sites, no cache decorator"),
+    ]
+
+
 def test_comprehension_body_is_scanned_as_a_loop(tmp_path) -> None:
     """A comprehension is a loop; its body gets the same rules as a `for`."""
     findings = _scan_source(tmp_path, """
@@ -242,6 +270,44 @@ def test_infer_kinds_prefers_the_annotation_over_the_value() -> None:
     assert kinds["lookup"] == "dict"
     assert kinds["seen"] == "set"
     assert kinds["plain"] == "list"
+
+
+def test_kind_inference_visits_each_scope_once_with_a_same_size_control(
+) -> None:
+    """A nested chain must not rescan every descendant for every owner."""
+    import ast
+
+    count = 40
+    siblings = "\n".join(
+        f"def function_{index}(items):\n    local = list(items)\n    return local"
+        for index in range(count)
+    )
+    nested_lines = [
+        "    " * index + f"def function_{index}(items):"
+        for index in range(count)
+    ]
+    nested_lines.append("    " * count + "local = list(items)")
+    nested_lines.extend(
+        "    " * (index + 1) + f"return function_{index + 1}"
+        for index in reversed(range(count - 1))
+    )
+
+    def visits(source: str) -> int:
+        tree = ast.parse(source)
+        functions = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        ]
+        return sum(
+            1
+            for function in functions
+            for _ in _owned_statements(function)
+        )
+
+    sibling_visits = visits(siblings)
+    chain_visits = visits("\n".join(nested_lines))
+
+    assert chain_visits <= sibling_visits * 2
 
 
 # --- C ----------------------------------------------------------------------

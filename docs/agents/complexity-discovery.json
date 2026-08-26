@@ -119,7 +119,8 @@
     "_devtools/build_lint.py::_named_list::SL-ACCUM-ADD",
     "_devtools/build_lint.py::_named_list::SL-SLICE-LOOP",
     "_devtools/complexity_discover.py::_loop_local::SL-IN-LOOP",
-    "_devtools/complexity_discover.py::_recursion_findings::SL-COMP-LOOP",
+    "_devtools/complexity_discover.py::_owned_statements::SL-LINEAR-METHOD",
+    "_devtools/complexity_discover.py::visit_Call::SL-ACCUM-ADD",
     "_devtools/complexity_discover.py::visit_Compare::SL-IN-LOOP",
     "_devtools/complexity_probe.py::__post_init__::SL-SLICE-LOOP",
     "_devtools/complexity_probe.py::_check_baseline::SL-ACCUM-ADD",
@@ -137,6 +138,8 @@
     "_devtools/complexity_probe.py::run::SL-ACCUM-ADD",
     "_devtools/cpu_probe.py::main::SL-IN-LOOP",
     "_devtools/cpu_probe.py::perf_counters::SL-IN-LOOP",
+    "_devtools/dup_scan.py::_alpha_structure::SL-ACCUM-ADD",
+    "_devtools/dup_scan.py::_alpha_structure::SL-RECURSE",
     "_devtools/dup_scan.py::_c_body::SL-ACCUM-ADD",
     "_devtools/dup_scan.py::_c_body::SL-SLICE-LOOP",
     "_devtools/dup_scan.py::_c_shape::SL-ACCUM-ADD",
@@ -145,15 +148,18 @@
     "_devtools/dup_scan.py::_native_bodies::SL-ACCUM-ADD",
     "_devtools/dup_scan.py::_native_bodies::SL-IN-LOOP",
     "_devtools/dup_scan.py::_native_bodies::SL-LINEAR-METHOD",
-    "_devtools/dup_scan.py::_similarity::SL-IN-LOOP",
+    "_devtools/dup_scan.py::_near_bodies::SL-COMP-NEST",
+    "_devtools/dup_scan.py::_near_bodies::SL-LINEAR-METHOD",
+    "_devtools/dup_scan.py::_python_bodies::SL-SLICE-LOOP",
+    "_devtools/dup_scan.py::_scope_catalog::SL-LINEAR-METHOD",
+    "_devtools/dup_scan.py::_similarity::SL-ACCUM-ADD",
     "_devtools/dup_scan.py::_sketch::SL-SLICE-LOOP",
     "_devtools/dup_scan.py::_sources::SL-COMP-NEST",
     "_devtools/dup_scan.py::_sources::SL-LINEAR-METHOD",
     "_devtools/dup_scan.py::_structure::SL-ACCUM-ADD",
     "_devtools/dup_scan.py::_structure::SL-RECURSE",
-    "_devtools/dup_scan.py::collect::SL-COMP-NEST",
-    "_devtools/dup_scan.py::near_clones::SL-COMP-NEST",
-    "_devtools/dup_scan.py::near_clones::SL-LINEAR-METHOD",
+    "_devtools/dup_scan.py::collect::SL-ACCUM-ADD",
+    "_devtools/dup_scan.py::collect::SL-LINEAR-METHOD",
     "_devtools/dup_scan.py::redundant_lines::SL-SLICE-LOOP",
     "_devtools/hygiene.py::scan_commits::SL-COMP-NEST",
     "_devtools/map_lint.py::_budget_sites::SL-COMP-LOOP",
@@ -175,14 +181,10 @@
     "_devtools/native_boundary_lint.py::scan_text::SL-IN-LOOP",
     "_devtools/native_error_lint.py::_returns_pyobject::SL-SLICE-LOOP",
     "_devtools/native_gil_lint.py::scan_text::SL-LINEAR-CALL",
-    "_devtools/native_lint.py::_enclosing_function::SL-IN-LOOP",
-    "_devtools/native_lint.py::_loop_depth_map::SL-ACCUM-ADD",
-    "_devtools/native_lint.py::_loop_depth_map::SL-LINEAR-CALL",
     "_devtools/native_lint.py::iter_sources::SL-LINEAR-METHOD",
     "_devtools/native_lint.py::main::SL-LINEAR-METHOD",
     "_devtools/native_lint.py::run_lint::SL-LINEAR-METHOD",
     "_devtools/native_lint.py::scan_text::SL-SLICE-LOOP",
-    "_devtools/native_lint.py::strip_c::SL-ACCUM-ADD",
     "_devtools/query_probe.py::main::SL-IN-LOOP",
     "_devtools/quiet.py::_parse_cpu_list::SL-LINEAR-METHOD",
     "_devtools/quiet.py::apply::SL-ACCUM-ADD",
@@ -208,9 +210,11 @@
     "_devtools/sql_lint.py::_code_only::SL-SLICE-LOOP",
     "_devtools/sql_lint.py::_function_body::SL-ACCUM-ADD",
     "_devtools/sql_lint.py::_function_body::SL-SLICE-LOOP",
+    "_devtools/sql_lint.py::_python_facts::SL-COMP-LOOP",
+    "_devtools/sql_lint.py::_python_facts::SL-LINEAR-METHOD",
     "_devtools/sql_lint.py::blank::SL-LINEAR-CALL",
-    "_devtools/sql_lint.py::owned_relations::SL-COMP-LOOP",
     "_devtools/sql_lint.py::owned_relations::SL-LINEAR-METHOD",
+    "_devtools/sql_lint.py::scan::SL-LINEAR-METHOD",
     "_devtools/tape_decomp.py::_build_arms::SL-SLICE-LOOP",
     "_devtools/tape_decomp.py::_calibrate::SL-SLICE-LOOP",
     "_devtools/tape_decomp.py::main::SL-COMP-LOOP",
@@ -224,13 +228,12 @@
     "_docs/apidoc.py::_module_members::SL-IN-LOOP",
     "_docs/capabilities.py::table::SL-LINEAR-METHOD",
     "_docs/charts.py::_bar_fill::SL-IN-LOOP",
-    "_docs/codeblocks.py::_check_chains::SL-ACCUM-ADD",
+    "_docs/codeblocks.py::_check_page::SL-ACCUM-ADD",
+    "_docs/codeblocks.py::_check_page::SL-COMP-LOOP",
+    "_docs/codeblocks.py::_check_page::SL-LINEAR-METHOD",
     "_docs/codeblocks.py::_dotted::SL-RECURSE",
     "_docs/codeblocks.py::_rule_depends_in_annotated::SL-SLICE-LOOP",
     "_docs/codeblocks.py::_rule_markers_in_a_dependency::SL-COMP-LOOP",
-    "_docs/codeblocks.py::check_page::SL-ACCUM-ADD",
-    "_docs/codeblocks.py::check_page::SL-LINEAR-METHOD",
-    "_docs/codeblocks.py::scan::SL-ACCUM-ADD",
     "_docs/highlight.py::highlight::SL-SLICE-LOOP",
     "_docs/markdown.py::_admonition::SL-ACCUM-ADD",
     "_docs/markdown.py::_blockquote::SL-ACCUM-ADD",
@@ -243,7 +246,6 @@
     "_docs/markdown.py::_tabs::SL-ACCUM-ADD",
     "_docs/markdown.py::render::SL-ACCUM-ADD",
     "_docs/plate.py::_render::SL-LINEAR-CALL",
-    "_docs/search.py::word_set::SL-IN-LOOP",
     "_docs/site.py::_check_page::SL-LINEAR-METHOD",
     "_docs/site.py::_sections::SL-SLICE-LOOP",
     "_docs/site.py::build::SL-COMP-LOOP",
@@ -336,6 +338,11 @@
     "_mutant/runner.py::sample_identifiers::SL-COMP-LOOP",
     "_mutant/runner.py::sample_identifiers::SL-IN-LOOP",
     "_mutant/runner.py::words::SL-IN-LOOP",
+    "_native/_docsmodule.c::<file>::CL-LINEAR-IN-LOOP",
+    "_native/_docsmodule.c::<file>::CL-NEST",
+    "_native/_docsmodule.c::<file>::CL-REALLOC-IN-LOOP",
+    "_native/_dupscanmodule.c::<file>::CL-LINEAR-IN-LOOP",
+    "_native/_dupscanmodule.c::<file>::CL-NEST",
     "_native/aesgcm.c::<file>::CL-LINEAR-IN-LOOP",
     "_native/aesgcm.c::<file>::CL-NEST",
     "_native/cedar.c::<file>::CL-LINEAR-IN-LOOP",
@@ -414,7 +421,6 @@
     "_native/reactor_transport.c::<file>::CL-LINEAR-IN-LOOP",
     "_native/reactor_transport.c::<file>::CL-NEST",
     "_native/reactor_wheel.c::<file>::CL-NEST",
-    "_native/ryu/d2s.c::to_chars::CL-LINEAR-IN-LOOP",
     "_native/scheduler.c::<file>::CL-NEST",
     "_native/scim.c::<file>::CL-NEST",
     "_native/security.c::<file>::CL-LINEAR-IN-LOOP",
@@ -440,6 +446,22 @@
     "_native/wreathcore.h::<file>::CL-NEST",
     "_native/xml.c::<file>::CL-LINEAR-IN-LOOP",
     "_native/xml.c::<file>::CL-NEST",
+    "_native_test_runner.py::_collect_class::SL-LINEAR-CALL",
+    "_native_test_runner.py::_collect_class::SL-LINEAR-METHOD",
+    "_native_test_runner.py::_collect_module::SL-LINEAR-METHOD",
+    "_native_test_runner.py::_expand_function::SL-COMP-NEST",
+    "_native_test_runner.py::_fixture_defs::SL-IN-LOOP",
+    "_native_test_runner.py::_native_shards::SL-LINEAR-CALL",
+    "_native_test_runner.py::_parse::SL-ACCUM-ADD",
+    "_native_test_runner.py::_run_parallel::SL-LINEAR-CALL",
+    "_native_test_runner.py::_run_parallel::SL-LINEAR-METHOD",
+    "_native_test_runner.py::_selected_files::SL-LINEAR-METHOD",
+    "_native_test_runner.py::_test_import_paths::SL-LINEAR-METHOD",
+    "_native_test_runner.py::collect::SL-LINEAR-METHOD",
+    "_native_test_runner.py::fnmatch_lines::SL-COMP-LOOP",
+    "_native_test_runner.py::get_closest_marker::SL-LINEAR-CALL",
+    "_native_test_runner.py::parse_and::SL-ACCUM-ADD",
+    "_native_test_runner.py::parse_or::SL-ACCUM-ADD",
     "_orm_events.py::_reap::SL-LINEAR-CALL",
     "_orm_events.py::_reap::SL-LINEAR-METHOD",
     "_orm_events.py::_unsubscribe::SL-LINEAR-CALL",
@@ -626,6 +648,8 @@
     "_privacy/retention.py::describe_retention::SL-LINEAR-CALL",
     "_privacy/retention.py::retention_passes::SL-LINEAR-CALL",
     "_projector.py::snapshot::SL-LINEAR-CALL",
+    "_pytest_facade.py::_approximately_equal::SL-RECURSE",
+    "_pytest_facade.py::setattr::SL-SLICE-LOOP",
     "_recording_format.py::_split_slabs::SL-ACCUM-ADD",
     "_recording_format.py::_split_slabs::SL-SLICE-LOOP",
     "_recording_format.py::read_recording::SL-LINEAR-METHOD",
@@ -652,14 +676,12 @@
     "_template_tape.py::_tokenize::SL-LINEAR-METHOD",
     "_template_tape.py::_tokenize::SL-SLICE-LOOP",
     "_test_runner.py::_consume_mutation_events::SL-LINEAR-METHOD",
-    "_test_runner.py::_consume_mutation_events::SL-SLICE-LOOP",
     "_test_runner.py::_finish_mutation_process::SL-LINEAR-CALL",
     "_test_runner.py::_mutation_activity_from_report::SL-LINEAR-METHOD",
     "_test_runner.py::_mutation_arguments::SL-LINEAR-METHOD",
     "_test_runner.py::_prepare_mutation_trace::SL-LINEAR-METHOD",
     "_test_runner.py::pytest_runtest_logreport::SL-LINEAR-CALL",
     "_test_runner.py::pytest_sessionfinish::SL-LINEAR-METHOD",
-    "_test_runner.py::render_activity::SL-IN-LOOP",
     "_test_runner.py::render_activity::SL-SLICE-LOOP",
     "_test_runner.py::report::SL-SLICE-LOOP",
     "_test_runner.py::schedule::SL-COMP-NEST",
@@ -866,7 +888,6 @@
     "passes.py::run::SL-ACCUM-ADD",
     "policy/__init__.py::schema_owners::SL-LINEAR-METHOD",
     "policy/idempotency.py::_replayable_headers::SL-IN-LOOP",
-    "policy/ratelimit.py::_tier_from_roles::SL-IN-LOOP",
     "policy/ratelimit.py::schema_owners::SL-COMP-NEST",
     "policy/traffic.py::__init__::SL-IN-LOOP",
     "postgres.py::_hand_off::SL-IN-LOOP",
@@ -898,9 +919,7 @@
     "replay.py::recorded_request::SL-SLICE-LOOP",
     "replay.py::to_bytes::SL-ACCUM-ADD",
     "replay.py::writelines::SL-ACCUM-ADD",
-    "request.py::_valid_boundary::SL-IN-LOOP",
     "request.py::stream::SL-ACCUM-ADD",
-    "request.py::stream::SL-LINEAR-METHOD",
     "response.py::_reader::SL-LINEAR-CALL",
     "response_cache.py::_apply_tags::SL-IN-LOOP",
     "response_cache.py::_on_write::SL-LINEAR-CALL",
@@ -940,7 +959,6 @@
     "temporal.py::_parse_cron_field::SL-LINEAR-METHOD",
     "temporal.py::jsonable::SL-RECURSE",
     "temporal.py::spine_lengths::SL-LINEAR-CALL",
-    "temporal.py::spine_lengths::SL-LINEAR-METHOD",
     "typegen/cli.py::check::SL-LINEAR-CALL",
     "typegen/cli.py::write::SL-LINEAR-CALL",
     "typegen/inspect.py::_operation_behaviours::SL-COMP-NEST",
@@ -968,7 +986,7 @@
   "candidates": [
     {
       "file": "_admin/registry.py",
-      "line": 279,
+      "line": 297,
       "code": "SL-IN-LOOP",
       "function": "register",
       "loop_depth": 1,
@@ -978,7 +996,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 290,
+      "line": 308,
       "code": "SL-IN-LOOP",
       "function": "register",
       "loop_depth": 1,
@@ -988,7 +1006,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 299,
+      "line": 317,
       "code": "SL-IN-LOOP",
       "function": "register",
       "loop_depth": 1,
@@ -998,7 +1016,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 366,
+      "line": 384,
       "code": "SL-COMP-NEST",
       "function": "router",
       "loop_depth": 0,
@@ -1008,7 +1026,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 841,
+      "line": 849,
       "code": "SL-IN-LOOP",
       "function": "_page_params",
       "loop_depth": 1,
@@ -1018,7 +1036,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 881,
+      "line": 889,
       "code": "SL-IN-LOOP",
       "function": "_form_fields",
       "loop_depth": 1,
@@ -1028,7 +1046,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 885,
+      "line": 893,
       "code": "SL-IN-LOOP",
       "function": "_form_fields",
       "loop_depth": 1,
@@ -1038,7 +1056,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 886,
+      "line": 894,
       "code": "SL-IN-LOOP",
       "function": "_form_fields",
       "loop_depth": 1,
@@ -1048,7 +1066,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 896,
+      "line": 904,
       "code": "SL-IN-LOOP",
       "function": "_form_fields",
       "loop_depth": 1,
@@ -1058,7 +1076,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 947,
+      "line": 955,
       "code": "SL-IN-LOOP",
       "function": "_submitted",
       "loop_depth": 1,
@@ -1068,7 +1086,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 950,
+      "line": 958,
       "code": "SL-IN-LOOP",
       "function": "_submitted",
       "loop_depth": 1,
@@ -1078,7 +1096,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 951,
+      "line": 959,
       "code": "SL-IN-LOOP",
       "function": "_submitted",
       "loop_depth": 1,
@@ -1088,7 +1106,7 @@
     },
     {
       "file": "_admin/registry.py",
-      "line": 953,
+      "line": 961,
       "code": "SL-IN-LOOP",
       "function": "_submitted",
       "loop_depth": 1,
@@ -1748,7 +1766,7 @@
     },
     {
       "file": "_auth/cedar.py",
-      "line": 801,
+      "line": 804,
       "code": "SL-IN-LOOP",
       "function": "_query_base",
       "loop_depth": 1,
@@ -2228,7 +2246,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 1005,
+      "line": 1045,
       "code": "SL-LINEAR-METHOD",
       "function": "execute_ci",
       "loop_depth": 1,
@@ -2238,7 +2256,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 1287,
+      "line": 1327,
       "code": "SL-LINEAR-METHOD",
       "function": "_read_jobs",
       "loop_depth": 1,
@@ -2248,7 +2266,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 1976,
+      "line": 2016,
       "code": "SL-LINEAR-CALL",
       "function": "_wait_for_worker_generation",
       "loop_depth": 1,
@@ -2258,7 +2276,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 2004,
+      "line": 2044,
       "code": "SL-LINEAR-CALL",
       "function": "_terminate_worker_pids",
       "loop_depth": 2,
@@ -2268,7 +2286,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 2099,
+      "line": 2139,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_metal_worker_group",
       "loop_depth": 1,
@@ -2278,7 +2296,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 2360,
+      "line": 2400,
       "code": "SL-LINEAR-METHOD",
       "function": "_read_pass_rows",
       "loop_depth": 1,
@@ -2288,7 +2306,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 2817,
+      "line": 2857,
       "code": "SL-LINEAR-METHOD",
       "function": "_read_traced_work",
       "loop_depth": 1,
@@ -2298,7 +2316,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 2892,
+      "line": 2932,
       "code": "SL-COMP-LOOP",
       "function": "execute_doctor_n_plus_one",
       "loop_depth": 1,
@@ -2308,7 +2326,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 3275,
+      "line": 3315,
       "code": "SL-LINEAR-CALL",
       "function": "_execute_flight_read_recording",
       "loop_depth": 1,
@@ -2318,7 +2336,7 @@
     },
     {
       "file": "_cli.py",
-      "line": 3276,
+      "line": 3316,
       "code": "SL-COMP-LOOP",
       "function": "_execute_flight_read_recording",
       "loop_depth": 1,
@@ -2518,7 +2536,17 @@
     },
     {
       "file": "_devtools/complexity_discover.py",
-      "line": 238,
+      "line": 177,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_owned_statements",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "`todo.extend()` inside a loop: extend() is linear in its argument",
+      "source": "todo.extend(block)"
+    },
+    {
+      "file": "_devtools/complexity_discover.py",
+      "line": 275,
       "code": "SL-IN-LOOP",
       "function": "_loop_local",
       "loop_depth": 1,
@@ -2528,7 +2556,7 @@
     },
     {
       "file": "_devtools/complexity_discover.py",
-      "line": 238,
+      "line": 275,
       "code": "SL-IN-LOOP",
       "function": "_loop_local",
       "loop_depth": 1,
@@ -2538,7 +2566,7 @@
     },
     {
       "file": "_devtools/complexity_discover.py",
-      "line": 314,
+      "line": 362,
       "code": "SL-IN-LOOP",
       "function": "visit_Compare",
       "loop_depth": 1,
@@ -2548,7 +2576,7 @@
     },
     {
       "file": "_devtools/complexity_discover.py",
-      "line": 321,
+      "line": 369,
       "code": "SL-IN-LOOP",
       "function": "visit_Compare",
       "loop_depth": 1,
@@ -2558,13 +2586,13 @@
     },
     {
       "file": "_devtools/complexity_discover.py",
-      "line": 435,
-      "code": "SL-COMP-LOOP",
-      "function": "_recursion_findings",
+      "line": 376,
+      "code": "SL-ACCUM-ADD",
+      "function": "visit_Call",
       "loop_depth": 1,
-      "confidence": "medium",
-      "message": "comprehension over `fn.decorator_list` inside a loop",
-      "source": "decorators = {_name_of(d) or \"\" for d in fn.decorator_list}"
+      "confidence": "low",
+      "message": "`recursion.calls += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "recursion.calls += 1"
     },
     {
       "file": "_devtools/complexity_probe.py",
@@ -2608,7 +2636,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 560,
+      "line": 563,
       "code": "SL-ACCUM-ADD",
       "function": "run",
       "loop_depth": 1,
@@ -2618,7 +2646,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 620,
+      "line": 623,
       "code": "SL-SLICE-LOOP",
       "function": "_http1_fragmented_head",
       "loop_depth": 1,
@@ -2628,7 +2656,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 2055,
+      "line": 2098,
       "code": "SL-COMP-LOOP",
       "function": "_series_reconcile_harness",
       "loop_depth": 1,
@@ -2638,7 +2666,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 3061,
+      "line": 3104,
       "code": "SL-LINEAR-CALL",
       "function": "_queue_drain_harness",
       "loop_depth": 1,
@@ -2648,7 +2676,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 3105,
+      "line": 3148,
       "code": "SL-LINEAR-CALL",
       "function": "_queue_snapshot_harness",
       "loop_depth": 1,
@@ -2658,7 +2686,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 3147,
+      "line": 3190,
       "code": "SL-LINEAR-CALL",
       "function": "_rank_indices_harness",
       "loop_depth": 1,
@@ -2668,7 +2696,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 4202,
+      "line": 4273,
       "code": "SL-LINEAR-CALL",
       "function": "_print_todo_summary",
       "loop_depth": 1,
@@ -2678,7 +2706,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 4227,
+      "line": 4298,
       "code": "SL-ACCUM-ADD",
       "function": "_check_baseline",
       "loop_depth": 1,
@@ -2688,7 +2716,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 4251,
+      "line": 4322,
       "code": "SL-LINEAR-METHOD",
       "function": "_notification_window_harness",
       "loop_depth": 1,
@@ -2698,7 +2726,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 4353,
+      "line": 4424,
       "code": "SL-IN-LOOP",
       "function": "main",
       "loop_depth": 1,
@@ -2708,7 +2736,7 @@
     },
     {
       "file": "_devtools/complexity_probe.py",
-      "line": 4376,
+      "line": 4447,
       "code": "SL-ACCUM-ADD",
       "function": "main",
       "loop_depth": 1,
@@ -2738,7 +2766,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 129,
+      "line": 147,
       "code": "SL-RECURSE",
       "function": "_structure",
       "loop_depth": 0,
@@ -2748,7 +2776,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 173,
+      "line": 191,
       "code": "SL-ACCUM-ADD",
       "function": "_structure",
       "loop_depth": 1,
@@ -2758,7 +2786,27 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 235,
+      "line": 198,
+      "code": "SL-RECURSE",
+      "function": "_alpha_structure",
+      "loop_depth": 0,
+      "confidence": "low",
+      "message": "6 self-recursive call sites, no cache decorator",
+      "source": ""
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 250,
+      "code": "SL-ACCUM-ADD",
+      "function": "_alpha_structure",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`out += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "out += prefix"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 312,
       "code": "SL-ACCUM-ADD",
       "function": "_c_skip_string",
       "loop_depth": 1,
@@ -2768,7 +2816,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 270,
+      "line": 347,
       "code": "SL-ACCUM-ADD",
       "function": "_c_body",
       "loop_depth": 1,
@@ -2778,7 +2826,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 275,
+      "line": 352,
       "code": "SL-SLICE-LOOP",
       "function": "_c_body",
       "loop_depth": 1,
@@ -2788,17 +2836,17 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 299,
+      "line": 382,
       "code": "SL-ACCUM-ADD",
       "function": "_c_shape",
       "loop_depth": 1,
       "confidence": "low",
       "message": "`shape += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "shape += b\"C\""
+      "source": "shape += _token(b\"C\", match.group())"
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 311,
+      "line": 408,
       "code": "SL-ACCUM-ADD",
       "function": "_c_shape",
       "loop_depth": 1,
@@ -2808,7 +2856,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 342,
+      "line": 464,
       "code": "SL-SLICE-LOOP",
       "function": "redundant_lines",
       "loop_depth": 1,
@@ -2818,7 +2866,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 763,
+      "line": 927,
       "code": "SL-COMP-NEST",
       "function": "_sources",
       "loop_depth": 0,
@@ -2828,7 +2876,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 771,
+      "line": 935,
       "code": "SL-LINEAR-METHOD",
       "function": "_sources",
       "loop_depth": 1,
@@ -2838,7 +2886,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 815,
+      "line": 979,
       "code": "SL-LINEAR-METHOD",
       "function": "_definitions",
       "loop_depth": 2,
@@ -2848,7 +2896,37 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 851,
+      "line": 1015,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_scope_catalog",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "`todo.extend()` inside a loop: extend() is linear in its argument",
+      "source": "todo.extend((item, child_parent, child_owner) for item in block)"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1069,
+      "code": "SL-SLICE-LOOP",
+      "function": "_python_bodies",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `source_lines` inside a loop copies each time",
+      "source": "fragment_source = b\"\".join(source_lines[body_start - 1:body_end])"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1145,
+      "code": "SL-SLICE-LOOP",
+      "function": "_python_bodies",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `source_lines` inside a loop copies each time",
+      "source": "fragment_source = b\"\".join(source_lines[body_start - 1:body_end])"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1187,
       "code": "SL-ACCUM-ADD",
       "function": "_native_bodies",
       "loop_depth": 1,
@@ -2858,7 +2936,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 851,
+      "line": 1187,
       "code": "SL-LINEAR-METHOD",
       "function": "_native_bodies",
       "loop_depth": 1,
@@ -2868,7 +2946,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 854,
+      "line": 1190,
       "code": "SL-IN-LOOP",
       "function": "_native_bodies",
       "loop_depth": 1,
@@ -2878,7 +2956,7 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 856,
+      "line": 1192,
       "code": "SL-LINEAR-METHOD",
       "function": "_native_bodies",
       "loop_depth": 1,
@@ -2888,17 +2966,47 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 870,
-      "code": "SL-COMP-NEST",
-      "function": "collect",
-      "loop_depth": 0,
+      "line": 1199,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_native_bodies",
+      "loop_depth": 1,
       "confidence": "medium",
-      "message": "comprehension with 2 generators",
-      "source": "return ["
+      "message": "`source.count()` inside a loop: count() scans",
+      "source": "body_start = source.count(\"\\n\", 0, brace) + 1"
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 920,
+      "line": 1200,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_native_bodies",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`source.count()` inside a loop: count() scans",
+      "source": "body_end = source.count(\"\\n\", 0, end) + 1"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1236,
+      "code": "SL-LINEAR-METHOD",
+      "function": "collect",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`bodies.extend()` inside a loop: extend() is linear in its argument",
+      "source": "bodies.extend(read[lang]("
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1245,
+      "code": "SL-ACCUM-ADD",
+      "function": "collect",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`coverage.scanned_files += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "coverage.scanned_files += 1"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1305,
       "code": "SL-SLICE-LOOP",
       "function": "_sketch",
       "loop_depth": 1,
@@ -2908,19 +3016,49 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 941,
-      "code": "SL-IN-LOOP",
+      "line": 1329,
+      "code": "SL-ACCUM-ADD",
       "function": "_similarity",
       "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `both` (kind unknown) inside a loop",
-      "source": "return sum(1 for shingle in union if shingle in both) / len(union)"
+      "confidence": "low",
+      "message": "`right_at += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "right_at += 1"
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 975,
+      "line": 1331,
+      "code": "SL-ACCUM-ADD",
+      "function": "_similarity",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`left_at += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "left_at += 1"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1333,
+      "code": "SL-ACCUM-ADD",
+      "function": "_similarity",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`both += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "both += 1"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1340,
+      "code": "SL-ACCUM-ADD",
+      "function": "_similarity",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`union += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "union += 1"
+    },
+    {
+      "file": "_devtools/dup_scan.py",
+      "line": 1383,
       "code": "SL-COMP-NEST",
-      "function": "near_clones",
+      "function": "_near_bodies",
       "loop_depth": 1,
       "confidence": "medium",
       "message": "comprehension with 2 generators",
@@ -2928,9 +3066,9 @@
     },
     {
       "file": "_devtools/dup_scan.py",
-      "line": 975,
+      "line": 1383,
       "code": "SL-LINEAR-METHOD",
-      "function": "near_clones",
+      "function": "_near_bodies",
       "loop_depth": 1,
       "confidence": "medium",
       "message": "`candidates.update()` inside a loop: update() is linear in its argument",
@@ -3078,17 +3216,17 @@
     },
     {
       "file": "_devtools/map_lint.py",
-      "line": 697,
+      "line": 696,
       "code": "SL-IN-LOOP",
       "function": "_budget_sites",
       "loop_depth": 3,
       "confidence": "medium",
       "message": "membership test against `BUDGETED` (kind unknown) inside a loop",
-      "source": "if name in BUDGETED:"
+      "source": "if alias.name in BUDGETED:"
     },
     {
       "file": "_devtools/map_lint.py",
-      "line": 731,
+      "line": 730,
       "code": "SL-IN-LOOP",
       "function": "check_memory_budgets",
       "loop_depth": 1,
@@ -3098,7 +3236,7 @@
     },
     {
       "file": "_devtools/map_lint.py",
-      "line": 731,
+      "line": 730,
       "code": "SL-IN-LOOP",
       "function": "check_memory_budgets",
       "loop_depth": 1,
@@ -3108,7 +3246,7 @@
     },
     {
       "file": "_devtools/map_lint.py",
-      "line": 785,
+      "line": 784,
       "code": "SL-LINEAR-METHOD",
       "function": "scan",
       "loop_depth": 1,
@@ -3128,7 +3266,7 @@
     },
     {
       "file": "_devtools/native_boundary_lint.py",
-      "line": 150,
+      "line": 148,
       "code": "SL-ACCUM-ADD",
       "function": "_error_call_lines",
       "loop_depth": 1,
@@ -3138,7 +3276,7 @@
     },
     {
       "file": "_devtools/native_boundary_lint.py",
-      "line": 184,
+      "line": 181,
       "code": "SL-IN-LOOP",
       "function": "scan_text",
       "loop_depth": 1,
@@ -3148,7 +3286,7 @@
     },
     {
       "file": "_devtools/native_boundary_lint.py",
-      "line": 217,
+      "line": 214,
       "code": "SL-IN-LOOP",
       "function": "scan_text",
       "loop_depth": 2,
@@ -3158,7 +3296,7 @@
     },
     {
       "file": "_devtools/native_boundary_lint.py",
-      "line": 243,
+      "line": 240,
       "code": "SL-IN-LOOP",
       "function": "scan_text",
       "loop_depth": 2,
@@ -3168,7 +3306,7 @@
     },
     {
       "file": "_devtools/native_boundary_lint.py",
-      "line": 246,
+      "line": 243,
       "code": "SL-COMP-LOOP",
       "function": "scan_text",
       "loop_depth": 2,
@@ -3178,7 +3316,7 @@
     },
     {
       "file": "_devtools/native_error_lint.py",
-      "line": 96,
+      "line": 95,
       "code": "SL-SLICE-LOOP",
       "function": "_returns_pyobject",
       "loop_depth": 1,
@@ -3188,7 +3326,7 @@
     },
     {
       "file": "_devtools/native_gil_lint.py",
-      "line": 137,
+      "line": 136,
       "code": "SL-LINEAR-CALL",
       "function": "scan_text",
       "loop_depth": 1,
@@ -3198,67 +3336,7 @@
     },
     {
       "file": "_devtools/native_lint.py",
-      "line": 155,
-      "code": "SL-ACCUM-ADD",
-      "function": "strip_c",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`row += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "row += 1"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 310,
-      "code": "SL-IN-LOOP",
-      "function": "_enclosing_function",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `NOT_A_FUNCTION` (kind unknown) inside a loop",
-      "source": "if match and match.group(1) not in NOT_A_FUNCTION:"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 313,
-      "code": "SL-IN-LOOP",
-      "function": "_enclosing_function",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `NOT_A_FUNCTION` (kind unknown) inside a loop",
-      "source": "if match is None or match.group(\"name\") in NOT_A_FUNCTION:"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 364,
-      "code": "SL-ACCUM-ADD",
-      "function": "_loop_depth_map",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`current += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "current += 1"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 382,
-      "code": "SL-LINEAR-CALL",
-      "function": "_loop_depth_map",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "`min(offset)` inside a loop: min() scans",
-      "source": "out.append(depth_at[min(offset, n)])"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 383,
-      "code": "SL-ACCUM-ADD",
-      "function": "_loop_depth_map",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`offset += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "offset += len(line) + 1"
-    },
-    {
-      "file": "_devtools/native_lint.py",
-      "line": 413,
+      "line": 319,
       "code": "SL-SLICE-LOOP",
       "function": "scan_text",
       "loop_depth": 1,
@@ -3268,7 +3346,7 @@
     },
     {
       "file": "_devtools/native_lint.py",
-      "line": 486,
+      "line": 392,
       "code": "SL-LINEAR-METHOD",
       "function": "iter_sources",
       "loop_depth": 1,
@@ -3278,7 +3356,7 @@
     },
     {
       "file": "_devtools/native_lint.py",
-      "line": 487,
+      "line": 393,
       "code": "SL-LINEAR-METHOD",
       "function": "iter_sources",
       "loop_depth": 1,
@@ -3288,7 +3366,7 @@
     },
     {
       "file": "_devtools/native_lint.py",
-      "line": 590,
+      "line": 496,
       "code": "SL-LINEAR-METHOD",
       "function": "run_lint",
       "loop_depth": 1,
@@ -3298,7 +3376,7 @@
     },
     {
       "file": "_devtools/native_lint.py",
-      "line": 672,
+      "line": 578,
       "code": "SL-LINEAR-METHOD",
       "function": "main",
       "loop_depth": 1,
@@ -3568,7 +3646,7 @@
     },
     {
       "file": "_devtools/sanitize.py",
-      "line": 281,
+      "line": 302,
       "code": "SL-COMP-LOOP",
       "function": "run_target",
       "loop_depth": 1,
@@ -3578,7 +3656,7 @@
     },
     {
       "file": "_devtools/sanitize.py",
-      "line": 324,
+      "line": 345,
       "code": "SL-SLICE-LOOP",
       "function": "_report",
       "loop_depth": 1,
@@ -3588,7 +3666,7 @@
     },
     {
       "file": "_devtools/sanitize.py",
-      "line": 326,
+      "line": 347,
       "code": "SL-SLICE-LOOP",
       "function": "_report",
       "loop_depth": 1,
@@ -3608,7 +3686,27 @@
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 193,
+      "line": 222,
+      "code": "SL-COMP-LOOP",
+      "function": "_python_facts",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "comprehension over `keyword.value.elts` inside a loop",
+      "source": "declared = tuple("
+    },
+    {
+      "file": "_devtools/sql_lint.py",
+      "line": 229,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_python_facts",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`relations.update()` inside a loop: update() is linear in its argument",
+      "source": "relations.update(declared)"
+    },
+    {
+      "file": "_devtools/sql_lint.py",
+      "line": 244,
       "code": "SL-LINEAR-CALL",
       "function": "blank",
       "loop_depth": 1,
@@ -3618,7 +3716,7 @@
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 200,
+      "line": 251,
       "code": "SL-SLICE-LOOP",
       "function": "_code_only",
       "loop_depth": 1,
@@ -3628,7 +3726,7 @@
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 234,
+      "line": 285,
       "code": "SL-ACCUM-ADD",
       "function": "_function_body",
       "loop_depth": 1,
@@ -3638,7 +3736,7 @@
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 238,
+      "line": 289,
       "code": "SL-SLICE-LOOP",
       "function": "_function_body",
       "loop_depth": 1,
@@ -3648,23 +3746,23 @@
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 385,
-      "code": "SL-COMP-LOOP",
+      "line": 409,
+      "code": "SL-LINEAR-METHOD",
       "function": "owned_relations",
-      "loop_depth": 3,
+      "loop_depth": 1,
       "confidence": "medium",
-      "message": "comprehension over `keyword.value.elts` inside a loop",
-      "source": "relations = tuple("
+      "message": "`names.update()` inside a loop: update() is linear in its argument",
+      "source": "names.update(_python_facts(module).owned_relations)"
     },
     {
       "file": "_devtools/sql_lint.py",
-      "line": 392,
+      "line": 473,
       "code": "SL-LINEAR-METHOD",
-      "function": "owned_relations",
-      "loop_depth": 2,
+      "function": "scan",
+      "loop_depth": 1,
       "confidence": "medium",
-      "message": "`names.update()` inside a loop: update() is linear in its argument",
-      "source": "names.update(relations)"
+      "message": "`owned.update()` inside a loop: update() is linear in its argument",
+      "source": "owned.update(facts.owned_relations)"
     },
     {
       "file": "_devtools/tape_decomp.py",
@@ -3798,17 +3896,7 @@
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 168,
-      "code": "SL-ACCUM-ADD",
-      "function": "scan",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`index += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "index += 1"
-    },
-    {
-      "file": "_docs/codeblocks.py",
-      "line": 373,
+      "line": 359,
       "code": "SL-RECURSE",
       "function": "_dotted",
       "loop_depth": 0,
@@ -3818,49 +3906,29 @@
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 413,
+      "line": 398,
       "code": "SL-SLICE-LOOP",
       "function": "_rule_depends_in_annotated",
-      "loop_depth": 2,
+      "loop_depth": 1,
       "confidence": "medium",
       "message": "slice of `node.slice.elts` inside a loop copies each time",
       "source": "for element in node.slice.elts[1:]:"
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 484,
+      "line": 467,
       "code": "SL-COMP-LOOP",
       "function": "_rule_markers_in_a_dependency",
-      "loop_depth": 2,
+      "loop_depth": 1,
       "confidence": "medium",
       "message": "comprehension over `_MARKERS` inside a loop",
       "source": "if any(marker in str(parameter.annotation) for marker in _MARKERS)"
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 574,
+      "line": 625,
       "code": "SL-ACCUM-ADD",
-      "function": "_check_chains",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`stats.unresolved += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "stats.unresolved += 1"
-    },
-    {
-      "file": "_docs/codeblocks.py",
-      "line": 576,
-      "code": "SL-ACCUM-ADD",
-      "function": "_check_chains",
-      "loop_depth": 1,
-      "confidence": "low",
-      "message": "`stats.resolved += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
-      "source": "stats.resolved += 1"
-    },
-    {
-      "file": "_docs/codeblocks.py",
-      "line": 627,
-      "code": "SL-ACCUM-ADD",
-      "function": "check_page",
+      "function": "_check_page",
       "loop_depth": 1,
       "confidence": "low",
       "message": "`stats.blocks += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
@@ -3868,9 +3936,9 @@
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 632,
+      "line": 630,
       "code": "SL-ACCUM-ADD",
-      "function": "check_page",
+      "function": "_check_page",
       "loop_depth": 1,
       "confidence": "low",
       "message": "`stats.unparsed += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
@@ -3878,9 +3946,9 @@
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 647,
+      "line": 645,
       "code": "SL-ACCUM-ADD",
-      "function": "check_page",
+      "function": "_check_page",
       "loop_depth": 1,
       "confidence": "low",
       "message": "`stats.parsed += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
@@ -3888,9 +3956,19 @@
     },
     {
       "file": "_docs/codeblocks.py",
-      "line": 657,
+      "line": 663,
+      "code": "SL-COMP-LOOP",
+      "function": "_check_page",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "comprehension over `_RULES` inside a loop",
+      "source": "rule_findings: list[list[Finding]] = [[] for _ in _RULES]"
+    },
+    {
+      "file": "_docs/codeblocks.py",
+      "line": 675,
       "code": "SL-LINEAR-METHOD",
-      "function": "check_page",
+      "function": "_check_page",
       "loop_depth": 1,
       "confidence": "medium",
       "message": "`findings.extend()` inside a loop: extend() is linear in its argument",
@@ -3908,7 +3986,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 164,
+      "line": 204,
       "code": "SL-ACCUM-ADD",
       "function": "render",
       "loop_depth": 1,
@@ -3918,7 +3996,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 216,
+      "line": 256,
       "code": "SL-ACCUM-ADD",
       "function": "_code_block",
       "loop_depth": 1,
@@ -3928,7 +4006,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 238,
+      "line": 278,
       "code": "SL-ACCUM-ADD",
       "function": "_blockquote",
       "loop_depth": 1,
@@ -3938,7 +4016,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 265,
+      "line": 305,
       "code": "SL-ACCUM-ADD",
       "function": "_parse_list",
       "loop_depth": 1,
@@ -3948,7 +4026,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 310,
+      "line": 349,
       "code": "SL-ACCUM-ADD",
       "function": "_admonition",
       "loop_depth": 1,
@@ -3958,7 +4036,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 333,
+      "line": 372,
       "code": "SL-ACCUM-ADD",
       "function": "_tabs",
       "loop_depth": 1,
@@ -3968,7 +4046,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 372,
+      "line": 411,
       "code": "SL-ACCUM-ADD",
       "function": "_table",
       "loop_depth": 1,
@@ -3978,7 +4056,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 404,
+      "line": 443,
       "code": "SL-ACCUM-ADD",
       "function": "_paragraph",
       "loop_depth": 1,
@@ -3988,7 +4066,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 422,
+      "line": 461,
       "code": "SL-LINEAR-METHOD",
       "function": "_line_numbers",
       "loop_depth": 1,
@@ -3998,7 +4076,7 @@
     },
     {
       "file": "_docs/markdown.py",
-      "line": 480,
+      "line": 520,
       "code": "SL-SLICE-LOOP",
       "function": "_strip_frontmatter",
       "loop_depth": 1,
@@ -4017,28 +4095,8 @@
       "source": "items = \"\".join(f\"<li>{_esc(name)}</li>\" for name in sorted(names))"
     },
     {
-      "file": "_docs/search.py",
-      "line": 73,
-      "code": "SL-IN-LOOP",
-      "function": "word_set",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `STOPWORDS` (kind unknown) inside a loop",
-      "source": "if word not in STOPWORDS"
-    },
-    {
-      "file": "_docs/search.py",
-      "line": 75,
-      "code": "SL-IN-LOOP",
-      "function": "word_set",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `seen` (kind unknown) inside a loop",
-      "source": "return \" \".join(sorted(s for s in stems if s not in seen))"
-    },
-    {
       "file": "_docs/site.py",
-      "line": 330,
+      "line": 357,
       "code": "SL-COMP-LOOP",
       "function": "build",
       "loop_depth": 1,
@@ -4048,7 +4106,7 @@
     },
     {
       "file": "_docs/site.py",
-      "line": 380,
+      "line": 409,
       "code": "SL-LINEAR-METHOD",
       "function": "build",
       "loop_depth": 1,
@@ -4058,7 +4116,7 @@
     },
     {
       "file": "_docs/site.py",
-      "line": 465,
+      "line": 494,
       "code": "SL-SLICE-LOOP",
       "function": "_sections",
       "loop_depth": 1,
@@ -4068,7 +4126,7 @@
     },
     {
       "file": "_docs/site.py",
-      "line": 599,
+      "line": 634,
       "code": "SL-LINEAR-METHOD",
       "function": "_check_page",
       "loop_depth": 1,
@@ -5088,7 +5146,7 @@
     },
     {
       "file": "_mutant/patch.py",
-      "line": 222,
+      "line": 252,
       "code": "SL-SLICE-LOOP",
       "function": "_container",
       "loop_depth": 1,
@@ -5098,7 +5156,7 @@
     },
     {
       "file": "_mutant/patch.py",
-      "line": 289,
+      "line": 319,
       "code": "SL-LINEAR-CALL",
       "function": "_slot_names",
       "loop_depth": 1,
@@ -5108,7 +5166,7 @@
     },
     {
       "file": "_mutant/patch.py",
-      "line": 401,
+      "line": 431,
       "code": "SL-LINEAR-CALL",
       "function": "_recompile_policy_engines",
       "loop_depth": 2,
@@ -5118,7 +5176,7 @@
     },
     {
       "file": "_mutant/patch.py",
-      "line": 405,
+      "line": 435,
       "code": "SL-COMP-LOOP",
       "function": "_recompile_policy_engines",
       "loop_depth": 1,
@@ -5128,7 +5186,7 @@
     },
     {
       "file": "_mutant/patch.py",
-      "line": 450,
+      "line": 480,
       "code": "SL-RECURSE",
       "function": "clone_tree",
       "loop_depth": 0,
@@ -5148,7 +5206,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 130,
+      "line": 134,
       "code": "SL-IN-LOOP",
       "function": "discover",
       "loop_depth": 2,
@@ -5158,7 +5216,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 212,
+      "line": 216,
       "code": "SL-IN-LOOP",
       "function": "build_plan",
       "loop_depth": 1,
@@ -5168,7 +5226,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 220,
+      "line": 224,
       "code": "SL-IN-LOOP",
       "function": "build_plan",
       "loop_depth": 1,
@@ -5178,7 +5236,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 227,
+      "line": 231,
       "code": "SL-COMP-LOOP",
       "function": "build_plan",
       "loop_depth": 2,
@@ -5188,7 +5246,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 242,
+      "line": 246,
       "code": "SL-COMP-LOOP",
       "function": "build_plan",
       "loop_depth": 2,
@@ -5198,7 +5256,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 244,
+      "line": 248,
       "code": "SL-IN-LOOP",
       "function": "build_plan",
       "loop_depth": 2,
@@ -5208,7 +5266,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 302,
+      "line": 305,
       "code": "SL-IN-LOOP",
       "function": "sample_identifiers",
       "loop_depth": 1,
@@ -5218,7 +5276,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 312,
+      "line": 315,
       "code": "SL-COMP-LOOP",
       "function": "sample_identifiers",
       "loop_depth": 2,
@@ -5228,7 +5286,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 321,
+      "line": 324,
       "code": "SL-COMP-LOOP",
       "function": "sample_identifiers",
       "loop_depth": 2,
@@ -5238,7 +5296,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 548,
+      "line": 723,
       "code": "SL-IN-LOOP",
       "function": "candidates_for",
       "loop_depth": 1,
@@ -5248,7 +5306,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 551,
+      "line": 726,
       "code": "SL-LINEAR-METHOD",
       "function": "candidates_for",
       "loop_depth": 1,
@@ -5258,7 +5316,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 559,
+      "line": 734,
       "code": "SL-IN-LOOP",
       "function": "candidates_for",
       "loop_depth": 1,
@@ -5268,7 +5326,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 601,
+      "line": 812,
       "code": "SL-IN-LOOP",
       "function": "words",
       "loop_depth": 1,
@@ -5278,7 +5336,7 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 869,
+      "line": 1188,
       "code": "SL-ACCUM-ADD",
       "function": "_run_live_mutants",
       "loop_depth": 2,
@@ -5288,7 +5346,17 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 896,
+      "line": 1195,
+      "code": "SL-ACCUM-ADD",
+      "function": "_run_live_mutants",
+      "loop_depth": 2,
+      "confidence": "low",
+      "message": "`finished_suite_workers += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "finished_suite_workers += 1"
+    },
+    {
+      "file": "_mutant/runner.py",
+      "line": 1258,
       "code": "SL-ACCUM-ADD",
       "function": "_run_live_mutants",
       "loop_depth": 2,
@@ -5298,13 +5366,203 @@
     },
     {
       "file": "_mutant/runner.py",
-      "line": 1140,
+      "line": 1581,
       "code": "SL-ACCUM-ADD",
       "function": "execute",
       "loop_depth": 2,
       "confidence": "low",
       "message": "`next_runnable += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
       "source": "next_runnable += 1"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 46,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcmp(): linear call inside a loop",
+      "source": "memcmp(data + index, needle, (size_t)needle_length) == 0) {"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 183,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (end < intermediate_used && intermediate[end] != '>') {"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 308,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (end < source_length) {"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 444,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (closing < line_count) {"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 674,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (index < text_length && allowed_word_byte((unsigned char)text[index])) {"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 693,
+      "code": "CL-REALLOC-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "PyMem_Realloc(): reallocation inside a loop",
+      "source": "Word *next = PyMem_Realloc(words, (size_t)next_capacity * sizeof(*words));"
+    },
+    {
+      "file": "_native/_docsmodule.c",
+      "line": 722,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcpy(): linear call inside a loop",
+      "source": "memcpy(output + used, word->data, (size_t)word->length);"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 126,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "strlen(): linear call inside a loop",
+      "source": "size_t keyword_length = strlen(keywords[index]);"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 128,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcmp(): linear call inside a loop",
+      "source": "memcmp(word, keywords[index], keyword_length) == 0) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 157,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (next[slot].occupied) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 194,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcmp(): linear call inside a loop",
+      "source": "memcmp(entry->name, word, (size_t)length) == 0) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 305,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (index < length && source[index] != '\\n') {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 313,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (index < length) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 338,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (start < index) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 349,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (index < length &&"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 377,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (index < length &&"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 716,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (token_index = 0; token_index < tape->count; token_index++) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 734,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (start = 0; start < window_count; start++) {"
+    },
+    {
+      "file": "_native/_dupscanmodule.c",
+      "line": 743,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "while (windows[slot].occupied && windows[slot].hash != rolling) {"
     },
     {
       "file": "_native/aesgcm.c",
@@ -5688,7 +5946,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 544,
+      "line": 614,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5698,7 +5956,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 674,
+      "line": 744,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5708,7 +5966,37 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 747,
+      "line": 843,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (eq < field_len && field[eq] != '=') eq++;"
+    },
+    {
+      "file": "_native/codecs.c",
+      "line": 859,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t j = 0; j < count; j++) {"
+    },
+    {
+      "file": "_native/codecs.c",
+      "line": 874,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t j = 0; j < count; j++) {"
+    },
+    {
+      "file": "_native/codecs.c",
+      "line": 1111,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5718,7 +6006,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 749,
+      "line": 1113,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5728,7 +6016,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 762,
+      "line": 1126,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5738,7 +6026,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 764,
+      "line": 1128,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5748,7 +6036,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 799,
+      "line": 1163,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5758,7 +6046,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 879,
+      "line": 1243,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5768,7 +6056,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 990,
+      "line": 1354,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5778,7 +6066,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1070,
+      "line": 1434,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5788,7 +6076,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1073,
+      "line": 1437,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5798,7 +6086,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1091,
+      "line": 1455,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5808,7 +6096,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1098,
+      "line": 1462,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5818,7 +6106,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1160,
+      "line": 1524,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5828,7 +6116,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1188,
+      "line": 1552,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5838,7 +6126,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1193,
+      "line": 1557,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -5848,7 +6136,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1435,
+      "line": 1799,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5858,7 +6146,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1755,
+      "line": 2119,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -5868,7 +6156,7 @@
     },
     {
       "file": "_native/codecs.c",
-      "line": 1757,
+      "line": 2121,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -6098,7 +6386,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 292,
+      "line": 359,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6108,7 +6396,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 296,
+      "line": 363,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -6118,7 +6406,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 301,
+      "line": 368,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -6128,7 +6416,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 302,
+      "line": 369,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -6138,7 +6426,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 304,
+      "line": 371,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6148,7 +6436,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 354,
+      "line": 421,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6158,7 +6446,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 360,
+      "line": 427,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -6168,7 +6456,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 837,
+      "line": 904,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6178,7 +6466,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 857,
+      "line": 924,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6188,7 +6476,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 882,
+      "line": 949,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6198,7 +6486,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 885,
+      "line": 952,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6208,7 +6496,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1095,
+      "line": 1162,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6218,7 +6506,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1099,
+      "line": 1166,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 2,
@@ -6228,7 +6516,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1681,
+      "line": 1748,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6238,7 +6526,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1685,
+      "line": 1752,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6248,7 +6536,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1697,
+      "line": 1764,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6258,7 +6546,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1947,
+      "line": 2014,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6268,7 +6556,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 1951,
+      "line": 2018,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6278,7 +6566,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2188,
+      "line": 2255,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6288,7 +6576,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2192,
+      "line": 2259,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6298,27 +6586,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2480,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (slots[slot] != SIZE_MAX) slot = (slot + 1) & (capacity - 1);"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2502,
-      "code": "CL-LINEAR-IN-LOOP",
-      "function": "<file>",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "memcmp(): linear call inside a loop",
-      "source": "memcmp(entry->key, key, key_length) == 0) {"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2618,
+      "line": 2638,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6328,7 +6596,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2633,
+      "line": 2653,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6338,107 +6606,67 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2768,
+      "line": 2771,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "loop nested 2 deep",
-      "source": "while (part_end < length && text[part_end] != ',') part_end++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2772,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (separator < end && text[separator] != ';') separator++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2779,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (parameter_start <= end) {"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2781,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (parameter_end < end && text[parameter_end] != ';')"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2784,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (equals < parameter_end && text[equals] != '=') equals++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2892,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (part_end < length && text[part_end] != ',') part_end++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2896,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (separator < end && text[separator] != ';') separator++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2901,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (parameter_start <= end) {"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 2903,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
       "source": "while (parameter_end < end && text[parameter_end] != ';') parameter_end++;"
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2905,
+      "line": 2773,
       "code": "CL-NEST",
       "function": "<file>",
-      "loop_depth": 3,
+      "loop_depth": 2,
       "confidence": "medium",
-      "message": "loop nested 3 deep",
+      "message": "loop nested 2 deep",
       "source": "while (equals < parameter_end && text[equals] != '=') equals++;"
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2924,
+      "line": 2806,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (part_end < length && text[part_end] != ',') part_end++;"
+    },
+    {
+      "file": "_native/data_kernels.c",
+      "line": 2810,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (separator < end && text[separator] != ';') separator++;"
+    },
+    {
+      "file": "_native/data_kernels.c",
+      "line": 2913,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (part_end < length && text[part_end] != ',') part_end++;"
+    },
+    {
+      "file": "_native/data_kernels.c",
+      "line": 2917,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (separator < end && text[separator] != ';') separator++;"
+    },
+    {
+      "file": "_native/data_kernels.c",
+      "line": 2925,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6448,7 +6676,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 2932,
+      "line": 2933,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6458,7 +6686,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3000,
+      "line": 3001,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6468,7 +6696,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3040,
+      "line": 3041,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6478,7 +6706,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3044,
+      "line": 3045,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6488,7 +6716,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3054,
+      "line": 3055,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6498,7 +6726,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3121,
+      "line": 3122,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6508,7 +6736,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3280,
+      "line": 3281,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6518,7 +6746,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3284,
+      "line": 3285,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6528,37 +6756,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3290,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (parameter_start <= end) {"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 3292,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (parameter_end < end && text[parameter_end] != ';')"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 3295,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (equals < parameter_end && text[equals] != '=') equals++;"
-    },
-    {
-      "file": "_native/data_kernels.c",
-      "line": 3310,
+      "line": 3291,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6568,7 +6766,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3386,
+      "line": 3367,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6578,7 +6776,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3403,
+      "line": 3384,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6588,7 +6786,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3484,
+      "line": 3465,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6598,7 +6796,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3520,
+      "line": 3501,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6608,7 +6806,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3588,
+      "line": 3569,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6618,7 +6816,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3642,
+      "line": 3623,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6628,7 +6826,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3684,
+      "line": 3665,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6638,7 +6836,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3687,
+      "line": 3668,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6648,7 +6846,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3818,
+      "line": 3799,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6658,7 +6856,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3992,
+      "line": 3973,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6668,7 +6866,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 3998,
+      "line": 3979,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 2,
@@ -6678,7 +6876,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4007,
+      "line": 3988,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6688,7 +6886,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4014,
+      "line": 3995,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6698,7 +6896,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4024,
+      "line": 4005,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6708,7 +6906,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4044,
+      "line": 4025,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6718,7 +6916,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4151,
+      "line": 4132,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6728,7 +6926,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4183,
+      "line": 4164,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6738,7 +6936,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4184,
+      "line": 4165,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -6748,7 +6946,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4190,
+      "line": 4171,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6758,7 +6956,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4195,
+      "line": 4176,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6768,7 +6966,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4279,
+      "line": 4260,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -6778,7 +6976,7 @@
     },
     {
       "file": "_native/data_kernels.c",
-      "line": 4291,
+      "line": 4272,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7128,7 +7326,7 @@
     },
     {
       "file": "_native/graphql.c",
-      "line": 1255,
+      "line": 1220,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7138,7 +7336,7 @@
     },
     {
       "file": "_native/graphql.c",
-      "line": 1415,
+      "line": 1380,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7738,7 +7936,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 53,
+      "line": 90,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7748,7 +7946,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 82,
+      "line": 119,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7758,7 +7956,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 108,
+      "line": 145,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7768,7 +7966,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 111,
+      "line": 148,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7778,7 +7976,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 115,
+      "line": 152,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7788,53 +7986,13 @@
     },
     {
       "file": "_native/http.c",
-      "line": 219,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (p < end && TOKEN_CHARS[*p]) p++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 226,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (p < end && (*p == ' ' || *p == '\\t')) p++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 243,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (value_end > value_start &&"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 267,
+      "line": 274,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "loop nested 2 deep",
       "source": "for (Py_ssize_t i = 0; i < name_len; i++) {"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 273,
-      "code": "CL-LINEAR-IN-LOOP",
-      "function": "<file>",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "memcmp(): linear call inside a loop",
-      "source": "if (name_len == 4 && memcmp(owned + name_offset, \"host\", 4) == 0) {"
     },
     {
       "file": "_native/http.c",
@@ -7844,11 +8002,21 @@
       "loop_depth": 1,
       "confidence": "medium",
       "message": "memcmp(): linear call inside a loop",
+      "source": "if (name_len == 4 && memcmp(owned + name_offset, \"host\", 4) == 0) {"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 287,
+      "code": "CL-LINEAR-IN-LOOP",
+      "function": "<file>",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "memcmp(): linear call inside a loop",
       "source": "if (name_len == 6 && memcmp(name, \"expect\", 6) == 0) {"
     },
     {
       "file": "_native/http.c",
-      "line": 290,
+      "line": 297,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7858,7 +8026,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 296,
+      "line": 303,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7868,7 +8036,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 301,
+      "line": 308,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7878,7 +8046,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 304,
+      "line": 311,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -7888,7 +8056,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 308,
+      "line": 315,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -7898,7 +8066,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 313,
+      "line": 320,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -7908,7 +8076,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 317,
+      "line": 324,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -7918,7 +8086,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 332,
+      "line": 339,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7928,7 +8096,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 340,
+      "line": 347,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7938,37 +8106,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 575,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (p < end && TOKEN_CHARS[*p]) p++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 582,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (p < end && (*p == ' ' || *p == '\\t')) p++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 599,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "while (value_end > value_start &&"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 610,
+      "line": 587,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -7978,29 +8116,69 @@
     },
     {
       "file": "_native/http.c",
+      "line": 595,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (;;) {"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 598,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "while (separator < value_end && *separator != ',') separator++;"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 600,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "while (cursor < token_end && http_is_ows(*cursor)) cursor++;"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 601,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "while (token_end > cursor && http_is_ows(token_end[-1])) token_end--;"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 613,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (;;) {"
+    },
+    {
+      "file": "_native/http.c",
+      "line": 616,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "while (separator < value_end && *separator != ',') separator++;"
+    },
+    {
+      "file": "_native/http.c",
       "line": 618,
       "code": "CL-NEST",
       "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "for (;;) {"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 621,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (separator < value_end && *separator != ',') separator++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 623,
-      "code": "CL-NEST",
-      "function": "<file>",
       "loop_depth": 3,
       "confidence": "medium",
       "message": "loop nested 3 deep",
@@ -8008,7 +8186,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 624,
+      "line": 619,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8018,47 +8196,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 636,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "loop nested 2 deep",
-      "source": "for (;;) {"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 639,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (separator < value_end && *separator != ',') separator++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 641,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (cursor < token_end && http_is_ows(*cursor)) cursor++;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 642,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "while (token_end > cursor && http_is_ows(token_end[-1])) token_end--;"
-    },
-    {
-      "file": "_native/http.c",
-      "line": 654,
+      "line": 631,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8068,7 +8206,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 672,
+      "line": 649,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8078,7 +8216,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 896,
+      "line": 873,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8088,7 +8226,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 913,
+      "line": 890,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8098,7 +8236,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 924,
+      "line": 901,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8108,7 +8246,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 928,
+      "line": 905,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8118,7 +8256,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 931,
+      "line": 908,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8128,7 +8266,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 932,
+      "line": 909,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8138,7 +8276,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1021,
+      "line": 998,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8148,7 +8286,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1031,
+      "line": 1008,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8158,7 +8296,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1034,
+      "line": 1011,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8168,7 +8306,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1036,
+      "line": 1013,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8178,7 +8316,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1037,
+      "line": 1014,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -8188,7 +8326,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1270,
+      "line": 1247,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8198,7 +8336,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1273,
+      "line": 1250,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8208,7 +8346,7 @@
     },
     {
       "file": "_native/http.c",
-      "line": 1317,
+      "line": 1294,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8218,7 +8356,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1194,
+      "line": 1228,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8228,7 +8366,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1195,
+      "line": 1229,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8238,7 +8376,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1196,
+      "line": 1230,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8248,7 +8386,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1197,
+      "line": 1231,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8258,7 +8396,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1202,
+      "line": 1236,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8268,7 +8406,7 @@
     },
     {
       "file": "_native/http3_asgi.c",
-      "line": 1209,
+      "line": 1243,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8298,7 +8436,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 502,
+      "line": 506,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8308,7 +8446,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 514,
+      "line": 518,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8318,7 +8456,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 524,
+      "line": 528,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8328,7 +8466,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 535,
+      "line": 539,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -8338,7 +8476,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 606,
+      "line": 610,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -8348,7 +8486,7 @@
     },
     {
       "file": "_native/json.c",
-      "line": 629,
+      "line": 633,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9427,26 +9565,6 @@
       "source": "while (node != NULL) {"
     },
     {
-      "file": "_native/ryu/d2s.c",
-      "line": 372,
-      "code": "CL-LINEAR-IN-LOOP",
-      "function": "to_chars",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "memcpy(): linear call inside a loop",
-      "source": "memcpy(result + index + olength - i - 1, DIGIT_TABLE + c0, 2);"
-    },
-    {
-      "file": "_native/ryu/d2s.c",
-      "line": 373,
-      "code": "CL-LINEAR-IN-LOOP",
-      "function": "to_chars",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "memcpy(): linear call inside a loop",
-      "source": "memcpy(result + index + olength - i - 3, DIGIT_TABLE + c1, 2);"
-    },
-    {
       "file": "_native/scheduler.c",
       "line": 133,
       "code": "CL-NEST",
@@ -9518,7 +9636,7 @@
     },
     {
       "file": "_native/security.c",
-      "line": 427,
+      "line": 416,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9528,7 +9646,7 @@
     },
     {
       "file": "_native/security.c",
-      "line": 433,
+      "line": 422,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9538,7 +9656,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 744,
+      "line": 756,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9548,7 +9666,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 762,
+      "line": 774,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9558,7 +9676,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1276,
+      "line": 1457,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9568,7 +9686,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1311,
+      "line": 1492,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9578,7 +9696,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1318,
+      "line": 1499,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9588,7 +9706,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1441,
+      "line": 1622,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9598,7 +9716,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1467,
+      "line": 1648,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9608,33 +9726,23 @@
     },
     {
       "file": "_native/series.c",
-      "line": 1916,
+      "line": 1756,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "loop nested 2 deep",
-      "source": "for (Py_ssize_t series = 0; series < series_count; series++) {"
+      "source": "for (Py_ssize_t slot = 0; slot < group_count; slot++) {"
     },
     {
       "file": "_native/series.c",
-      "line": 1919,
-      "code": "CL-NEST",
-      "function": "<file>",
-      "loop_depth": 3,
-      "confidence": "medium",
-      "message": "loop nested 3 deep",
-      "source": "for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {"
-    },
-    {
-      "file": "_native/series.c",
-      "line": 1939,
+      "line": 1949,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "loop nested 2 deep",
-      "source": "for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {"
+      "source": "for (Py_ssize_t base = begin; base < end;) {"
     },
     {
       "file": "_native/series.c",
@@ -9644,11 +9752,111 @@
       "loop_depth": 3,
       "confidence": "medium",
       "message": "loop nested 3 deep",
+      "source": "while (next < end && row_indices[next] / measure_count == series)"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 1988,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (next < downsample_count &&"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 1999,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t slot = 0; slot < group_count; slot++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2011,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t output = base; output < next; output++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2044,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "while (next < output_count &&"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2055,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t slot = 0; slot < group_count; slot++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2067,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t output = base; output < next; output++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2277,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t series = 0; series < series_count; series++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2280,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
+      "source": "for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2300,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 2,
+      "confidence": "medium",
+      "message": "loop nested 2 deep",
+      "source": "for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {"
+    },
+    {
+      "file": "_native/series.c",
+      "line": 2313,
+      "code": "CL-NEST",
+      "function": "<file>",
+      "loop_depth": 3,
+      "confidence": "medium",
+      "message": "loop nested 3 deep",
       "source": "for (Py_ssize_t measure = 0; measure < measure_count; measure++) {"
     },
     {
       "file": "_native/series.c",
-      "line": 1990,
+      "line": 2351,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9658,7 +9866,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2053,
+      "line": 2414,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9668,7 +9876,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2075,
+      "line": 2436,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9678,7 +9886,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2084,
+      "line": 2445,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 2,
@@ -9688,7 +9896,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2087,
+      "line": 2448,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 2,
@@ -9698,7 +9906,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2324,
+      "line": 2685,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9708,7 +9916,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2413,
+      "line": 2774,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9718,7 +9926,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2424,
+      "line": 2785,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9728,7 +9936,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2431,
+      "line": 2792,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9738,7 +9946,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2458,
+      "line": 2819,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9748,7 +9956,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 2913,
+      "line": 3329,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9758,7 +9966,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 3008,
+      "line": 3424,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9768,17 +9976,17 @@
     },
     {
       "file": "_native/series.c",
-      "line": 3122,
+      "line": 3545,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
       "confidence": "medium",
       "message": "loop nested 2 deep",
-      "source": "while (table[slot].used) slot = (slot + 1) & (size - 1);"
+      "source": "while (table[slot].key != NULL) slot = (slot + 1) & (size - 1);"
     },
     {
       "file": "_native/series.c",
-      "line": 3350,
+      "line": 3771,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9788,7 +9996,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 3359,
+      "line": 3780,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 3,
@@ -9798,7 +10006,7 @@
     },
     {
       "file": "_native/series.c",
-      "line": 3523,
+      "line": 3944,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -9808,7 +10016,7 @@
     },
     {
       "file": "_native/server_common.c",
-      "line": 608,
+      "line": 589,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -9818,7 +10026,7 @@
     },
     {
       "file": "_native/server_common.c",
-      "line": 656,
+      "line": 637,
       "code": "CL-LINEAR-IN-LOOP",
       "function": "<file>",
       "loop_depth": 1,
@@ -10678,7 +10886,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 668,
+      "line": 674,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10688,7 +10896,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 677,
+      "line": 683,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10698,7 +10906,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 693,
+      "line": 699,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10708,7 +10916,7 @@
     },
     {
       "file": "_native/wreathcore.h",
-      "line": 701,
+      "line": 707,
       "code": "CL-NEST",
       "function": "<file>",
       "loop_depth": 2,
@@ -10785,6 +10993,196 @@
       "confidence": "medium",
       "message": "memcmp(): linear call inside a loop",
       "source": "(size > 6 && memcmp(utf8, \"xmlns:\", 6) == 0)) {"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 127,
+      "code": "SL-LINEAR-CALL",
+      "function": "get_closest_marker",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`reversed(self.marks)` inside a loop: reversed() over a sequence",
+      "source": "return next((mark for mark in reversed(self.marks) if mark.name == name), None)"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 250,
+      "code": "SL-COMP-LOOP",
+      "function": "fnmatch_lines",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "comprehension over `lines` inside a loop",
+      "source": "if not any(fnmatch.fnmatch(line, pattern) for line in lines)"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 728,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_test_import_paths",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`roots.update()` inside a loop: update() is linear in its argument",
+      "source": "roots.update(str(conftest.parent) for conftest in _conftest_paths(path.parent))"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 761,
+      "code": "SL-ACCUM-ADD",
+      "function": "_parse",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`index += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "index += 1"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 870,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_selected_files",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`files.update()` inside a loop: update() is linear in its argument",
+      "source": "files.update(candidate.resolve() for candidate in path.rglob(\"test_*.py\"))"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1025,
+      "code": "SL-LINEAR-METHOD",
+      "function": "collect",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`cases.extend()` inside a loop: extend() is linear in its argument",
+      "source": "cases.extend(_collect_module(path, module, fixtures, runtime))"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1120,
+      "code": "SL-IN-LOOP",
+      "function": "_fixture_defs",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "membership test against `_NATIVE_REPORTING_HOOKS` (kind unknown) inside a loop",
+      "source": "and name not in _NATIVE_REPORTING_HOOKS"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1340,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_collect_module",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`collected.extend()` inside a loop: extend() is linear in its argument",
+      "source": "collected.extend("
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1357,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_collect_module",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`collected.extend()` inside a loop: extend() is linear in its argument",
+      "source": "collected.extend("
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1413,
+      "code": "SL-LINEAR-CALL",
+      "function": "_collect_class",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`dict(fixtures)` inside a loop: dict() copies",
+      "source": "method_fixtures = dict(fixtures)"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1440,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_collect_class",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`cases.extend()` inside a loop: extend() is linear in its argument",
+      "source": "cases.extend("
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1484,
+      "code": "SL-COMP-NEST",
+      "function": "_expand_function",
+      "loop_depth": 0,
+      "confidence": "medium",
+      "message": "comprehension with 2 generators",
+      "source": "declared_names = [item for declaration in declarations for item in declaration.names]"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1562,
+      "code": "SL-COMP-NEST",
+      "function": "_expand_function",
+      "loop_depth": 0,
+      "confidence": "medium",
+      "message": "comprehension with 2 generators",
+      "source": "expanded_cases = ("
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1683,
+      "code": "SL-ACCUM-ADD",
+      "function": "parse_or",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`position += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "position += 1"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1693,
+      "code": "SL-ACCUM-ADD",
+      "function": "parse_and",
+      "loop_depth": 1,
+      "confidence": "low",
+      "message": "`position += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
+      "source": "position += 1"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 1840,
+      "code": "SL-LINEAR-CALL",
+      "function": "_native_shards",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`sorted(weighted)` inside a loop: sorted() is n log n",
+      "source": "for weight, _path, cases in sorted(weighted, key=lambda item: (-item[0], item[1])):"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 2353,
+      "code": "SL-LINEAR-CALL",
+      "function": "_run_parallel",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`tuple(progress_buffers)` inside a loop: tuple() copies",
+      "source": "ready, _, _ = select.select(tuple(progress_buffers), (), (), 0.05)"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 2358,
+      "code": "SL-LINEAR-CALL",
+      "function": "_run_parallel",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`tuple(children)` inside a loop: tuple() copies",
+      "source": "pid, status = _reap_owned_worker(tuple(children))"
+    },
+    {
+      "file": "_native_test_runner.py",
+      "line": 2453,
+      "code": "SL-LINEAR-METHOD",
+      "function": "_run_parallel",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "`combined.extend()` inside a loop: extend() is linear in its argument",
+      "source": "combined.extend(shard_results)"
     },
     {
       "file": "_orm_events.py",
@@ -10878,7 +11276,7 @@
     },
     {
       "file": "_passes/driver.py",
-      "line": 482,
+      "line": 478,
       "code": "SL-ACCUM-ADD",
       "function": "_shift_bound",
       "loop_depth": 1,
@@ -10888,7 +11286,7 @@
     },
     {
       "file": "_passes/driver.py",
-      "line": 484,
+      "line": 480,
       "code": "SL-ACCUM-ADD",
       "function": "_shift_bound",
       "loop_depth": 1,
@@ -10898,7 +11296,7 @@
     },
     {
       "file": "_passes/driver.py",
-      "line": 485,
+      "line": 481,
       "code": "SL-ACCUM-ADD",
       "function": "_shift_bound",
       "loop_depth": 1,
@@ -10908,7 +11306,7 @@
     },
     {
       "file": "_passes/driver.py",
-      "line": 580,
+      "line": 576,
       "code": "SL-ACCUM-ADD",
       "function": "_attempt",
       "loop_depth": 1,
@@ -11538,7 +11936,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 669,
+      "line": 671,
       "code": "SL-COMP-LOOP",
       "function": "_created_task_is_joined",
       "loop_depth": 1,
@@ -11548,7 +11946,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 816,
+      "line": 818,
       "code": "SL-IN-LOOP",
       "function": "_migration_verdict",
       "loop_depth": 1,
@@ -11558,7 +11956,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 824,
+      "line": 826,
       "code": "SL-IN-LOOP",
       "function": "_migration_verdict",
       "loop_depth": 1,
@@ -11568,7 +11966,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 843,
+      "line": 845,
       "code": "SL-IN-LOOP",
       "function": "_table_body_verdict",
       "loop_depth": 1,
@@ -11578,7 +11976,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 845,
+      "line": 847,
       "code": "SL-COMP-LOOP",
       "function": "_table_body_verdict",
       "loop_depth": 1,
@@ -11588,7 +11986,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 845,
+      "line": 847,
       "code": "SL-IN-LOOP",
       "function": "_table_body_verdict",
       "loop_depth": 2,
@@ -11598,7 +11996,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 864,
+      "line": 866,
       "code": "SL-COMP-LOOP",
       "function": "_column_verdict",
       "loop_depth": 1,
@@ -11608,7 +12006,7 @@
     },
     {
       "file": "_port/analyzer/scan.py",
-      "line": 864,
+      "line": 866,
       "code": "SL-IN-LOOP",
       "function": "_column_verdict",
       "loop_depth": 2,
@@ -11618,7 +12016,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 80,
+      "line": 82,
       "code": "SL-IN-LOOP",
       "function": "_function_query_names",
       "loop_depth": 1,
@@ -11628,7 +12026,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 184,
+      "line": 186,
       "code": "SL-LINEAR-METHOD",
       "function": "session_functions",
       "loop_depth": 1,
@@ -11638,7 +12036,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 284,
+      "line": 286,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 2,
@@ -11648,7 +12046,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 284,
+      "line": 286,
       "code": "SL-COMP-NEST",
       "function": "session_sites",
       "loop_depth": 2,
@@ -11658,7 +12056,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 308,
+      "line": 310,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 1,
@@ -11668,7 +12066,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 311,
+      "line": 313,
       "code": "SL-IN-LOOP",
       "function": "session_sites",
       "loop_depth": 2,
@@ -11678,7 +12076,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 325,
+      "line": 327,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 1,
@@ -11688,7 +12086,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 335,
+      "line": 337,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 2,
@@ -11698,7 +12096,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 345,
+      "line": 347,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 1,
@@ -11708,7 +12106,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 350,
+      "line": 352,
       "code": "SL-COMP-LOOP",
       "function": "session_sites",
       "loop_depth": 1,
@@ -11718,7 +12116,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 443,
+      "line": 445,
       "code": "SL-IN-LOOP",
       "function": "session_sites",
       "loop_depth": 2,
@@ -11728,7 +12126,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 454,
+      "line": 456,
       "code": "SL-IN-LOOP",
       "function": "methods_for",
       "loop_depth": 1,
@@ -11738,7 +12136,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 524,
+      "line": 526,
       "code": "SL-IN-LOOP",
       "function": "session_sites",
       "loop_depth": 1,
@@ -11748,7 +12146,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 545,
+      "line": 547,
       "code": "SL-COMP-NEST",
       "function": "session_sites",
       "loop_depth": 0,
@@ -11758,7 +12156,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 557,
+      "line": 559,
       "code": "SL-COMP-NEST",
       "function": "session_sites",
       "loop_depth": 0,
@@ -11768,7 +12166,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 589,
+      "line": 591,
       "code": "SL-COMP-NEST",
       "function": "session_sites",
       "loop_depth": 0,
@@ -11778,7 +12176,7 @@
     },
     {
       "file": "_port/analyzer/sessions.py",
-      "line": 592,
+      "line": 594,
       "code": "SL-IN-LOOP",
       "function": "session_sites",
       "loop_depth": 2,
@@ -12018,7 +12416,17 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 64,
+      "line": 54,
+      "code": "SL-IN-LOOP",
+      "function": "rewrite_imports",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "membership test against `self._rewritten` (kind unknown) inside a loop",
+      "source": "and id(node) not in self._rewritten"
+    },
+    {
+      "file": "_port/emit/imports.py",
+      "line": 73,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12028,7 +12436,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 77,
+      "line": 86,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12038,17 +12446,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 81,
-      "code": "SL-IN-LOOP",
-      "function": "rewrite_imports",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "membership test against `self._retain` (kind unknown) inside a loop",
-      "source": "and (alias.asname or alias.name) not in self._retain"
-    },
-    {
-      "file": "_port/emit/imports.py",
-      "line": 89,
+      "line": 98,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12058,17 +12456,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 93,
-      "code": "SL-IN-LOOP",
-      "function": "rewrite_imports",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "membership test against `self._retain` (kind unknown) inside a loop",
-      "source": "and (alias.asname or alias.name) not in self._retain"
-    },
-    {
-      "file": "_port/emit/imports.py",
-      "line": 100,
+      "line": 109,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12078,7 +12466,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 102,
+      "line": 111,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12088,7 +12476,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 108,
+      "line": 117,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12098,7 +12486,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 110,
+      "line": 119,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12108,7 +12496,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 113,
+      "line": 122,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12118,7 +12506,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 124,
+      "line": 133,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12128,7 +12516,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 127,
+      "line": 136,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12138,7 +12526,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 139,
+      "line": 148,
       "code": "SL-LINEAR-CALL",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12148,7 +12536,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 141,
+      "line": 150,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12158,7 +12546,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 144,
+      "line": 153,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 2,
@@ -12168,7 +12556,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 145,
+      "line": 154,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 2,
@@ -12178,7 +12566,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 153,
+      "line": 162,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12188,7 +12576,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 153,
+      "line": 162,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 2,
@@ -12198,7 +12586,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 154,
+      "line": 163,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12208,7 +12596,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 159,
+      "line": 168,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12218,7 +12606,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 159,
+      "line": 168,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 2,
@@ -12228,7 +12616,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 160,
+      "line": 169,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12238,7 +12626,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 166,
+      "line": 175,
       "code": "SL-IN-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12248,7 +12636,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 178,
+      "line": 187,
       "code": "SL-COMP-LOOP",
       "function": "rewrite_imports",
       "loop_depth": 1,
@@ -12258,7 +12646,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 194,
+      "line": 203,
       "code": "SL-IN-LOOP",
       "function": "_drop_replaced",
       "loop_depth": 1,
@@ -12268,7 +12656,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 227,
+      "line": 236,
       "code": "SL-IN-LOOP",
       "function": "_rewrite_from_fastapi",
       "loop_depth": 1,
@@ -12278,7 +12666,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 230,
+      "line": 239,
       "code": "SL-IN-LOOP",
       "function": "_rewrite_from_fastapi",
       "loop_depth": 1,
@@ -12288,7 +12676,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 232,
+      "line": 241,
       "code": "SL-IN-LOOP",
       "function": "_rewrite_from_fastapi",
       "loop_depth": 1,
@@ -12298,7 +12686,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 252,
+      "line": 261,
       "code": "SL-IN-LOOP",
       "function": "_rewrite_from_pydantic",
       "loop_depth": 1,
@@ -12308,7 +12696,7 @@
     },
     {
       "file": "_port/emit/imports.py",
-      "line": 253,
+      "line": 262,
       "code": "SL-IN-LOOP",
       "function": "_rewrite_from_pydantic",
       "loop_depth": 1,
@@ -13687,6 +14075,56 @@
       "source": "buckets=list(m.buckets),"
     },
     {
+      "file": "_pytest_facade.py",
+      "line": 359,
+      "code": "SL-RECURSE",
+      "function": "_approximately_equal",
+      "loop_depth": 0,
+      "confidence": "low",
+      "message": "2 self-recursive call sites, no cache decorator",
+      "source": ""
+    },
+    {
+      "file": "_pytest_facade.py",
+      "line": 446,
+      "code": "SL-SLICE-LOOP",
+      "function": "setattr",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `parts` inside a loop copies each time",
+      "source": "imported = importlib.import_module(\".\".join(parts[:width]))"
+    },
+    {
+      "file": "_pytest_facade.py",
+      "line": 448,
+      "code": "SL-SLICE-LOOP",
+      "function": "setattr",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `parts` inside a loop copies each time",
+      "source": "if error.name != \".\".join(parts[:width]):"
+    },
+    {
+      "file": "_pytest_facade.py",
+      "line": 451,
+      "code": "SL-SLICE-LOOP",
+      "function": "setattr",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `parts` inside a loop copies each time",
+      "source": "remainder = parts[width:]"
+    },
+    {
+      "file": "_pytest_facade.py",
+      "line": 456,
+      "code": "SL-SLICE-LOOP",
+      "function": "setattr",
+      "loop_depth": 1,
+      "confidence": "medium",
+      "message": "slice of `remainder` inside a loop copies each time",
+      "source": "for component in remainder[:-1]:"
+    },
+    {
       "file": "_recording_format.py",
       "line": 645,
       "code": "SL-SLICE-LOOP",
@@ -13788,7 +14226,7 @@
     },
     {
       "file": "_scim/router.py",
-      "line": 416,
+      "line": 457,
       "code": "SL-IN-LOOP",
       "function": "commit_group",
       "loop_depth": 1,
@@ -13798,7 +14236,7 @@
     },
     {
       "file": "_scim/router.py",
-      "line": 622,
+      "line": 652,
       "code": "SL-LINEAR-CALL",
       "function": "user_documents",
       "loop_depth": 1,
@@ -13808,7 +14246,7 @@
     },
     {
       "file": "_scim/router.py",
-      "line": 650,
+      "line": 680,
       "code": "SL-SLICE-LOOP",
       "function": "scim_list_users",
       "loop_depth": 1,
@@ -14018,7 +14456,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 426,
+      "line": 497,
       "code": "SL-SLICE-LOOP",
       "function": "report",
       "loop_depth": 1,
@@ -14028,47 +14466,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 617,
-      "code": "SL-SLICE-LOOP",
-      "function": "render_activity",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "slice of `file_states` inside a loop copies each time",
-      "source": "row = file_states[start : start + columns]"
-    },
-    {
-      "file": "_test_runner.py",
-      "line": 624,
-      "code": "SL-IN-LOOP",
-      "function": "render_activity",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "membership test against `mutation.mutating_files` (kind unknown) inside a loop",
-      "source": "and file_state.path in mutation.mutating_files"
-    },
-    {
-      "file": "_test_runner.py",
-      "line": 628,
-      "code": "SL-IN-LOOP",
-      "function": "render_activity",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "membership test against `mutation.verified_files` (kind unknown) inside a loop",
-      "source": "and file_state.path in mutation.verified_files"
-    },
-    {
-      "file": "_test_runner.py",
-      "line": 632,
-      "code": "SL-IN-LOOP",
-      "function": "render_activity",
-      "loop_depth": 2,
-      "confidence": "medium",
-      "message": "membership test against `mutation.failed_mutation_files` (kind unknown) inside a loop",
-      "source": "and file_state.path in mutation.failed_mutation_files"
-    },
-    {
-      "file": "_test_runner.py",
-      "line": 681,
+      "line": 884,
       "code": "SL-SLICE-LOOP",
       "function": "render_activity",
       "loop_depth": 1,
@@ -14078,7 +14476,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1052,
+      "line": 1244,
       "code": "SL-COMP-NEST",
       "function": "schedule",
       "loop_depth": 0,
@@ -14088,7 +14486,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1171,
+      "line": 1363,
       "code": "SL-LINEAR-CALL",
       "function": "pytest_runtest_logreport",
       "loop_depth": 1,
@@ -14098,7 +14496,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1182,
+      "line": 1374,
       "code": "SL-LINEAR-METHOD",
       "function": "pytest_sessionfinish",
       "loop_depth": 1,
@@ -14108,7 +14506,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1647,
+      "line": 1899,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_arguments",
       "loop_depth": 1,
@@ -14118,7 +14516,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1649,
+      "line": 1901,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_arguments",
       "loop_depth": 1,
@@ -14128,7 +14526,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1651,
+      "line": 1903,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_arguments",
       "loop_depth": 1,
@@ -14138,7 +14536,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1653,
+      "line": 1905,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_arguments",
       "loop_depth": 1,
@@ -14148,7 +14546,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1655,
+      "line": 1907,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_arguments",
       "loop_depth": 1,
@@ -14158,7 +14556,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1712,
+      "line": 1965,
       "code": "SL-LINEAR-METHOD",
       "function": "_prepare_mutation_trace",
       "loop_depth": 1,
@@ -14168,7 +14566,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1713,
+      "line": 1966,
       "code": "SL-LINEAR-METHOD",
       "function": "_prepare_mutation_trace",
       "loop_depth": 1,
@@ -14178,17 +14576,17 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1917,
-      "code": "SL-SLICE-LOOP",
+      "line": 2192,
+      "code": "SL-LINEAR-METHOD",
       "function": "_consume_mutation_events",
       "loop_depth": 1,
       "confidence": "medium",
-      "message": "slice of `lines` inside a loop copies each time",
-      "source": "for line in lines[state.processed:]:"
+      "message": "`state.killer_tests.update()` inside a loop: update() is linear in its argument",
+      "source": "state.killer_tests.update(str(nodeid) for nodeid in killers)"
     },
     {
       "file": "_test_runner.py",
-      "line": 1939,
+      "line": 2193,
       "code": "SL-LINEAR-METHOD",
       "function": "_consume_mutation_events",
       "loop_depth": 1,
@@ -14198,17 +14596,17 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 1943,
+      "line": 2202,
       "code": "SL-LINEAR-METHOD",
       "function": "_consume_mutation_events",
       "loop_depth": 1,
       "confidence": "medium",
-      "message": "`state.failed_mutation_files.update()` inside a loop: update() is linear in its argument",
-      "source": "state.failed_mutation_files.update(tested)"
+      "message": "`state.survivor_candidate_files.update()` inside a loop: update() is linear in its argument",
+      "source": "state.survivor_candidate_files.update(tested)"
     },
     {
       "file": "_test_runner.py",
-      "line": 1969,
+      "line": 2228,
       "code": "SL-LINEAR-METHOD",
       "function": "_mutation_activity_from_report",
       "loop_depth": 1,
@@ -14218,7 +14616,7 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 2088,
+      "line": 2739,
       "code": "SL-LINEAR-CALL",
       "function": "_finish_mutation_process",
       "loop_depth": 1,
@@ -14228,23 +14626,13 @@
     },
     {
       "file": "_test_runner.py",
-      "line": 2089,
+      "line": 2740,
       "code": "SL-LINEAR-CALL",
       "function": "_finish_mutation_process",
       "loop_depth": 1,
       "confidence": "medium",
       "message": "`frozenset(mutation.event_state.verified_files)` inside a loop: frozenset() copies",
       "source": "verified_files=frozenset(mutation.event_state.verified_files),"
-    },
-    {
-      "file": "_test_runner.py",
-      "line": 2090,
-      "code": "SL-LINEAR-CALL",
-      "function": "_finish_mutation_process",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "`frozenset(mutation.event_state.failed_mutation_files)` inside a loop: frozenset() copies",
-      "source": "failed_mutation_files=frozenset("
     },
     {
       "file": "_userkit.py",
@@ -14388,7 +14776,7 @@
     },
     {
       "file": "app.py",
-      "line": 4548,
+      "line": 4561,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14398,7 +14786,7 @@
     },
     {
       "file": "app.py",
-      "line": 4551,
+      "line": 4564,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14408,7 +14796,7 @@
     },
     {
       "file": "app.py",
-      "line": 4589,
+      "line": 4602,
       "code": "SL-COMP-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14418,7 +14806,7 @@
     },
     {
       "file": "app.py",
-      "line": 4597,
+      "line": 4610,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_routes_locked",
       "loop_depth": 1,
@@ -14428,7 +14816,7 @@
     },
     {
       "file": "app.py",
-      "line": 4616,
+      "line": 4629,
       "code": "SL-COMP-NEST",
       "function": "_compile_routes_locked",
       "loop_depth": 0,
@@ -14438,7 +14826,7 @@
     },
     {
       "file": "app.py",
-      "line": 4697,
+      "line": 4710,
       "code": "SL-COMP-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 2,
@@ -14448,7 +14836,7 @@
     },
     {
       "file": "app.py",
-      "line": 4719,
+      "line": 4732,
       "code": "SL-IN-LOOP",
       "function": "_compile_routes_locked",
       "loop_depth": 2,
@@ -14458,7 +14846,7 @@
     },
     {
       "file": "app.py",
-      "line": 4773,
+      "line": 4786,
       "code": "SL-COMP-NEST",
       "function": "_compile_routes_locked",
       "loop_depth": 0,
@@ -14468,7 +14856,7 @@
     },
     {
       "file": "app.py",
-      "line": 4948,
+      "line": 4961,
       "code": "SL-COMP-LOOP",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14478,7 +14866,7 @@
     },
     {
       "file": "app.py",
-      "line": 4948,
+      "line": 4961,
       "code": "SL-LINEAR-METHOD",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14488,7 +14876,7 @@
     },
     {
       "file": "app.py",
-      "line": 4950,
+      "line": 4963,
       "code": "SL-COMP-LOOP",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14498,7 +14886,7 @@
     },
     {
       "file": "app.py",
-      "line": 4950,
+      "line": 4963,
       "code": "SL-LINEAR-METHOD",
       "function": "_compile_capabilities",
       "loop_depth": 2,
@@ -14508,7 +14896,7 @@
     },
     {
       "file": "app.py",
-      "line": 4951,
+      "line": 4964,
       "code": "SL-LINEAR-CALL",
       "function": "_compile_capabilities",
       "loop_depth": 1,
@@ -14518,7 +14906,7 @@
     },
     {
       "file": "app.py",
-      "line": 4974,
+      "line": 4987,
       "code": "SL-COMP-LOOP",
       "function": "_requirement_clauses",
       "loop_depth": 1,
@@ -14528,7 +14916,7 @@
     },
     {
       "file": "app.py",
-      "line": 5005,
+      "line": 5018,
       "code": "SL-COMP-NEST",
       "function": "_requirement_clauses",
       "loop_depth": 1,
@@ -14538,7 +14926,7 @@
     },
     {
       "file": "app.py",
-      "line": 5336,
+      "line": 5349,
       "code": "SL-ACCUM-ADD",
       "function": "_close_all",
       "loop_depth": 1,
@@ -14548,7 +14936,7 @@
     },
     {
       "file": "app.py",
-      "line": 5440,
+      "line": 5453,
       "code": "SL-LINEAR-CALL",
       "function": "_lifespan",
       "loop_depth": 2,
@@ -14558,7 +14946,7 @@
     },
     {
       "file": "app.py",
-      "line": 5485,
+      "line": 5498,
       "code": "SL-LINEAR-CALL",
       "function": "_lifespan",
       "loop_depth": 2,
@@ -14598,7 +14986,7 @@
     },
     {
       "file": "binding.py",
-      "line": 171,
+      "line": 170,
       "code": "SL-RECURSE",
       "function": "_compile_plan",
       "loop_depth": 0,
@@ -14608,7 +14996,7 @@
     },
     {
       "file": "binding.py",
-      "line": 393,
+      "line": 392,
       "code": "SL-RECURSE",
       "function": "_validate",
       "loop_depth": 0,
@@ -14618,7 +15006,7 @@
     },
     {
       "file": "binding.py",
-      "line": 632,
+      "line": 631,
       "code": "SL-RECURSE",
       "function": "_response_input",
       "loop_depth": 0,
@@ -14628,7 +15016,7 @@
     },
     {
       "file": "binding.py",
-      "line": 643,
+      "line": 642,
       "code": "SL-IN-LOOP",
       "function": "_response_input",
       "loop_depth": 1,
@@ -14638,7 +15026,7 @@
     },
     {
       "file": "binding.py",
-      "line": 693,
+      "line": 692,
       "code": "SL-RECURSE",
       "function": "_jsonable",
       "loop_depth": 0,
@@ -14648,7 +15036,7 @@
     },
     {
       "file": "binding.py",
-      "line": 746,
+      "line": 745,
       "code": "SL-RECURSE",
       "function": "_jsonable_any",
       "loop_depth": 0,
@@ -14658,7 +15046,7 @@
     },
     {
       "file": "binding.py",
-      "line": 773,
+      "line": 772,
       "code": "SL-IN-LOOP",
       "function": "_jsonable_any",
       "loop_depth": 1,
@@ -14668,7 +15056,7 @@
     },
     {
       "file": "binding.py",
-      "line": 777,
+      "line": 776,
       "code": "SL-IN-LOOP",
       "function": "_jsonable_any",
       "loop_depth": 1,
@@ -14678,7 +15066,7 @@
     },
     {
       "file": "binding.py",
-      "line": 791,
+      "line": 790,
       "code": "SL-IN-LOOP",
       "function": "_jsonable_any",
       "loop_depth": 1,
@@ -14688,7 +15076,7 @@
     },
     {
       "file": "binding.py",
-      "line": 794,
+      "line": 793,
       "code": "SL-IN-LOOP",
       "function": "_jsonable_any",
       "loop_depth": 1,
@@ -14698,7 +15086,7 @@
     },
     {
       "file": "binding.py",
-      "line": 800,
+      "line": 799,
       "code": "SL-RECURSE",
       "function": "_compile_response_input",
       "loop_depth": 0,
@@ -14708,7 +15096,7 @@
     },
     {
       "file": "binding.py",
-      "line": 833,
+      "line": 832,
       "code": "SL-IN-LOOP",
       "function": "project_dataclass",
       "loop_depth": 1,
@@ -14718,7 +15106,7 @@
     },
     {
       "file": "binding.py",
-      "line": 879,
+      "line": 878,
       "code": "SL-RECURSE",
       "function": "_projection_is_identity",
       "loop_depth": 0,
@@ -14728,7 +15116,7 @@
     },
     {
       "file": "binding.py",
-      "line": 933,
+      "line": 932,
       "code": "SL-RECURSE",
       "function": "_compile_jsonable",
       "loop_depth": 0,
@@ -14738,7 +15126,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1007,
+      "line": 1006,
       "code": "SL-IN-LOOP",
       "function": "jsonable_dataclass",
       "loop_depth": 1,
@@ -14748,7 +15136,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1035,
+      "line": 1034,
       "code": "SL-IN-LOOP",
       "function": "jsonable_value",
       "loop_depth": 1,
@@ -14758,7 +15146,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1039,
+      "line": 1038,
       "code": "SL-IN-LOOP",
       "function": "jsonable_value",
       "loop_depth": 1,
@@ -14768,7 +15156,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1055,
+      "line": 1054,
       "code": "SL-IN-LOOP",
       "function": "jsonable_value",
       "loop_depth": 1,
@@ -14778,7 +15166,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1058,
+      "line": 1057,
       "code": "SL-IN-LOOP",
       "function": "jsonable_value",
       "loop_depth": 1,
@@ -14788,7 +15176,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1330,
+      "line": 1329,
       "code": "SL-IN-LOOP",
       "function": "_validate_dataclass",
       "loop_depth": 1,
@@ -14798,7 +15186,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1781,
+      "line": 1780,
       "code": "SL-LINEAR-CALL",
       "function": "aclose",
       "loop_depth": 1,
@@ -14808,7 +15196,7 @@
     },
     {
       "file": "binding.py",
-      "line": 1883,
+      "line": 1882,
       "code": "SL-SLICE-LOOP",
       "function": "_compile_dep",
       "loop_depth": 1,
@@ -14818,7 +15206,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2054,
+      "line": 2053,
       "code": "SL-RECURSE",
       "function": "_unwrap_form_type",
       "loop_depth": 0,
@@ -14828,7 +15216,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2413,
+      "line": 2412,
       "code": "SL-SLICE-LOOP",
       "function": "inspect_handler",
       "loop_depth": 1,
@@ -14838,7 +15226,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2485,
+      "line": 2484,
       "code": "SL-IN-LOOP",
       "function": "inspect_handler",
       "loop_depth": 1,
@@ -14848,7 +15236,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2519,
+      "line": 2518,
       "code": "SL-IN-LOOP",
       "function": "inspect_handler",
       "loop_depth": 1,
@@ -14858,7 +15246,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2937,
+      "line": 2972,
       "code": "SL-LINEAR-CALL",
       "function": "bound",
       "loop_depth": 1,
@@ -14868,7 +15256,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2990,
+      "line": 3025,
       "code": "SL-LINEAR-CALL",
       "function": "_release",
       "loop_depth": 1,
@@ -14878,7 +15266,7 @@
     },
     {
       "file": "binding.py",
-      "line": 2995,
+      "line": 3030,
       "code": "SL-LINEAR-CALL",
       "function": "_release",
       "loop_depth": 1,
@@ -14918,7 +15306,7 @@
     },
     {
       "file": "crud.py",
-      "line": 424,
+      "line": 428,
       "code": "SL-IN-LOOP",
       "function": "crud_router",
       "loop_depth": 1,
@@ -14928,7 +15316,7 @@
     },
     {
       "file": "crud.py",
-      "line": 445,
+      "line": 449,
       "code": "SL-IN-LOOP",
       "function": "crud_router",
       "loop_depth": 1,
@@ -14938,7 +15326,7 @@
     },
     {
       "file": "crud.py",
-      "line": 446,
+      "line": 450,
       "code": "SL-IN-LOOP",
       "function": "crud_router",
       "loop_depth": 1,
@@ -14948,7 +15336,7 @@
     },
     {
       "file": "crud.py",
-      "line": 461,
+      "line": 465,
       "code": "SL-IN-LOOP",
       "function": "crud_router",
       "loop_depth": 1,
@@ -14958,7 +15346,7 @@
     },
     {
       "file": "crud.py",
-      "line": 463,
+      "line": 467,
       "code": "SL-IN-LOOP",
       "function": "crud_router",
       "loop_depth": 1,
@@ -14968,7 +15356,7 @@
     },
     {
       "file": "crud.py",
-      "line": 535,
+      "line": 539,
       "code": "SL-IN-LOOP",
       "function": "clean_input",
       "loop_depth": 1,
@@ -15278,7 +15666,7 @@
     },
     {
       "file": "graphql.py",
-      "line": 328,
+      "line": 343,
       "code": "SL-LINEAR-CALL",
       "function": "validate",
       "loop_depth": 1,
@@ -15288,7 +15676,7 @@
     },
     {
       "file": "graphql.py",
-      "line": 336,
+      "line": 351,
       "code": "SL-COMP-NEST",
       "function": "_ensure_policy_schema",
       "loop_depth": 0,
@@ -15298,7 +15686,7 @@
     },
     {
       "file": "graphql.py",
-      "line": 372,
+      "line": 387,
       "code": "SL-COMP-NEST",
       "function": "declared_actions",
       "loop_depth": 0,
@@ -15308,7 +15696,7 @@
     },
     {
       "file": "graphql.py",
-      "line": 388,
+      "line": 403,
       "code": "SL-RECURSE",
       "function": "parse",
       "loop_depth": 0,
@@ -16848,7 +17236,7 @@
     },
     {
       "file": "orm/query.py",
-      "line": 230,
+      "line": 249,
       "code": "SL-IN-LOOP",
       "function": "where_fields",
       "loop_depth": 1,
@@ -17178,7 +17566,7 @@
     },
     {
       "file": "orm/session.py",
-      "line": 1094,
+      "line": 1092,
       "code": "SL-SLICE-LOOP",
       "function": "_load_relationship",
       "loop_depth": 1,
@@ -17188,7 +17576,7 @@
     },
     {
       "file": "orm/session.py",
-      "line": 1113,
+      "line": 1111,
       "code": "SL-LINEAR-METHOD",
       "function": "_load_relationship",
       "loop_depth": 1,
@@ -17198,7 +17586,7 @@
     },
     {
       "file": "orm/session.py",
-      "line": 1148,
+      "line": 1146,
       "code": "SL-IN-LOOP",
       "function": "_new",
       "loop_depth": 1,
@@ -17208,7 +17596,7 @@
     },
     {
       "file": "orm/session.py",
-      "line": 1404,
+      "line": 1402,
       "code": "SL-LINEAR-CALL",
       "function": "_flush_inner",
       "loop_depth": 1,
@@ -17218,7 +17606,7 @@
     },
     {
       "file": "orm/session.py",
-      "line": 1414,
+      "line": 1412,
       "code": "SL-LINEAR-CALL",
       "function": "_flush_inner",
       "loop_depth": 1,
@@ -17318,23 +17706,13 @@
     },
     {
       "file": "policy/ratelimit.py",
-      "line": 799,
+      "line": 807,
       "code": "SL-COMP-NEST",
       "function": "schema_owners",
       "loop_depth": 0,
       "confidence": "medium",
       "message": "comprehension with 2 generators",
       "source": "return tuple(owner for child in self._children for owner in child.schema_owners)"
-    },
-    {
-      "file": "policy/ratelimit.py",
-      "line": 806,
-      "code": "SL-IN-LOOP",
-      "function": "_tier_from_roles",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `self._tiers` (kind unknown) inside a loop",
-      "source": "matched = [role for role in identity.roles if role in self._tiers]"
     },
     {
       "file": "policy/traffic.py",
@@ -17668,43 +18046,13 @@
     },
     {
       "file": "request.py",
-      "line": 397,
-      "code": "SL-IN-LOOP",
-      "function": "_valid_boundary",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "membership test against `_BOUNDARY_CHARS` (kind unknown) inside a loop",
-      "source": "and all(byte in _BOUNDARY_CHARS for byte in value)"
-    },
-    {
-      "file": "request.py",
-      "line": 1270,
+      "line": 1271,
       "code": "SL-ACCUM-ADD",
       "function": "stream",
       "loop_depth": 1,
       "confidence": "low",
       "message": "`total += ...` accumulates inside a loop (quadratic if str/bytes/tuple)",
       "source": "total += len(body)"
-    },
-    {
-      "file": "request.py",
-      "line": 1272,
-      "code": "SL-LINEAR-METHOD",
-      "function": "stream",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "`running.update()` inside a loop: update() is linear in its argument",
-      "source": "running.update(body)"
-    },
-    {
-      "file": "request.py",
-      "line": 1299,
-      "code": "SL-LINEAR-METHOD",
-      "function": "stream",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "`running.update()` inside a loop: update() is linear in its argument",
-      "source": "running.update(body)"
     },
     {
       "file": "response.py",
@@ -17858,7 +18206,7 @@
     },
     {
       "file": "series.py",
-      "line": 969,
+      "line": 1028,
       "code": "SL-IN-LOOP",
       "function": "_check_values",
       "loop_depth": 1,
@@ -17868,7 +18216,7 @@
     },
     {
       "file": "series.py",
-      "line": 1787,
+      "line": 1846,
       "code": "SL-COMP-LOOP",
       "function": "_compute",
       "loop_depth": 1,
@@ -17878,7 +18226,7 @@
     },
     {
       "file": "series.py",
-      "line": 1952,
+      "line": 2011,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_tiered",
       "loop_depth": 1,
@@ -17888,7 +18236,7 @@
     },
     {
       "file": "series.py",
-      "line": 1953,
+      "line": 2012,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_tiered",
       "loop_depth": 1,
@@ -17898,7 +18246,7 @@
     },
     {
       "file": "series.py",
-      "line": 1956,
+      "line": 2015,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_tiered",
       "loop_depth": 1,
@@ -17908,7 +18256,7 @@
     },
     {
       "file": "series.py",
-      "line": 1957,
+      "line": 2016,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_tiered",
       "loop_depth": 1,
@@ -17918,7 +18266,7 @@
     },
     {
       "file": "series.py",
-      "line": 1958,
+      "line": 2017,
       "code": "SL-LINEAR-METHOD",
       "function": "_run_tiered",
       "loop_depth": 1,
@@ -17928,7 +18276,7 @@
     },
     {
       "file": "series.py",
-      "line": 2150,
+      "line": 2209,
       "code": "SL-LINEAR-CALL",
       "function": "settle",
       "loop_depth": 1,
@@ -17938,7 +18286,7 @@
     },
     {
       "file": "series.py",
-      "line": 2217,
+      "line": 2276,
       "code": "SL-IN-LOOP",
       "function": "reconcile",
       "loop_depth": 1,
@@ -17948,7 +18296,7 @@
     },
     {
       "file": "series.py",
-      "line": 2356,
+      "line": 2415,
       "code": "SL-RECURSE",
       "function": "_walk_related",
       "loop_depth": 0,
@@ -18068,7 +18416,7 @@
     },
     {
       "file": "signatures.py",
-      "line": 994,
+      "line": 992,
       "code": "SL-ACCUM-ADD",
       "function": "refresh",
       "loop_depth": 1,
@@ -18078,7 +18426,7 @@
     },
     {
       "file": "signatures.py",
-      "line": 1002,
+      "line": 1000,
       "code": "SL-ACCUM-ADD",
       "function": "refresh",
       "loop_depth": 1,
@@ -18088,7 +18436,7 @@
     },
     {
       "file": "signatures.py",
-      "line": 1009,
+      "line": 1007,
       "code": "SL-ACCUM-ADD",
       "function": "refresh",
       "loop_depth": 1,
@@ -18098,7 +18446,7 @@
     },
     {
       "file": "signatures.py",
-      "line": 1263,
+      "line": 1261,
       "code": "SL-LINEAR-CALL",
       "function": "llms_txt",
       "loop_depth": 1,
@@ -18158,7 +18506,7 @@
     },
     {
       "file": "temporal.py",
-      "line": 565,
+      "line": 571,
       "code": "SL-LINEAR-CALL",
       "function": "spine_lengths",
       "loop_depth": 1,
@@ -18168,17 +18516,7 @@
     },
     {
       "file": "temporal.py",
-      "line": 571,
-      "code": "SL-LINEAR-METHOD",
-      "function": "spine_lengths",
-      "loop_depth": 1,
-      "confidence": "medium",
-      "message": "`names.index()` inside a loop: index() scans",
-      "source": "units = tuple(names.index(width.name) for width in widths)"
-    },
-    {
-      "file": "temporal.py",
-      "line": 1017,
+      "line": 1030,
       "code": "SL-LINEAR-METHOD",
       "function": "_parse_cron_field",
       "loop_depth": 1,
@@ -18188,7 +18526,7 @@
     },
     {
       "file": "temporal.py",
-      "line": 1120,
+      "line": 1133,
       "code": "SL-IN-LOOP",
       "function": "_calendar_fields",
       "loop_depth": 1,
@@ -18198,7 +18536,7 @@
     },
     {
       "file": "temporal.py",
-      "line": 1327,
+      "line": 1340,
       "code": "SL-RECURSE",
       "function": "jsonable",
       "loop_depth": 0,
@@ -18228,7 +18566,7 @@
     },
     {
       "file": "typegen/inspect.py",
-      "line": 423,
+      "line": 438,
       "code": "SL-COMP-NEST",
       "function": "_operation_behaviours",
       "loop_depth": 0,
@@ -18238,7 +18576,7 @@
     },
     {
       "file": "typegen/inspect.py",
-      "line": 473,
+      "line": 488,
       "code": "SL-LINEAR-CALL",
       "function": "build_api_model",
       "loop_depth": 2,
@@ -18248,7 +18586,7 @@
     },
     {
       "file": "typegen/inspect.py",
-      "line": 573,
+      "line": 588,
       "code": "SL-IN-LOOP",
       "function": "_series_shape",
       "loop_depth": 1,
@@ -18438,7 +18776,7 @@
     },
     {
       "file": "workflows.py",
-      "line": 736,
+      "line": 749,
       "code": "SL-LINEAR-METHOD",
       "function": "_execute_bound",
       "loop_depth": 1,
@@ -18448,7 +18786,7 @@
     },
     {
       "file": "workflows.py",
-      "line": 763,
+      "line": 776,
       "code": "SL-LINEAR-CALL",
       "function": "_compensate",
       "loop_depth": 1,
@@ -18458,7 +18796,7 @@
     },
     {
       "file": "workflows.py",
-      "line": 783,
+      "line": 796,
       "code": "SL-ACCUM-ADD",
       "function": "_compensate",
       "loop_depth": 1,
@@ -18468,7 +18806,7 @@
     }
   ],
   "scanner": {
-    "source": "ca373cbeb07303128dd0df533622f0317a3511668d946d68c75aff03cc2d9183",
+    "source": "449c988ee23eda3c67c543f16461295019e5ec32fa4a22e9086f6a3cdea9ff34",
     "python": "cpython-314"
   },
   "sources": {
@@ -18477,7 +18815,7 @@
     "_admin/__init__.py": "384c1fbc68408746b6a40e70bd166d7a0f9d25b13dcce60a9d8750d501dc78ea",
     "_admin/fields.py": "fe50d795449599defed4ebe0b463a772bc56dd37291ecf20c8173e2bec13b45b",
     "_admin/pages.py": "d2c78801c4f82d599dec558c38d8e007373c52df0d81344a7d826c931790d390",
-    "_admin/registry.py": "6edccfa6565088ac6167681942508441108cfb11d6b559d97003bde464862352",
+    "_admin/registry.py": "cff3c77b45f94ad759f2598c90d6fc3f24a6b8eb975f8c8aec3110429f93a221",
     "_asgi_driver.py": "64467f79df83e944871cd1f85acbc0b34540d938dcc9c1c1888003884305443f",
     "_asgi_state.py": "cdc0ff2780b30462a8a1a9a7742cad1f40ef503db0abe3c4237abd3d8b3c0bb6",
     "_audit/__init__.py": "533b758c7eaed1a39550774b3a541ba83d6f4a52155967a97a57090a3560161b",
@@ -18498,8 +18836,8 @@
     "_auth/__init__.py": "7487032ffd1a632bc5692843ae1c689446990ccee22365d1697a47b093e1ccc2",
     "_auth/_ecverify.py": "1a1f90112c2c07c3702cbd8e5875096ffc0f56534b045b371d098153704eca76",
     "_auth/backends.py": "aab0fb2936b7847824822834078ee32eb60f3021c66fec76dde69a152205e302",
-    "_auth/cedar.py": "67700f6b802a57b277d8ea567bca617bfdfe1a35f5f7458d34cfeeb4d640d841",
-    "_auth/cedar_engine.py": "12379dfb67d5991dafc4fad6795cb5e4be8c04bfebea5d14347aafdfbd99eb2c",
+    "_auth/cedar.py": "b5868dced7ddd8b52ec2e42316c0aa0f563bd399a300c7f7acf2c6724ab44406",
+    "_auth/cedar_engine.py": "f1c47448f6da760808003720ad101404ef0f642b811b6bcebd9374406aa46e60",
     "_auth/cedar_schema.py": "e421584406aef83724fee44c1e192e6ef078e1f53ac369dad5be81d2aa4b6bbd",
     "_auth/decorators.py": "5c70a104e7b91049fab07ba645add8c6a2e34c8e9a355f4c8bb476ccc2444dcb",
     "_auth/facts.py": "b89a5dbf19690b8f24bdc54114161f4fb20c8a80d2743e22444ec4c1a159381e",
@@ -18517,14 +18855,14 @@
     "_b64.py": "94f9357e35b9192103b3594b8e9fdd3ca804bd79147c81ed0911e06a9211122c",
     "_busbridge.py": "170c638d52410539e015d07bcf5612af4bb8b5d85c26140fb81319b929c3e8ec",
     "_capabilities.py": "537af2e7d9764f77cb00e03aae0cdca6a1d5f0c6a4d8a444d189478f7a752d75",
-    "_capability_data.py": "c70b1fc5ce3c91ad197089047dec35951abcca38ac2a627043d45aece4a05ecf",
+    "_capability_data.py": "3ec7299493d0a989a7faba65ae20b366752950982e47fa7713c6e2beb9866b83",
     "_capability_map.py": "47ec77da8d5a0093b214be72ea6b0a80bcc31e07add8f5d5d4cc6842aa71e8d2",
     "_ci.py": "cc9d4936aa20c8ad84c3eed8e6e8b5f294c9c719f5b862e195e4e814f2474713",
-    "_cli.py": "2c686d2f1a457ac6c84ceb9eda7b733815e28094934b14eb81375d5c118798e3",
+    "_cli.py": "4146ec2440f45a534b0aaa463e7ff94924294fa05828687962e33affbd84e699",
     "_client_codec.py": "e90a9aa2407a9a5b10e9261c8129818ea23475979daa890eb5f476e1b6674d70",
     "_cloudwatch_emf.py": "39bb289decf735c70f6a9af305527801b1d8337cf246e5305a9871f81055fa6b",
     "_codecs.py": "184847480e2042c04f340cd63aa0bef8b0a2b416a3428b1a5de362259f042a23",
-    "_compression.py": "1d3fc40abf867600db9584dd5ef1f709df53e7943c2f4fbde747fd2f0553ea13",
+    "_compression.py": "740e14f26988b491805edb3b5fc46795b7cf1852d319c537a45bd2e6f6305e27",
     "_conditional.py": "e9be706f158b29246b9ab06e4d429f8cc3e7e02b2fb0209ad69a6c2336f05261",
     "_correlation.py": "fb589616995d3ffa0ff33c1fbf8a12d86a6d67a7f1a601e8961d48567c443b2b",
     "_curves.py": "2d5aa0ce006b781044740e7d106b6db7b1345a5dc1bdd5cca112f5d070a092b3",
@@ -18533,20 +18871,20 @@
     "_devtools/bench_report.py": "b157f16eba0607c8aa4aa088ef22bca1488325bbff8f41f1e8668c83196b9c2b",
     "_devtools/build_lint.py": "de7593141125371f3d5af2a8cc1aafb304a31f4525fb2cd8201827a67bb01ad8",
     "_devtools/capability_index.py": "04158e49a3840d5f4f6bf563102ac371d19c96fec07d27864474d5d492664a5f",
-    "_devtools/complexity_discover.py": "ca373cbeb07303128dd0df533622f0317a3511668d946d68c75aff03cc2d9183",
-    "_devtools/complexity_probe.py": "f1d5eac4d7b8a14044041e0222a99bdbc39cf20eb2cda156dde134dbe3c14422",
+    "_devtools/complexity_discover.py": "449c988ee23eda3c67c543f16461295019e5ec32fa4a22e9086f6a3cdea9ff34",
+    "_devtools/complexity_probe.py": "37ab6e36d96983b8ccbcf0b081c591ea9be7276dcc6be73e441f89dd76d3ab05",
     "_devtools/cpu_probe.py": "3483e27b02bf3f9b0784efd4de4de83356d6d1c43f867887a7b0b4b597ed3809",
     "_devtools/decomp.py": "ac384ddaeaf14ff9cc0206991ff25432acc94f4518a4e7eaed934387c602418c",
-    "_devtools/dup_scan.py": "7f2007ca23ff82fae94f0d501482807cc2a06c1bd4adf771e9396b5c17ddb462",
+    "_devtools/dup_scan.py": "f6a0a0b553f51cc63589d766a085bce399e1b3642b56842f7cdfbe2d022594c2",
     "_devtools/hygiene.py": "0f269d5dd6e3c46e2953ebf01c406cf03be3dc73e6f160f97852e158da466bbb",
-    "_devtools/map_lint.py": "e25741e8182732f4d18577084fc5aa5bdf9e0530e56401d1196c3043acbdaad9",
+    "_devtools/map_lint.py": "f4ec1257743058ba8d51fcc2047d649e47d84f615956d21f054033e26bead0f4",
     "_devtools/measure.py": "952a0db0f162e253766f2f7e7a7816a552d99f66c31bdefaf4a0d5b434d6a7f5",
-    "_devtools/native_boundary_lint.py": "ea112a8b8c7b6000c08d6b321a6447142e3f81e4a02716f70caf365fca201bd3",
-    "_devtools/native_error_lint.py": "c8624f3cc2be79147acc0df4d03281d3e0de2af1a791dd49c68850e665348d02",
-    "_devtools/native_gil_lint.py": "c23dcaba18eb4bd9772a291a61dab8b2720224671c5c8c0ff4a8eb3bd5d22ff0",
+    "_devtools/native_boundary_lint.py": "8a69def5b81651447ab1c7e3a48b9b417c25166d4dd930865df0391e270d42e2",
+    "_devtools/native_error_lint.py": "41569867009bca0af41d373141d4356f08594da3d0cccceaa62186530e126044",
+    "_devtools/native_gil_lint.py": "8c07759776cba387c1079bc4fcde389e2345b954a27ba25fcd5b39544057fb1f",
     "_devtools/native_gil_status.py": "a6e05c54fb920e3fbe9f662803f8cd486f07d480c5e4067b6a7e64abd9ecefdd",
-    "_devtools/native_lint.py": "f565a3a7d43aa08df270632b801d9128555c0315848ac58d7606a1dcd942e5de",
-    "_devtools/native_memory_lint.py": "aaa23ad01f2e0df5e69d22ba3f3cc083dae2cbc6aaeb595746df29934593eae8",
+    "_devtools/native_lint.py": "b6390f8d83b22535f7514207d81eb222beb51a1718940aa8f0736a6530e0eb86",
+    "_devtools/native_memory_lint.py": "44a5fa2f55a1aa7cd9e26c0f237839e28eb298c72f0ef338188c9c7a16193b28",
     "_devtools/native_profile.py": "3f2f5e07fef6cc4a316adb76daaed1f4d688fdb9f6cf5aad8fad3afd71395a4f",
     "_devtools/port_golden.py": "20c714d2a5139bc1a2399f0274775750965ac2f5145fc4a582e7a995f83b8d4d",
     "_devtools/query_probe.py": "3edb5c3b0ed4f99fc99018118f3883fc377bb18b614a6b926c480bb692d66ec2",
@@ -18554,29 +18892,29 @@
     "_devtools/request_trace.py": "8bf10a405d0407c18533c9d7725164fa026a8837090116610dc6171a47405bb4",
     "_devtools/roadmap_lint.py": "b9ea499b05f67d46af9d2297d93daed874fc4a0a27abb1b839debe20e5280be1",
     "_devtools/sample_app.py": "a259e09e3942e07ac343102d3cf7ea4b09d48d88538662c0a1715b5afb070048",
-    "_devtools/sanitize.py": "32a55e9dffc07c14575ffa8fcff1b16885de7b46017776052e1c26216f9000b5",
-    "_devtools/sql_lint.py": "797071ab87f127a01fd4b18c132396f859954260b12bf91575edaf823c880508",
+    "_devtools/sanitize.py": "728365b8d0e8d4135bf85f898107a5dbe488e0d28e9d2109bda917827d0ff225",
+    "_devtools/sql_lint.py": "18eefdd882b3208df953eb81c43aba8e36af279449ba66d1f3443e6fb9476ce1",
     "_devtools/tape_decomp.py": "73d4de53a082705b212379ef23e951fa4de424521bfaaa3704e5d955a88db503",
-    "_devtools/tasks.py": "9a2c4c52ad77b9025efbc6c3768f864d5d6bc7face54de763a48765ac2b1d5cd",
+    "_devtools/tasks.py": "1b9b63d860c1a8167cd3bc8d239df0b9fb4b9a0ac6199b5cc3f49152411ab05a",
     "_dkim.py": "992697704105f685d8bce459e87b4f1f02293b352d506e8242bf8ec3f34439d0",
     "_dns.py": "b9e299cdadce2ed59a341316e6cfbd19169d26e54efb3948896827d270db05f4",
-    "_docs/__init__.py": "b2270aaa59b8adef32139b9c1f21469b62a177579c19b4ccf4c636c4ea335737",
+    "_docs/__init__.py": "d8eea364876b82324a5067df7f9a147c9a61b2ff7c89298e90064f9d9832a515",
     "_docs/_fenced.py": "582acc7f97c2b3e7a229c40d08487735ff0ec7fd65009be855ece5b072723016",
     "_docs/apidoc.py": "9c1a666ba8dc240ce0f63ecefc477779f60907f7dbd72ef8cc16580f7e3443ef",
     "_docs/capabilities.py": "d37d61d7945921b31ce13a9056abfccbd599285175980fa5e95b94ff8e8e4eef",
     "_docs/charts.py": "122c27568b5da98dd84ba80df8bad40afee94159edae26abd723f8a3b0262e5a",
     "_docs/cli.py": "1e978ef28729924637d29236938db064f8e1e9422e2094e1cfa3e90c32b70aaa",
-    "_docs/codeblocks.py": "a6d4dd70d3f006dc94fa0e22831db90ec82ae63e5121611f906c062c5f93d534",
+    "_docs/codeblocks.py": "cb523406c1c88b973f658ff8f6db8bed787bd74162d8dd61ed325cc1e5f4c1a6",
     "_docs/config.py": "d7571cb389439c445a4b4f3600ee07a524c1e7fff944075cf21013e622db3859",
     "_docs/figures.py": "511c115bd9db224b9398f4327f05de4d83e614a6e3acc4332d0b339976f53305",
     "_docs/hero.py": "7fcb564fff554f63f936888f54f03c78563a3caac0a236d0b574c0a1bb76c18b",
     "_docs/highlight.py": "5b20a81738a77b5f47f2ae05371249a147107f50033c27a59dcc667f68420718",
-    "_docs/markdown.py": "083f53f3a511ad9926febe2610a2ed7c7b36208ee38b3d36757ddd7c8e4a0bd1",
+    "_docs/markdown.py": "173171ad437afc88c20b8286b6337563a6e3c72328a34e3297c46c71e0bbb2c1",
     "_docs/plate.py": "b9e5940232857b3f4a5b518597ffc0718a2d8d90a902d77337b2887e68cad74d",
     "_docs/repo.py": "f3ad9173320f83eccb90d0ccde40cdcfb087330e59889bdfd1f3eceaed786b7f",
     "_docs/scripts.py": "908534d3ae726ba42bde1bfb52a4ea1a5eebe476680986b6e42d7009aedca24a",
-    "_docs/search.py": "13429ae74e67267c667b599d692ea04470b9881f511fcd8ddb20d80a4a288473",
-    "_docs/site.py": "0998367f30455b51ce56230056fba9442ba60f35ec1ec1f449a17c85e8cbce6b",
+    "_docs/search.py": "16a72a634ff7cc83d29bdd65cfe9b6a81a0fbc6e53a956338cf271a10cd6c4c0",
+    "_docs/site.py": "7c1c7dfb58f15f446e10da64fa420df9d65de1ef309f0ab75a68d72cb22838d5",
     "_docs/theme.py": "8c97d05390d8f18150404518dd5aab93085be2d73bd432afbf6cc872d6551bc1",
     "_doorbell.py": "6200fe1c95a475b998e8a78e54a0ddab28bc9a0aa7f8a7be7357506e80510133",
     "_drainthread.py": "1dfa54e7c6daaee1519783931aeaf9b4695df40780e3a522f484bc9fe6ec8756",
@@ -18622,7 +18960,7 @@
     "_mcp/roots.py": "a8c6d61ac66c35b5a784e8e13dcfa2802342d15b5203ce0607be76778c580413",
     "_mcp/routes.py": "a65e5a9570594065a7095dda25ee846cf44788277344d72e5df055583bd441c9",
     "_mcp/schema.py": "c5352c5aa2e8dea87c7cf6733ced18fdd5da7a8b51b1c0386ff4aada2e87c474",
-    "_mcp/server.py": "c66dfd233b56af5cd0a206f9915d37eb922646854b5af64e83bcef0ca5516048",
+    "_mcp/server.py": "2bb022aea17a0c27d81a7a2b118dd2b3dddd8f3200c2677ff69f01d24ae63f05",
     "_mcp/session.py": "abd3eabba19065ea4da91b4ab42d3be627f03c1f22bb228ae57fbf749c99ee77",
     "_mcp/stdio.py": "09424a1d14ecfda92149d843840bc12489892ef340cebf9b50a32a002061a3dc",
     "_migrations/__init__.py": "1864a1ceb7579e9352f2d680b1bd1433217cb9ba0296b30d1d43fdbd56fca69b",
@@ -18632,26 +18970,30 @@
     "_model_fields.py": "249856ab4eded5de2e29419a7d6f44cd59eae6c488ec991c0cc16328d8100807",
     "_multipart.py": "ef5fae7ca5586dc99d987d77665edb2d15d2b1ff132850f95aa555f488549d5c",
     "_mutant/__init__.py": "379e7dc27d80618f4e78506091cdc036ab1889962afd2cbbf95c44bb5270ed3c",
-    "_mutant/cli.py": "619a2516fda19bf7b936bb4c92bb74ed9496031d869a63f7436140e0d9d6ace0",
+    "_mutant/cli.py": "e8baf590eabc08187b058bb3f769052b1e5eaacec7550a445285d21a34680962",
     "_mutant/model.py": "999290cc3ebc05a6e2e063399cfe31f4dd851925eae49c8090bf826b65781242",
     "_mutant/operators.py": "83eb5ddb8f5b30cb2c411387c8a5adbecc8deda3b1fde70a7fb929ebe3d38547",
-    "_mutant/patch.py": "d9c538ed789608a5906bf0140104de16ace962f10c3457802d17fcf06497d3dc",
+    "_mutant/patch.py": "b04c5cad703843cfc48ed62548a2af1ec20961ea33933760828f86e94ca87e9b",
     "_mutant/report.py": "e34cc2f8df0813ae2ec4df4107f286d4ba9ab7ef06569705509fb51361c59e36",
-    "_mutant/runner.py": "9643d174e29f703741d76450a1c463d618b9112747b7626adddd91062e516c5b",
-    "_mutant/trace.py": "abe46400d087a6318ec372dbdfd94b575ebabc8ca121f21446b3034f8d0dadf7",
-    "_native/__init__.py": "d1a6d1f3d77ffaa07dba2acd56152070a52c6373eca665eba46913fc112ae1db",
+    "_mutant/runner.py": "e11335435dbfe4f1af0a2ebe796f7be39390cbf105728be3188070ac03f4e8ea",
+    "_mutant/trace.py": "7125ba21695b51745e38af9bf1736ce1dad2fd2edb17011cd772ce2bd35eb8d8",
+    "_native/__init__.py": "5f297fed2826378d9755d961c991018fee17a49b8f951e9d2ba5d6b3a2318657",
     "_native/_clientmodule.c": "ec580b2014aa4b8e7a5408ee36ec934d0fce249e6286dc0bcce6a3b44ef6e38d",
-    "_native/_coremodule.c": "98e6aafdb0d47cc183313962c95982111214d5c3972b834876724639e8e407b7",
+    "_native/_coremodule.c": "d08946cfc886049ca8375d1cb3a096e8af6705de270c8a041f307a21bb999875",
+    "_native/_docsmodule.c": "b860d8872284994dcca1bdb06441309d5279218ba54088ea00d73c215753eb73",
+    "_native/_dupscanmodule.c": "64f7d6986cc1f344e9e295b9b660dff457271a852ec7eb12d1816ffe54f3cba5",
     "_native/_edgemodule.c": "a3c15af2aa74279fda525eb6279db8b0e5a6f8b1ba91e7d9f5f9fce556a1f7cf",
     "_native/_flightmodule.c": "63e630094d37881abd4f2151a452f07223dd5fdf078542c11a2d707c28790a8f",
     "_native/_http3module.c": "af19b8671f062fff6a03197bc85d54b8279237e1a243c534c9a35365479c67a7",
+    "_native/_lintmodule.c": "21af0e1832960e1c20b92ae092c7094a182f715a2afb3f5dfcc3d9b7a097fa07",
     "_native/_postgresmodule.c": "8b4c5bb1a5918866fa23c477bee9209d70e3e177788b5664d144c523b33e433f",
     "_native/_reactormodule.c": "9aa764434b7a7befa77cef8e279b966c90667f28c776cca601867a71a99db268",
     "_native/_servermodule.c": "c76812ec81fbd8c34b581eed240890d317c23c32e76ec8e5e7a5b9907640ccec",
+    "_native/_testrunnermodule.c": "37c3dca5441c298b23dddf200e61d373e43306f2983fb456ef6267e7c881526a",
     "_native/activate.c": "0c25093c1b15382ab558fb6cd5ee33f4faae8250e5744b47a098d270d4989a75",
     "_native/activate.h": "4d3463fe2820ae99bdf85ee733f1f1f4f9c375c8307eea97f83e5220c40c11c0",
     "_native/aesgcm.c": "117346fcad2207a96d69f3d928426d881a717bda17095709635156428087a470",
-    "_native/ascii.h": "59fde8fb6fe1ce2b94da3344a3a40ba32e63bbbd3ceee17a2808002162d54007",
+    "_native/ascii.h": "4f880c2d413d26abc8b02366e0e9ddce5ff34598457c40ab16c6356a4bc1792d",
     "_native/authz.c": "c896ba9a43393ccc3f749924d5c598e69ff94d70c74dc29943d611ce807c308c",
     "_native/byteorder.h": "cb17e918f74f54d4df3d5ae804583249d5864f998776cce10cf2e469426114a6",
     "_native/bytes_writer.h": "91d559b519084460a7c7432f03729f2d4e6453e0fa4a452ecc7cf348a7406aaa",
@@ -18660,12 +19002,12 @@
     "_native/client_header_block.c": "1475f154ed16cdbca45bb526526148779d4e42af607da275c2b627bcb03116c7",
     "_native/client_http.c": "fd00c3ec8a6b6ae377306c2257d9eb52d786fa9a8ac9c6bb68d4d73379c37f1a",
     "_native/client_http1.c": "bec97639e1bfe50b34df94bf2f53e3c66b78b99d0784d16ecda6ae1485dde5b6",
-    "_native/codecs.c": "2ab63850466a60b2831fee6d6f34d96e031d18ace5001ec3fddd469a995270a0",
+    "_native/codecs.c": "9d1670e3207f90900e5e891442fb154957c272051e92f4800b6004fed1bbbdfe",
     "_native/compression_select.h": "2b99a49184dea55ae98308ae0ffca6d3aee2b71c8be138189b88c375a0217e1a",
     "_native/core_header_block.c": "67fc6b7b1f056f46a19b03c821cddf323b61fbbfdb5938df96137afebb16221b",
     "_native/core_http.c": "fd00c3ec8a6b6ae377306c2257d9eb52d786fa9a8ac9c6bb68d4d73379c37f1a",
     "_native/curves.c": "ce4c2e829bac4a294780480c56c86021916e70cf1ca34f37a01f0aafd53ebdba",
-    "_native/data_kernels.c": "d1b86802e0459f2a1a08bab5fd817b7ec2789293902cffa32d3698c28ed0f368",
+    "_native/data_kernels.c": "5388b3f085a1d2bf07e094bca23417babe89808fa5f5d41492d11117b1619288",
     "_native/dkim.c": "c2ef466f747062fe4f932456645f898bda1e45f1de595cdc97a1d7bdb60af798",
     "_native/edge.h": "7b29c5dbb7917d8878256758bd5b0b4bdfec6be1d76e95fbf33d2b49e60304b6",
     "_native/edge_headers.c": "56a20db5c33d335dcb503ecf7e8731f203fe8434a756c0993b5f5c7ff1ff1c65",
@@ -18676,17 +19018,19 @@
     "_native/flight_project.c": "c7b0d5ea3fd7db34814fd02c597b2626244b87f8045cb1cb475ba1e6b819df59",
     "_native/flight_schema.h": "39c62ea6c9fd1fd495f1a241ef0f458e43f633420591a89ddfc0c3b8e32c6cf1",
     "_native/geospatial.c": "3c73186f6e371d19d1e0a0dc22761e59bf9215bd68580ff838855bf0a957e5d9",
-    "_native/graphql.c": "c3a2674c8daa85291552cd301fcdcf38e32979b0731233127c52e95f1cd0f608",
+    "_native/graphql.c": "a3cf1e96322f1cf5a112fa40f3e8d600365a1fc071ab0a89ab4191e144dd09fc",
     "_native/graphql_parser.c": "2dc11a47af7700286f7355d5b0598bd0f3e8a17a0683b6f174e1d5260adac5bf",
     "_native/grpc.c": "4aeb2ed0ec91219c8e27b65bf67aecb5be8df4d286a0568fe66fc964bd42cb1a",
     "_native/gzip/compat.h": "1fcec37e49693f3108d24a5aea1a8efa43fc8bdf6504763862390034f9533c2b",
+    "_native/gzip/crc32_pclmul_impl.h": "d5b5cb540d2c8364afff9f07cfc67f67e753e7c0d38480a6b0b4796258b6a185",
     "_native/gzip/crc32_table.h": "224bc07170cdd66874395de93fe196f37a0d6d6c5f5e02c0bcb01fa9454825b1",
+    "_native/gzip/crc32_vpclmul_impl.h": "9207a9b4c25c9fbacda92ddce818bafff937cdf46fedf7a4bd45c17a2f9aad85",
     "_native/gzip/decode/cpu.c": "c6c3ee390b3a432753607aaebe204f2f5efb914643db51c957072b69c004ec40",
     "_native/gzip/decode/cpu.h": "f8626494ef33edb70e851abeaf7989466d40ee73e53d3ef6def001c1777f2a24",
     "_native/gzip/decode/crc32.c": "8f5f9263fb86cfe31b813f9b62f161df2e7a058fa69e3819cbe06170ebed5660",
     "_native/gzip/decode/crc32.h": "dc174e79ab1410aa26707647e755f3a2535173639baa6718df1fb206f833bb9b",
-    "_native/gzip/decode/crc32_pclmul.c": "1302bce3fa95d7010dedb316408180195a2116f26427847725abe8f6d464afa1",
-    "_native/gzip/decode/crc32_vpclmul.c": "8a36749b7bc6c8ddfdbc1021a2cd5ce968f402ae05c9509b96537249f84686ec",
+    "_native/gzip/decode/crc32_pclmul.c": "2276d4332202e6579e0cb5f60b7f3b528e050724550c3e16560389fc3ca4ac13",
+    "_native/gzip/decode/crc32_vpclmul.c": "4b6e682dd76dcfeca25f2a6852f87c98dd6291937871d15d2188ba7b403f331c",
     "_native/gzip/decode/decode_tables.h": "db797a272b3d89cb760ee33ecc73035aeda0aa741c9b73a4ba009571658ff9a8",
     "_native/gzip/decode/gz.h": "018f28892e18f96075dd58a5c6df1c2673d6c6c4f246b5cbd645e7cce7742b7b",
     "_native/gzip/decode/infl.h": "789f4e1d63d378dd5d2152a4da141ef14909767f687c9fb639384985aab20fdb",
@@ -18702,8 +19046,8 @@
     "_native/gzip/encode/cpu.h": "590c80b9b49040c42674294581d6b49658466667665870607e2c4db52ab06b8b",
     "_native/gzip/encode/crc32.c": "d386f5db16eeb8c0db4538394eda7c0b3e3831ff5dbf363f2237ebaeaa90997f",
     "_native/gzip/encode/crc32.h": "e0c5e4ecd8f3627611f9785c33e274eb1b6e9c6fc6aa3bcd4beba4663704e12d",
-    "_native/gzip/encode/crc32_pclmul.c": "ffe61b03b290e6c86608c68e4f70912876c992017acd4ca98e636c3597dcc7ba",
-    "_native/gzip/encode/crc32_vpclmul.c": "b904794d3be82f52271005e1bfe2caff99f12cfb0c4ee81a5ba2f7ba0131d3ad",
+    "_native/gzip/encode/crc32_pclmul.c": "faef554cb4f46bfe7394426626fbd6534a39a5262e14e22b839106ea15b58ca6",
+    "_native/gzip/encode/crc32_vpclmul.c": "e4073d922cfd695ead84a8110cc0238eebcab7d95012b3275ac98bb06a8f482d",
     "_native/gzip/encode/defl.h": "b5d27e59a9c743950e9e28f781f7fad003135ec830a27a1eadd82016bcb1e4f9",
     "_native/gzip/encode/deflate.c": "e6fe92bf173c5b0e5d1338df34f324805d34c3c2f959218d1926c27001b9b49c",
     "_native/gzip/encode/encode_tables.h": "6d0de303574c0888f1fadd953f3ed4681aadb6a551810f6f559395e2c0a7d59e",
@@ -18716,20 +19060,20 @@
     "_native/gzip/encode/parse_formats.c": "b21db433d158ab40f397a683e13848178e6663db7823c3bfda5c13f06ac0e77d",
     "_native/gzip/encode/profiles.h": "6064d532b1a849207db3ca60cd9d2947184dd734be3de83c888e23b6d0084f80",
     "_native/gzip/portable_isa.c": "bfec00f04ee9353542489038b53edb2e4bd1d8320b627340c7b8a05c8e78d996",
-    "_native/gzip_codec.c": "fbfaf279830dc70ef230eef2947f71e9276c9d3b0bdc9cd923f7017e2ff5b4d7",
+    "_native/gzip_codec.c": "419930fcc15b573d27d25639c9b2baf1a558434edbcb7467692ff124bab8308d",
     "_native/header_block.c": "4d67cbe05f52f6d80d80054432f438729a1593335ef96123bc0e04e7b1b49c75",
     "_native/header_block.h": "5937ee5c07b15af20adc67561ff09a7807fa5730c08cc93a66d946c121e61f10",
     "_native/headers.c": "ed877a08a9393d20a951362d3b38d37307959cd4a6e2f4e52ca1076c0ad89806",
     "_native/hmac_sha256.c": "ec36e0f027af1da806879b9cfe08c4c64cfdf035f5ccc0b105aa93634b84cd67",
     "_native/hmac_sha256.h": "cbd8e6d8b0741e8dfaec1ab896ae8a6b514aa0eb8ae9ae8a2177f84742cf6812",
-    "_native/http.c": "3c1c5448d7527018496012c9abcf716efebc0670b66a1adf17c7cbe27acc2071",
-    "_native/http3.h": "40b961cd9d95fe55b32c11b3ce223628004e96597c072d6062ca844b26f95355",
-    "_native/http3_asgi.c": "46b553e63596a529b6bdaa0dab37d034bb6464926a8a9731e8ec0009ca06801c",
+    "_native/http.c": "6d95ebae3c76add9438b29ab55766f91d931b692d2b559d165d38e9c2ee1b607",
+    "_native/http3.h": "88ebde39cda1a9915d71a5eafd0dd2fd49d1ca83f708545a436d58fdfd0f59f9",
+    "_native/http3_asgi.c": "57a9b550203bd834227721fdbca210050dcd0ba1b67a0106a1c271dc77f3e047",
     "_native/http3_connection.c": "513a646950e8b9ea2353ba18a8208f5e5689716d2d3fb23500980bffd2f1bdaa",
     "_native/http3_header_block.c": "5ea193190dd5409dadba2f2b66182f145c71b723c1227d6b785de64d865715ed",
     "_native/http_replay.c": "7daa8c1589b1657d04fe56d61306ba48c6d63619cc958f00d064ba71fe5d9682",
     "_native/jose.c": "85ca1e91201a3f68f66975bf64c9f48a15838474f7ad76d8c65ed6996c71ea47",
-    "_native/json.c": "85b34bfe75fbf933ba22bd3f263083cba53c05139a35679e286b5c1e499e1c75",
+    "_native/json.c": "be49bff521abe5c3ad19982c7717a0f63b57df4fdf4ae45065e109309baa1b5c",
     "_native/kv.c": "d95aa854c9d8a6e37a1bd3cc0c2bdaae1ec397e0c7e3fa45eef75f6ab8d3c537",
     "_native/model_api.h": "e80eb38b81a96a5e9b1013a4126ddc75ed5867272d85e12473bdd1cfac3b8c26",
     "_native/msgpack.c": "1e2bac56ca7c8a8447e95e535222a96e8ab5b67c20c692cf508df0846a2e1ae7",
@@ -18789,24 +19133,24 @@
     "_native/record_api.h": "c81a76ade631db47317fb0d2313c4410b92b86aab69e4c211035ca8317e3e449",
     "_native/recording.c": "e27ea6949800d4f2e891f9def3605b54d95c828a51fb8af025910ea2b8e37bab",
     "_native/response.c": "ea56a2efa5625f5e975888f99daaf95d6aed96e22b4ba0cb4cb77eeddd6da1b1",
-    "_native/ryu/common.h": "0bbd71d26da6193e678d0776cf418f43f287c73d6fd6725353df0aadf70f2a19",
-    "_native/ryu/d2s.c": "d66c21bf7889b32a2a5cc8b3dab720d3122c43e7147489bc6a4559b006e98528",
+    "_native/ryu/common.h": "b9e2bfe7ff2602c04a38ac831d2d6277c65e9b7ce05115f7563028d119c084b0",
+    "_native/ryu/d2s.c": "eb6bbdc427cb2e9fa4a66328a891811dd877742e930d28ba9d4b8c1922a171e7",
     "_native/ryu/d2s_full_table.h": "2618f6e5fae6c4443899b184efe3d08295dd267dc9f1a994c983c7caca59ebe6",
-    "_native/ryu/d2s_intrinsics.h": "1d05702f2edacce428223d4b43dd3095c1bd1f3ad30128ce1761d84356dddc7d",
+    "_native/ryu/d2s_intrinsics.h": "35526b5de895ce9d35c58baf851461c5cf3581615706818f9f7c0303c92df553",
     "_native/ryu/digit_table.h": "8b782573abc0b8554d74163ae6c02f0beb5c30d1e63eaebdb0ddf2c98d817e01",
     "_native/ryu/ryu.h": "b0139506bd991b01a8880f908b1c1cad990c713c857e8954df4dfa132cb4e64f",
     "_native/scheduler.c": "2336b13ebbd1b7a3c7c6fd32d35ad517abe062e1e7aab107b557737ff507a19f",
     "_native/scim.c": "5bbf84bd2f434842b6191ca7809513dfece75894d20ebb41e3ef9ac599852ea5",
-    "_native/security.c": "4f12a1ee5888f21c0932746680dd6d64d039c426799f9315c6f58c156ab0edce",
-    "_native/series.c": "47fc7941deec9649e63619b20cdf5962f7202b10836a87d0504a8afd4b7260a0",
-    "_native/server.h": "25d19862c2d3144563b5aef2eedf5561aeec2728718e7a8756651c4919ffba0e",
-    "_native/server_common.c": "de22003215d1c2b39c6b51f9fd9bdcba8c2cb33b9860aecfdf1d5915384db6d3",
+    "_native/security.c": "5ee0d684bd7704cf078b4ed6bec0ba03264678a2f694529898b091050ea6842d",
+    "_native/series.c": "1bb5c9875bed16d5f168f3f214216d8c94517f0a59e85e538116a2bf05e217b0",
+    "_native/server.h": "490cde1ff25891eefff9b17203956691d95553c08d2309e88213bdd47ec38fa5",
+    "_native/server_common.c": "fa93dd307c2d1be987be63adb65f5f39fcd21f498eba7669982a56afa44d932d",
     "_native/server_header_block.c": "e355fbc815f84d39c8fb290c44450e4257c63aa397ca9c4961dcc3ea33e60410",
     "_native/server_hpack.c": "3685425b21996c984e52cb0db215e2401d97e4e99095896e851772b53cc01ef6",
     "_native/server_hpack_huffman.h": "a51337b93e296739cab5e84bc3601c59a444feea0dff2a7e5dec3c35ff82d34e",
     "_native/server_http.c": "fd00c3ec8a6b6ae377306c2257d9eb52d786fa9a8ac9c6bb68d4d73379c37f1a",
     "_native/server_http1.c": "14ef847d59da5ed2943195fa9b7844affdc836e07f706debe9be8e943d9219a0",
-    "_native/server_http2.c": "6f471f5672f1903f8f173de6aa49d7905a265e67fcd1102ece0c1e021ed72258",
+    "_native/server_http2.c": "fa164969f7edd8190fbd3c146fd387a11406c21f8251f93ac425f1840647b43a",
     "_native/server_policy.c": "c55c58afc3484d8bdf4e47118a719bb2421a9c12159bb92fe43f3f882ada4cb0",
     "_native/server_policy.h": "9a5329745311055e7a6658bc69243ea7d64adc8f1b95987cbf1c58e0e4d4ad2d",
     "_native/server_request.c": "58b0e64290127d249fa8a97d7f1a0de2eef46c2540e65764e532543a42ee9233",
@@ -18814,25 +19158,26 @@
     "_native/signatures.c": "672866bee5017646dec700f34ca34ef3d6fdb2dabcad1b50f56e43f7b229f689",
     "_native/simd.c": "99a63a76fb40626c3444f9ed950633b1d0396450efce2f477ad886ff6234e5bd",
     "_native/simd.h": "c00cd9fc16ca62720d6429fea4f3442b14547f0d2ccd5a36ebdcb5bd72ccc424",
-    "_native/sparse_vector.h": "965c84abc3f581d062414928ae00179250fbc5545865f1b5ee0eaaea11637857",
+    "_native/sparse_vector.h": "691a90461e427d8c11e55cfbe307531977c7024ca29fdcdd3aa374701b1c301c",
     "_native/sql.c": "94a61b9adee472800bf8c1c643f8b53386cc07a7a8a00efc19f69f33bc28fdbf",
     "_native/sse.c": "5bdfff7de8f8292306a30e36d02710188950368ce885b56285e76256710ca4e5",
-    "_native/templates.c": "35e27e3d0d462ad9cb058433ffb953bb627bd737df4ef53018dff3d2ec8c6fde",
+    "_native/templates.c": "aa2c8c588c3a17883e9881be0892125fdf531dd4ec3249f2c6644b6c4b3b57fb",
     "_native/validate.c": "1ad6d4e17a2935ae8d5368e94193d678f97f7b431e5ab7c3daad35b8895f433a",
     "_native/webpolicy.c": "24256241e92d09f92ea9c02d89c633f86e0bb9c801f99400c6e67866f35668e1",
     "_native/wreath_stream.h": "39a8934db4de3e7bacd45f6fc88e9c69eaec92e796e6fa1ad588234ac69148db",
-    "_native/wreathcore.h": "4c07ea7358714acfd1ecaac97348d66c520158118966cb4923bda27788cf0c4c",
+    "_native/wreathcore.h": "cf845ba7ff3dec22c4d559d54f1c73c06539b445ed3620eea5ce6957b32b710a",
     "_native/ws.c": "35dd1fb7e3d809c08049a1ba4fba4ed1a6741642ef884fbbd8d6175049c3c700",
     "_native/xml.c": "db1f388dffc6f2a4d967607b7df1ead81a160528b817011b90b94a0aab7a627f",
+    "_native_test_runner.py": "7e981a1e31e54aea227874416315756c6251d5a827179ef6d63e919361cd91bf",
     "_nplusone.py": "8ea3e0ccf324c0b29dc3f7688fd0ad0ab524661285dddbfa734a96b42ccb8df9",
     "_orm_events.py": "95c406336becdd4ce757e57eb14059162b7eabb77963bc94906cf92b74323889",
     "_otlp.py": "f550dc28a5d2c33c12adc42ee303f1f5dad3e18332759878c8e1b61371640134",
     "_otlp_proto.py": "b03912ed3bfb095dfb1bb398af940622938105d45b1cc620e6d07c759813f09b",
     "_passes/__init__.py": "37b0634b1a56dc62d14d467a33c45990c13ce7070f963301d2984ecbed70859f",
     "_passes/buckets.py": "497802e9cae566f06af86adbf424c71753d8bfd2ad2d9bb4ab4b784481735144",
-    "_passes/driver.py": "635a00d73715b73d01bbbd9069d9ff146de99f99c91b65f43f66c3c0d4a3833b",
+    "_passes/driver.py": "6530ac409041e88f122f1797cbc18a9055b1ac39b7b556dbec336a92f3ef58f4",
     "_passes/duration.py": "06ee3252a752ceb56f6b38b809b39ccad604df7fd7d8145b136148c3fa075745",
-    "_passes/gate.py": "540776d1e3abcb5ce80664092d7e6cc35b9aa034c5373e6bba68ea38d9e139e4",
+    "_passes/gate.py": "ff202fbd1a01aea628d1fe877e5103f55b3bdedfcbf0af8955bcef022a175f2b",
     "_passes/keyset.py": "d5d5800359beab350425ebbba6c41eac2791a89acb759f1dea86328f643084c9",
     "_passes/ledger.py": "9732afddfe2f55440bb0f0a18338392be520d0115944e9bf97ffafa1b713229d",
     "_passes/pace.py": "d46f55c1e700aa1af4cb82034a1e5e98b2c3e9860694898cf7e807cc22e5ed4e",
@@ -18853,8 +19198,8 @@
     "_port/analyzer/queries.py": "07a7fdce380bf0517a05b03ea871e1161eefc296ec138c0ba88aa578ec51bbb8",
     "_port/analyzer/responses.py": "896b34bbbbc60d31de5d44c2c750bb2d4a3abf932aed5564af44fa63d6d5d979",
     "_port/analyzer/routes.py": "f128b0a1507e77c9e0d57a7db8850d50cbcc2e051bcc45a523d502bdda293b60",
-    "_port/analyzer/scan.py": "ab794f657b43bf0dde8cd54a6ba7eb5ab7404891f1620068af0d41fb21e2a401",
-    "_port/analyzer/sessions.py": "00335f75adceaaee5d679613427b632c1dfdd2b5db4105ce935722fb1e8f5a80",
+    "_port/analyzer/scan.py": "2079df29834dafccd50a6901aa47527148b57ead2d4a31ccdb8d2e32ac5dd42e",
+    "_port/analyzer/sessions.py": "ea1118e3131778894e79ab18cb25110a658f0e551b7e4ff66d07aab1f49a515f",
     "_port/analyzer/settings.py": "a2b40db458311e72cfb6b74f576d5958a219c5325149908b2a9b8904bc8362e4",
     "_port/analyzer/sources.py": "81d009b3299703ac6ca7c9186753142937e951e22e17e7483e3a9807caa9a69b",
     "_port/cli.py": "1961419a3ef132f83d7d88b372306bda128a42bb266fbcdc2ca3d04442f4d75a",
@@ -18867,13 +19212,13 @@
     "_port/emit/emitter.py": "79cde3dc330f2e9e90e81decc3f88d2039e62fdd457bb0aebc83a68c9ae8dcdd",
     "_port/emit/frameworks.py": "ad729987ccf108e68ecdc3b11a68b7669b9eb2c0bc7b1c2819d7aad9e8917e54",
     "_port/emit/http_client.py": "3734a3e5416d8e9bfb8252ff47d6e480d15e88c1603488f2879c6f145167706a",
-    "_port/emit/imports.py": "7f715d17d8261d9a199c3b2182f47a5f82ff18bc3eef14b02789cabbf2b60ecf",
+    "_port/emit/imports.py": "c4db70dc9891081d96ac3fce422130cd2fd938d43fac36ede5fe4982ba8dd2ca",
     "_port/emit/jobs.py": "74db9629b00779346a29cc6f3c4cbbdf3999189a661c915fa83113d0178e4ef7",
     "_port/emit/models.py": "67b059d67c905095402afd4ff87673ce8ff9b2acd5700be0490b93ff55eb9530",
     "_port/emit/module.py": "0c0610b8c83f56e990ccb05442bbc8e47f07edc3ad7ea6d9e8e68f7f53e49f43",
     "_port/emit/ormar.py": "2a97f1d0b113bb750cc284dec8d79776e024cb435ba2c2ee205918aaa752ea85",
     "_port/emit/queries.py": "870071fd0278db3e7a09b2260f902da4067f83efc09d4bf45856bb9e611b7406",
-    "_port/emit/routes.py": "9c6320b9d7323595d6090522d74a0f6dd2c14a1521322105d3a3b17b150891e0",
+    "_port/emit/routes.py": "5a4fbfca6c522aa08ca5ba2094b358281003d8275f955a7ff293ee58261cdf21",
     "_port/emit/session.py": "14cab2c2b2a824a5d5fc42a0c2333e532d5b4e19a5595d98d7d0bfe616462c2c",
     "_port/emit/state.py": "3610f1dd6697ff80d9681126b9eab17cea68debb78683b0faf54a4b29f3b51a8",
     "_port/emit/targets.py": "e10aff09bf36bc223c140628ac2e6cc7d43ce74c55e3b06172172dd78265214e",
@@ -18915,13 +19260,14 @@
     "_projector.py": "e66764f520e3db5441aea6e52ed515d81b0988431a22fe30252e9f722e881663",
     "_prometheus.py": "7f2b6ccbb69e3dd6eed16248806c9b752590d14bf06ce10469473bbebbf8ae5e",
     "_protobuf_plan.py": "ffd5c74eb6fce54050f15165f617639a5d97fe0ed5c4f6b6aff0a9a1bead72d1",
+    "_pytest_facade.py": "489a7af89e1997b138027b368ea86df48a6d7546b6c3ad576b165378b187dad6",
     "_pytest_plugin.py": "ec2a310416be6aa210bcccc17216ae217a499fde0b8637b5cd4e4b69c410a556",
     "_queue_protocol.py": "2990fbd5465b04b563ab0d0318ca4520a2a506d03b70a259bc6ae052f93caac3",
     "_recording_format.py": "ef268ec777d3a1b72a0d514568cfcd1498cd82d368aa66cb013f65dbff8f7462",
-    "_replay_adapters.py": "7d25238da7e9e4440ddfead5f7b9e14dec1dc04c6b78e24139de527d3a723f4d",
+    "_replay_adapters.py": "614a24099bab67424b9f98fd5eaccd057a3d0f06bf34da65fe215e956c60f2d5",
     "_replay_errors.py": "d647a3934a23fefa5f1fa9d0e1e1f015655ae62408c6fa56de7bf742bed92dfe",
     "_replay_plan.py": "b7b7b2b9cef3f5f4383e998d1e0823aff23b42a735dba42e924cf5d5a7d6fe52",
-    "_reqcache.py": "843eed08a3435bb6d81d0be6bf37954c50ac3506a35c40480f4d438f799586ba",
+    "_reqcache.py": "66ddd34cd000073feae0681fcb4d1ac4573c1740c06c6fe628784e1a7aba6c44",
     "_ring_file.py": "57014bccbc2c86fa1c4858cba7206b5a4763120da7a852a4a81a31ef123eb940",
     "_routing.py": "5c94d42b2b76b0b7cc949c100ec1f8ee4ba5b06d830446248ff645e111926054",
     "_scaffold.py": "4c45b3ff3f216299e9334a280c7cdf8c9acfab0495a67d8763c243a16c9a74ac",
@@ -18929,10 +19275,10 @@
     "_scim/filters.py": "cb9efa8f95a20fd0c677c8c0f6812a86e779a72a04d723ddac5d564ea73a5f7d",
     "_scim/patch.py": "70d3c5f061b16205a3575c88ce781c8c81fa378cc404fe9995545ea955dbc0a4",
     "_scim/resources.py": "c0319089ae20223a48159ff0495abe0cf47b86cab0c386ca51d0074ba14db98f",
-    "_scim/router.py": "33f430d84cd348408308ec0962f76e498bdc176fd2307eef460e563a6802117d",
-    "_secondfactor.py": "6058507a4e0c63566a4c82f9ff0ab0a46e5e0f13254758a421e98943670e0e81",
+    "_scim/router.py": "e889a7787c584bd3ba8dfb278532fd5bf54c1f7541d9d6678b241380445a55e2",
+    "_secondfactor.py": "78f4bcef2b4f96c1eb0184dcd67339ea3c38a805756a7c19233f0eaa01bf20ca",
     "_series/__init__.py": "15d80c0542a2cedb9e596c199c26e0040202221a6b8b9a5993f52b96b36ab386",
-    "_series/compile.py": "cf666642331fd30657403bbf27270d1ac236e5d17fcec298d2398148c6d65aa8",
+    "_series/compile.py": "19846f1412b4387fee17f9e8e03e2b3fa233642e9570104547ec4b9f58146b8f",
     "_series/envelope.py": "40e38b37bad563e477e3932d43e190474c9b035afeead3a0dc3773702d618578",
     "_series/settle.py": "ccddd1990f4e2bb24939e8008b98394df6efc7b2fa3f528b114b8ba199752864",
     "_series/tiers.py": "448339ed81b8eba420958bf724cfcc94975ba1d4d7415d9e69f04123d5802ec5",
@@ -18942,30 +19288,30 @@
     "_statsd.py": "d7e659e8271dc77bb214d53e291cfed678849a4f0473702a9db134979e8f641f",
     "_target.py": "e841988e0970725c9619033ba01051b19f9777ed33cbdfa7c423db3d0fcf6c09",
     "_template_tape.py": "e051ba2614c9c319c3da2085662ab8faa83466dc3378664499d8f5ef56f30a49",
-    "_test_runner.py": "4634eb4126ccc6dadb8542048807840705844ef8b54a9f9db8f39b303c44971c",
+    "_test_runner.py": "48e0f05e9c0ec888902daf7c04b81ce6fcaec304321897500ded7719744e7dff",
     "_userkit.py": "63c8540a511faa1df9797a0aece4d706e6d09dd5705fbf6e2a35b7230116cc68",
-    "_webauthn.py": "0fbbb3c8c1e4054562a283a5adac81ae4a8c368d3ccf0023138d029529d2559f",
+    "_webauthn.py": "fb56766271258c785a8c4b6b204afdb5735e7c1113fe238e00b4e4782a7b1a92",
     "_webpolicy.py": "bc9d4074f07cc53ac3a22e56bbc42a71ede3daf577f204ad0238095c9e9e95ba",
     "_webpush.py": "9ebc37328daaddbfcbc8141f15cad6641004eb3f1a48279fdfa1e3742f6c0c09",
     "_websocket.py": "9e8e19a944ae7bccae063e3ec2a604b4f53d71e05a0ea554c3d72100c0f0cb26",
     "_xml_model.py": "810b2bf92f39270e5adcb0df10cbb453eaa27b72cb9d2a27fa156102feb8f08b",
     "admin.py": "89cf4f8e9598eb49eef9599e4e7c636b1de9257c59a169e0d71ef251264eb09b",
-    "app.py": "f0a3439260a2e412bde5adaff3cabd5ac6a5e12672816a2f88b272d8a0e08ff5",
+    "app.py": "5f573f805bd1e2c96c0d549b2678aff51a58e572ee2bd93698f900b1376a9373",
     "audit_log.py": "74845d98dd940bd2197e3efef81d987482cd5e15cdb84b5cc59abc623ffb558f",
     "auth.py": "8a1ad54d595305424a6484252e9e65a0c833fac2fad80105462e221409a68b0d",
     "authorization.py": "c9c65db5b1e18e1c9ce419206486581e31c63f0d67a7ffb5fba3f25148fa03e5",
     "aws_lambda.py": "11697062738ac6fd5f8c48fdef8e269fd963cf3621ee64958eac24db7ad9679e",
     "background.py": "566582b3eeba4d0897df6c57f02bd1ab2c7e74413a492df72c03e6224300fa80",
-    "binding.py": "95afb62ce28a7d891e9cfe047f18f830b98a6943c70d4f4cb2a177f5bf1fde22",
-    "bot.py": "7132de5fb709a1e035be19b2dfd664702a452790e1ecf416429fd29142c4c6c4",
+    "binding.py": "8cd43944d3f8463ecf592e7842f32d009e3635bf6547abb435d4ac5dca7b1095",
+    "bot.py": "0f3d0d2a6cf495f0019be441720ec57fbb45e2df6e70111c48e1e9f3c73a92a9",
     "cache.py": "1871d0327c2fec530b8fefbe779b7e8203a588c7ee4f0e393b68fd9177a20193",
     "cache_control.py": "b54e0e6713cb16b0a8d31e610b03fa2b60e960c80268fab68d6ab76792c0cc61",
     "cli.py": "0c08dc8e44c640e97f44020cc90c1987f1ef403af3e958d5de7fd1bd8f64ef87",
-    "client_facts.py": "8f031f5f5fbbe2a2e4e18a9b6216bed4bd136a144b464fe1d659f3e3b6b3bbf8",
+    "client_facts.py": "d539510452e375f8c95df1bb6d5540a335b468256d33e3db860ed42ee52406d5",
     "compression.py": "cfa5b11888cf845adedf21eafc4e5b83531c8e99c71b467662e850d96957dfb9",
     "config.py": "1d5c7188aff03c04dcec61a47359b05d70f3fd9b090c3fc9924f889682364a0b",
     "contracts.py": "d5409f5db335ababb03262407d84779aab40eaa569dd3dbc1752e1b459b9e36c",
-    "crud.py": "b9cccee5cbdc36eee4d5c62a8c8f9cf38d38b1847d5eae0f1868813a7cb1da6c",
+    "crud.py": "adf2744c93035168ef7380f84d6550e1b257c05b4072e2c586a32f8319dc4e67",
     "doctor.py": "7d01d64a96e9d086e9fc51c4b19acde4ac71a6641eadb9d5ef74d9feb8a3ec2e",
     "edge/__init__.py": "692806ddc2c7b96e6ec8ddfe43e9420f2c0f4028153fdd219f2184d51a2fd675",
     "edge/headers.py": "6b15b8476b3fe7a425efb6154196b4305c7e4a7dd1c474fb3e94fd172799e4b3",
@@ -18976,10 +19322,10 @@
     "entity.py": "28cac1fba29feec10f5534210e35a4b88dd5044257d85e3357bc525d94661a1a",
     "errors.py": "e536f1b1eee774852c7abe94a003bf95a82b87e2e90c88b8a4508555e393fc1c",
     "exceptions.py": "8aec3a6881bc3363ed91d94ca3998750a28f47117cb92ab419ae98ebe0d6a10d",
-    "flags.py": "664298e8109f0ae7b5c096df28024cabee865099ce0d3e8f25f4fcf84e552c16",
-    "geospatial.py": "ef8b3e275727e856b8681102b47be9964353dc6c544ac75f633f982f06e8e3f5",
-    "graphql.py": "3c3a5d909a4a5172ee38e8b80c37326523b5dadd91c1f235318abd98669cba79",
-    "grpc.py": "dd0af8cdb3715bf64f7acbaba62200e5cde76011667d9fca098bd976e36257e5",
+    "flags.py": "c29e4b7cf3f943badd342e9e47007855bde4e1d6f713baa7370b98632175b4be",
+    "geospatial.py": "ec7a83bb2cee25db0bc7e4f853268c8fb4e8711192a8edbc430433f3a288cf3e",
+    "graphql.py": "d53e240410ccb158ddf579bf5422e25ff8904d534851c9b2e7eb0fa5c3753237",
+    "grpc.py": "46dacef80cecc0b01d9d4b2c1d79c1b5e7c6cb1f4fd0d527bf8c26bbe1a5c3b8",
     "hardening.py": "cf0832a5dff8180b455ca5239c920051c522f68b3d59e2f8dfc58ff062a95efe",
     "health.py": "005b2c3162f7658c21905fdc70295c3e1e3daf909b111300427c725804ea02ea",
     "http_client.py": "12d9b7713ba4146a37d81b5cfb63014c34afe9c6b95fe650bcacdbf55237d752",
@@ -18991,7 +19337,7 @@
     "infra/render.py": "77b0689bfef6dc319086938caa3dd8a381c8384cd78564fa7a003a5080d3bd8b",
     "infra/settings.py": "0fbb9c507e0fa4db5883dbca2670a36f5117549f7cbfcafc1edc355ab3a665d8",
     "inspector.py": "c4d796e2ec161399ae36f3f585cc92f4e3b0a03f373aaa5798eac364c011b18e",
-    "jobs.py": "c98840bab36b2c980c76ff4ef6703407d943440f163af2386b0a54ecb343c3e8",
+    "jobs.py": "303af23f2907ad2350a019d2ef59bf908dc2fb3e6dfb2391688092b095935f7a",
     "kv.py": "b93fd15b9f1c5c27d6fcc1491ce7c198a42b1f64f6ee3cf0775caa831897be10",
     "log.py": "e76e504494869b84541aa89c231194379f5ae09bb29ab59f6ffb9b2f65d70426",
     "logging.py": "e58fdd81f8f9a0af0bc1fcf1872b863d04d149d5f5ef64b1b1be7a198fd5d54d",
@@ -19005,7 +19351,7 @@
     "negotiation.py": "1c6bb9500a5aacff31b722f4df7bc67fc9b9b0877707fd3d8bba608e6920d05f",
     "notifications.py": "054ad38000100f309ac3bb455ded6b927635b66c1664139297c2b5171ce3b121",
     "oauth.py": "935d418744b7e0c8ce73520fdd7ead74cc46ab72f6ebbcf7b20b34716b0d6abf",
-    "objects.py": "3ec400f525834ff096efae02386be902b8bb18bd9d8bf40aa5db4e458e1fe03b",
+    "objects.py": "e4d038d2c2be9e36234beafbc2a5b01c96a74aa3770fa0cea5e9ceb3697fb1ef",
     "openapi.py": "1f177a45a2c1463e1f9f58a25b7fa70633a20e7eb7490070c474cc1a374f4a67",
     "organizations.py": "31bda927e778c06916b1c3c0f6dc04d8a2a3ed9b277305976bcca7c62f6ca5ce",
     "orm/__init__.py": "e798227dc2f00b19fbc24aefa4c31b69e4bbed636ab8994669cf6277e8bb1818",
@@ -19019,29 +19365,29 @@
     "orm/fields.py": "3524da1e4b09b2f46dc23eaecccf9a6ca3a6e50c5c043aedbeda62ba4d1abd97",
     "orm/introspection.py": "a4f958b0893b197fec33ed59ba43e2d3178617536ed84a3e787a56ce598faf45",
     "orm/model.py": "492b3afe33c428fe3f9df01316399bd4ff3cacde7093bfbd164134795489e254",
-    "orm/query.py": "0f7147b21fb4f1df2a0a87e8bd27f3c569151221d93b1c6a98ae1911872546b1",
+    "orm/query.py": "70558895ed4d7e570091cc344ad67e529d886ae632ac86eb93b36a6aa9fff56f",
     "orm/registry.py": "53e725ef2ba960640ffcfecb37acfb6e235e42f30a567bfc2fb252f35bff451f",
     "orm/relations.py": "97cb6892363b0805bda3f708b9f096aa3e091e0837d848ad24aa9264f356d638",
     "orm/schema.py": "ee939d7320926daf84c64f63a3002364ee8af1ee49e2bfe04cec5e1469e9793d",
-    "orm/session.py": "ec68bc62991c3d526a4d3e0b6cc4d055a5415a33e441985a4ed12052090aad4c",
+    "orm/session.py": "cc799024affb698637c5e4f4bcce2c1cbbf024a1f71d82e26adfba88cd126e9d",
     "orm/table.py": "c0dfe496e7300854b8cfcfe7a34b0e4f83931a94c439465677a3f753a48ae738",
     "orm/types.py": "ee4d59a607a531ca9879cf95e240061e72346f050f4bc13150089c773b244538",
     "orm/validation.py": "09b51a4394b669355a85d199645cf10cb062fa3152d060351c3fdc9fda5cfe3f",
-    "pagination.py": "ac68e13408e5546a7936cb927c686ce692d8498079f0393b7c38b8b95fd7fb35",
+    "pagination.py": "f0faeae8ae853c442f70a6b51f322eddada4a7182a9cd659506a197974689f2e",
     "passes.py": "11f9e353712882bd063e16883d7f1123b332e0fd8926aa0f64153f10382a7d45",
     "platform.py": "041f4c97b75666e32987dbf14264c38f295d50e22d260456d199d593922530d0",
     "policy/__init__.py": "00afdd4c6cb1b7c48496f3a7ab039e14254d51d9290012e0e5c19c0394b6759b",
     "policy/admission.py": "549356e3240e615d5c9598fd1d240f52e0455ec3da0ee23dea3615488c8c3939",
     "policy/base.py": "fbe8f5dc61792efb2436f2047c04a6195d36e20a97cfaf22b548e5a43a54c52b",
     "policy/cache.py": "670cfc8e56432dae0d2a7311c320752253c217772ecb97309206d2e66a4a0c34",
-    "policy/compression.py": "5122bd5f8a69471006c248b02b7a329baa79564695dd8b07dc2ca6e131c5b6e2",
+    "policy/compression.py": "6da06365b8d86e4d86334ddd410e6edee637b62855a804b15f5d66ce16047d9e",
     "policy/cors.py": "079cbcfe60d04e53a02d85b1d9a768dffbc7a6229352d1689775b0fdbc10c8ca",
     "policy/csrf.py": "8c3cbf71d5ec6ccce55409207f09a195ac54d3b913f36607f22d04171fbb0275",
     "policy/deadline.py": "c54fc7c603ce4a4d9cf96b5d3f7e824cad0ce8f4eb9b861f8b70cd2f81bb5733",
     "policy/idempotency.py": "daa3f54075df5df01135097a4019cf385422fa000e6b330a3aec0c5cbb0f6be3",
     "policy/maintenance.py": "585714b2f1ac91900377ff69115525d4d78a7585c718f5621615940774ef1a47",
     "policy/proxy.py": "ee3d62d6eec47bce5c4b9c51a8ebd7456cf7e65d157621ba6fdcbf5c43187716",
-    "policy/ratelimit.py": "b9eb802d86e51a775fdf0efccad7e3397d875bc9bf03ce6b6f8ddface5883467",
+    "policy/ratelimit.py": "7fa824235593236eee89e01d58d2fa2a86e7f9b9f11c2b8b54cd0cd10f0cf19d",
     "policy/request_decompression.py": "5d33ed2f2a1a47284f726bbe125f230fcf63037b2ab611ce3645caeb2425f2fe",
     "policy/request_id.py": "e313ebd72c1ce33e34a3c66f74ed9ad6169a0ef26eb5f663e03ee9ebb6476276",
     "policy/security.py": "9493b2c87d15f4be00f3183015d87b8bb2913c2d5dd7a53f5ba711886e27bdb2",
@@ -19061,20 +19407,20 @@
     "reactor.py": "7cf2a1f52bd752e712003b0fbb02db0ec13a9c5c60d3e38335f0bbe500461988",
     "recording.py": "f192fce1abfd89167ce846e0368161e340b44484b27ef458ebd8edfdb37d0514",
     "replay.py": "961ad9f193b8055e0b726cc053da13585596aba8742bc9ce5e453ff0a62a050d",
-    "request.py": "4e23a0bf8a3bbb73c7e2e90262b1a86cc90960c1b2ec3de60c5373baed2ba518",
+    "request.py": "32fb766bbfa96184fe77cc69f35e7e2a60ad4853db5386874874e9649f72b8c9",
     "response.py": "471164d3807194b1f9b540a79d04a5e55daabd28bcea56ffae7f87079820d717",
     "response_cache.py": "7615ba37e1b47a3f8a22ad86aa84e9a87535b59801615ab394bddfb90471a97c",
     "rooms.py": "1958f1d76c0c4dad4981695fa3ca851e41470fa3f103b1592c55f84c8bb337cc",
     "router.py": "31e759ed1a2c7f4ae32f74c92d9d7fba3f0fcee1ea6cefaa25678488c45ab403",
     "saml.py": "eee2f748f0f568a41f4efa48e83c47da382909bac4e8b0832ec9263410b6afe5",
     "schema.py": "f63b7cd1bfd2ea44f7817d766aeda8949f36dfca6940c91a21927559fe97a881",
-    "series.py": "59e148a82d32c8f25735342580bc022971c0250b77968741629d0e5deeb6e477",
+    "series.py": "4040f78721537dafe405746a097f686e2ad611fa3979e44075fec5d669759b5e",
     "server.py": "52bfbfa1d069c8c696a754ebc66e50ac49ca6015f010f8a4bb686156e5a52d9e",
     "serverless.py": "329ef0dafd184b7d0969958490f14ed546f1bb8ca1dc1b7c9f1e3195d71596d7",
     "service_client.py": "468d9326a15dcdbadd12ac8b13a8507f0a62d192582079a8add48a691957a676",
     "services.py": "057c6037e5ad136f1afb9f46a79199d5b059336062f3019d3df3ca780f9c6fc2",
     "session_store.py": "129aa5b2e66ebac88033cd1f9186602fc7bd79bc8c461cbc35deb5564bbcb813",
-    "signatures.py": "12173f2239c60585b71b63b4e3176266c020f77231852e7fb81ad18020c0bb43",
+    "signatures.py": "6c647b926079c1fdb63173c128a3aa1120f27574baad0914ae15463b4877eb29",
     "simulation.py": "5a8c9a4269a8563d6978cfe0b06ff541a9f3d609e3510f2b27f0f0072a865229",
     "sql.py": "1e93750859091dd78c1b24d0b51cb12997637bdc08fc7a3524aa159ba19a77c8",
     "sso.py": "0d3f8acfb8a1835f778f6e0ea05eacbf4066348ff39e8e0a7adeb0ee901cdae6",
@@ -19086,14 +19432,14 @@
     "sync.py": "67f94d7bfccda951652aad3be1558ce4539a060a56dcd458d6996812a65de62a",
     "telemetry.py": "8d5bfcefc72ba7580353fbfa0a1dcd82935160045427d891f729987c15d0b621",
     "templates.py": "d5795d670a925cd250b3fb4622fef1730615869e50e71ee760847c095b3f11e1",
-    "temporal.py": "0f5d3fb43c6e8caa191bb113e9367438b54f962afdcf900ca8a33769fc9d55e6",
+    "temporal.py": "b92f17d7f72ef003a92edfc7dec755c0ebf86c51565abda71505cd03ac41c2bc",
     "tenancy.py": "a7447aea04356bf2f4e194842fc80f2c39176d9687b423a5d1f18c8b52449532",
     "testing.py": "7dc55cf55743f802af30cd50973b56d3899d7800fde0f495ef3f1dc52024ceaa",
-    "tokens.py": "ac91355235f55099a7243d9f94346b8ceb39bf56aa9429473077fc14bea08c05",
+    "tokens.py": "6d8912e4ef904380ac381cfc98ba2629bdc464e9c6e8cfb40876743230825d9a",
     "typegen/__init__.py": "d54ca73fe87f2b4363a78d095eb44c2d26a7adb126b4fee5789eea97fd484857",
     "typegen/_names.py": "158c9aea84741dcd8c7c077937768b6b7e70d464e756ea6249fe2f8a21433dbf",
     "typegen/cli.py": "b77a0e59a7dcdd67ab401fe237b0d7137df8411026cc5a2b9b9061a7bf17daff",
-    "typegen/inspect.py": "f84acacd0370b66d3060f142b97861cbd4e9444072769eeaf82cfac0ebbc272f",
+    "typegen/inspect.py": "2a51c88c696733f489b38203c04bcc2ff786d6b9ec8eea75f5d0605a1ce2295c",
     "typegen/model.py": "2c401e73844c11292a5454d92f6de1f3108ef29a7e92065e8630f69ce2cb0ed4",
     "typegen/render.py": "a350d1858aaf3018ab5754be82553cf271f020178edc3cd62bc644b6ff421ef7",
     "typegen/targets/__init__.py": "2a647c23a3c4a75725e637a53ca154bf546a77d1a9e8166b951fbffcedf6b85c",
@@ -19104,9 +19450,9 @@
     "users.py": "835e70b59fac5202e07899a60f0b431519e3d9dfc198cb82c76c1bdea08cbbc9",
     "validation_errors.py": "6a97c553de5e1b514797d50b76e9f965b3fc787df8703ce843317988c7a15706",
     "versioning.py": "dd7ff28f017bbd5eb86a6f86cf0e70e9a9acfef300a1b4e495a244be665d7418",
-    "webhooks.py": "e8dde5e75bb5852073e84e269393526b5376210b2ad780a72a3cc4f1109ba4df",
+    "webhooks.py": "b2db8278252ff252591588f0a811b485c8bf377694707075f17772d19326d173",
     "websocket.py": "1146816c1b483fba10c98eef02a308e6dd8d8a875a70df67c8d08b73aa5cb903",
-    "workflows.py": "f57231568344bc8952ad66d35b17541cab6abdd248e9a8e0cb4dfcae1b746f94",
+    "workflows.py": "56c7c154c80b500aaa45e478d8d95a3b7713be5ed03664dd17bcc89f7e3b34c4",
     "xml.py": "c414724e11f3ced67bc69c1002aaa8a2509131803da12b0f51550ee332e642ce"
   }
 }
