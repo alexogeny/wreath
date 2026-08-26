@@ -13,6 +13,7 @@ import enum
 import inspect
 import types
 import typing
+from collections import ChainMap
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -191,7 +192,11 @@ class _ModelRegistry:
         alias = f"{base}_{module.replace('.', '_')}"
         if alias not in self._owner:
             return alias
-        qualified = f"{alias}_{_pascal(getattr(tp, '__qualname__', tp.__name__))}"
+        qualname = getattr(tp, "__qualname__", tp.__name__)
+        identifier_qualname = "".join(
+            character if character.isalnum() else "_" for character in qualname
+        )
+        qualified = f"{alias}_{_pascal(identifier_qualname)}"
         if qualified not in self._owner:
             return qualified
         raise KeyError(base)
@@ -378,16 +383,26 @@ class _Builder:
         return self._wreath_model_fields(annotation)
 
     def _wreath_model_fields(self, annotation: Any) -> list[Field]:
-        columns = getattr(annotation, "__wreath_columns__", None)
-        if columns is None:
-            return []
+        from ..orm import MISSING, Mapped
+
+        columns = annotation.__wreath_columns__
+        try:
+            hints = typing.get_type_hints(annotation, include_extras=True)
+        except (NameError, TypeError):
+            # Search derived declarations before their bases without copying
+            # every inherited annotation into a repeatedly grown dictionary.
+            hints = ChainMap(
+                *(vars(base).get("__annotations__", {}) for base in annotation.__mro__)
+            )
         fields = []
         for column in columns:
-            annotation_type = getattr(column, "type", Any)
-            required = not getattr(column, "nullable", False) and getattr(
-                column, "default", dataclasses.MISSING
-            ) is dataclasses.MISSING
-            fields.append(Field(column.name, self.type_ref(annotation_type), required))
+            annotation_type = hints.get(column.python_name, Any)
+            if typing.get_origin(annotation_type) is Mapped:
+                annotation_type = typing.get_args(annotation_type)[0]
+            required = not column.nullable and column.default is MISSING
+            fields.append(
+                Field(column.python_name, self.type_ref(annotation_type), required)
+            )
         return fields
 
 
@@ -472,7 +487,7 @@ def build_api_model(
                     response_body=response,
                     tags=tuple(definition.tags),
                     summary=definition.summary,
-                    description=doc or None,
+                    description=doc,
                     behaviours=_operation_behaviours(app, definition, method),
                 )
             )
