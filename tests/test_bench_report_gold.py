@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from wreath._devtools.bench_report import _migration_section, _scenario_table
+from wreath._devtools.bench_report import (
+    _cedar_section,
+    _migration_section,
+    _scenario_table,
+)
 
 
 def _row(
@@ -70,3 +74,23 @@ def test_migration_results_ignore_entries_without_a_median() -> None:
     assert "measured" in html
     assert "metadata" not in html
     assert "foreign" not in html
+
+
+def test_cedar_report_keeps_the_compiled_evaluation_table_on_its_own() -> None:
+    html = _cedar_section(
+        [{"evaluate": {"wreath": {"median_ns": 125.0}}}]
+    )
+
+    assert "Cedar authorization" in html
+    assert "Evaluate (policies compiled once)" in html
+    assert "Parse and evaluate" not in html
+
+
+def test_cedar_report_keeps_the_stateless_evaluation_table_on_its_own() -> None:
+    html = _cedar_section(
+        [{"parse_and_evaluate": {"wreath": {"median_ns": 250.0}}}]
+    )
+
+    assert "Cedar authorization" in html
+    assert "Evaluate (policies compiled once)" not in html
+    assert "Parse and evaluate (full per-call cost)" in html

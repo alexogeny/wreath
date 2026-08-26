@@ -25,21 +25,26 @@ def test_holistic_counter_helpers_do_not_import_benchmark_frameworks() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-@pytest.mark.parametrize(
-    "arm",
-    ["route", "cors", "binding", "auth", "cedar", "postgres", "complete-aa"],
-)
 @pytest.mark.parametrize("framework", ["wreath", "fastapi", "sanic", "blacksheep"])
-def test_e2e_stack_imports_one_valid_application(framework: str, arm: str) -> None:
-    code = (
-        "import json; from benchmarks import e2e_stack as s; "
-        "print(json.dumps({'framework': s.FRAMEWORK, 'arm': s.ARM, "
-        "'effective': s.EFFECTIVE_ARM, 'expected': s.EXPECTED, "
-        "'app': callable(s.app)}))"
-    )
+def test_e2e_stack_imports_one_valid_application(framework: str) -> None:
+    arms = ("route", "cors", "binding", "auth", "cedar", "postgres", "complete-aa")
+    code = "\n".join((
+        "import importlib, json, os, sys",
+        f"arms = {arms!r}",
+        "rows = []",
+        "for arm in arms:",
+        "    os.environ['WREATH_E2E_ARM'] = arm",
+        "    sys.modules.pop('benchmarks.e2e_stack', None)",
+        "    stack = importlib.import_module('benchmarks.e2e_stack')",
+        "    rows.append({",
+        "        'framework': stack.FRAMEWORK, 'arm': stack.ARM,",
+        "        'effective': stack.EFFECTIVE_ARM, 'expected': stack.EXPECTED,",
+        "        'app': callable(stack.app),",
+        "    })",
+        "print(json.dumps(rows))",
+    ))
     env = dict(os.environ)
     env["WREATH_E2E_FRAMEWORK"] = framework
-    env["WREATH_E2E_ARM"] = arm
     result = subprocess.run(
         [sys.executable, "-c", code],
         check=True,
@@ -47,12 +52,14 @@ def test_e2e_stack_imports_one_valid_application(framework: str, arm: str) -> No
         text=True,
         env=env,
     )
-    payload = json.loads(result.stdout)
-    assert payload["framework"] == framework
-    assert payload["arm"] == arm
-    assert payload["effective"] == ("complete" if arm == "complete-aa" else arm)
-    assert payload["expected"]["db"] == 42
-    assert payload["app"] is True
+    payloads = json.loads(result.stdout)
+    assert len(payloads) == len(arms)
+    for arm, payload in zip(arms, payloads, strict=True):
+        assert payload["framework"] == framework
+        assert payload["arm"] == arm
+        assert payload["effective"] == ("complete" if arm == "complete-aa" else arm)
+        assert payload["expected"]["db"] == 42
+        assert payload["app"] is True
 
 
 def test_retained_instruction_account_has_repeated_slopes_and_aa_controls() -> None:
@@ -76,6 +83,25 @@ def test_retained_instruction_account_has_repeated_slopes_and_aa_controls() -> N
         )
         assert all(len(row["samples"]) == 5 for row in rows.values())
         assert rows["complete-aa"]["absolute_delta_from_complete"] >= 0
+    limitation = artifact["limitations"]
+    assert "hand-written msgspec success-path adapter" in limitation
+    assert "rather than equivalent framework feature costs" in limitation
+
+
+def test_minimal_stack_docs_mark_non_equivalent_sanic_and_blacksheep_steps() -> None:
+    artifact = json.loads((ROOT / "docs/perf/data/e2e-stack-instructions.json").read_text())
+    pages = (
+        (ROOT / "README.md").read_text(),
+        (ROOT / "docs/perf/index.md").read_text(),
+    )
+    for page in pages:
+        prose = " ".join(page.split())
+        for framework in ("sanic", "blacksheep"):
+            for arm in ("binding", "auth"):
+                value = round(artifact["arms"][framework][arm]["median"])
+                assert f"{value:,}<sup>*</sup>" in page
+        assert "not like-for-like framework feature costs" in prose
+        assert "Every later cumulative BlackSheep and Sanic cell inherits" in prose
 
 
 def test_readme_histogram_matches_the_retained_complete_medians() -> None:
