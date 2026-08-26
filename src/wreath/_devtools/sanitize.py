@@ -70,6 +70,16 @@ class Target:
 
 TARGETS: tuple[Target, ...] = (
     Target(
+        "dupscan",
+        ("tests/test_dup_scan_features.py",),
+        "duplicate-fragment tokenization, rolling windows, and match extension",
+    ),
+    Target(
+        "testrunner",
+        ("tests/test_native_test_runner.py",),
+        "native vectorcall dispatch, exception classification, and maxfail",
+    ),
+    Target(
         "core",
         ("tests",),
         "codecs, JSON/msgpack, SSE framing, Cedar, JOSE, routing, templates",
