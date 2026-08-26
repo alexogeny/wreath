@@ -77,6 +77,13 @@ class Node:
 
 
 @dataclasses.dataclass
+class Recursive:
+    """A direct recursion, used to exercise the compiler's cycle cut."""
+
+    child: Recursive
+
+
+@dataclasses.dataclass
 class Holder:
     points: list[Point]
     lookup: dict[str, Point]
@@ -269,10 +276,44 @@ def test_an_enum_backed_by_a_primitive_still_reduces_to_its_value() -> None:
     assert type(_compile_jsonable(int)(Level.HIGH)) is int
 
 
+def test_a_scalar_mapping_entry_bypasses_its_compiled_converter() -> None:
+    """The exact-type branch is a cost contract, not an output distinction.
+
+    Every compiled converter deliberately returns JSON scalars unchanged, so
+    comparing only the result cannot distinguish the fast path from an extra
+    Python call per entry.  Instrument the converter captured by the compiled
+    mapping and assert that the overwhelmingly common scalar case never enters
+    it while a value that needs conversion still does.
+    """
+    convert = _compile_jsonable(dict[str, Decimal])
+    sequence, mapping = convert.__defaults__
+    calls: list[object] = []
+
+    def watched(value: object) -> object:
+        calls.append(value)
+        return mapping(value)
+
+    convert.__defaults__ = (sequence, watched)
+
+    assert convert({"count": 7, "cost": Decimal("1.25")}) == {
+        "count": 7,
+        "cost": "1.25",
+    }
+    assert calls == [Decimal("1.25")]
+
+
 def test_a_self_referential_dataclass_compiles_and_still_converts() -> None:
     """The compiled walk cannot be finite here, so that node is interpreted."""
     deep = Node(1, Node(2, Node(3, Node(4))))
     assert _compile_jsonable(Node)(deep) == _jsonable(Node, deep)
+
+
+def test_a_self_referential_response_mapping_uses_the_finite_fallback() -> None:
+    payload = {"child": None}
+
+    assert _compile_response_input(Recursive)(payload) == _response_input(
+        Recursive, payload
+    )
 
 
 # -- the exact-type fast path must not change what any subclass does ----------

@@ -2856,22 +2856,17 @@ def compile_binder(
 
     async def _decode_body(request: Request, kwargs: dict[str, Any]) -> None:
         """Multipart, form-model, and JSON body parameters."""
-        if form_specs or file_specs or form_model_tape is not None:
-            # A body the multipart parser cannot read is the caller's fault, and
-            # `Request.form` reports it as `ValueError` and leaves the status to
-            # its caller -- which is here. Running these outside the handler the
-            # JSON path already has made a bad boundary, an unterminated part, or
-            # a malformed part header a 500 on every route binding `Form()` or
-            # `File()`. `ValidationError` is not a `ValueError`, so a field that
-            # is merely wrong still reaches the 422 it belongs in, and
-            # `PayloadTooLarge` still surfaces as its own 413.
-            try:
-                if form_specs or file_specs:
-                    await form_tape.decode_multipart_validation_tape(request, kwargs)
-                if form_model_tape is not None:
-                    await form_model_tape.decode(request, kwargs)
-            except ValueError as exc:
-                raise BadRequest(f"invalid form body: {exc}") from None
+        # A body the multipart parser cannot read is the caller's fault, and
+        # `Request.form` reports it as `ValueError` and leaves the status to its
+        # caller -- which is here. The two inner guards are the complete shape
+        # test; wrapping them in their disjunction added an equivalent branch.
+        try:
+            if form_specs or file_specs:
+                await form_tape.decode_multipart_validation_tape(request, kwargs)
+            if form_model_tape is not None:
+                await form_model_tape.decode(request, kwargs)
+        except ValueError as exc:
+            raise BadRequest(f"invalid form body: {exc}") from None
         if body_spec is not None and body_validator is not None:
             name, annotation = body_spec
             body = await request.body()
