@@ -40,6 +40,7 @@ nav = Nav(
     Section(
         "Under the hood",
         Page("The request path", "internals/index.md"),
+        Page("The native test engine", "internals/native-test-engine.md"),
         Page("Scanning bytes in bulk", "internals/vectorisation.md"),
         Page("Work moved out of the request", "internals/compile-time.md"),
     ),
