@@ -53,6 +53,13 @@ class Verification:
     #: answer, so the pass retries rather than concluding anything.
     transient: bool = False
 
+    def __post_init__(self) -> None:
+        if self.ok and self.transient:
+            raise ValueError(
+                "a successful verification cannot be transient; use "
+                "Verification(True, detail) for an answer"
+            )
+
 
 def _sqlstate(error: BaseException) -> str:
     for attribute in ("sqlstate", "pgcode", "code"):

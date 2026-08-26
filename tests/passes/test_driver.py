@@ -418,6 +418,16 @@ async def test_the_pass_rests_between_chunks_in_proportion_to_its_duty_cycle(dat
     assert naps and all(nap == pytest.approx(3.0) for nap in naps)
 
 
+async def test_a_full_duty_cycle_never_calls_the_sleeper(database):
+    naps: list[float] = []
+
+    async def record(seconds):
+        naps.append(seconds)
+
+    await purge_pass(pace=DutyCycle(1.0)).run(database, sleep=record)
+    assert naps == []
+
+
 async def test_the_connection_is_released_even_when_a_chunk_fails(database, world):
     def explode(sql, args):
         if sql.startswith("DELETE FROM replays"):
