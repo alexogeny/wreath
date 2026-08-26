@@ -1215,7 +1215,7 @@ class MCP:
             return await self._prompts_get(request, session, message)
         if method == "completion/complete":
             return _complete(self._prompts, message.params)
-        stage = _NOT_YET.get(method or "")
+        stage = _NOT_YET.get(method)
         if stage is not None:
             raise JsonRpcError(
                 METHOD_NOT_FOUND,
@@ -1579,8 +1579,8 @@ class MCP:
             )
 
         tool = self._registry.get(context.tool)
-        requirement = None if tool is None else tool.sampling_requirement
-        if tool is None or requirement is None:
+        requirement = getattr(tool, "sampling_requirement", None)
+        if requirement is None:
             self.sampling_refusals += 1
             marker(_record.OUTCOME_SAMPLE_DENIED)
             raise ClientRequestError(

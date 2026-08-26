@@ -221,9 +221,11 @@ all three use `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, msgspec,
 and standard gzip. Wreath performs the corresponding transaction through its
 dependency-free declarative surfaces and native data kernels.
 
-To make the framework layers independently auditable, a smaller companion
-request removes the dashboard calculations while keeping the same successful
-routing, CORS, validation, auth, Cedar, PostgreSQL, HTTP, and JSON path:
+To expose the successful-path application cost layer by layer, a smaller
+companion request removes the dashboard calculations while keeping the same
+routing, CORS, validation, auth, Cedar, PostgreSQL, HTTP, and JSON result. The
+starred cells below are deliberately called out because they are not
+like-for-like framework feature costs:
 
 The cumulative decomposition shows where work enters:
 
@@ -231,11 +233,27 @@ The cumulative decomposition shows where work enters:
 |---|---:|---:|---:|---:|
 | route + JSON response | 35,221 | 104,326 | 220,806 | 425,757 |
 | + CORS | 46,542 | 143,283 | 241,150 | 491,308 |
-| + typed binding and validation | 107,943 | 222,511 | 275,629 | 774,667 |
-| + bearer authentication | 114,036 | 229,477 | 277,595 | 867,014 |
+| + typed binding and validation | 107,943 | 222,511<sup>*</sup> | 275,629<sup>*</sup> | 774,667 |
+| + bearer authentication | 114,036 | 229,477<sup>*</sup> | 277,595<sup>*</sup> | 867,014 |
 | + Cedar authorization | 153,793 | 931,174 | 974,843 | 1,597,999 |
 | + PostgreSQL query | 206,037 | 1,104,737 | 1,145,880 | 1,811,778 |
 | + outbound HTTP | **249,844** | **1,444,119** | **1,443,892** | **2,107,179** |
+
+<sup>*</sup> Sanic and BlackSheep share a hand-written, success-path adapter:
+msgspec decodes the known-good body, the query is converted inline, and bearer
+"authentication" is an exact comparison with `"Bearer user"`. Wreath's cells
+exercise its public binder and bearer backend, including structured validation
+refusals, case-insensitive scheme parsing, duplicate-credential refusal,
+`Identity` publication, protected-route resolution, and a proper 401 Bearer
+challenge. Invalid input is therefore not equivalent: for example, the Sanic
+adapter answers 500 for a bad query or missing token where Wreath answers 422 or
+401, and it accepts a duplicated Authorization field when the first value is
+valid. Every later cumulative BlackSheep and Sanic cell inherits this shortcut.
+Those full rows remain an account of the exact successful applications, but the
+starred increments are not evidence that equivalent framework validation or
+authentication is cheaper. In the retained Sanic run, the 1,966-instruction
+authentication increment is also below its available 2,747-instruction A/A
+resolution and is unresolved.
 
 On this stripped companion, Wreath retired **8.43× fewer instructions** than
 FastAPI and **5.78× fewer** than both Sanic and BlackSheep. BlackSheep has the
@@ -247,8 +265,8 @@ decomposition; the holistic request above is the headline system comparison.
 |---|---|
 | Wreath | Wreath 0.3.2: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
 | FastAPI | FastAPI 0.139, Starlette, Pydantic/pydantic-core, Uvicorn, uvloop, httptools, `HTTPBearer`, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
-| Sanic | Sanic 25.12.1 native server, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
-| BlackSheep | BlackSheep 2.6.3 on Granian 2.7.9 ASGI/uvloop, plus the same typed business stack as Sanic |
+| Sanic | Sanic 25.12.1 native server, a hand-written msgspec success-path binding/auth adapter, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, and protobuf |
+| BlackSheep | BlackSheep 2.6.3 on Granian 2.7.9 ASGI/uvloop, plus the same success-path adapter and typed business stack as Sanic |
 
 CORS is Starlette's `CORSMiddleware`, which FastAPI already brings in. It is not
 padded into the stack as another package. `cedarpy` 4.8.7 has a stateless public

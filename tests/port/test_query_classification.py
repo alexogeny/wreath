@@ -29,7 +29,11 @@ The invariant underneath does not move: **the emitter never rewrites a query
 body.** A translated verdict says the target is fully determined, not that
 Phase 1 performs it — bodies are copied byte-for-byte either way.
 """
+import ast
+
 import pytest
+
+from wreath._port.analyzer.queries import query_rule
 
 port = pytest.importorskip("wreath.port")
 
@@ -347,3 +351,73 @@ def test_a_dynamic_filter_mapping_key_stays_reviewable(tmp_path) -> None:
     )
 
     assert query.rule_id == "orm.query.filter"
+
+
+@pytest.mark.parametrize(
+    ("update", "expected"),
+    [
+        ("terms.update(name=name)", "orm.query.filter_exact"),
+        ("terms.update({'name': name})", "orm.query.filter_exact"),
+        ("terms.update({key: name})", "orm.query.filter"),
+        ("terms.update(name__icontains=name)", "orm.query.filter"),
+    ],
+)
+def test_mapping_update_keeps_static_and_dynamic_filter_keys_apart(
+    tmp_path, update, expected
+) -> None:
+    source = (
+        "async def search(name, key='name'):\n"
+        "    terms = {}\n"
+        f"    {update}\n"
+        "    return await Llama.objects.filter(**terms).all()\n"
+    )
+    query = next(
+        item for item in _analyze(tmp_path, source) if item.construct == "orm_query"
+    )
+    assert query.rule_id == expected
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "name=name, _defaults=defaults",
+        "name=name, defaults=defaults",
+        "name=name, **defaults",
+    ],
+)
+def test_get_or_create_reserved_value_sources_never_become_creation_fields(
+    tmp_path, arguments
+) -> None:
+    source = (
+        "async def create(name, defaults):\n"
+        f"    return await Llama.objects.get_or_create({arguments})\n"
+    )
+    assert _query_rules(tmp_path, source) == ["orm.query.get_or_create"]
+
+
+def test_order_by_head_checks_its_own_argument_shape_directly() -> None:
+    literal = ast.parse("Llama.objects.order_by('-created_at')").body[0].value
+    dynamic = ast.parse("Llama.objects.order_by(column)").body[0].value
+
+    assert isinstance(literal, ast.Call)
+    assert isinstance(dynamic, ast.Call)
+    assert query_rule("order_by", literal, model="Llama") == "orm.query.order_exact"
+    assert query_rule("order_by", dynamic, model="Llama") == "orm.query.order"
+
+
+def test_limit_head_checks_its_own_argument_shape_directly() -> None:
+    literal = ast.parse("Llama.objects.limit(10)").body[0].value
+    missing = ast.parse("Llama.objects.limit()").body[0].value
+
+    assert isinstance(literal, ast.Call)
+    assert isinstance(missing, ast.Call)
+    assert query_rule("limit", literal, model="Llama") == "orm.query.page_exact"
+    assert query_rule("limit", missing, model="Llama") == "orm.query"
+
+
+def test_fields_must_be_consumed_by_values_before_another_chain_step(tmp_path) -> None:
+    source = (
+        "async def rows():\n"
+        "    return await Llama.objects.filter(id=7).fields(['id']).limit(1).all()\n"
+    )
+    assert _query_rules(tmp_path, source) == ["orm.query.filter"]

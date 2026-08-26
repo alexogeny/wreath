@@ -270,6 +270,52 @@ async def test_a_skipped_chunk_does_not_count_as_a_unit_of_work_done(
     assert (await walk.status(database)).units_done == 2
 
 
+async def test_a_later_skip_compares_against_the_cursor_it_followed(database, world):
+    walk = purge_pass(on_chunk_failure="skip")
+    delete_calls = 0
+
+    def poison_second_chunk(sql, args):
+        nonlocal delete_calls
+        if sql.startswith("DELETE FROM replays"):
+            delete_calls += 1
+            if delete_calls in (2, 3):
+                raise RuntimeError("second chunk is cursed")
+
+    world.before = poison_second_chunk
+    result = await walk.run(database, sleep=_nap)
+    skips = [
+        args
+        for sql, args in world.statements
+        if "SET cursor = $3::jsonb, last_advance" in sql
+    ]
+    assert result.complete is True
+    assert len(skips) == 1
+    assert skips[0][3] is not None
+
+
+async def test_a_skip_that_loses_its_cursor_swap_stops_as_lost(database, world):
+    walk = purge_pass(on_chunk_failure="skip")
+    failures = 2
+
+    def poison_then_steal(sql, args):
+        nonlocal failures
+        if sql.startswith("DELETE FROM replays") and failures:
+            failures -= 1
+            raise RuntimeError("first chunk is cursed")
+        if "SET cursor = $3::jsonb, last_advance" in sql:
+            world.before = None
+            world.ledger[("purge_replays", "")]["cursor"] = [
+                "2026-01-01T00:00:00+00:00",
+                "stolen",
+            ]
+
+    world.before = poison_then_steal
+    result = await walk.run(database, sleep=_nap)
+    assert result.stopped == "lost"
+    assert result.chunks == 0
+    assert result.holes == 0
+
+
 # --- requeue and retry --------------------------------------------------------
 
 
@@ -334,6 +380,36 @@ async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, 
     assert naps and all(seconds > 0 for seconds in naps)
     # The cursor never moved backwards to do it.
     assert (await walk.status(database)).cursor == before
+
+
+async def test_a_requeued_unit_failure_is_counted_as_a_hole(database, world):
+    walk = purge_pass(
+        frontier=Ceiling.at_launch(monotone="expiry stamps are assigned by now()")
+    )
+    await walk.run(database, sleep=_nap)
+    world.rows.append({"key": "late", "expires": NOW - datetime.timedelta(hours=5)})
+    assert await walk.requeue(
+        database,
+        (NOW - datetime.timedelta(hours=5), "late"),
+        after=(NOW - datetime.timedelta(hours=6), "k000"),
+    )
+
+    def fail_delete(sql, args):
+        if sql.startswith("DELETE FROM replays"):
+            raise RuntimeError("cannot delete late row")
+
+    world.before = fail_delete
+    naps: list[float] = []
+
+    async def record_rest(seconds: float) -> None:
+        naps.append(seconds)
+
+    result = await walk.run(database, sleep=record_rest)
+    assert result.complete is True
+    assert result.holes == 1
+    assert len(world.rows) == 1
+    assert len(naps) == 1
+    assert naps[0] > 0
 
 
 async def test_requeueing_the_same_unit_twice_is_harmless(database, world):

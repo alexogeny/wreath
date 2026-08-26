@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from _pgfidelity import check_statement
 
+from wreath import telemetry
 from wreath._jobcore import dedup_key
 from wreath.jobs import JobRunner, JobVanished
 
@@ -391,6 +392,35 @@ async def test_a_handler_that_raises_still_retries_normally():
     statements = [sql for sql, _ in db.connection.calls]
     assert "state='ready'" in statements[0], "a transient failure must retry"
     assert runner.dead_lettered == 0
+
+
+@pytest.mark.parametrize(
+    ("trace_context", "expected"),
+    [
+        (
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", ""),
+        ),
+        (None, None),
+    ],
+)
+async def test_a_job_binds_only_its_own_trace_context(trace_context, expected):
+    db = FakeDatabase()
+    runner = _runner(db)
+    seen = []
+
+    @runner.task("send_receipt")
+    async def send_receipt(ctx, order_id, template):
+        seen.append(telemetry.outbound_context.get())
+
+    token = telemetry.outbound_context.set(("outer", "state"))
+    try:
+        await runner._run(_stale_job(trace_context=trace_context))
+        assert telemetry.outbound_context.get() == ("outer", "state")
+    finally:
+        telemetry.outbound_context.reset(token)
+
+    assert seen == [expected]
 
 
 # --- `drive`: the shift handler that keeps an online pass moving ---------------
@@ -1013,8 +1043,71 @@ async def test_priority_rides_the_row_and_orders_the_claim():
 
     runner._columns["priority"] = True
     await runner.enqueue("send", priority=7)
-    insert = next(args for sql, args in db.connection.calls if "INSERT INTO" in sql)
+    sql, insert = next(call for call in db.connection.calls if "INSERT INTO" in call[0])
+    assert "dedup_key, priority)" in sql
     assert insert[7] == 7
+
+
+async def test_priority_and_trace_context_share_the_same_insert_without_drifting():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    runner._columns.update(priority=True, trace_context=True)
+    parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    token = telemetry.outbound_context.set((parent, "vendor=ignored"))
+    try:
+        await runner.enqueue("send", priority=7)
+    finally:
+        telemetry.outbound_context.reset(token)
+
+    sql, params = next(call for call in db.connection.calls if "INSERT INTO" in call[0])
+    assert "dedup_key, priority, trace_context)" in sql
+    assert "$9, $8" in sql
+    assert params[7:] == (parent, 7)
+
+
+async def test_a_traced_default_priority_insert_omits_the_priority_column():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    runner._columns["trace_context"] = True
+    token = telemetry.outbound_context.set(("traceparent", "tracestate"))
+    try:
+        await runner.enqueue("send")
+    finally:
+        telemetry.outbound_context.reset(token)
+
+    sql, params = next(call for call in db.connection.calls if "INSERT INTO" in call[0])
+    assert "dedup_key, trace_context)" in sql
+    assert "priority" not in sql
+    assert params[7:] == ("traceparent",)
+
+
+async def test_a_trace_is_not_written_when_the_schema_cannot_carry_it():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    runner._columns["trace_context"] = False
+    token = telemetry.outbound_context.set(("traceparent", "tracestate"))
+    try:
+        await runner.enqueue("send")
+    finally:
+        telemetry.outbound_context.reset(token)
+
+    sql = next(sql for sql, _ in db.connection.calls if "INSERT INTO" in sql)
+    assert "trace_context" not in sql
 
 
 async def test_the_claim_is_ordered_by_priority_then_run_at():
@@ -1040,6 +1133,15 @@ async def test_the_claim_degrades_when_the_column_is_absent():
     claim = next(sql for sql, _ in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql)
     assert "ORDER BY run_at" in claim
     assert "priority" not in claim
+
+
+async def test_the_claim_reads_trace_context_when_the_column_is_present():
+    db = FakeDatabase()
+    runner = _runner(db)
+    runner._columns["trace_context"] = True
+    await runner._claim(1)
+    claim = next(sql for sql, _ in db.connection.calls if "FOR UPDATE SKIP LOCKED" in sql)
+    assert "j.trace_context" in claim
 
 
 async def test_a_priority_against_a_schema_without_the_column_is_refused():
@@ -1159,6 +1261,24 @@ def test_the_claim_index_leads_with_priority():
     )
     assert "(queue, priority DESC, run_at) WHERE state = 'ready'" in statements
     assert "DROP INDEX IF EXISTS" in statements
+
+
+async def test_an_unarmed_reclaim_does_not_request_recording_fields():
+    db = FakeDatabase()
+    runner = _runner(db)
+    await runner._reclaim_expired()
+    sql = db.connection.calls[0][0]
+    assert "RETURNING" not in sql
+
+
+async def test_an_armed_reclaim_requests_the_fields_needed_for_a_recording():
+    db = FakeDatabase()
+    runner = _runner(db)
+    runner._attempts = object()
+    await runner._reclaim_expired()
+    sql = db.connection.calls[0][0]
+    assert "RETURNING id, task, tenant" in sql
+    assert "jsonb_array_length(args) AS argument_count" in sql
 
 
 # --- worker identity ------------------------------------------------------------------

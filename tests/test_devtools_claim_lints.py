@@ -355,3 +355,34 @@ def test_docstrings_are_not_sql() -> None:
     describes `$1::regclass`, and the first run of the lint flagged it."""
     source = '"""Explains SELECT ... WHERE oid = $1::regclass and why it fails."""\n'
     assert sql_lint._sql_literals(source) == []
+
+
+def test_the_repository_scan_parses_each_module_once(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """All three SQL rules derive their facts from the same module image."""
+    package = tmp_path / "src" / "wreath"
+    package.mkdir(parents=True)
+    (package / "schema.py").write_text(
+        "class Component: pass\n"
+        'JOBS = Component(relations=("jobs",))\n',
+        encoding="utf-8",
+    )
+    (package / "queries.py").write_text(
+        'QUERY = "SELECT count(*) FROM jobs"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sql_lint, "encodable_types", lambda _root: ENCODABLE)
+    original_parse = sql_lint.ast.parse
+    parses = 0
+
+    def recording_parse(*args, **kwargs):
+        nonlocal parses
+        parses += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(sql_lint.ast, "parse", recording_parse)
+
+    findings = sql_lint.scan(tmp_path)
+    assert [finding.code for finding in findings] == ["SQL003"]
+    assert parses == 2

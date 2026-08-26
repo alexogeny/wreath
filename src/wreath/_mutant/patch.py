@@ -125,6 +125,36 @@ def compile_module(tree: ast.Module, filename: str, *, locate: bool = True) -> C
     return compile(tree, filename, "exec", dont_inherit=True, optimize=0)
 
 
+def compile_scope(tree: ast.Module, qualname: str, filename: str) -> CodeType:
+    """Compile only the top-level owner of one replacement code object.
+
+    A code patch installs one function or method; compiling every unrelated
+    definition in its module repeats work whose result is immediately thrown
+    away. The owner plus the module's future imports produces the same nested
+    code object and compiler flags without paying for sibling definitions.
+    """
+    owner_name = qualname.partition(".")[0]
+    owner = next(
+        (
+            statement
+            for statement in tree.body
+            if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+            and statement.name == owner_name
+        ),
+        None,
+    )
+    if owner is None:
+        return compile_module(tree, filename, locate=False)
+    future_imports = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, ast.ImportFrom)
+        and statement.module == "__future__"
+    ]
+    narrowed = ast.Module(body=[*future_imports, owner], type_ignores=[])
+    return compile_module(narrowed, filename, locate=False)
+
+
 def same_bytecode(left: CodeType, right: CodeType) -> bool:
     """Whether two code objects are indistinguishable to the interpreter.
 

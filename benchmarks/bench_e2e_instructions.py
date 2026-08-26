@@ -468,7 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         document["arms"][framework] = rows
 
     document["fairness"] = (
-        "All four stacks receive and verify the same request, response and CORS behavior. "
+        "All four stacks receive and verify the same successful request, response and "
+        "CORS behavior. "
         "Wreath uses its native metal HTTP/1.1 server, binding, bearer backend, "
         "startup-compiled Cedar engine, PostgreSQL driver and HTTP client. FastAPI "
         "uses Uvicorn with uvloop+httptools, Pydantic, HTTPBearer and Starlette "
@@ -480,6 +481,15 @@ def main(argv: list[str] | None = None) -> int:
         "deterministic in-process peers. The server process owns those peers, so their "
         "small instruction cost is included equally. No external database, network, "
         "wall clock, cycles or IPC enters the result."
+    )
+    document["limitations"] = (
+        "Sanic and BlackSheep share a hand-written msgspec success-path adapter for "
+        "binding and bearer authentication. It does not reproduce Wreath's structured "
+        "validation refusals, case-insensitive bearer parsing, duplicate-credential "
+        "refusal, Identity publication, protected-route resolution or 401 Bearer "
+        "challenge. Their binding and auth increments, and every later cumulative arm, "
+        "therefore measure the exact successful applications rather than equivalent "
+        "framework feature costs."
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

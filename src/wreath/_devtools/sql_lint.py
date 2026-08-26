@@ -179,6 +179,57 @@ class Finding:
         return f"{self.where}: {self.code} {self.message}"
 
 
+@dataclass(frozen=True)
+class _PythonFacts:
+    """The source facts all three SQL rules derive from one AST image."""
+
+    strings: tuple[tuple[int, str], ...]
+    owned_relations: frozenset[str]
+
+
+def _python_facts(tree: ast.Module) -> _PythonFacts:
+    """Collect SQL strings and component relations in one generic walk."""
+    nodes = tuple(ast.walk(tree))
+    documentation = {
+        id(node.body[0].value)
+        for node in nodes
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    strings: list[tuple[int, str]] = []
+    relations: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in documentation:
+                strings.append((node.lineno, node.value))
+            continue
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Component"
+        ):
+            continue
+        qualified, declared = True, ()
+        for keyword in node.keywords:
+            if keyword.arg == "schema" and isinstance(keyword.value, ast.Constant):
+                qualified = bool(keyword.value.value)
+            elif keyword.arg == "relations" and isinstance(
+                keyword.value, (ast.Tuple, ast.List)
+            ):
+                declared = tuple(
+                    element.value
+                    for element in keyword.value.elts
+                    if isinstance(element, ast.Constant)
+                    and isinstance(element.value, str)
+                )
+        if qualified:
+            relations.update(declared)
+    return _PythonFacts(tuple(strings), frozenset(relations))
+
+
 def _code_only(source: str) -> str:
     """`source` with the inside of every comment and literal blanked out.
 
@@ -290,26 +341,11 @@ def _sql_literals(source: str) -> list[tuple[int, str]]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    documentation = {
-        id(node.body[0].value)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
-    }
-    found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-            continue
-        if id(node) in documentation:
-            continue
-        text = node.value
-        if "$" not in text or not _SQL_HINT.search(text):
-            continue
-        found.append((node.lineno, text))
-    return found
+    return [
+        (line, text)
+        for line, text in _python_facts(tree).strings
+        if "$" in text and _SQL_HINT.search(text)
+    ]
 
 
 def _scan_text(where: str, line: int, sql: str, encodable: frozenset[str]) -> list[Finding]:
@@ -370,26 +406,7 @@ def owned_relations(root: Path) -> frozenset[str]:
     names: set[str] = set()
     for path in sorted((root / "src" / "wreath").rglob("*.py")):
         module = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(module):
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "Component"):
-                continue
-            qualified, relations = True, ()
-            for keyword in node.keywords:
-                if keyword.arg == "schema" and isinstance(keyword.value, ast.Constant):
-                    qualified = bool(keyword.value.value)
-                elif keyword.arg == "relations" and isinstance(
-                    keyword.value, (ast.Tuple, ast.List)
-                ):
-                    relations = tuple(
-                        element.value
-                        for element in keyword.value.elts
-                        if isinstance(element, ast.Constant)
-                        and isinstance(element.value, str)
-                    )
-            if qualified:
-                names.update(relations)
+        names.update(_python_facts(module).owned_relations)
     return frozenset(names)
 
 
@@ -404,22 +421,10 @@ def _sql_statements(source: str) -> list[tuple[int, str]]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    documentation = {
-        id(node.body[0].value)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
-    }
     return [
-        (node.lineno, node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in documentation
-        and _SQL_HINT.search(node.value)
+        (line, text)
+        for line, text in _python_facts(tree).strings
+        if _SQL_HINT.search(text)
     ]
 
 
@@ -452,13 +457,27 @@ def _scan_qualification(
 
 def scan(root: Path) -> list[Finding]:
     encodable = encodable_types(root)
-    owned = owned_relations(root)
-    findings: list[Finding] = []
     package = root / "src" / "wreath"
+    schema_module = package / "schema.py"
+    if "class Component" not in schema_module.read_text(encoding="utf-8"):
+        raise SystemExit(
+            "sql-lint: wreath/schema.py no longer declares Component, so the "
+            "owned-relation set would be empty and SQL003 would check nothing"
+        )
+    modules: list[tuple[str, _PythonFacts]] = []
+    owned: set[str] = set()
     for path in sorted(package.rglob("*.py")):
         relative = path.relative_to(root).as_posix()
-        source = path.read_text(encoding="utf-8")
-        for line, sql in _sql_literals(source):
+        facts = _python_facts(ast.parse(path.read_text(encoding="utf-8")))
+        modules.append((relative, facts))
+        owned.update(facts.owned_relations)
+
+    findings: list[Finding] = []
+    frozen_owned = frozenset(owned)
+    for relative, facts in modules:
+        for line, sql in facts.strings:
+            if "$" not in sql or not _SQL_HINT.search(sql):
+                continue
             findings += _scan_text(relative, line, sql, encodable)
         # SQL003 reads a *wider* set than SQL001/SQL002 deliberately. Those two
         # are about placeholders, so `_sql_literals` is right to require a `$`.
@@ -467,8 +486,9 @@ def scan(root: Path) -> list[Finding]:
         # `$` and is exactly the reference the rule exists to catch. Sharing the
         # narrower collector would have made SQL003 quietly check a subset of
         # what it claims to.
-        for line, sql in _sql_statements(source):
-            findings += _scan_qualification(relative, line, sql, owned)
+        for line, sql in facts.strings:
+            if _SQL_HINT.search(sql):
+                findings += _scan_qualification(relative, line, sql, frozen_owned)
     return findings
 
 

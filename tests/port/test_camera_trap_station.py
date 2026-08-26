@@ -681,6 +681,40 @@ def test_same_named_unrelated_method_does_not_gain_a_session(tmp_path: Path) -> 
     assert "return 'north'" in emitted
 
 
+def test_a_self_method_call_threads_the_session_to_the_owning_method(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "station"
+    root.mkdir()
+    (root / "repository.py").write_text(
+        "class CameraRepository:\n"
+        "    async def locate(self):\n"
+        "        return await Camera.objects.get_or_none(active=True)\n"
+        "    async def current(self):\n"
+        "        return await self.locate()\n"
+        "class RidgeMap:\n"
+        "    async def locate(self):\n"
+        "        return 'north'\n",
+        encoding="utf-8",
+    )
+    (root / "routes.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from repository import CameraRepository\n"
+        "router = APIRouter()\n"
+        "@router.get('/current')\n"
+        "async def current():\n"
+        "    return await CameraRepository().current()\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "ported"
+
+    port.port_tree(root, output, opinionated=True)
+
+    emitted = (output / "repository.py").read_text(encoding="utf-8")
+    assert emitted.count("*, session: Session") == 2
+    assert "self.locate(session=session)" in emitted
+
+
 def test_query_create_is_rewritten_before_local_session_calls_are_threaded(
     tmp_path: Path,
 ) -> None:
@@ -891,6 +925,39 @@ def test_only_a_plain_single_argument_append_is_followed(
         encoding="utf-8",
     )
     assert "bg.asyncio_loop" in [
+        finding.rule_id for finding in port.analyze(source).findings
+    ]
+
+
+def test_a_multi_argument_append_cannot_transfer_task_ownership(tmp_path: Path) -> None:
+    source = tmp_path / "camera_tasks.py"
+    source.write_text(
+        "import asyncio\n"
+        "async def load():\n"
+        "    task = asyncio.create_task(read())\n"
+        "    tasks = []\n"
+        "    tasks.append(task, 'metadata')\n"
+        "    await asyncio.gather(*tasks)\n",
+        encoding="utf-8",
+    )
+
+    assert "bg.asyncio_loop" in [
+        finding.rule_id for finding in port.analyze(source).findings
+    ]
+
+
+def test_include_router_is_classified_as_a_static_route_composition(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "routes.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+
+    assert "route.include_static" in [
         finding.rule_id for finding in port.analyze(source).findings
     ]
 
@@ -1120,6 +1187,214 @@ def test_scoped_test_client_context_becomes_async(tmp_path: Path) -> None:
     assert "async with TestClient(app) as client:" in emitted
     assert "(await client.get('/ready')).status == 200" in emitted
     compile(emitted, str(tmp_path / "test_startup.py"), "exec")
+
+
+def test_only_the_referenced_module_test_client_becomes_a_fixture() -> None:
+    source = (
+        "from fastapi.testclient import TestClient\n"
+        "camera = TestClient(app)\n"
+        "ridge = TestClient(other_app)\n"
+        "def test_camera():\n"
+        "    assert camera.get('/ready').status_code == 200\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async def test_camera(camera):" in emitted
+    assert "async def test_camera(camera, ridge):" not in emitted
+
+
+def test_an_existing_async_test_client_context_is_not_prefixed_twice() -> None:
+    source = (
+        "from fastapi.testclient import TestClient\n"
+        "async def test_ready():\n"
+        "    async with TestClient(app) as client:\n"
+        "        assert (await client.get('/ready')).status == 200\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async async" not in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_sync_client_context_inside_async_test_does_not_double_prefix_function() -> None:
+    source = (
+        "from fastapi.testclient import TestClient\n"
+        "async def test_ready():\n"
+        "    with TestClient(app) as client:\n"
+        "        assert client.get('/ready').status_code == 200\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async async" not in emitted
+    assert "async with TestClient(app) as client:" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_a_fixture_client_argument_does_not_double_prefix_the_test() -> None:
+    source = (
+        "import pytest\n"
+        "from fastapi.testclient import TestClient\n"
+        "@pytest.fixture\n"
+        "def client():\n"
+        "    yield TestClient(app)\n"
+        "def test_ready(client):\n"
+        "    with TestClient(app) as scoped:\n"
+        "        assert scoped.get('/ready').status_code == 200\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert emitted.count("async def test_ready") == 1
+    assert "async async" not in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_test_client_context_without_a_name_does_not_invent_a_fixture() -> None:
+    source = (
+        "from fastapi.testclient import TestClient\n"
+        "def test_ready():\n"
+        "    with TestClient(app):\n"
+        "        pass\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async def test_ready():" in emitted
+    assert "TODO(wreath-port)" not in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_existing_request_only_signature_needs_no_second_edit() -> None:
+    source = (
+        "from fastapi import APIRouter, Request\n"
+        "router = APIRouter()\n"
+        "@router.get('/ready')\n"
+        "async def ready(request: Request):\n"
+        "    return {'ok': True}\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert emitted.count("request: Request") == 1
+    assert "move `request` to the front" not in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_existing_request_gains_the_required_keyword_only_separator() -> None:
+    source = (
+        "from fastapi import APIRouter, Query, Request\n"
+        "router = APIRouter()\n"
+        "@router.get('/search')\n"
+        "async def search(request: Request, page: int = 1, term: str = Query(...)):\n"
+        "    return term\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async def search(request: Request, *, page: int = 1" in emitted
+    assert "term: Annotated[str, Query()]" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+@pytest.mark.parametrize("request_first", [True, False])
+def test_existing_request_gains_a_route_session_without_duplication(
+    request_first: bool,
+) -> None:
+    parameters = "request: Request, value: int" if request_first else "value: int, request: Request"
+    source = (
+        "import ormar\n"
+        "from fastapi import APIRouter, Request\n"
+        "router = APIRouter()\n"
+        "class Llama(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "@router.get('/llamas')\n"
+        f"async def llamas({parameters}):\n"
+        "    return await Llama.objects.all()\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert emitted.count("request: Request") == 1
+    assert "session: Annotated[Session, FromORM()]" in emitted
+    if request_first:
+        assert "async def llamas(request: Request, *, session:" in emitted
+    else:
+        assert "async def llamas(value: int, request: Request, *, session:" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_keyword_only_request_with_a_query_gets_a_move_note_not_a_crash() -> None:
+    source = (
+        "import ormar\n"
+        "from fastapi import APIRouter, Request\n"
+        "router = APIRouter()\n"
+        "class Llama(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "@router.get('/llamas')\n"
+        "async def llamas(value: int, *, request: Request):\n"
+        "    return await Llama.objects.all()\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "move `request` to the front" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_existing_request_before_keyword_only_values_gains_a_session() -> None:
+    source = (
+        "import ormar\n"
+        "from fastapi import APIRouter, Request\n"
+        "router = APIRouter()\n"
+        "class Llama(ormar.Model):\n"
+        "    id: int = ormar.Integer(primary_key=True)\n"
+        "@router.get('/llamas')\n"
+        "async def llamas(request: Request, *, value: int):\n"
+        "    return await Llama.objects.all()\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "async def llamas(request: Request, session: Annotated[Session, FromORM()], *" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_as_form_rewrite_requires_the_exact_attribute_and_an_annotation() -> None:
+    source = (
+        "from fastapi import APIRouter, Depends\n"
+        "router = APIRouter()\n"
+        "class FormModel:\n"
+        "    pass\n"
+        "@router.post('/forms')\n"
+        "async def forms(good: FormModel = Depends(FormModel.as_form), "
+        "wrong: FormModel = Depends(FormModel.other), bare = Depends(FormModel.as_form)):\n"
+        "    return good\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "good: Annotated[FormModel, Form()]" in emitted
+    assert "Depends(FormModel.other)" in emitted
+    assert "bare = Depends(FormModel.as_form)" in emitted
+    compile(emitted, "<emitted>", "exec")
+
+
+def test_unannotated_query_marker_is_left_for_review() -> None:
+    source = (
+        "from fastapi import APIRouter, Query\n"
+        "router = APIRouter()\n"
+        "@router.get('/search')\n"
+        "async def search(term = Query(...)):\n"
+        "    return term\n"
+    )
+
+    emitted = port.emit_module(source, opinionated=True)
+
+    assert "term = Query(...)" in emitted
+    compile(emitted, "<emitted>", "exec")
 
 
 def test_partial_model_families_stay_visible_without_a_generated_helper(

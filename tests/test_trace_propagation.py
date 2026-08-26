@@ -76,6 +76,20 @@ def test_a_client_can_refuse_to_propagate(unpropagated):
     assert b"traceparent" not in headers
 
 
+def test_an_unarmed_process_never_sends_a_stale_bound_context(unpropagated):
+    """The process latch is authoritative even if a context variable is bound.
+
+    A copied context can outlive the application that armed propagation.  The
+    cheap global guard prevents that stale value crossing an outbound trust
+    boundary before a new application declares an outbound client.
+    """
+    telemetry.outbound_context.set((PARENT, ""))
+    client = _client()
+    telemetry.PROPAGATING = False
+
+    assert b"traceparent" not in _sent_headers(client)
+
+
 def test_tracestate_rides_only_when_asked(unpropagated):
     telemetry.outbound_context.set((PARENT, "vendor=abc"))
     assert b"tracestate" not in _sent_headers(_client())

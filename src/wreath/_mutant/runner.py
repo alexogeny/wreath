@@ -5,16 +5,17 @@ The shape of a run:
 1. **Import** every module that will be mutated, so the operators can ask the
    live objects real questions -- does this keyword have a default? is this
    constant a compiled pattern? -- instead of guessing from syntax.
-2. **Scan** each module's AST and compile the replacement code object for every
-   mutation *in the parent*. A mutant that cannot be compiled or applied is
+2. **Scan** each module's AST and compile only the replacement's top-level
+   definition *in the parent*. A mutant that cannot be compiled or applied is
    found here, before any test runs, and reported as this tool's error rather
    than as the suite's failure.
-3. **Warm** the interpreter by collecting the test suite. Collection imports
-   every test module; after this, a forked child inherits all of it and pays
-   nothing to import it again.
+3. **Warm** the interpreter by collecting and indexing the test suite once.
+   After this, a forked child inherits the pristine case image and resolves an
+   exact candidate set without importing or rebuilding an index.
 4. **Baseline** in a forked child, under the line tracer: which tests pass, and
    which of them touch each mutation site.
-5. **One fork per mutant**, running only the tests that reach it.
+5. **One fork per mutant**, running only the tests that reach it and reporting
+   completion through a pidfd and a bounded pipe on the default maxfail path.
 
 `fork` is why this is cheap and also why it is Linux-first. The alternative --
 rewrite the file, start a new interpreter -- costs the whole import graph per
@@ -29,16 +30,19 @@ import contextlib
 import hashlib
 import importlib
 import io
+import itertools
 import json
 import os
 import re
+import select
 import signal
 import sys
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .model import Mutation, Outcome, Report, Site, Verdict
 from .operators import Candidate, scan, tag
@@ -47,7 +51,7 @@ from .patch import (
     PatchError,
     PolicyPatch,
     ValuePatch,
-    compile_module,
+    compile_scope,
     find_code,
     transform_module,
 )
@@ -221,7 +225,7 @@ def build_plan(
             continue
         if selected_ids is None:
             plan.sources.append(relative)
-        scopes = tag(tree)
+        tag(tree)
         selected: list[tuple[Candidate, str]] = []
         for candidate in scan(tree, name):
             if operators and not any(candidate.operator.startswith(p) for p in operators):
@@ -255,10 +259,9 @@ def build_plan(
             # an optional-dependency ImportError must not end the run.
             plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
             continue
-        baseline_code = compile_module(tree, str(path))
         for candidate, identifier in selected:
             mutation = _build(
-                candidate, tree, scopes, baseline_code, name, relative, str(path), identifier
+                candidate, tree, name, relative, str(path), identifier
             )
             if isinstance(mutation, str):
                 plan.errors.append((identifier, mutation))
@@ -383,8 +386,6 @@ def watch_selected_identifiers(
 def _build(
     candidate: Candidate,
     tree: ast.Module,
-    scopes: dict[int, tuple[str, ...]],
-    baseline_code: object,
     module: str,
     relative: str,
     filename: str,
@@ -407,7 +408,7 @@ def _build(
         return "no transform"
     try:
         mutated = transform_module(tree, candidate.node_id, candidate.mutate)
-        code = compile_module(mutated, filename, locate=False)
+        code = compile_scope(mutated, candidate.scope_name, filename)
     except (PatchError, SyntaxError, ValueError, TypeError) as error:
         return f"did not compile: {type(error).__name__}: {error}"
     replacement = find_code(code, candidate.scope_name)
@@ -529,6 +530,180 @@ def run_baseline(
     )
 
 
+def run_native_baseline(
+    tests: Sequence[str],
+    plan: Plan,
+    *,
+    workdir: Path,
+    native_collection: Any | None = None,
+) -> Baseline:
+    """Measure reachability in a fork of one pristine native collection."""
+    from wreath._native_test_runner import (
+        _facade_import,
+        _run,
+    )
+
+    watched = {path: frozenset(lines) for path, lines in plan.watched.items()}
+    for path in plan.whole_file:
+        try:
+            span = len(Path(path).read_text(encoding="utf-8").splitlines()) + 1
+        except OSError:  # pragma: no cover - the planner read it immediately before
+            continue
+        watched[path] = frozenset(range(1, span)) | watched.get(path, frozenset())
+    owns_collection = native_collection is None
+    collection = native_collection or prepare_native_collection(tests)
+    target = workdir / "native-baseline.json"
+    started = time.perf_counter()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+            tracer = LineTracer(watched)
+
+            def observe(node_id: str, outcome: str | None) -> None:
+                if outcome is None:
+                    tracer.begin(node_id)
+                else:
+                    tracer.end()
+
+            tracer.start()
+            try:
+                with _facade_import():
+                    results = _run(collection, 0, observe)
+            finally:
+                tracer.stop()
+            index = tracer.index()
+            per_file: dict[str, set[str]] = {
+                path: set() for path in plan.whole_file
+            }
+            for (path, _line), nodes in index.items():
+                bucket = per_file.get(path)
+                if bucket is not None:
+                    bucket.update(nodes)
+            target.write_text(
+                json.dumps(
+                    {
+                        "passed": sorted(
+                            result.node_id
+                            for result in results
+                            if result.outcome == "passed"
+                        ),
+                        "failed": [
+                            result.node_id
+                            for result in results
+                            if result.outcome in {"failed", "interrupted"}
+                        ],
+                        "hits": [
+                            [f"{path}:{line}", list(nodes)]
+                            for (path, line), nodes in index.items()
+                        ],
+                        "files": {
+                            path: sorted(nodes) for path, nodes in per_file.items()
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+        finally:
+            os._exit(0)
+    os.waitpid(pid, 0)
+    if not target.exists():
+        raise RuntimeError(
+            "the native baseline produced no result; the suite may have crashed"
+        )
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    target.unlink(missing_ok=True)
+    index: dict[tuple[str, int], tuple[str, ...]] = {}
+    for key, nodes in payload["hits"]:
+        path, _, line = key.rpartition(":")
+        index[(path, int(line))] = tuple(nodes)
+    if owns_collection:
+        release_native_collection(collection)
+    return Baseline(
+        passed=frozenset(payload["passed"]),
+        failed=tuple(payload["failed"]),
+        index=index,
+        per_file={path: tuple(nodes) for path, nodes in payload["files"].items()},
+        seconds=time.perf_counter() - started,
+    )
+
+
+def prepare_native_collection(tests: Sequence[str]) -> Any:
+    """Compile the immutable native case image before any test mutates state."""
+    from wreath._native_test_runner import Options, _configured_markers, collect
+
+    return collect(
+        Options(
+            tuple(Path(target) for target in tests),
+            markers=_configured_markers(),
+            mutation_mode=True,
+        )
+    )
+
+
+def release_native_collection(collection: Any) -> None:
+    """Release parent-owned fixture resources and imported test modules."""
+    from wreath._native_test_runner import _forget_modules
+
+    if collection.runtime is not None:
+        collection.runtime.close()
+    _forget_modules(collection.modules)
+
+
+def combine_native_collections(collections: Sequence[Any]) -> Any:
+    """Join operation-owned case images without importing their modules again."""
+    from wreath._native_test_runner import Collection
+
+    cases = tuple(
+        itertools.chain.from_iterable(collection.cases for collection in collections)
+    )
+    modules = tuple(
+        dict.fromkeys(
+            itertools.chain.from_iterable(
+                collection.modules for collection in collections
+            )
+        )
+    )
+    files = tuple(
+        dict.fromkeys(
+            itertools.chain.from_iterable(collection.files for collection in collections)
+        )
+    )
+    index: dict[str, Any] = {}
+    for collection in collections:
+        for node_id, case in collection.index.items():
+            index[node_id] = case
+    return Collection(cases, modules, files=files, runtime=None, index=index)
+
+
+def unique_native_collections(collections: Iterable[Any]) -> tuple[Any, ...]:
+    """Retain one owner for each case image referenced by one or more files."""
+    seen: set[int] = set()
+    unique: list[Any] = []
+    for collection in collections:
+        identity = id(collection)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(collection)
+    return tuple(unique)
+
+
+def pooled_native_collection(
+    files: Sequence[str], pool: dict[str, Any]
+) -> Any:
+    """Compile only files absent from this operation's native case-image pool."""
+    missing = tuple(path for path in files if path not in pool)
+    if missing:
+        collection = prepare_native_collection(missing)
+        for path in missing:
+            pool[path] = collection
+    return combine_native_collections(unique_native_collections(pool.values()))
+
+
 def candidates_for(
     mutation: Mutation, plan: Plan, baseline: Baseline, source_root: Path
 ) -> tuple[str, ...]:
@@ -574,6 +749,42 @@ class RunningMutant:
     target: Path
     started: float
     timeout: float
+    read_fd: int | None = None
+    pid_fd: int | None = None
+
+
+def _write_mutant_payload(
+    target: Path,
+    descriptor: int | None,
+    payload: dict[str, object],
+) -> None:
+    encoded = json.dumps(payload).encode()
+    if descriptor is None:
+        target.write_bytes(encoded)
+        return
+    view = memoryview(encoded)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _wait_for_mutants(
+    running: Sequence[RunningMutant],
+    *,
+    ceiling: float | None = None,
+) -> None:
+    """Sleep until one child exits or the nearest timeout becomes observable."""
+    if not running:
+        return
+    now = time.perf_counter()
+    delay = max(0.0, min(item.started + item.timeout for item in running) - now)
+    if ceiling is not None:
+        delay = min(delay, ceiling)
+    descriptors = [item.pid_fd for item in running if item.pid_fd is not None]
+    if descriptors:
+        select.select(descriptors, (), (), delay)
+    elif delay:
+        time.sleep(min(delay, 0.002))
 
 
 _PROBE_NOISE = frozenset({
@@ -623,6 +834,7 @@ def start_mutant(
     timeout: float,
     ordinal: int,
     maxfail: int = DEFAULT_MAXFAIL,
+    native_collection: Any | None = None,
 ) -> RunningMutant:
     """Fork a child that installs one mutation and runs its candidates.
 
@@ -630,29 +842,60 @@ def start_mutant(
     Zero -- the default -- runs the whole candidate set, which is what the
     verdict never needed: `KILLED` is decided by whether *anything* failed.
     """
-    import pytest
+    if native_collection is None:
+        import pytest
 
     target = workdir / f"m{ordinal}.json"
+    read_fd: int | None = None
+    write_fd: int | None = None
+    if native_collection is not None and maxfail == DEFAULT_MAXFAIL:
+        read_fd, write_fd = os.pipe()
     started = time.perf_counter()
     pid = os.fork()
     if pid == 0:  # pragma: no cover - child
         try:
-            recorder = OutcomeRecorder()
+            if read_fd is not None:
+                os.close(read_fd)
             patch = mutation.patch
             if patch is None:  # pragma: no cover - never planned
-                target.write_text(json.dumps({"error": "no patch"}), encoding="utf-8")
+                _write_mutant_payload(target, write_fd, {"error": "no patch"})
                 os._exit(0)
             try:
                 patch.apply()
             except Exception as error:  # noqa: BLE001 - the child's only job is
                 # to report why it could not run; re-raising loses the reason.
-                target.write_text(
-                    json.dumps({"error": f"{type(error).__name__}: {error}"}), encoding="utf-8"
+                _write_mutant_payload(
+                    target,
+                    write_fd,
+                    {"error": f"{type(error).__name__}: {error}"},
                 )
                 os._exit(0)
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, 1)
             os.dup2(devnull, 2)
+            if native_collection is not None:
+                from wreath._native_test_runner import run_selected
+
+                results = run_selected(
+                    native_collection,
+                    tests,
+                    max_failures=maxfail,
+                )
+                failed = sorted(
+                    result.node_id for result in results if result.outcome == "failed"
+                )
+                _write_mutant_payload(
+                    target,
+                    write_fd,
+                    {
+                        "code": 1 if failed else 0,
+                        "failed": failed,
+                        "ran": len(results),
+                    },
+                )
+                os._exit(0)
+
+            recorder = OutcomeRecorder()
             child_extra = list(extra)
             if maxfail:
                 # The mutant child only, never the baseline: the baseline's
@@ -677,22 +920,34 @@ def start_mutant(
                     pytest.main(_pytest_argv(tests, child_extra), plugins=[recorder])
                 )
                 ran += len(recorder.passed | recorder.failed)
-            target.write_text(
-                json.dumps(
-                    {
-                        "code": code,
-                        "failed": sorted(recorder.failed),
-                        # How many tests actually executed. A counter rather
-                        # than a stopwatch, so it survives a loaded machine.
-                        "ran": ran,
-                    }
-                ),
-                encoding="utf-8",
+            _write_mutant_payload(
+                target,
+                write_fd,
+                {
+                    "code": code,
+                    "failed": sorted(recorder.failed),
+                    # How many tests actually executed. A counter rather
+                    # than a stopwatch, so it survives a loaded machine.
+                    "ran": ran,
+                },
             )
         finally:
             os._exit(0)
 
-    return RunningMutant(pid=pid, target=target, started=started, timeout=timeout)
+    if write_fd is not None:
+        os.close(write_fd)
+    try:
+        pid_fd = os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        pid_fd = None
+    return RunningMutant(
+        pid=pid,
+        target=target,
+        started=started,
+        timeout=timeout,
+        read_fd=read_fd,
+        pid_fd=pid_fd,
+    )
 
 
 def poll_mutant(
@@ -705,6 +960,12 @@ def poll_mutant(
             return None
         os.kill(running.pid, signal.SIGKILL)
         os.waitpid(running.pid, 0)
+        if running.read_fd is not None:
+            os.close(running.read_fd)
+            running.read_fd = None
+        if running.pid_fd is not None:
+            os.close(running.pid_fd)
+            running.pid_fd = None
         return (
             Outcome.TIMEOUT,
             (),
@@ -712,15 +973,28 @@ def poll_mutant(
             f"exceeded {running.timeout:g}s; undecided",
         )
     elapsed = time.perf_counter() - running.started
-    if not running.target.exists():
+    if running.pid_fd is not None:
+        os.close(running.pid_fd)
+        running.pid_fd = None
+    encoded = b""
+    if running.read_fd is not None:
+        chunks: list[bytes] = []
+        while chunk := os.read(running.read_fd, 65536):
+            chunks.append(chunk)
+        encoded = b"".join(chunks)
+        os.close(running.read_fd)
+        running.read_fd = None
+    elif running.target.exists():
+        encoded = running.target.read_bytes()
+        running.target.unlink(missing_ok=True)
+    if not encoded:
         signalled = os.WIFSIGNALED(status)
         note = "the child died before reporting"
         if signalled:
             return (Outcome.KILLED, (), elapsed,
                     f"the interpreter took signal {os.WTERMSIG(status)} with the control removed")
         return (Outcome.ERROR, (), elapsed, note)
-    payload = json.loads(running.target.read_text(encoding="utf-8"))
-    running.target.unlink(missing_ok=True)
+    payload = json.loads(encoded)
     TESTS_RUN.append(int(payload.get("ran", 0)))
     if "error" in payload:
         return (Outcome.ERROR, (), elapsed, payload["error"])
@@ -742,6 +1016,7 @@ def run_mutant(
     timeout: float,
     ordinal: int,
     maxfail: int = DEFAULT_MAXFAIL,
+    native_collection: Any | None = None,
 ) -> tuple[Outcome, tuple[str, ...], float, str]:
     """Fork one mutant and block until it reports (the compatibility helper)."""
     running = start_mutant(
@@ -752,12 +1027,13 @@ def run_mutant(
         timeout=timeout,
         ordinal=ordinal,
         maxfail=maxfail,
+        native_collection=native_collection,
     )
     while True:
         result = poll_mutant(running)
         if result is not None:
             return result
-        time.sleep(0.002)
+        _wait_for_mutants((running,))
 
 
 def _live_trace_events(
@@ -781,6 +1057,32 @@ def _live_trace_events(
     return events
 
 
+def _progressive_live_jobs(
+    capacity: int,
+    completed: int,
+    total: int,
+    *,
+    max_live: int | None = None,
+) -> int:
+    """Ramp live mutation without serialising the ordinary test tail.
+
+    The first slot opens when ten percent of the per-file activity blocks are
+    complete. Further slots open linearly through the next eighty percent, but
+    ``max_live`` keeps the measured test-worker floor intact until baseline
+    seal; only the sealed scheduler inherits every CPU slot.
+    """
+    if capacity < 2 or total <= 0 or completed * 10 < total:
+        return 0
+    live_capacity = capacity - 1
+    if max_live is not None:
+        live_capacity = min(live_capacity, max_live)
+    if live_capacity == 1:
+        return 1
+    progress_after_gate = min(8 * total, completed * 10 - total)
+    additional = progress_after_gate * (live_capacity - 1) // (8 * total)
+    return min(live_capacity, 1 + additional)
+
+
 def _run_live_mutants(
     plan: Plan,
     repo: Path,
@@ -794,6 +1096,11 @@ def _run_live_mutants(
     jobs: int,
     origin: float,
     emit: Callable[..., None],
+    reclaim_jobs: int | None = None,
+    progressive: bool = False,
+    native_collection: Any | None = None,
+    native_engine: bool = False,
+    native_collections: dict[str, Any] | None = None,
 ) -> tuple[dict[int, Verdict], int, int, int, float | None]:
     """Try one completed green candidate while the baseline is still running.
 
@@ -816,11 +1123,19 @@ def _run_live_mutants(
     queued: deque[tuple[int, Mutation, str]] = deque()
     tried: set[int] = set()
     active: dict[int, tuple[RunningMutant, Mutation, str]] = {}
+    owns_live_collections = native_collections is None
+    live_collections = {} if native_collections is None else native_collections
     killed: dict[int, Verdict] = {}
     probes = 0
     completed_probes = 0
     cancelled_at_seal = 0
     first_started: float | None = None
+    finished_suite_workers = 0
+    total_blocks = 0
+    completed_blocks: set[str] = set()
+    reported_live_jobs = -1
+    if reclaim_jobs is None:
+        reclaim_jobs = jobs
 
     def record_completed(
         ordinal: int,
@@ -864,6 +1179,10 @@ def _run_live_mutants(
                     continue
                 os.kill(running.pid, signal.SIGKILL)
                 os.waitpid(running.pid, 0)
+                if running.read_fd is not None:
+                    os.close(running.read_fd)
+                if running.pid_fd is not None:
+                    os.close(running.pid_fd)
                 running.target.unlink(missing_ok=True)
                 emit("finished", ordinal=ordinal, outcome="retry", killers=[])
                 cancelled_at_seal += 1
@@ -872,10 +1191,29 @@ def _run_live_mutants(
 
         if not baseline_wait.exists():
             for event in _live_trace_events(stream_dir, positions):
+                if event.get("event") == "worker_finished":
+                    finished_suite_workers += 1
+                    continue
+                if event.get("event") == "suite_started":
+                    value = event.get("total_blocks")
+                    if isinstance(value, int):
+                        total_blocks = max(total_blocks, value)
+                    continue
+                if event.get("event") == "block_finished":
+                    path = event.get("path")
+                    if isinstance(path, str):
+                        completed_blocks.add(path)
+                    continue
                 nodeid = event.get("nodeid")
                 hits = event.get("hits")
                 if not isinstance(nodeid, str) or not isinstance(hits, list):
                     continue
+                if native_engine:
+                    test_file = nodeid.split("::", 1)[0]
+                    if live_collections.get(test_file) is None:
+                        live_collections[test_file] = prepare_native_collection(
+                            (test_file,)
+                        )
                 candidates: dict[int, Mutation] = {}
                 for hit in hits:
                     if not isinstance(hit, list) or len(hit) != 2:
@@ -891,7 +1229,31 @@ def _run_live_mutants(
                     tried.add(ordinal)
                     queued.append((ordinal, mutation, nodeid))
 
-        while queued and len(active) < jobs and not baseline_wait.exists():
+        if progressive:
+            if total_blocks:
+                live_jobs = _progressive_live_jobs(
+                    reclaim_jobs,
+                    len(completed_blocks),
+                    total_blocks,
+                    max_live=jobs,
+                )
+            else:
+                live_jobs = _progressive_live_jobs(
+                    reclaim_jobs,
+                    finished_suite_workers,
+                    reclaim_jobs,
+                    max_live=jobs,
+                )
+        else:
+            live_jobs = jobs
+        if progressive and live_jobs != reported_live_jobs:
+            emit(
+                "capacity",
+                test_workers=max(1, reclaim_jobs - live_jobs),
+                mutant_workers=live_jobs,
+            )
+            reported_live_jobs = live_jobs
+        while queued and len(active) < live_jobs and not baseline_wait.exists():
             ordinal, mutation, nodeid = queued.popleft()
             probes += 1
             if first_started is None:
@@ -902,6 +1264,13 @@ def _run_live_mutants(
                 phase="live",
                 tests=[nodeid.split("::", 1)[0]],
             )
+            selected_collection = native_collection
+            if selected_collection is None and native_engine:
+                test_file = nodeid.split("::", 1)[0]
+                selected_collection = live_collections.get(test_file)
+                if selected_collection is None:
+                    selected_collection = prepare_native_collection((test_file,))
+                    live_collections[test_file] = selected_collection
             active[ordinal] = (
                 start_mutant(
                     mutation,
@@ -911,6 +1280,7 @@ def _run_live_mutants(
                     timeout=timeout,
                     ordinal=ordinal,
                     maxfail=maxfail,
+                    native_collection=selected_collection,
                 ),
                 mutation,
                 nodeid,
@@ -924,8 +1294,21 @@ def _run_live_mutants(
             completed = True
             del active[ordinal]
             record_completed(ordinal, mutation, nodeid, result)
-        if not completed:
+        if not active and not completed:
+            # A live stream can exist before any watched green test completes.
+            # Polling it flat-out stole a full logical CPU from the suite whose
+            # idle slots this scheduler is meant to consume.
             time.sleep(0.01)
+        elif not completed:
+            _wait_for_mutants(
+                tuple(item[0] for item in active.values()),
+                ceiling=0.01,
+            )
+    if owns_live_collections:
+        for collection in live_collections.values():
+            release_native_collection(collection)
+    if progressive:
+        emit("capacity", test_workers=0, mutant_workers=reclaim_jobs)
     return (
         killed,
         probes,
@@ -957,12 +1340,23 @@ def execute(
     budget: float = 0.0,
     jobs: int = DEFAULT_JOBS,
     reclaim_workers: bool = False,
+    suite_workers: int = 0,
     preselected: frozenset[str] | None = None,
     activity_file: Path | None = None,
+    test_engine: str = "native",
 ) -> Report:
     started = time.perf_counter()
     if jobs < 1:
         raise ValueError("jobs must be at least 1")
+    if suite_workers < 0:
+        raise ValueError("suite workers must be non-negative")
+    if test_engine not in {"pytest", "native"}:
+        raise ValueError(f"unknown mutation test engine {test_engine!r}")
+    if test_engine == "native" and extra:
+        raise ValueError(
+            "native mutation execution does not accept --pytest-arg; "
+            "remove it or use --test-engine pytest"
+        )
     selected_ids = preselected
     if selected_ids is None and sample:
         selected_ids = frozenset(
@@ -1012,7 +1406,9 @@ def execute(
         )
 
     reused_baseline = baseline is not None or baseline_wait is not None
-    if baseline_wait is None:
+    native_collection: Any | None = None
+    live_native_collections: dict[str, Any] = {}
+    if baseline_wait is None and test_engine == "pytest":
         import pytest
 
         # A known baseline narrows warmup to candidate-bearing files. The live
@@ -1028,6 +1424,15 @@ def execute(
             )
         with contextlib.redirect_stdout(io.StringIO()):
             pytest.main([*_PYTEST_BASE, "--collect-only", *extra, *warm_targets])
+    if test_engine == "native":
+        selected_node = next((target for target in tests if "::" in target), None)
+        if selected_node is not None:
+            raise ValueError(
+                f"native mutation collection does not accept {selected_node!r}; "
+                "pass its test file and let reachability select node ids"
+            )
+        if baseline_wait is None:
+            native_collection = prepare_native_collection(tests)
 
     live_verdicts: dict[int, Verdict] = {}
     if (
@@ -1051,8 +1456,19 @@ def execute(
             timeout=timeout,
             maxfail=maxfail,
             jobs=jobs,
+            reclaim_jobs=(
+                max(jobs, min(suite_workers, os.cpu_count() or 1))
+                if reclaim_workers
+                else jobs
+            ),
+            progressive=reclaim_workers,
             origin=started,
             emit=emit,
+            native_collection=native_collection,
+            native_engine=test_engine == "native",
+            native_collections=(
+                live_native_collections if test_engine == "native" else None
+            ),
         )
         report.live_kills = len(live_verdicts)
     if baseline is None and baseline_wait is not None:
@@ -1064,7 +1480,16 @@ def execute(
             time.sleep(0.01)
         baseline = read_baseline(baseline_wait)
     if baseline is None:
-        baseline = run_baseline(tests, plan, extra=extra, workdir=workdir)
+        baseline = (
+            run_native_baseline(
+                tests,
+                plan,
+                workdir=workdir,
+                native_collection=native_collection,
+            )
+            if test_engine == "native"
+            else run_baseline(tests, plan, extra=extra, workdir=workdir)
+        )
     report.baseline_tests = len(baseline.passed) + len(baseline.failed)
     report.baseline_failures = baseline.failed
     report.baseline_seconds = baseline.seconds
@@ -1120,15 +1545,31 @@ def execute(
     # informative than timing all three out behind one broad control. The
     # original ordinal still owns the report/grid tile; only launch order moves.
     runnable.sort(key=lambda item: (len(item[2]), item[0]))
-
-    # During the semantic suite, three nice'd children leave its six workers
-    # the machine. Once the baseline seals those workers are gone; the default
-    # `wreath test` path can reclaim their slots without adding pipeline time.
+    if test_engine == "native" and runnable and native_collection is None:
+        selected_nodes = itertools.chain.from_iterable(
+            item[2] for item in runnable
+        )
+        candidate_files = tuple(
+            sorted(
+                {
+                    node_id.split("::", 1)[0]
+                    for node_id in selected_nodes
+                }
+            )
+        )
+        native_collection = pooled_native_collection(
+            candidate_files,
+            live_native_collections,
+        )
+    # During the semantic suite, the per-file completion ramp reserves CPU for
+    # native mutation only after ten percent of the visible blocks are green.
+    # Once the baseline seals all measured runner slots can be reclaimed without
+    # adding idle CPU to the pipeline tail.
     # An explicit --mutant-workers value does not opt in, so resource ceilings
     # remain literal when a caller names one.
     scheduler_jobs = jobs
     if reclaim_workers:
-        scheduler_jobs = max(jobs, min(6, os.cpu_count() or 1))
+        scheduler_jobs = max(jobs, min(suite_workers, os.cpu_count() or 1))
 
     active: dict[
         int, tuple[RunningMutant, Mutation, tuple[str, ...]]
@@ -1169,6 +1610,7 @@ def execute(
                     timeout=remaining,
                     ordinal=ordinal,
                     maxfail=maxfail,
+                    native_collection=native_collection,
                 ),
                 mutation,
                 selected,
@@ -1202,7 +1644,7 @@ def execute(
                     file=sys.stderr,
                 )
         if active and not completed:
-            time.sleep(0.002)
+            _wait_for_mutants(tuple(item[0] for item in active.values()))
 
     report.verdicts.extend(
         verdicts[ordinal] for ordinal in range(len(plan.mutations))
@@ -1217,4 +1659,9 @@ def execute(
             )
         )
     report.total_seconds = time.perf_counter() - started
+    if live_native_collections:
+        for collection in unique_native_collections(live_native_collections.values()):
+            release_native_collection(collection)
+    elif native_collection is not None:
+        release_native_collection(native_collection)
     return report

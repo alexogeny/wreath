@@ -24,6 +24,8 @@ CBOR initial byte: the top three bits are the major type, the low five the
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wreath._webauthn import (
@@ -32,12 +34,20 @@ from wreath._webauthn import (
     RS256,
     CoseKey,
     WebAuthnError,
+    _authority,
+    _der_integer,
     b64url_decode,
+    b64url_encode,
     cbor_decode,
+    check_client_data,
     der_signature_to_raw,
+    is_loopback_host,
+    origin_accepted,
+    pack_credential,
     parse_attestation_object,
     parse_authenticator_data,
     parse_cose_key,
+    unpack_credential,
 )
 
 # --- base64url --------------------------------------------------------------
@@ -413,6 +423,16 @@ def test_a_malformed_der_integer_length_is_refused(r_length_byte: int, why: str)
         der_signature_to_raw(bytes([0x30, len(body)]) + body)
 
 
+def test_a_missing_second_der_integer_is_a_structured_refusal() -> None:
+    with pytest.raises(WebAuthnError, match="expected a DER INTEGER"):
+        der_signature_to_raw(b"\x30\x06\x02\x04\x01\x01\x01\x01")
+
+
+def test_a_long_form_integer_length_is_refused_before_reading_its_body() -> None:
+    with pytest.raises(WebAuthnError, match="malformed DER INTEGER length"):
+        _der_integer(b"\x02\x81" + b"\x01" * 129, 0)
+
+
 def test_a_negative_signature_component_is_refused() -> None:
     """A high bit set in the first content octet is a negative DER INTEGER.
 
@@ -489,6 +509,28 @@ def test_a_credential_id_running_past_the_buffer_is_refused() -> None:
         parse_authenticator_data(_auth_data(0x40, tail))
 
 
+def test_declared_extensions_are_consumed_as_one_complete_cbor_value() -> None:
+    parsed = parse_authenticator_data(_auth_data(0x80, b"\xa0"))
+    assert parsed.flags == 0x80
+
+
+def _none_attestation(auth_data: bytes) -> bytes:
+    assert len(auth_data) < 256
+    return b"\xa2\x63fmt\x64none\x68authData\x58" + bytes([len(auth_data)]) + auth_data
+
+
+def test_none_attestation_requires_attested_credential_data() -> None:
+    with pytest.raises(WebAuthnError, match="no attested credential data"):
+        parse_attestation_object(_none_attestation(_auth_data(0)))
+
+
+def test_none_attestation_refuses_an_empty_credential_identifier() -> None:
+    cose = b"\xa4\x01\x01\x03\x27\x20\x06\x21\x58\x20" + b"x" * 32
+    auth_data = _auth_data(0x40, b"\x00" * 16 + b"\x00\x00" + cose)
+    with pytest.raises(WebAuthnError, match="no attested credential data"):
+        parse_attestation_object(_none_attestation(auth_data))
+
+
 def test_an_attestation_object_that_is_not_a_map_is_refused() -> None:
     with pytest.raises(WebAuthnError, match="must be a CBOR map"):
         parse_attestation_object(b"\x81\x01")
@@ -507,3 +549,89 @@ def test_an_attestation_format_other_than_none_is_refused_and_named() -> None:
     encoded = b"\xa2\x63fmt\x66packed\x68authData\x41\x00"
     with pytest.raises(WebAuthnError, match="packed"):
         parse_attestation_object(encoded)
+
+
+# --- loopback origins -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0",
+        "127.0.0.1.2",
+        "126.0.0.1",
+        "127.a.0.1",
+        "127.0000.0.1",
+        "127.256.0.1",
+    ],
+)
+def test_only_well_formed_127_slash_8_addresses_are_loopback(host: str) -> None:
+    assert is_loopback_host(host) is False
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "localhost",
+        "://localhost",
+        "https://",
+        "https://:8000",
+        "https://é:8000",
+        "https://localhost:é",
+        "https://local@host:8000",
+        "https://localhost:80/path",
+        "https://localhost:80:81",
+    ],
+)
+def test_malformed_authorities_are_not_normalized(origin: str) -> None:
+    assert _authority(origin) is None
+
+
+def test_authority_accepts_bare_hosts_and_bracketed_ipv6() -> None:
+    assert _authority("https://example.test") == ("https", "example.test", "")
+    assert _authority("http://[::1]:8000") == ("http", "::1", "8000")
+    assert origin_accepted("http://[::1]:8000", ("http://[::1]",)) is True
+
+
+# --- client data and stored credentials ------------------------------------
+
+
+@pytest.mark.parametrize("presented", [None, 7, ["challenge"]])
+def test_client_data_challenge_must_be_a_string(presented) -> None:
+    body = json.dumps(
+        {"type": "webauthn.create", "challenge": presented, "origin": "https://h"}
+    ).encode()
+    with pytest.raises(WebAuthnError, match="carries no challenge"):
+        check_client_data(
+            body,
+            expected_type="webauthn.create",
+            challenge=b"challenge",
+            origins=("https://h",),
+        )
+
+
+@pytest.mark.parametrize("origin", [None, 7, ["https://h"]])
+def test_client_data_origin_must_be_a_string(origin) -> None:
+    body = json.dumps(
+        {
+            "type": "webauthn.create",
+            "challenge": b64url_encode(b"challenge"),
+            "origin": origin,
+        }
+    ).encode()
+    with pytest.raises(WebAuthnError, match="origin"):
+        check_client_data(
+            body,
+            expected_type="webauthn.create",
+            challenge=b"challenge",
+            origins=("https://h",),
+        )
+
+
+def test_stored_credentials_refuse_a_short_header_and_unknown_version() -> None:
+    with pytest.raises(WebAuthnError, match="truncated"):
+        unpack_credential(b"wa1")
+    material = bytearray(pack_credential(b"id", b"key", user_verified=False))
+    material[3] = 2
+    with pytest.raises(WebAuthnError, match="unknown.*version: 2"):
+        unpack_credential(bytes(material))

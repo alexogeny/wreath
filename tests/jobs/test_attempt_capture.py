@@ -457,3 +457,21 @@ async def test_a_task_whose_handler_takes_varargs_captures_nothing(tmp_path):
     assert b"alex@example.com" not in raw
     assert b"reset-token-nobody-may-keep" not in raw
     assert read_attempt_recording(raw).arguments == ()
+
+
+def test_an_expired_job_without_a_registered_handler_records_no_arguments(tmp_path):
+    class EmptyTrace:
+        events = ()
+
+    runner = _runner(
+        tmp_path,
+        AttemptTrigger(AttemptTriggerKind.FAILURE),
+    )
+    record = runner._attempt_record(
+        _claim(task="removed", args=["private"]),
+        AttemptOutcome.LEASE_EXPIRED,
+        None,
+        EmptyTrace(),
+    )
+    assert record.arguments == ()
+    assert record.argument_count == 1

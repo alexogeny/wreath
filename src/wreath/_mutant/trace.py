@@ -44,11 +44,19 @@ class LineTracer:
 
     # -- pytest hooks ------------------------------------------------------
 
+    def begin(self, node_id: str) -> None:
+        """Begin one engine-independent test attribution window."""
+        self._current = self.hits.setdefault(node_id, set())
+
+    def end(self) -> None:
+        """End the current engine-independent attribution window."""
+        self._current = None
+
     def pytest_runtest_setup(self, item: Any) -> None:
-        self._current = self.hits.setdefault(item.nodeid, set())
+        self.begin(item.nodeid)
 
     def pytest_runtest_teardown(self, item: Any, nextitem: Any) -> None:
-        self._current = None
+        self.end()
 
     # -- monitoring --------------------------------------------------------
 

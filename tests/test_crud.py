@@ -265,6 +265,44 @@ async def test_deny_operation_answers_403_without_touching_db() -> None:
     assert resp.status == 403 and session.deleted == []          # nobody, ever
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "incoming"),
+    [
+        ("GET", "/account", _Req()),
+        ("POST", "/account", _Req(body={"name": "B", "email": "b@example.com"})),
+    ],
+)
+async def test_deny_short_circuits_list_and_create(
+    method: str, path: str, incoming: _Req,
+) -> None:
+    Account = _model()
+    existing = Account(id=1, name="A", email="a@example.com")
+    session = _FakeSession({1: existing})
+    routes = _routes(
+        crud_router(Account, lambda request: session, authorize=Access.deny())
+    )
+
+    response = await routes[(method, path)](incoming)
+
+    assert response.status == 403
+    assert session.added == []
+    assert session.rows == {1: existing}
+
+
+async def test_create_refuses_a_non_object_json_body() -> None:
+    Account = _model()
+    session = _FakeSession()
+    create = _routes(crud_router(Account, lambda request: session))[
+        ("POST", "/account")
+    ]
+
+    response = await create(_Req(body=[{"name": "B"}]))
+
+    assert response.status == 400
+    assert json.loads(response.body) == {"error": "request body must be a JSON object"}
+    assert session.added == []
+
+
 async def test_object_authorizer_enforces_row_level_ownership() -> None:
     Account = _model()
     owned = Account(id=1, name="Ada", email="ada@x.io")
@@ -281,6 +319,44 @@ async def test_object_authorizer_enforces_row_level_ownership() -> None:
     assert denied.status == 403 and owned.name == "Ada"          # not mutated
     ok = await update(_Req(path_params={"id": "1", "who": "ada@x.io"}, body={"name": "New"}))
     assert ok.status == 200 and owned.name == "New"
+
+
+async def test_create_awaits_an_async_object_authorizer() -> None:
+    Account = _model()
+    session = _FakeSession()
+
+    async def deny(request, op, instance):
+        return False
+
+    create = _routes(
+        crud_router(Account, lambda request: session, object_authorizer=deny)
+    )[("POST", "/account")]
+
+    response = await create(_Req(body={"name": "B", "email": "b@example.com"}))
+
+    assert response.status == 403
+    assert session.added == []
+
+
+async def test_delete_honours_an_authorization_decision() -> None:
+    from wreath._auth.models import AuthorizationDecision
+
+    Account = _model()
+    row = Account(id=1, name="A", email="a@example.com")
+    session = _FakeSession({1: row})
+
+    def deny(request, op, instance):
+        return AuthorizationDecision(False, "not this row")
+
+    delete = _routes(
+        crud_router(Account, lambda request: session, object_authorizer=deny)
+    )[("DELETE", "/account/{id}")]
+
+    response = await delete(_Req(path_params={"id": "1"}))
+
+    assert response.status == 403
+    assert session.deleted == []
+    assert session.rows == {1: row}
 
 
 async def test_authorize_attaches_enforceable_metadata() -> None:

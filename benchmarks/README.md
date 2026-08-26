@@ -57,7 +57,15 @@ Wreath's metal server, binding, auth, Cedar, PostgreSQL driver, and HTTP client.
 FastAPI uses Starlette CORS, Pydantic, Uvicorn/uvloop/httptools and `HTTPBearer`.
 Sanic uses its native server and response middleware. BlackSheep uses its built-in
 CORS policy on Granian/uvloop. The three ecosystem arms use `cedarpy`, `asyncpg`,
-and `aiohttp`; Sanic and BlackSheep share msgspec binding.
+and `aiohttp`; Sanic and BlackSheep share a hand-written msgspec success-path
+adapter for binding and bearer authentication. That adapter is pragmatic
+application glue, not either framework's full validation/authentication surface:
+it does not reproduce Wreath's structured 422 refusals, duplicate-credential
+refusal, identity publication, protected-route resolution, or 401 Bearer
+challenge. The README and performance page therefore star those two incremental
+cells, and every later cumulative cell inherits the limitation. Complete rows
+remain measurements of the exact successful applications; the starred deltas
+must not be read as equivalent feature costs.
 
 ```bash
 uv sync --inexact --group benchmark

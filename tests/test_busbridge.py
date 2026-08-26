@@ -186,6 +186,18 @@ async def test_a_payload_with_no_origin_is_treated_as_foreign() -> None:
     assert accepted == [{"n": 1}]
 
 
+@pytest.mark.parametrize("origin", ["", 0, False, 7])
+async def test_an_invalid_origin_is_delivered_but_counted(origin: Any) -> None:
+    bus = FakeBus()
+    bridge, accepted = _collecting(bus)
+
+    _channel, handler = bus.handlers[0]
+    await handler(_Message("test_channel", {"n": 1, "origin": origin}))
+
+    assert accepted == [{"n": 1, "origin": origin}]
+    assert bridge.untagged_applied == 1
+
+
 @pytest.mark.parametrize("payload", ["not-a-dict", None, 7, ["models"], b"bytes"])
 async def test_a_payload_that_is_not_a_mapping_is_dropped(payload: Any) -> None:
     """The channel is shared; anything else on it must not crash the worker."""

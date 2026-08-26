@@ -33,8 +33,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from wreath._native import extension
+
 # Scanned when no explicit paths are given, relative to the repository root.
 DEFAULT_ROOTS = ("src/wreath/_native",)
+
+_native_tape: Any = extension("_lint")
 
 def waiver_pattern(tool: str, prefix: str) -> re.Pattern[str]:
     """The `<tool>: allow <CODE> -- <reason>` comment a native lint honours.
@@ -132,82 +136,7 @@ RULES: dict[str, Rule] = {
 }
 
 
-def strip_c(text: str) -> list[str]:
-    """Blank out comments and string/char literals, preserving line numbers.
-
-    Rules must not fire on prose. Several comments in this tree describe the very
-    patterns being searched for, so scanning raw text would report itself.
-    """
-    out: list[list[str]] = [list(line) for line in text.split("\n")]
-    row = col = 0
-    state = "code"  # code | block | line | string | char
-    lines = text.split("\n")
-
-    def blank(r: int, c: int) -> None:
-        if c < len(out[r]):
-            out[r][c] = " "
-
-    while row < len(lines):
-        line = lines[row]
-        if col >= len(line):
-            if state == "line":
-                state = "code"
-            row += 1
-            col = 0
-            continue
-        ch = line[col]
-        nxt = line[col + 1] if col + 1 < len(line) else ""
-        if state == "code":
-            if ch == "/" and nxt == "*":
-                state = "block"
-                blank(row, col)
-                blank(row, col + 1)
-                col += 2
-                continue
-            if ch == "/" and nxt == "/":
-                state = "line"
-                continue
-            if ch == '"':
-                state = "string"
-                col += 1
-                continue
-            if ch == "'":
-                state = "char"
-                col += 1
-                continue
-            col += 1
-            continue
-        if state == "block":
-            if ch == "*" and nxt == "/":
-                blank(row, col)
-                blank(row, col + 1)
-                state = "code"
-                col += 2
-                continue
-            blank(row, col)
-            col += 1
-            continue
-        if state == "line":
-            blank(row, col)
-            col += 1
-            continue
-        # inside a literal
-        if ch == "\\":
-            blank(row, col)
-            blank(row, col + 1)
-            col += 2
-            continue
-        if (state == "string" and ch == '"') or (state == "char" and ch == "'"):
-            state = "code"
-            col += 1
-            continue
-        blank(row, col)
-        col += 1
-    return ["".join(r) for r in out]
-
-
 LOOP_START = re.compile(r"\b(for|while)\s*\(")
-LOOP_KEYWORD = re.compile(r"(for|while)\s*\(")
 FORWARD_LOOP = re.compile(r"\bfor\s*\([^;]*;[^;]*;[^)]*\+\+")
 DEL_ITEM = re.compile(r"\bPySequence_DelItem\s*\(([^,]+),\s*([^)]+)\)")
 FRONT_SLICE = re.compile(r"\bPyList_SetSlice\s*\(([^,]+),\s*0\s*,\s*1\s*,\s*NULL\s*\)")
@@ -302,93 +231,70 @@ NOT_A_RETURN_TYPE = frozenset(
 )
 
 
-def _enclosing_function(code_lines: list[str], index: int) -> str:
-    """Best-effort name of the function containing `index` (0-based)."""
-    for i in range(index, max(-1, index - 400), -1):
-        line = code_lines[i]
-        match = FUNC_AT_LINE_START.match(line)
-        if match and match.group(1) not in NOT_A_FUNCTION:
-            return match.group(1)
-        match = FUNC_ONE_LINE.match(line)
-        if match is None or match.group("name") in NOT_A_FUNCTION:
-            continue
+def _declared_function(line: str) -> str:
+    """Best-effort function declaration on one stripped source line."""
+    match = FUNC_AT_LINE_START.match(line)
+    if match and match.group(1) not in NOT_A_FUNCTION:
+        return match.group(1)
+    match = FUNC_ONE_LINE.match(line)
+    if match is not None and match.group("name") not in NOT_A_FUNCTION:
         if NOT_A_RETURN_TYPE.isdisjoint(match.group("prefix").split()):
             return match.group("name")
     return ""
 
 
-def _loop_depth_map(code_lines: list[str]) -> list[int]:
-    """Loop nesting depth at the start of each line.
+def _enclosing_function(code_lines: list[str], index: int) -> str:
+    """Best-effort name of the function containing `index` (0-based)."""
+    for i in range(index, max(-1, index - 400), -1):
+        if function := _declared_function(code_lines[i]):
+            return function
+    return ""
 
-    Character-wise over the whole file rather than line-wise, because a loop and
-    its body routinely share a line (`for (...) { if (...) { ... } }`). The
-    loop's opening brace has to be identified when it is reached -- attributing
-    it after the fact marks the enclosing function's brace as a loop and leaks
-    depth to the end of the function.
 
-    A braceless single-statement loop body is not tracked: bounding it needs
-    real parsing, and a rule that quietly does nothing beats one that is wrong.
+def _function_map(code_lines: list[str]) -> list[str]:
+    """Resolve every line's enclosing function in one forward pass.
+
+    The old callers independently searched up to 400 preceding lines for every
+    source line.  This carries exactly the same nearest declaration and expires
+    it at the same bound, turning that repeated backward scan into one linear
+    pass over the operation-owned source image.
     """
-    text = "\n".join(code_lines)
-    n = len(text)
-    depth_at = [0] * (n + 1)
-    stack: list[bool] = []  # one entry per open brace: True when it opened a loop
-    current = 0
-    i = 0
-    while i < n:
-        depth_at[i] = current
-        if (
-            LOOP_KEYWORD.match(text, i)
-            and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
-        ):
-            # Skip the balanced condition, then look for a braced body.
-            open_paren = text.find("(", i)
-            balance = 0
-            close = open_paren
-            while close < n:
-                if text[close] == "(":
-                    balance += 1
-                elif text[close] == ")":
-                    balance -= 1
-                    if balance == 0:
-                        break
-                close += 1
-            for offset in range(i, min(close + 1, n)):
-                depth_at[offset] = current
-            probe = close + 1
-            while probe < n and text[probe].isspace():
-                depth_at[probe] = current
-                probe += 1
-            if probe < n and text[probe] == "{":
-                stack.append(True)
-                current += 1
-                depth_at[probe] = current
-                i = probe + 1
-                continue
-            i = close + 1
-            continue
-        ch = text[i]
-        if ch == "{":
-            stack.append(False)
-        elif ch == "}":
-            if stack and stack.pop():
-                current = max(0, current - 1)
-        i += 1
-    depth_at[n] = current
-
-    out: list[int] = []
-    offset = 0
-    for line in code_lines:
-        out.append(depth_at[min(offset, n)])
-        offset += len(line) + 1
+    out: list[str] = []
+    current = ""
+    declared_at = -400
+    for index, line in enumerate(code_lines):
+        if function := _declared_function(line):
+            current = function
+            declared_at = index
+        elif index - declared_at >= 400:
+            current = ""
+        out.append(current)
     return out
+
+
+def _c_tape(text: str) -> tuple[list[str], list[int]]:
+    """Compile the stripped source and per-line loop depth in one native scan."""
+    version, code_lines, loop_depth = _native_tape.c_tape(text)
+    if version != 1:
+        raise RuntimeError(f"native C-source tape version must be 1; got {version!r}")
+    return code_lines, loop_depth
+
+
+def _source_tape(text: str) -> tuple[list[str], list[int], list[str]]:
+    """All shared per-line C facts, compiled once for one lint operation."""
+    code_lines, loop_depth = _c_tape(text)
+    return code_lines, loop_depth, _function_map(code_lines)
+
+
+def strip_c(text: str) -> list[str]:
+    """Blank comments and literals through the shared native lexical tape."""
+    return _c_tape(text)[0]
 
 
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
-    code_lines = strip_c(text)
+    code_lines, depth = _c_tape(text)
     waived = _waivers(raw_lines, code_lines, WAIVER)
-    depth = _loop_depth_map(code_lines)
     findings: list[Finding] = []
 
     def add(index: int, code: str, message: str) -> None:

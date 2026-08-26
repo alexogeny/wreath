@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -63,6 +63,32 @@ def test_run_activity_aggregates_phase_timings_and_file_outcomes() -> None:
     assert activity.files["tests/test_two.py"].outcome == "failed"
     assert activity.files["tests/test_three.py"].outcome == "error"
     assert activity.tests[passed].duration == pytest.approx(0.6)
+
+
+def test_run_activity_ingests_terminal_native_results_without_report_objects() -> None:
+    activity = runner.RunActivity(workers=1)
+    passed = "tests/test_native.py::test_passes"
+    skipped = "tests/test_native.py::test_skips"
+    failed = "tests/test_native.py::test_fails"
+    activity.collect((passed, skipped, failed))
+    activity.start_native_tests((passed, skipped, failed))
+
+    assert activity.files["tests/test_native.py"].outcome == "running"
+
+    activity.add_native_result(passed, "passed", 0.1)
+    activity.add_native_result(skipped, "skipped", 0.2)
+    activity.add_native_result(failed, "failed", 0.3)
+
+    assert activity.counts() == {
+        "collected": 3,
+        "finished": 3,
+        "passed": 1,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 1,
+    }
+    assert activity.tests[failed].duration == pytest.approx(0.3)
+    assert activity.files["tests/test_native.py"].outcome == "failed"
 
 
 def test_duration_report_names_slowest_tests_and_robust_outliers() -> None:
@@ -119,37 +145,77 @@ def test_render_is_a_stable_file_state_map_with_duration_statistics() -> None:
         activity,
         width=80,
         height=24,
-        colour=False,
         slowest=1,
     )
 
     assert "Test activity   current run" in text
     assert "2 tests · 2 files" in text
-    assert "■ ·" in text
+    assert "Test pass     ■" in text
+    assert "Queued        ■" in text
     assert "Duration   Less" not in text
-    assert (
-        "State      · queued · ◆ running · ■ pass · ▣ mutation testing · "
-        "▰ pass + killed mutant · ▤ mutation failed · ▲ skip/mixed · ✕ fail/error"
-    ) in text
+    assert "State      ■ queued · ■ running · ■ pass" in text
+    for state in (
+        "■ mutation testing",
+        "■ mutation passed",
+        "× mutation failed",
+        "■ fuzzing",
+        "× fuzz failed",
+        "★ all stages passed",
+        "■ skip/mixed",
+        "× fail/error",
+    ):
+        assert state in text
     assert "average 250.0ms" in text
     assert "slow tail   1 >=100ms · 1 >=250ms · 0 >=1s · Tukey 0 >250.0ms" in text
     assert "Slowest tests" in text
 
-    coloured = runner.render_activity(
+    assert "\x1b[" not in text
+
+
+def test_final_render_names_failed_tests() -> None:
+    activity = runner.RunActivity(workers=1)
+    nodeid = "tests/test_policy.py::test_refuses_an_untrusted_caller"
+    activity.collect((nodeid,))
+    activity.add_native_result(nodeid, "failed", 0.01)
+    activity.finish(1)
+
+    text = runner.render_activity(
         activity,
-        width=80,
+        width=100,
         height=24,
-        colour=True,
         slowest=0,
     )
-    assert "\x1b[38;5;238m■\x1b[0m queued" in coloured
-    assert "\x1b[38;5;33m■\x1b[0m running" in coloured
-    assert "\x1b[38;5;46m■\x1b[0m pass" in coloured
-    assert "\x1b[38;5;201m■\x1b[0m mutation testing" in coloured
-    assert "\x1b[38;5;226m■\x1b[0m pass + killed mutant" in coloured
-    assert "\x1b[38;5;93m■\x1b[0m mutation failed" in coloured
-    assert "\x1b[38;5;202m■\x1b[0m skip/mixed" in coloured
-    assert "\x1b[38;5;196m■\x1b[0m fail/error" in coloured
+
+    assert "Failures" in text
+    assert f"× {nodeid}" in text
+
+
+def test_static_renderer_does_no_work_until_finish_and_never_emits_ansi() -> None:
+    activity = runner.RunActivity(workers=1)
+    nodeid = "tests/test_passed.py::test_contract"
+    activity.collect((nodeid,))
+    activity.add_native_result(nodeid, "passed", 0.01)
+    activity.finish(0)
+    stream = io.StringIO()
+    renderer = runner.ActivityRenderer(
+        activity,
+        stream=stream,
+        mode="never",
+        slowest=0,
+    )
+
+    assert stream.getvalue() == ""
+    renderer.finish()
+
+    output = stream.getvalue()
+    assert output.count("Test activity   current run") == 1
+    assert "\x1b[" not in output
+
+
+def test_state_legend_never_soft_wraps_terminal_rows() -> None:
+    for width in (40, 80, 120, 190):
+        lines = runner._state_legend_lines(width=width)
+        assert all(len(line) < width for line in lines)
 
 
 def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
@@ -167,7 +233,6 @@ def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
         activity,
         width=100,
         height=30,
-        colour=False,
         slowest=0,
         mutation=runner.MutationActivity(
             mode="auto",
@@ -180,7 +245,6 @@ def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
         activity,
         width=100,
         height=30,
-        colour=False,
         slowest=0,
         mutation=runner.MutationActivity(
             mode="auto",
@@ -201,7 +265,6 @@ def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
         activity,
         width=100,
         height=30,
-        colour=False,
         slowest=0,
         mutation=runner.MutationActivity(
             mode="auto",
@@ -210,20 +273,22 @@ def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
         ),
     )
 
-    assert "■ ▣" in active
-    assert "Mutation   ▣ auto · 1 sampled controls · testing controls" in active
-    assert "■ ▰" in verified
+    assert "Mutating      ■" in active
+    assert "Test pass     ■" in active
+    assert "Mutation   ■ auto · 1 sampled controls · testing controls" in active
+    assert "Mutant pass   ■" in verified
     assert "Mutation   auto · ■ SAMPLE WATCHED" in verified
-    assert "▰ 1 gold test file · 1 killed" in verified
+    assert "Mutation miss ×" in verified
+    assert "Test pass" not in verified
+    assert "■ 1 gold test file · 1 without mutation evidence · 1 killed" in verified
     assert "live overlap · 2 started · 1 completed before seal · first at 0.24s" in verified
     assert "1 stopped at seal" in verified
-    assert "■ ▤" in failed
+    assert "Mutation miss ×" in failed
 
     plural = runner.render_activity(
         activity,
         width=100,
         height=30,
-        colour=False,
         slowest=0,
         mutation=runner.MutationActivity(
             mode="sample",
@@ -232,7 +297,65 @@ def test_mutation_tiles_show_active_verified_and_failed_states() -> None:
             verified_files=frozenset({"tests/test_policy.py", "tests/test_other.py"}),
         ),
     )
-    assert "▰ 2 gold test files · 2 killed" in plural
+    assert "■ 2 gold test files · 2 killed" in plural
+
+
+def test_fuzz_tiles_move_between_named_groups_and_finish_as_stars() -> None:
+    activity = runner.RunActivity(workers=1)
+    paths = ("tests/test_hero.py", "tests/test_active.py", "tests/test_failed.py")
+    nodeids = tuple(f"{path}::test_contract" for path in paths)
+    activity.collect(nodeids)
+    for nodeid in nodeids:
+        activity.add_native_result(nodeid, "passed", 0.01)
+    activity.finish(0)
+    mutation = runner.MutationActivity(
+        mode="auto",
+        state="complete",
+        verified_files=frozenset(paths),
+    )
+    fuzz = runner.FuzzActivity(
+        state="running",
+        selected_files=frozenset(paths),
+        active_files=frozenset({"tests/test_active.py"}),
+        passed_files=frozenset({"tests/test_hero.py"}),
+        failed_files=frozenset({"tests/test_failed.py"}),
+    )
+
+    text = runner.render_activity(
+        activity,
+        width=100,
+        height=30,
+        slowest=0,
+        mutation=mutation,
+        fuzz=fuzz,
+    )
+
+    assert "Complete      ★" in text
+    assert "Fuzzing       ■" in text
+    assert "Mutant pass   ×" in text
+    assert "Fuzz       ■ 1 active · 1 complete" in text
+
+
+def test_fuzz_pulses_only_files_reported_running_by_a_worker(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    file_state = runner.FileState("tests/test_fuzz.py")
+    state = runner._FuzzEventState()
+
+    runner._append_stage_event(events_path, file_state, outcome="running")
+    runner._consume_fuzz_events(events_path, state)
+    running = runner._fuzz_activity(
+        "running", ("tests/test_fuzz.py", "tests/test_waiting.py"), state
+    )
+
+    assert running.active_files == frozenset({"tests/test_fuzz.py"})
+
+    runner._append_stage_event(events_path, file_state, outcome="passed")
+    runner._consume_fuzz_events(events_path, state)
+    finished = runner._fuzz_activity(
+        "running", ("tests/test_fuzz.py", "tests/test_waiting.py"), state
+    )
+    assert finished.active_files == frozenset()
+    assert finished.passed_files == frozenset({"tests/test_fuzz.py"})
 
 
 def test_mutation_report_requires_a_complete_rating() -> None:
@@ -245,7 +368,7 @@ def test_mutation_report_requires_a_complete_rating() -> None:
         runner._mutation_activity_from_report("auto", report)
 
 
-def test_mutation_report_keeps_survived_candidate_files_purple() -> None:
+def test_mutation_report_does_not_blame_candidate_files_for_a_survivor() -> None:
     report = {
         "counts": {"survived": 1},
         "rating": {
@@ -258,7 +381,7 @@ def test_mutation_report_keeps_survived_candidate_files_purple() -> None:
 
     activity = runner._mutation_activity_from_report("auto", report)
 
-    assert activity.failed_mutation_files == frozenset({"tests/test_policy.py"})
+    assert activity.failed_mutation_files == frozenset()
 
 
 def test_mutation_event_stream_moves_only_killers_to_verified(tmp_path: Path) -> None:
@@ -285,6 +408,7 @@ def test_mutation_event_stream_moves_only_killers_to_verified(tmp_path: Path) ->
 
     assert state.mutating_files == set()
     assert state.verified_files == {"tests/test_policy.py"}
+    assert state.killer_tests == {"tests/test_policy.py::test_refuses"}
 
 
 def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
@@ -292,6 +416,7 @@ def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
 ) -> None:
     path = tmp_path / "events.jsonl"
     path.write_text(
+        '{"event":"capacity","test_workers":5,"mutant_workers":3}\n'
         '{"event":"started","ordinal":0,"tests":["tests/test_a.py"]}\n'
         '{"event":"started","ordinal":1,"tests":["tests/test_b.py"]}\n'
         '{"event":"finished","ordinal":0,"outcome":"killed",'
@@ -304,6 +429,7 @@ def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
 
     assert state.mutating_files == {"tests/test_b.py"}
     assert state.verified_files == {"tests/test_a.py"}
+    assert (state.test_workers, state.mutant_workers) == (5, 3)
 
     with path.open("a", encoding="utf-8") as stream:
         stream.write(
@@ -313,47 +439,101 @@ def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
     runner._consume_mutation_events(path, state)
 
     assert state.mutating_files == set()
-    assert state.failed_mutation_files == {"tests/test_b.py"}
+    assert state.survivor_candidate_files == {"tests/test_b.py"}
 
 
-def test_alternate_screen_and_cursor_are_always_restored(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("NO_COLOR", raising=False)
+def test_static_reporter_retains_mutation_progress_without_writing() -> None:
     activity = runner.RunActivity(workers=1)
     stream = io.StringIO()
     renderer = runner.ActivityRenderer(
         activity,
         stream=stream,
-        mode="always",
+        mode="never",
         slowest=0,
     )
 
-    renderer.start()
-    renderer.finish()
+    for active in ({"tests/test_a.py"}, {"tests/test_b.py"}):
+        renderer.mutation_progress(
+            "auto",
+            2,
+            mutating_files=frozenset(active),
+            verified_files=frozenset(),
+            failed_mutation_files=frozenset(),
+        )
 
-    output = stream.getvalue()
-    assert "\x1b[?1049h" in output
-    assert "\x1b[?1049l" in output
-    assert "\x1b[?25h" in output
-    assert renderer.active is False
+    assert stream.getvalue() == ""
+    assert renderer.mutation is not None
+    assert renderer.mutation.mutating_files == frozenset({"tests/test_b.py"})
 
 
-def test_mutation_ratings_use_the_grid_palette_only_on_a_colour_tty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Tty(io.StringIO):
-        def isatty(self) -> bool:
-            return True
+def test_a_passing_session_defers_its_final_render_for_mutation() -> None:
+    plugin = runner.ActivityPlugin(
+        runner.RunnerConfig(
+            grid="never",
+            history=None,
+            mutation_mode="auto",
+        ),
+        workers=1,
+    )
+    node_id = "tests/test_green.py::test_green"
+    plugin.activity.collect((node_id,))
+    plugin.activity.start_native_tests((node_id,))
+    plugin.activity.add_native_result(node_id, "passed", 0.001)
+    calls: list[str] = []
+    plugin.renderer.defer = lambda: calls.append("defer")
+    plugin.renderer.finish = lambda: calls.append("finish")
+    plugin.renderer.finish_with_mutation = lambda mutation: calls.append("mutation")
 
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    coloured = runner._format_mutation_rating("REVIEW ASSERTIONS", "attention", Tty())
-    plain = runner._format_mutation_rating(
-        "REVIEW ASSERTIONS", "attention", io.StringIO()
+    plugin.pytest_sessionfinish(None, 0)
+
+    assert plugin.deferred is True
+    assert calls == ["defer"]
+
+
+def test_session_finish_distinguishes_no_green_from_mutation_disabled() -> None:
+    no_green = runner.ActivityPlugin(
+        runner.RunnerConfig(
+            grid="never",
+            history=None,
+            mutation_mode="auto",
+        ),
+        workers=1,
+    )
+    no_green_calls: list[str] = []
+    no_green.renderer.defer = lambda: no_green_calls.append("defer")
+    no_green.renderer.finish = lambda: no_green_calls.append("finish")
+    no_green.renderer.finish_with_mutation = (
+        lambda mutation: no_green_calls.append(f"mutation:{mutation.state}")
     )
 
-    assert coloured == "\x1b[38;5;196m✕ REVIEW ASSERTIONS\x1b[0m"
-    assert plain == "✕ REVIEW ASSERTIONS"
+    no_green.pytest_sessionfinish(None, 1)
+
+    assert no_green.deferred is False
+    assert no_green_calls == ["mutation:no_green"]
+
+    disabled = runner.ActivityPlugin(
+        runner.RunnerConfig(
+            grid="never",
+            history=None,
+            mutation_mode="off",
+        ),
+        workers=1,
+    )
+    node_id = "tests/test_green.py::test_green"
+    disabled.activity.collect((node_id,))
+    disabled.activity.start_native_tests((node_id,))
+    disabled.activity.add_native_result(node_id, "passed", 0.001)
+    disabled_calls: list[str] = []
+    disabled.renderer.defer = lambda: disabled_calls.append("defer")
+    disabled.renderer.finish = lambda: disabled_calls.append("finish")
+    disabled.renderer.finish_with_mutation = (
+        lambda mutation: disabled_calls.append("mutation")
+    )
+
+    disabled.pytest_sessionfinish(None, 0)
+
+    assert disabled.deferred is False
+    assert disabled_calls == ["finish"]
 
 
 def test_history_is_atomic_bounded_run_data_and_updates_file_average(tmp_path: Path) -> None:
@@ -898,12 +1078,428 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
     ]
 
 
+def test_test_command_selects_the_native_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[Any] = []
+
+    def fake_execute(namespace: Any) -> int:
+        received.append(namespace)
+        return 0
+
+    monkeypatch.setattr(runner, "execute", fake_execute)
+
+    assert cli.main(["test", "--engine", "native", "--mutant", "off"]) == 0
+    assert received[0].engine == "native"
+
+
+def test_test_command_defaults_to_native_execution() -> None:
+    namespace = cli_parser.build_parser().parse_args(["test"])
+
+    assert namespace.engine == "native"
+    assert namespace.grid == "never"
+    assert namespace.mutant_engine == "native"
+    assert namespace.fuzz == "auto"
+
+
+def test_test_command_refuses_removed_animated_grid_modes() -> None:
+    with pytest.raises(SystemExit):
+        cli_parser.build_parser().parse_args(["test", "--grid", "auto"])
+
+
+def test_test_command_accepts_independent_mutation_and_fuzz_switches() -> None:
+    namespace = cli_parser.build_parser().parse_args(
+        ["test", "--mutant", "on", "--fuzz", "on"]
+    )
+
+    assert namespace.mutant == "on"
+    assert namespace.fuzz == "on"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [([], "on"), (["--mutant", "off"], "off")],
+)
+def test_auto_fuzz_follows_the_mutation_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    expected: str,
+) -> None:
+    from wreath import _native_test_runner as native_runner
+
+    received: list[str] = []
+
+    def fake_execute(namespace: Any) -> int:
+        received.append(str(namespace.fuzz))
+        return 0
+
+    monkeypatch.setattr(native_runner, "execute", fake_execute)
+    namespace = cli_parser.build_parser().parse_args(["test", *arguments])
+
+    assert runner.execute(namespace) == 0
+    assert received == [expected]
+
+
+def test_fuzz_refuses_to_run_without_mutation_evidence() -> None:
+    namespace = cli_parser.build_parser().parse_args(
+        ["test", "--mutant", "off", "--fuzz", "on"]
+    )
+
+    with pytest.raises(ValueError, match="--fuzz on requires mutation evidence"):
+        runner.execute(namespace)
+
+
+def test_fuzz_without_gold_has_an_explicit_empty_stage() -> None:
+    report, activity = runner._no_gold_fuzz()
+
+    assert report["selected_files"] == []
+    assert activity.state == "no_gold"
+    assert activity.selected_files == frozenset()
+
+
+def test_fuzz_command_runs_the_fresh_native_evidence_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[Any] = []
+
+    def fake_execute(namespace: Any) -> int:
+        received.append(namespace)
+        return 0
+
+    monkeypatch.setattr(runner, "execute", fake_execute)
+
+    assert cli.main(["fuzz", "--workers", "1"]) == 0
+    assert received[0].engine == "native"
+    assert received[0].mutant == "on"
+    assert received[0].fuzz == "on"
+    assert received[0].workers == "1"
+
+
+def test_fuzz_selects_every_file_with_positive_mutation_evidence() -> None:
+    mutation = {
+        "verified_test_files": ["tests/test_gold.py", "tests/test_survivor.py"],
+        "failed_mutation_test_files": ["tests/test_survivor.py"],
+    }
+
+    assert runner._mutation_gold_files(mutation) == (
+        "tests/test_gold.py",
+        "tests/test_survivor.py",
+    )
+
+
+def test_fuzz_runs_exact_killers_from_each_gold_file() -> None:
+    mutation = {
+        "mutants": [
+            {
+                "outcome": "killed",
+                "killers": [
+                    "tests/test_first.py::test_guard",
+                    "tests/test_failed.py::test_guard",
+                ],
+            },
+            {
+                "outcome": "survived",
+                "killers": ["tests/test_first.py::test_not_a_kill"],
+            },
+        ]
+    }
+
+    assert runner._mutation_gold_tests(
+        mutation, ("tests/test_first.py",)
+    ) == ("tests/test_first.py::test_guard",)
+
+
+def test_live_fuzz_unlocks_when_five_percent_of_passed_files_are_gold() -> None:
+    assert not runner._live_fuzz_ready(0, 100)
+    assert not runner._live_fuzz_ready(4, 100)
+    assert runner._live_fuzz_ready(5, 100)
+    assert runner._live_fuzz_ready(1, 1)
+
+
+def test_live_and_sealed_fuzz_batches_merge_without_repeating_files() -> None:
+    first = runner.FuzzActivity(
+        state="complete",
+        selected_files=frozenset({"tests/test_early.py"}),
+        passed_files=frozenset({"tests/test_early.py"}),
+        counts={"collected": 1, "passed": 1},
+    )
+    second = runner.FuzzActivity(
+        state="complete",
+        selected_files=frozenset({"tests/test_late.py"}),
+        failed_files=frozenset({"tests/test_late.py"}),
+        counts={"collected": 1, "failed": 1},
+    )
+
+    report, activity, status = runner._merge_fuzz_batches(
+        [({}, first, 0), ({}, second, 1)],
+        ("tests/test_early.py", "tests/test_late.py"),
+    )
+
+    assert report["batches"] == 2
+    assert report["counts"] == {"collected": 2, "passed": 1, "failed": 1}
+    assert activity.passed_files == frozenset({"tests/test_early.py"})
+    assert activity.failed_files == frozenset({"tests/test_late.py"})
+    assert status == 1
+
+
+def test_rerunning_a_killer_is_the_generic_fuzz_contract(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "report.json"
+    event_path = tmp_path / "events.jsonl"
+    log_path = tmp_path / "runner.log"
+    report_path.write_text(
+        json.dumps(
+            {
+                "counts": {"collected": 1, "passed": 1},
+                "fuzz_case_ids": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    event_path.write_text(
+        '{"path":"tests/test_policy.py","outcome":"passed"}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("", encoding="utf-8")
+
+    class FinishedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+    process = runner._FuzzProcess(
+        process=cast(Any, FinishedProcess()),
+        report_path=report_path,
+        event_path=event_path,
+        log_path=log_path,
+        events=runner._FuzzEventState(),
+        selected=("tests/test_policy.py",),
+    )
+    mutation = runner.MutationActivity(mode="sample", state="complete")
+
+    report, activity, status = runner._finish_fuzz_process(
+        process, mutation, renderer=None
+    )
+
+    assert status == 0
+    assert activity.passed_files == frozenset({"tests/test_policy.py"})
+    assert activity.schedule_only_files == frozenset({"tests/test_policy.py"})
+    assert report["schedule_only_files"] == ["tests/test_policy.py"]
+
+
+def test_only_an_explicit_passing_fuzz_contract_earns_a_star(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    event_path = tmp_path / "events.jsonl"
+    log_path = tmp_path / "runner.log"
+    report_path.write_text(
+        json.dumps(
+            {
+                "counts": {"collected": 2, "passed": 2},
+                "fuzz_case_ids": ["tests/test_policy.py::test_fuzz_boundaries"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    event_path.write_text(
+        '{"path":"tests/test_policy.py","outcome":"passed"}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("", encoding="utf-8")
+
+    class FinishedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+    process = runner._FuzzProcess(
+        process=cast(Any, FinishedProcess()),
+        report_path=report_path,
+        event_path=event_path,
+        log_path=log_path,
+        events=runner._FuzzEventState(),
+        selected=("tests/test_policy.py",),
+    )
+    mutation = runner.MutationActivity(mode="sample", state="complete")
+
+    report, activity, status = runner._finish_fuzz_process(
+        process, mutation, renderer=None
+    )
+
+    assert status == 0
+    assert activity.passed_files == frozenset({"tests/test_policy.py"})
+    assert activity.schedule_only_files == frozenset()
+    assert report["fuzzed_files"] == ["tests/test_policy.py"]
+
+
+def test_a_skipped_fuzz_contract_is_incomplete_not_passing_or_failed(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "report.json"
+    event_path = tmp_path / "events.jsonl"
+    log_path = tmp_path / "runner.log"
+    report_path.write_text(
+        json.dumps(
+            {
+                "counts": {"collected": 1, "skipped": 1},
+                "fuzz_case_ids": ["tests/test_policy.py::test_fuzz_boundaries"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    event_path.write_text(
+        '{"path":"tests/test_policy.py","outcome":"skipped"}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("", encoding="utf-8")
+
+    class FinishedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+    process = runner._FuzzProcess(
+        process=cast(Any, FinishedProcess()),
+        report_path=report_path,
+        event_path=event_path,
+        log_path=log_path,
+        events=runner._FuzzEventState(),
+        selected=("tests/test_policy.py",),
+    )
+
+    report, activity, status = runner._finish_fuzz_process(
+        process,
+        runner.MutationActivity(mode="sample", state="complete"),
+        renderer=None,
+    )
+
+    assert status == 0
+    assert activity.passed_files == frozenset()
+    assert activity.failed_files == frozenset()
+    assert activity.incomplete_files == frozenset({"tests/test_policy.py"})
+    assert report["incomplete_files"] == ["tests/test_policy.py"]
+
+
+def test_fuzz_command_executes_killers_and_explicit_cases_in_each_gold_file(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "shop"
+    tests = tmp_path / "tests"
+    package.mkdir()
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "policy.py").write_text(
+        "def authorize(value):\n"
+        "    if value < 0:\n"
+        "        raise ValueError('negative')\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    fuzz_ran = tmp_path / "fuzz-ran"
+    ordinary_fuzz_ran = tmp_path / "ordinary-fuzz-ran"
+    unrelated_fuzz_ran = tmp_path / "unrelated-fuzz-ran"
+    (tests / "test_policy.py").write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "import pytest\n"
+        "from shop.policy import authorize\n\n"
+        "def test_refuses_negative():\n"
+        "    if os.environ.get('WREATH_FUZZ_STAGE'):\n"
+        f"        Path({str(ordinary_fuzz_ran)!r}).write_text('ran')\n"
+        "    with pytest.raises(ValueError):\n"
+        "        authorize(-1)\n\n"
+        "@pytest.mark.fuzz\n"
+        "def test_fuzz_contract():\n"
+        f"    Path({str(fuzz_ran)!r}).write_text('ran')\n\n"
+        "def test_unrelated_regression():\n"
+        "    if os.environ.get('WREATH_FUZZ_STAGE'):\n"
+        f"        Path({str(unrelated_fuzz_ran)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    (tests / "test_slow.py").write_text(
+        "import time\n"
+        "def test_keeps_the_ordinary_pool_busy():\n"
+        "    time.sleep(2.0)\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "wreath._cli",
+            "fuzz",
+            "--workers",
+            "2",
+            "--mutant-samples",
+            "1",
+            "--mutant-budget",
+            "10",
+            "--mutant-path",
+            "shop",
+            "--mutant-tests",
+            "tests",
+            "--mutant-operator",
+            "guard.remove-raise",
+            "--grid",
+            "never",
+            "--no-history",
+            "--report",
+            str(report),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert fuzz_ran.read_text(encoding="utf-8") == "ran"
+    assert ordinary_fuzz_ran.read_text(encoding="utf-8") == "ran"
+    assert not unrelated_fuzz_ran.exists()
+    document = json.loads(report.read_text(encoding="utf-8"))
+    assert document["mutation"]["counts"]["killed"] == 1, document["mutation"]
+    assert document["fuzz"]["counts"]["passed"] == 2
+    assert document["fuzz"]["passed_files"] == ["tests/test_policy.py"]
+    assert document["fuzz"]["schedule_seeds"] == ["wreath-fuzz-v1"]
+    assert document["fuzz"]["fuzzed_files"] == ["tests/test_policy.py"]
+    assert document["fuzz"]["live_started"] is True
+
+
 def test_auto_mutation_workers_reclaim_idle_suite_slots_after_seal() -> None:
     namespace = cli_parser.build_parser().parse_args(["test"])
 
     arguments = runner._mutation_arguments(namespace)
 
     assert "--reclaim-workers" in arguments
+    assert arguments[arguments.index("--jobs") + 1] == "2"
+    assert arguments[arguments.index("--suite-workers") + 1] == str(
+        runner._resolve_workers("auto")
+    )
+
+
+def test_native_mutation_engine_is_forwarded_to_wreath_mutant() -> None:
+    namespace = cli_parser.build_parser().parse_args(
+        ["test", "--mutant", "sample", "--mutant-engine", "native"]
+    )
+
+    arguments = runner._mutation_arguments(namespace)
+
+    assert arguments[arguments.index("--test-engine") + 1] == "native"
 
 
 def test_explicit_mutation_worker_limit_remains_literal_after_seal() -> None:
@@ -973,6 +1569,8 @@ def test_real_parallel_pytest_run_reports_pass_fail_and_skip(tmp_path: Path) -> 
             "-m",
             "wreath",
             "test",
+            "--engine",
+            "pytest",
             "--workers",
             "2",
             "--grid",
@@ -1044,6 +1642,8 @@ def test_sharded_collection_imports_each_module_once_and_runs_every_test(
             "-m",
             "wreath",
             "test",
+            "--engine",
+            "pytest",
             "--workers",
             "2",
             "--collection",
@@ -1073,8 +1673,10 @@ def test_sharded_collection_imports_each_module_once_and_runs_every_test(
     assert import_counts == [1] * 8
 
 
+@pytest.mark.parametrize("engine", ["pytest", "native"])
 def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
     tmp_path: Path,
+    engine: str,
 ) -> None:
     package = tmp_path / "shop"
     tests = tmp_path / "tests"
@@ -1112,14 +1714,24 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
         "    pytest.fail('the removed guard admitted bad')\n",
         encoding="utf-8",
     )
-    (tests / "test_broken.py").write_text(
-        "from pathlib import Path\n"
-        "import time\n"
-        "def test_breaks():\n"
-        "    deadline = time.monotonic() + 2.0\n"
+    # Keep the mutation-bearing file first so one nested worker can seal its
+    # green evidence before entering the red waiter. Two nested workers used to
+    # create a competing mini test farm inside the already saturated outer
+    # suite, making this contract time out for scheduler load rather than
+    # behavior.
+    live_wait = (
+        "    deadline = time.monotonic() + 28.0\n"
         f"    while not Path({str(mutant_ran)!r}).exists():\n"
         "        assert time.monotonic() < deadline, 'live mutant never ran'\n"
         "        time.sleep(0.01)\n"
+        if engine == "native"
+        else ""
+    )
+    (tests / "test_zbroken.py").write_text(
+        "from pathlib import Path\n"
+        "import time\n"
+        "def test_breaks():\n"
+        f"{live_wait}"
         "    assert False, 'independent red file'\n",
         encoding="utf-8",
     )
@@ -1131,8 +1743,10 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
             "-m",
             "wreath",
             "test",
+            "--engine",
+            engine,
             "--workers",
-            "2",
+            "1",
             "--grid",
             "never",
             "--no-history",
@@ -1141,11 +1755,13 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
             "--mutant-samples",
             "1",
             "--mutant-budget",
-            "0.0001",
+            "10",
             "--mutant-path",
             "shop",
             "--mutant-tests",
             "tests",
+            "--mutant-operator",
+            "guard.remove-raise",
             str(tests),
         ],
         cwd=tmp_path,
@@ -1156,27 +1772,27 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
     )
 
     assert completed.returncode == 1, completed.stderr
-    assert "independent red file" in completed.stdout
-    assert "▰" in completed.stderr
+    assert "■" in completed.stderr, completed.stderr
     assert "evidence limited to green tests · 1 baseline failure(s) excluded" in (
         completed.stderr
     )
     document = json.loads(report_path.read_text(encoding="utf-8"))
-    assert document["mutation"]["counts"]["killed"] == 1
-    assert document["mutation"]["live_kills"] == 1
+    assert document["mutation"]["counts"]["killed"] == 1, document["mutation"]
     live = document["mutation"]["live"]
-    assert live["probes"] == 1
-    assert live["completed"] == 1
-    assert live["killed"] == 1
-    assert live["cancelled_at_seal"] == 0
-    assert 0 < live["first_started_seconds"] < document["mutation"]["baseline"]["seconds"]
+    if engine == "native":
+        assert document["mutation"]["live_kills"] == 1
+        assert live["probes"] == 1
+        assert live["completed"] == 1
+        assert live["killed"] == 1
+        assert live["cancelled_at_seal"] == 0
+        assert live["first_started_seconds"] > 0
     assert document["mutation"]["verified_test_files"] == ["tests/test_policy.py"]
     assert document["mutation"]["baseline"]["failures"] == [
-        "tests/test_broken.py::test_breaks"
+        "tests/test_zbroken.py::test_breaks"
     ]
     files = {row["path"]: row["outcome"] for row in document["files"]}
     assert files == {
-        "tests/test_broken.py": "failed",
+        "tests/test_zbroken.py": "failed",
         "tests/test_policy.py": "passed",
     }
 
@@ -1239,7 +1855,8 @@ def test_default_mutation_sample_reuses_baseline_and_attaches_to_json_report(
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Mutation activity   auto" in completed.stderr
+    assert "Mutation   auto" in completed.stderr
+    assert completed.stderr.count("Test activity   current run") == 1
     assert "\x1b[" not in completed.stderr
     document = json.loads(report_path.read_text(encoding="utf-8"))
     mutation = document["mutation"]

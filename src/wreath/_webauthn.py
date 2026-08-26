@@ -524,7 +524,7 @@ def parse_attestation_object(data: bytes) -> AuthenticatorData:
             "accepts none attestation"
         )
     auth_data = parse_authenticator_data(bytes(raw))
-    if not auth_data.attested or not auth_data.credential_id:
+    if not auth_data.credential_id:
         raise WebAuthnError("the registration carries no attested credential data")
     return auth_data
 
@@ -589,8 +589,8 @@ def _authority(origin: str) -> tuple[str, str, str] | None:
     fall out as unparseable rather than be normalized into something that
     matches. `None` means "no widening", never "close enough".
     """
-    scheme, separator, rest = origin.partition("://")
-    if not separator or not scheme or not rest:
+    scheme, _, rest = origin.partition("://")
+    if not scheme:
         return None
     if rest.startswith("["):
         host, closed, tail = rest.partition("]")
@@ -629,7 +629,7 @@ def origin_accepted(origin: str, accepted: Sequence[str]) -> bool:
     if parsed is None:
         return False
     scheme, host, port = parsed
-    if not port or not port.isdigit() or not is_loopback_host(host):
+    if not port.isdigit() or not is_loopback_host(host):
         return False
     bare = f"{scheme}://[{host}]" if ":" in host else f"{scheme}://{host}"
     return bare in accepted

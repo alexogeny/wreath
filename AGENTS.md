@@ -364,8 +364,8 @@ uv run wreath-bench --framework wreath starlette fastapi   # installs competitor
 
 # The individual gates, when you want one of them.
 # ** Run the suite with `wreath test`, not with `pytest`. ** It is the routine
-# check: it picks min(8, cpu_count) workers itself, keeps pytest's semantics
-# exactly, and adds the state map, timing history and bounded mutation
+# check: it picks min(8, cpu_count) native workers itself, preserves the
+# supported pytest compatibility surface, and adds the state map, timing history and bounded mutation
 # confidence. A bare `uv run pytest` takes no `-n` of its own, so it runs one
 # worker and is several times slower for no extra evidence.
 uv run wreath test             # THE routine suite: grid, timings, auto confidence
@@ -396,7 +396,7 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 
 - `src/wreath/`: dependency-free framework core
 - `tests/`: correctness and ASGI behavior tests. **Parallelism now pays on the
-  default marks, and it did not used to.** The suite was ~3.5s, where an xdist
+  default marks, and it did not used to.** The suite was ~3.5s, where a worker's
   worker's re-import of the native extensions cost more than it saved; it has
   since grown past 8,600 default-collected tests, and the trade inverted. The
   old measured curve flattened at six workers, but the grown 13,297-test tree
@@ -404,15 +404,15 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   at six workers and 25.860s ± 0.282s at eight. Ten workers were unstable and
   no faster in the clean samples, so prefer `-n 8` over `-n auto` on a wide
   machine. **Prefer `uv run wreath test` for routine agent runs.** It applies
-  `min(8, cpu_count)`, keeps pytest's
-  semantics, and adds the state map, timing history, and bounded mutation
+  `min(8, cpu_count)`, uses the native C dispatch engine, and adds the state map,
+  timing history, and bounded mutation
   confidence; a bare `uv run pytest` stays the serial process you attach a
-  debugger to. This recommendation is measured rather than aspirational: on the
-  12,002-test default-marker suite, three warm runs with mutation disabled were
-  26.404s ± 0.138s for `wreath test` against 29.055s ± 2.069s for
-  `pytest -n 6` on the same six workers (1.10x ± 0.08x), measured 2026-08-02,
-  with the worker curve re-measured the next day. Recorded runs are output
-  rather than source and are not kept in the tree; re-run both to reproduce.
+  debugger to. This recommendation is measured rather than aspirational: three
+  interleaved warm fixed-workload runs with mutation disabled averaged
+  25.903s ± 0.242s native against 47.152s ± 1.303s for pytest (1.820x), with
+  602.417B ± 1.138B against 1,064.063B ± 6.423B retired instructions (43.4%
+  fewer), measured 2026-08-25. The exact exclusions, reusable harness, and raw outputs live under
+  `~/scratch/wreath/native-default/`.
   A first run
   after source changes also builds the mutation candidate catalog; its planning
   and compilation overlap the ordinary workers without collecting the whole
@@ -465,9 +465,12 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   follow-up reached and killed that refusal in 0.11 seconds, adding the 126th
   gold file and leaving all 192 selected controls answered.
 
-  Completed green
-  tests can drive up to three isolated mutant children throughout the ordinary
-  run; that live window does not spend the fifty-second post-suite tail budget.
+  Completed green tests feed isolated mutant children during the ordinary run;
+  that live window does not spend the fifty-second post-suite tail budget. The
+  full test pool starts alone. At ten percent of completed per-file blocks, the
+  first test worker yields between cases and mutation receives one CPU slot;
+  the split then ramps toward one tester and seven mutators on an eight-worker
+  run, before mutation inherits the full pool at the baseline seal.
   Speculative passes are retried against the atomically sealed full baseline.
   The versioned history caches selection and invalidates
   it from source mtimes and sizes. `uv run wreath-check` likewise

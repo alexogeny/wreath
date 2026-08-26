@@ -22,6 +22,7 @@ import datetime
 
 import pytest
 
+from wreath._passes.gate import Verification
 from wreath.passes import (
     Buckets,
     Ceiling,
@@ -47,6 +48,11 @@ from .fakes import FakeDatabase, World
 NOW = datetime.datetime(2026, 7, 27, 12, 0, tzinfo=datetime.UTC)
 GRADE_ID = Key("id", "text", indexed=True, unique=True, monotone=True)
 RECORDED = Key("recorded_at", "timestamptz", indexed=True)
+
+
+def test_a_successful_verification_cannot_also_be_transient():
+    with pytest.raises(ValueError, match="successful verification cannot be transient"):
+        Verification(True, transient=True)
 
 
 async def _nap(_seconds):
@@ -536,3 +542,37 @@ async def test_a_unit_gate_runs_per_range_as_the_walk_passes_it():
     assert all(unit is not None for unit in units)
     starts = [unit[0][0].day for unit in units]
     assert starts == [24, 25, 26]
+
+
+async def test_a_failed_unit_gate_blocks_the_pass_before_any_callback():
+    rows = [
+        {
+            "id": "t1",
+            "grade_text": None,
+            "recorded_at": datetime.datetime(2026, 7, 24, 6, tzinfo=datetime.UTC),
+        }
+    ]
+    world = World("treks", rows)
+    database = FakeDatabase(world)
+    called = False
+
+    async def terminal(executor, walk, unit):
+        nonlocal called
+        called = True
+
+    class Reject:
+        async def check(self, executor, *, walk, scope=None):
+            class Verdict:
+                ok = False
+                transient = False
+                detail = "unit verification failed"
+
+            return Verdict()
+
+    result = await unit_gate_pass(
+        terminal,
+        gate=Gate(verify=Reject(), then=terminal, scope="unit"),
+    ).run(database, sleep=_nap)
+    assert result.stopped == "blocked"
+    assert result.error == "unit verification failed"
+    assert called is False

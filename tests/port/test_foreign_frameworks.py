@@ -85,6 +85,54 @@ def test_a_relative_import_names_no_framework() -> None:
     assert "no web framework recognized" in detection.headline()
 
 
+def test_a_hook_name_is_not_a_flask_hook_without_flask(tmp_path) -> None:
+    source = tmp_path / "plain.py"
+    source.write_text(
+        "from aiohttp import web\n"
+        "app = web.Application()\n"
+        "@app.before_request\n"
+        "def prepare():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    assert "foreign.flask.hook" not in [
+        finding.rule_id for finding in port.analyze(source).findings
+    ]
+
+
+def test_a_flask_before_request_decorator_is_reported_as_a_hook(tmp_path) -> None:
+    source = tmp_path / "flask_app.py"
+    source.write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.before_request\n"
+        "def prepare():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    assert "foreign.flask.hook" in [
+        finding.rule_id for finding in port.analyze(source).findings
+    ]
+
+
+def test_an_unrecognised_flask_decorator_is_not_reported_as_a_hook(tmp_path) -> None:
+    source = tmp_path / "flask_app.py"
+    source.write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.custom_decorator\n"
+        "def prepare():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    assert "foreign.flask.hook" not in [
+        finding.rule_id for finding in port.analyze(source).findings
+    ]
+
+
 def test_a_tree_with_no_framework_says_so_rather_than_nothing() -> None:
     detection = _detect("import json\n\n\ndef total(rows):\n    return sum(rows)\n")
     assert not detection.portable
@@ -728,45 +776,22 @@ FAMILIES = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(FAMILIES))
-def test_a_fixture_covers_its_whole_rule_family_and_nothing_else(
+@pytest.mark.parametrize("name", sorted(EXPECTED))
+def test_a_fixture_covers_its_rule_family_without_being_misidentified(
     foreign_root, name: str
 ) -> None:
-    assert {f.rule_id for f in port.analyze(foreign_root / name).findings} == FAMILIES[name]
+    report = port.analyze(foreign_root / name)
+    if name in FAMILIES:
+        assert {finding.rule_id for finding in report.findings} == FAMILIES[name]
+    assert EXPECTED[name] in report.detection.headline(), name
+    assert not report.detection.portable, name
+    assert report.detection.warnings(), name
+    routing = [finding for finding in report.findings if finding.category == "routing"]
+    assert routing == [], f"{name}: {routing}"
 
 
 def test_every_foreign_fixture_is_named_correctly(foreign_app_roots) -> None:
     assert [p.name for p in foreign_app_roots] == sorted(EXPECTED)
-    for root in foreign_app_roots:
-        detection = port.analyze(root).detection
-        assert EXPECTED[root.name] in detection.headline(), root.name
-
-
-def test_no_foreign_fixture_is_reported_as_portable(foreign_app_roots) -> None:
-    """None of these is a tree `wreath port` can translate, and it must say so.
-
-    The failure this pins is not a low score — it is a *confident* one. Scoring
-    any of these above zero means a rule matched a spelling rather than a
-    framework.
-    """
-    for root in foreign_app_roots:
-        report = port.analyze(root)
-        assert not report.detection.portable, root.name
-        assert report.detection.warnings(), root.name
-
-
-def test_no_foreign_fixture_yields_a_routing_finding(foreign_app_roots) -> None:
-    """The surviving half of the old blanket contract, and the load-bearing half.
-
-    `foreign/` roots may yield translated findings now — Flask's `@app.route`
-    has a wreath spelling and the emitter writes it. What they must never yield
-    is a **routing** finding, because that category is the *FastAPI* route rules
-    and one firing here means the framework was misidentified rather than
-    translated.
-    """
-    for root in foreign_app_roots:
-        routing = [f for f in port.analyze(root).findings if f.category == "routing"]
-        assert routing == [], f"{root.name}: {routing}"
 
 
 @pytest.mark.parametrize(

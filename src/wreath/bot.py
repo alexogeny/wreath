@@ -57,10 +57,21 @@ class Turnstile:
         action: str | None = None,
         target: str = "/turnstile/v0/siteverify",
     ) -> None:
-        if not secret:
-            raise ValueError("Turnstile secret cannot be empty")
-        if not target.startswith("/") or target.startswith("//"):
-            raise ValueError("Turnstile target must be an origin-relative path")
+        if not isinstance(secret, str) or not secret:
+            raise ValueError("Turnstile secret must be a non-empty string")
+        if (
+            not isinstance(target, str)
+            or not target.startswith("/")
+            or target.startswith("//")
+        ):
+            raise ValueError(
+                "Turnstile target must be an origin-relative path string such as "
+                "'/turnstile/v0/siteverify'"
+            )
+        if hostname is not None and (not isinstance(hostname, str) or not hostname):
+            raise ValueError("Turnstile hostname must be a non-empty string or None")
+        if action is not None and (not isinstance(action, str) or not action):
+            raise ValueError("Turnstile action must be a non-empty string or None")
         self._client = client
         self._secret = secret
         self._hostname = hostname
@@ -124,8 +135,8 @@ def challenge_dependency(
     """Build a dependency over the canonical bot-challenge protocol."""
     if not callable(getattr(challenge, "verify", None)):
         raise TypeError("bot challenge must expose async verify(token, request)")
-    if not header:
-        raise ValueError("bot-challenge token header cannot be empty")
+    if not isinstance(header, str) or not header:
+        raise ValueError("bot-challenge token header must be a non-empty string")
 
     async def verify(request: Request) -> ChallengeResult:
         token = request.header(header)

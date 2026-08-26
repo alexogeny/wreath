@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.series import Range, Series, SeriesError, count
+from wreath.orm import column
+from wreath.orm.expressions import RelatedColumnExpr
+from wreath.orm.types import Text
+from wreath.series import Range, Series, SeriesError, _Events, count
 from wreath.temporal import Day, Month
 
-from .conftest import Deploy, Trek, utc
+from .conftest import Deploy, Herd, Trek, utc
 
 WEEK = Range(utc(2026, 1, 1), utc(2026, 1, 8))
 
@@ -184,6 +187,28 @@ class TestDeclaration:
     def test_a_view_without_events_has_none(self, session):
         view = Series(Trek, at=Trek.started_at, bucket=Day).measure(n=count())
         assert view.sources == (Trek,)
+
+    def test_related_event_sources_are_unique_and_never_include_no_owner(self):
+        herd_time = RelatedColumnExpr(Herd.started_at.column, ())
+        herd_label = RelatedColumnExpr(Herd.name.column, ())
+        declared = Series(
+            Trek,
+            at=Trek.started_at,
+            bucket=Day,
+            _events=_Events(Deploy, herd_time, herd_label, (), 10),
+        ).measure(n=count())
+
+        assert declared.sources == (Trek, Herd, Deploy)
+
+        ownerless = RelatedColumnExpr(column(Text), ())
+        defensive = Series(
+            Trek,
+            at=Trek.started_at,
+            bucket=Day,
+            _events=_Events(Deploy, Deploy.happened_at, ownerless, (), 10),
+        ).measure(n=count())
+
+        assert defensive.sources == (Trek, Deploy)
 
 
 class TestWithOtherStages:

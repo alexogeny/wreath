@@ -628,8 +628,10 @@ class _Analyzer(ast.NodeVisitor):
             and parent.func.attr == "append"
             and isinstance(parent.func.value, ast.Name)
             and len(parent.args) == 1
-            and parent.args[0] is node
         ):
+            # ``parent`` came from this node's parent map. With one positional
+            # argument, that argument can only be ``node``; checking identity
+            # again adds no information and therefore no testable branch.
             tracked.add(parent.func.value.id)
         else:
             return False

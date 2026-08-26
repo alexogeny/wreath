@@ -93,6 +93,72 @@ def test_graphql_policy_plan_probes_reach_both_same_size_arms() -> None:
     assert _graphql_policy_plan_alias_control(4) > 0.0
 
 
+def test_livedoc_close_probe_reaches_both_principal_distributions() -> None:
+    assert complexity._livedoc_close_harness(4, shared_principal=True) >= 0.0
+    assert complexity._livedoc_close_harness(4, shared_principal=False) >= 0.0
+
+
+def test_livedoc_close_probe_builds_the_declared_principal_distributions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath import _livedoc
+
+    subscriptions: list[str] = []
+
+    class DocumentDouble:
+        def __init__(self, **_options: object) -> None:
+            self.subscribers: list[str] = []
+
+        def subscribe(self, principal: str) -> object:
+            subscriptions.append(principal)
+            self.subscribers.append(principal)
+            return object()
+
+        def close_all(self) -> None:
+            self.subscribers.clear()
+
+    monkeypatch.setattr(_livedoc, "LiveDocument", DocumentDouble)
+
+    complexity._livedoc_close_harness(3, shared_principal=True)
+    assert subscriptions == ["shared", "shared", "shared"]
+    subscriptions.clear()
+    complexity._livedoc_close_harness(3, shared_principal=False)
+    assert subscriptions == ["principal-0", "principal-1", "principal-2"]
+
+
+def test_main_dispatches_update_baseline_before_running_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected: list[list[str]] = []
+    monkeypatch.setattr(
+        complexity,
+        "_write_baseline",
+        lambda names: selected.append(list(names)) or 0,
+    )
+
+    assert complexity.main(["css-no-media-control", "--update-baseline"]) == 0
+    assert selected == [["css-no-media-control"]]
+
+
+def test_main_does_not_update_the_baseline_during_an_ordinary_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[list[str]] = []
+    monkeypatch.setattr(
+        complexity,
+        "_write_baseline",
+        lambda names: writes.append(list(names)) or 0,
+    )
+    monkeypatch.setattr(
+        complexity,
+        "run_probe",
+        lambda registered: Result(registered, [1.0, 2.0, 4.0, 8.0], [{}] * 4),
+    )
+
+    assert complexity.main(["css-no-media-control"]) == 0
+    assert writes == []
+
+
 def test_contract_records_the_scaled_axis_and_assumption() -> None:
     contract = _contract(_probe())
 

@@ -28,6 +28,7 @@ across a table that does not exist into a `translated` verdict.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -162,7 +163,11 @@ def _declared(
     return columns, relations, reverse, table
 
 
-def django_image(files: list[Path], on_skip=None) -> DjangoImage:
+def django_image(
+    files: list[Path],
+    on_skip=None,
+    trees: Mapping[Path, ast.Module] | None = None,
+) -> DjangoImage:
     """Read every Django model in the tree, and decide which are plain."""
     class_bases: dict[str, list[str]] = {}
     managers: dict[str, tuple[str, ...]] = {}
@@ -175,12 +180,17 @@ def django_image(files: list[Path], on_skip=None) -> DjangoImage:
     #: a forward declaration in another file still resolves.
     reverses: list[tuple[str, str, str]] = []
     for path in files:
-        try:
-            tree = _parse_file(path)
-        except _SKIPPABLE as exc:
-            if on_skip is not None:
-                on_skip(path, exc)
-            continue
+        if trees is not None:
+            tree = trees.get(path)
+            if tree is None:
+                continue
+        else:
+            try:
+                tree = _parse_file(path)
+            except _SKIPPABLE as exc:
+                if on_skip is not None:
+                    on_skip(path, exc)
+                continue
         imports = _Imports().visit(tree)
         django = "django" in imports.roots
         for node in ast.walk(tree):

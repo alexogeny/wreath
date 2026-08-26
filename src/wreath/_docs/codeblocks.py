@@ -44,8 +44,10 @@ import importlib
 import inspect
 import re
 import typing
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+
+from wreath._native import _docs as _native_docs
 
 __all__ = [
     "VOCABULARY",
@@ -57,8 +59,13 @@ __all__ = [
     "scan",
 ]
 
-_FENCE = re.compile(r"^(?P<mark>`{3,}|~{3,})(?P<info>[^\n]*)$")
 _PYTHON = ("python", "py", "python3")
+#: Sound rejection for pages that cannot contain a Python fence. A match may
+#: still sit inside a longer example fence, which merely takes the full path;
+#: no match proves ``scan`` cannot yield a Python block at all.
+_PYTHON_FENCE = re.compile(
+    r"^(?:`{3,}|~{3,})(?:python|python3|py)(?:\s|$)", re.MULTILINE,
+)
 
 #: Conventional names the docs use for objects the reader is assumed to hold,
 #: mapped to the type they always mean. Measured, not guessed: `app` is the root
@@ -160,31 +167,8 @@ def scan(text: str) -> Iterator[Block]:
     same rule is why `_fenced.extract` exists; this is a second reader because
     it wants every block, not one opener.
     """
-    lines = text.split("\n")
-    index = 0
-    while index < len(lines):
-        match = _FENCE.match(lines[index])
-        if match is None:
-            index += 1
-            continue
-        mark = match.group("mark")
-        info = match.group("info").strip()
-        start = index
-        index += 1
-        body: list[str] = []
-        while index < len(lines):
-            closing = _FENCE.match(lines[index])
-            if (
-                closing is not None
-                and closing.group("mark")[0] == mark[0]
-                and len(closing.group("mark")) >= len(mark)
-                and not closing.group("info").strip()
-            ):
-                break
-            body.append(lines[index])
-            index += 1
-        index += 1
-        yield Block(info, "\n".join(body), start + 1)
+    for info, body, line in _native_docs.python_blocks(text):
+        yield Block(info, body, line)
 
 
 # --- resolving a name to a real object ---------------------------------------
@@ -236,9 +220,11 @@ class _Environment:
     attribute, `app.get` is a lookup on the class.
     """
 
-    def __init__(self) -> None:
-        self.instances: dict[str, type] = {}
+    def __init__(self, vocabulary: Mapping[str, type] | None = None) -> None:
+        self.instances: dict[str, type] = dict(vocabulary or {})
         self.objects: dict[str, object] = {}
+        if vocabulary is not None:
+            return
         for name, spec in VOCABULARY.items():
             loaded = _load(spec)
             if isinstance(loaded, type):
@@ -396,61 +382,59 @@ def _describe(owner: object) -> str:
 # correct spelling, because an error that only says "no" makes the reader guess.
 
 
-def _rule_depends_in_annotated(tree: ast.AST, env: _Environment) -> Iterator[str]:
+def _rule_depends_in_annotated(node: ast.AST, env: _Environment) -> Iterator[str]:
     """`Annotated[T, Depends(f)]` -- the binder reads markers, not dependencies.
 
     Both names exist, so this is invisible to name resolution. It shipped in
     four places. The dependency is silently ignored and the parameter binds from
     the request or not at all.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Subscript):
-            continue
-        if not isinstance(node.value, ast.Name) or node.value.id != "Annotated":
-            continue
-        if not isinstance(node.slice, ast.Tuple):
-            continue
-        for element in node.slice.elts[1:]:
-            call = element.func if isinstance(element, ast.Call) else element
-            if isinstance(call, ast.Name) and call.id == "Depends":
-                yield (
-                    "Depends inside Annotated is ignored by the binder -- write "
-                    "it as the parameter's default: `name: T = Depends(f)`"
-                )
+    if not isinstance(node, ast.Subscript):
+        return
+    if not isinstance(node.value, ast.Name) or node.value.id != "Annotated":
+        return
+    if not isinstance(node.slice, ast.Tuple):
+        return
+    for element in node.slice.elts[1:]:
+        call = element.func if isinstance(element, ast.Call) else element
+        if isinstance(call, ast.Name) and call.id == "Depends":
+            yield (
+                "Depends inside Annotated is ignored by the binder -- write "
+                "it as the parameter's default: `name: T = Depends(f)`"
+            )
 
 
-def _rule_async_with_coroutine(tree: ast.AST, env: _Environment) -> Iterator[str]:
+def _rule_async_with_coroutine(node: ast.AST, env: _Environment) -> Iterator[str]:
     """`async with f()` where `f` is a coroutine function, not an async CM.
 
     `Pool.acquire` is a plain coroutine; `async with pool.acquire() as conn`
     raises `TypeError: 'coroutine' object does not support the asynchronous
     context manager protocol`. It shipped in three places.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncWith):
+    if not isinstance(node, ast.AsyncWith):
+        return
+    for item in node.items:
+        call = item.context_expr
+        if not isinstance(call, ast.Call):
             continue
-        for item in node.items:
-            call = item.context_expr
-            if not isinstance(call, ast.Call):
-                continue
-            func = env.resolve(call.func)
-            if func is None or not inspect.iscoroutinefunction(func):
-                continue
-            returns = _return_type(func)
-            if returns is not None and hasattr(returns, "__aenter__"):
-                continue
-            name = _dotted(call.func)
-            yield (
-                f"`async with {name}()` -- {name} is a coroutine function, not an "
-                "async context manager; await it instead"
-            )
+        func = env.resolve(call.func)
+        if func is None or not inspect.iscoroutinefunction(func):
+            continue
+        returns = _return_type(func)
+        if returns is not None and hasattr(returns, "__aenter__"):
+            continue
+        name = _dotted(call.func)
+        yield (
+            f"`async with {name}()` -- {name} is a coroutine function, not an "
+            "async context manager; await it instead"
+        )
 
 
 #: The binding markers. Honoured on a *handler* parameter; inert anywhere else.
 _MARKERS = ("Query(", "Path(", "Header(", "Cookie(", "Body(", "Form(", "File(")
 
 
-def _rule_markers_in_a_dependency(tree: ast.AST, env: _Environment) -> Iterator[str]:
+def _rule_markers_in_a_dependency(node: ast.AST, env: _Environment) -> Iterator[str]:
     """`Depends(f)` where `f`'s own parameters carry binding markers.
 
     Markers are read off a handler's signature, not a dependency's, so they do
@@ -464,32 +448,31 @@ def _rule_markers_in_a_dependency(tree: ast.AST, env: _Environment) -> Iterator[
     Only fires when the target resolves to a real callable, so a helper the
     block defines but never shows is not accused of a signature nobody can see.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Name) or node.func.id != "Depends":
-            continue
-        if not node.args:
-            continue
-        target = env.resolve(node.args[0])
-        if target is None or not callable(target) or isinstance(target, type):
-            continue
-        try:
-            signature = inspect.signature(target)
-        except TypeError, ValueError:
-            continue
-        marked = [
-            parameter.name
-            for parameter in signature.parameters.values()
-            if any(marker in str(parameter.annotation) for marker in _MARKERS)
-        ]
-        if marked:
-            yield (
-                f"Depends({_dotted(node.args[0])}) -- its parameters "
-                f"({', '.join(marked)}) carry binding markers, which only a "
-                "handler's own signature honours; the request is passed "
-                "positionally instead and the call raises"
-            )
+    if not isinstance(node, ast.Call):
+        return
+    if not isinstance(node.func, ast.Name) or node.func.id != "Depends":
+        return
+    if not node.args:
+        return
+    target = env.resolve(node.args[0])
+    if target is None or not callable(target) or isinstance(target, type):
+        return
+    try:
+        signature = inspect.signature(target)
+    except TypeError, ValueError:
+        return
+    marked = [
+        parameter.name
+        for parameter in signature.parameters.values()
+        if any(marker in str(parameter.annotation) for marker in _MARKERS)
+    ]
+    if marked:
+        yield (
+            f"Depends({_dotted(node.args[0])}) -- its parameters "
+            f"({', '.join(marked)}) carry binding markers, which only a "
+            "handler's own signature honours; the request is passed "
+            "positionally instead and the call raises"
+        )
 
 
 _RULES = (
@@ -502,43 +485,41 @@ _RULES = (
 # --- the floor ---------------------------------------------------------------
 
 
-def _bind_annotations(tree: ast.AST, env: _Environment) -> None:
+def _bind_annotation(node: ast.AST, env: _Environment) -> None:
     """Bind every written annotation in the block: parameters, then variables."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            args = node.args
-            for argument in [
-                *args.posonlyargs,
-                *args.args,
-                *args.kwonlyargs,
-                *(a for a in (args.vararg, args.kwarg) if a is not None),
-            ]:
-                if argument.annotation is not None:
-                    env.annotate(argument.arg, argument.annotation)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            env.annotate(node.target.id, node.annotation)
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        args = node.args
+        for argument in [
+            *args.posonlyargs,
+            *args.args,
+            *args.kwonlyargs,
+            *(a for a in (args.vararg, args.kwarg) if a is not None),
+        ]:
+            if argument.annotation is not None:
+                env.annotate(argument.arg, argument.annotation)
+    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        env.annotate(node.target.id, node.annotation)
 
 
-def _bind_block(tree: ast.AST, env: _Environment) -> None:
+def _bind_node(node: ast.AST, env: _Environment) -> None:
     """Record every name the block binds, so later blocks resolve against it."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import | ast.ImportFrom):
-            env.bind_import(node)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    env.bind_assign(target.id, node.value)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.value is not None:
-                env.bind_assign(node.target.id, node.value)
-        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            env.bind_name(node.name)
-        elif isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
-            _bind_target(node.target, env)
-        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-            _bind_target(node.optional_vars, env)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            env.bind_name(node.name)
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        env.bind_import(node)
+    elif isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                env.bind_assign(target.id, node.value)
+    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        if node.value is not None:
+            env.bind_assign(node.target.id, node.value)
+    elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+        env.bind_name(node.name)
+    elif isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
+        _bind_target(node.target, env)
+    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+        _bind_target(node.optional_vars, env)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        env.bind_name(node.name)
 
 
 def _bind_target(target: ast.expr, env: _Environment) -> None:
@@ -556,38 +537,38 @@ def _bind_target(target: ast.expr, env: _Environment) -> None:
             _bind_target(element, env)
 
 
-def _check_chains(
-    tree: ast.AST, env: _Environment, page: str, line: int, stats: Coverage
-) -> Iterator[Finding]:
+def _check_chain(
+    node: ast.AST, env: _Environment, page: str, line: int, stats: Coverage
+) -> Finding | None:
     """Resolve every attribute chain, reporting the first missing step in each."""
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
-        # Only the outermost Attribute of a chain is walked as a whole; inner
-        # ones are reached again by ast.walk, so resolve each independently and
-        # report only the step that is actually missing.
-        owner = env.resolve(node.value)
-        root = _root(node)
-        if isinstance(root, ast.Name):
-            stats.roots[root.id] = stats.roots.get(root.id, 0) + 1
-        if owner is None:
-            stats.unresolved += 1
-            continue
-        stats.resolved += 1
-        if isinstance(owner, type):
-            if _has_member(owner, node.attr):
-                continue
-            yield Finding(
-                page,
-                line,
-                f"`{_dotted(node)}` -- {_describe(owner)} has no attribute `{node.attr}`",
-            )
-        elif inspect.ismodule(owner) and not hasattr(owner, node.attr):
-            yield Finding(
-                page,
-                line,
-                f"`{_dotted(node)}` -- module {_describe(owner)} has no `{node.attr}`",
-            )
+    if not isinstance(node, ast.Attribute):
+        return None
+    # Only the outermost Attribute of a chain is walked as a whole; inner
+    # ones are reached again by ast.walk, so resolve each independently and
+    # report only the step that is actually missing.
+    owner = env.resolve(node.value)
+    root = _root(node)
+    if isinstance(root, ast.Name):
+        stats.roots[root.id] = stats.roots.get(root.id, 0) + 1
+    if owner is None:
+        stats.unresolved += 1
+        return None
+    stats.resolved += 1
+    if isinstance(owner, type):
+        if _has_member(owner, node.attr):
+            return None
+        return Finding(
+            page,
+            line,
+            f"`{_dotted(node)}` -- {_describe(owner)} has no attribute `{node.attr}`",
+        )
+    if inspect.ismodule(owner) and not hasattr(owner, node.attr):
+        return Finding(
+            page,
+            line,
+            f"`{_dotted(node)}` -- module {_describe(owner)} has no `{node.attr}`",
+        )
+    return None
 
 
 def _has_member(owner: type, name: str) -> bool:
@@ -605,20 +586,39 @@ def _has_member(owner: type, name: str) -> bool:
             slots = (slots,)
         if name in tuple(slots):
             return True
-        annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.STRING)
+        annotations = annotationlib.get_annotations(
+            klass, format=annotationlib.Format.STRING
+        )
         if name in annotations:
             return True
     return False
 
 
-def check_page(text: str, page: str = "") -> tuple[list[Finding], Coverage]:
-    """Check every Python block on one page. Returns (findings, coverage).
+class Checker:
+    """One build-owned Python-block checker with immutable resolved vocabulary."""
+
+    def __init__(self) -> None:
+        self._vocabulary = _Environment().instances
+
+    def check_page(self, text: str, page: str = "") -> tuple[list[Finding], Coverage]:
+        """Check every Python block on one page. Returns findings and coverage."""
+        if _PYTHON_FENCE.search(text) is None:
+            return [], Coverage()
+        return _check_page(text, page, self._vocabulary)
+
+
+def _check_page(
+    text: str,
+    page: str,
+    vocabulary: Mapping[str, type],
+) -> tuple[list[Finding], Coverage]:
+    """Check one page using a build-owned resolved vocabulary.
 
     Blocks are checked in document order against one accumulating environment,
     because that is how a reader meets them: a page that binds `app = Wreath()`
     in its first block means that `app` in its fifth.
     """
-    env = _Environment()
+    env = _Environment(vocabulary)
     findings: list[Finding] = []
     stats = Coverage()
     for block in scan(text):
@@ -645,18 +645,44 @@ def check_page(text: str, page: str = "") -> tuple[list[Finding], Coverage]:
                 )
             continue
         stats.parsed += 1
-        # Imports first, then annotations, both into a copy: a name a handler
-        # annotates is true for this block and no further.
+        # Bindings and annotations need a completed page-local environment
+        # before any rule resolves a chain. Two passes over one materialised
+        # depth-first stream replace the former seven independent AST walks.
+        nodes = tuple(ast.walk(tree))
+        # Persistent bindings are compiled once into the page environment, then
+        # copied for block-local annotations. Building both environments node by
+        # node performed every import and assignment resolution twice even
+        # though they started equal and received the same bindings in the same
+        # order.
+        annotated: list[ast.AST] = []
+        for node in nodes:
+            _bind_node(node, env)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.AnnAssign):
+                annotated.append(node)
         local = env.child()
-        _bind_block(tree, local)
-        _bind_annotations(tree, local)
+        for node in annotated:
+            _bind_annotation(node, local)
         if reason is None:
-            found = list(_check_chains(tree, local, page, block.line, stats))
-            for rule in _RULES:
-                found.extend(Finding(page, block.line, message) for message in rule(tree, local))
+            found: list[Finding] = []
+            rule_findings: list[list[Finding]] = [[] for _ in _RULES]
+            for node in nodes:
+                finding = _check_chain(node, local, page, block.line, stats)
+                if finding is not None:
+                    found.append(finding)
+                for index, rule in enumerate(_RULES):
+                    rule_findings[index].extend(
+                        Finding(page, block.line, message)
+                        for message in rule(node, local)
+                    )
+            for findings_for_rule in rule_findings:
+                found.extend(findings_for_rule)
             findings.extend(found)
-        _bind_block(tree, env)
     return findings, stats
+
+
+def check_page(text: str, page: str = "") -> tuple[list[Finding], Coverage]:
+    """Check one page outside a site-build operation."""
+    return Checker().check_page(text, page)
 
 
 def coverage(pages: dict[str, str]) -> Coverage:

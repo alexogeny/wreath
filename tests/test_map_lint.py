@@ -91,6 +91,21 @@ def test_clean_repository_has_no_findings(fake_repo: Path) -> None:
     assert map_lint.scan(fake_repo) == []
 
 
+def test_budget_sites_require_an_owned_source_and_preserve_import_aliases(
+    fake_repo: Path,
+) -> None:
+    (fake_repo / "src" / "wreath" / "budget_users.py").write_text(
+        "from wreath.cache import BoundedCache as Limited\n"
+        "from foreign.cacheish import BoundedCache\n"
+        "mine = Limited(max_entries=8, ttl=1)\n"
+        "foreign = BoundedCache(max_entries=8, ttl=1)\n"
+    )
+
+    sites = map_lint._budget_sites(fake_repo)
+
+    assert sites == [("src/wreath/budget_users.py", 3, "Limited")]
+
+
 def test_sibling_key_instead_of_array_edit_is_caught(fake_repo: Path) -> None:
     """The corruption that lost three subsystems' test lists.
 

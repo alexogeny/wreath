@@ -75,6 +75,33 @@ def test_a_category_with_no_findings_has_no_coverage(tmp_path):
     assert report.coverage("a_category_that_does_not_exist") is None
 
 
+def test_each_source_is_parsed_once_for_the_whole_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._port import analyzer
+    from wreath._port.analyzer import django, orm
+
+    root = _app_tree(tmp_path)
+    (root / "models.py").write_text(
+        "from pydantic import BaseModel\n\nclass Item(BaseModel):\n    name: str\n",
+        encoding="utf-8",
+    )
+    original = analyzer._parse_file
+    parsed: list[Path] = []
+
+    def recording_parse(path: Path):
+        parsed.append(path)
+        return original(path)
+
+    for module in (analyzer, django, orm):
+        monkeypatch.setattr(module, "_parse_file", recording_parse)
+
+    report = port.analyze(root)
+
+    assert report.files_analyzed == 2
+    assert sorted(path.name for path in parsed) == ["main.py", "models.py"]
+
+
 # -- 2. a bad file is recorded and skipped, not fatal -------------------------
 
 

@@ -474,10 +474,6 @@ async def _shift_bound(
                 expected=None, holes_open=True,
                 frontier_sql=frontier_sql, sleeper=sleeper, pending=unit,
             )
-            if outcome.blocked:
-                return ShiftResult(
-                    chunks, rows, stopped="blocked", error=outcome.error, holes=holes + 1
-                )
             if outcome.failed:
                 holes += 1
             else:
@@ -761,7 +757,7 @@ async def _run_gate(walk: Any, connection: Any, *, row: Any) -> ShiftResult:
 
     if phase == VERIFYING:
         verdict = await gate.verify.check(connection, walk=walk)
-        if not verdict.ok and verdict.transient:
+        if verdict.transient:
             # Could not run, rather than ran and answered no. Leave the phase
             # alone and let the next shift try again.
             await ledger.record_error(connection, verdict.detail)

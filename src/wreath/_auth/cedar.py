@@ -296,8 +296,7 @@ def _limits_of(request: Request) -> Limits:
     Absent means unrestricted, which is what every ordinary request carries, so
     this is a single attribute read on the common path.
     """
-    identity = request.identity
-    limits = None if identity is None else getattr(identity, "limits", None)
+    limits = getattr(request.identity, "limits", None)
     return NO_LIMITS if limits is None else limits
 
 
@@ -329,7 +328,7 @@ def _resolve_org_roles(
     names: set[str] = set()
     for member in memberships:
         names |= member.qualified_roles()
-        if active is not None and member.organization == active:
+        if member.organization == active:
             names |= member.roles
     return _limits_of(request).bound("org_roles", frozenset(names))
 

@@ -4,7 +4,7 @@ on an application nobody configured.
 The defaults matter more than the flags. Somebody with a `Wreath()` app, a
 `tests/` directory and no idea this tool existed should be able to type
 `wreath mutant` and get an answer, so the sources default to whatever package
-the project ships and the tests default to what `pytest` would have collected.
+the project ships and the tests default to what `wreath test` collects.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tests", action="append", metavar="PATH", default=[],
-        help="test path passed to pytest (repeatable; default: tests/)",
+        help="test path passed to the selected engine (repeatable; default: tests/)",
     )
     parser.add_argument(
         "--operators", action="append", metavar="PREFIX", default=[],
@@ -87,6 +87,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pytest-arg", action="append", metavar="ARG", default=[],
         help="extra argument for every pytest invocation (repeatable)",
+    )
+    parser.add_argument(
+        "--test-engine",
+        choices=("pytest", "native"),
+        default="native",
+        help="execute mutant candidate tests with pytest or Wreath's strict native "
+        "engine (default: native, including the PEP 669 reachability baseline)",
     )
     parser.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT, metavar="SECONDS",
@@ -119,6 +126,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--reclaim-workers", action="store_true", help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--suite-workers", type=int, default=0, help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--limit", type=int, default=0, metavar="N",
@@ -224,6 +234,7 @@ def execute_mutant(namespace: Any) -> int:
                 budget=namespace.budget,
                 jobs=namespace.jobs,
                 reclaim_workers=namespace.reclaim_workers,
+                suite_workers=namespace.suite_workers,
                 preselected=(
                     frozenset(json.loads(Path(namespace.selection).read_text()))
                     if namespace.selection is not None
@@ -234,6 +245,7 @@ def execute_mutant(namespace: Any) -> int:
                     if namespace.activity_file is not None
                     else None
                 ),
+                test_engine=namespace.test_engine,
             )
         except ChangedUnavailable as error:
             print(f"wreath: error: --changed needs git: {error}", file=sys.stderr)

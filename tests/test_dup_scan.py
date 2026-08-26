@@ -316,6 +316,74 @@ def test_a_definition_is_found_inside_every_kind_of_block(tree: Path, block: str
     assert [site.name for site in groups[0].sites] == ["insert_settled", "replace_settled"]
 
 
+def test_nested_normalization_reuses_child_images_with_a_same_size_control(
+    tree: Path,
+) -> None:
+    """Nested bodies remain structural without being copied into every owner."""
+    count = 40
+    siblings = "\n".join(
+        f"def function_{index}(items):\n    value = list(items)\n    return value"
+        for index in range(count)
+    )
+    nested = [
+        "    " * index + f"def function_{index}(items):"
+        for index in range(count)
+    ]
+    nested.append("    " * count + "value = list(items)")
+    nested.extend(
+        "    " * (index + 1) + f"return function_{index + 1}"
+        for index in reversed(range(count - 1))
+    )
+    sibling_path = tree / "src" / "wreath" / "siblings.py"
+    chain_path = tree / "src" / "wreath" / "chain.py"
+    sibling_path.write_text(siblings, encoding="utf-8")
+    chain_path.write_text("\n".join(nested), encoding="utf-8")
+
+    sibling_bytes = sum(
+        len(body.shape)
+        for body in dup_scan._python_bodies(sibling_path, "siblings.py", 1)
+    )
+    chain_bytes = sum(
+        len(body.shape)
+        for body in dup_scan._python_bodies(chain_path, "chain.py", 1)
+    )
+
+    assert chain_bytes <= sibling_bytes * 4
+
+
+def test_nested_child_image_keeps_the_owners_structure_sensitive(tree: Path) -> None:
+    """A fixed-size child image is a reference, not an erased nested body."""
+    _write(tree, "nested_difference.py", '''
+def first(items):
+    def transform(value):
+        prepared = load(value)
+        checked = validate(prepared)
+        mapped = encode(checked)
+        stored = save(mapped)
+        audit(stored)
+        return stored
+    return transform(items)
+
+
+def second(items):
+    def transform(value):
+        prepared = load(value)
+        checked = validate(prepared)
+        mapped = [checked]
+        stored = save(mapped)
+        audit(stored)
+        return stored
+    return transform(items)
+''')
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), 1, ("python",))
+
+    assert not any(
+        {site.name for site in group.sites} == {"first", "second"}
+        for group in groups
+    )
+
+
 def test_short_bodies_are_trivia(tree: Path) -> None:
     _write(tree, "small.py", '''
 def one(a):
@@ -821,6 +889,47 @@ def test_unrelated_bodies_are_not_near(tree: Path) -> None:
     _write(tree, "unrelated.c", NOT_C_TWINS)
 
     assert dup_scan.near_clones(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES) == []
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ((), ()),
+        ((1, 2, 3), ()),
+        ((1, 2, 3), (1, 2, 3)),
+        ((1, 3, 5), (2, 3, 6)),
+        (tuple(range(64)), tuple(range(32, 96))),
+    ],
+)
+def test_similarity_merge_matches_the_set_definition(left, right) -> None:
+    """The allocation-free merge preserves the bottom-k Jaccard definition."""
+    union = sorted(set(left) | set(right))[:dup_scan._SKETCH]
+    expected = (
+        sum(value in set(left) and value in set(right) for value in union) / len(union)
+        if union
+        else 0.0
+    )
+    assert dup_scan._similarity(left, right) == expected
+
+
+def test_the_near_report_collects_and_normalises_each_source_once(
+    tree: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact grouping and near matching consume one shared body image."""
+    _write(tree, "writer.c", RENAMED_C_TWINS)
+    original = dup_scan.collect
+    calls = 0
+
+    def recording_collect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dup_scan, "repo_root", lambda: tree)
+    monkeypatch.setattr(dup_scan, "collect", recording_collect)
+
+    assert dup_scan.main(["--near", "--format", "json"]) == 0
+    assert calls == 1
 
 
 def test_it_runs_on_this_repository_and_stays_a_report(

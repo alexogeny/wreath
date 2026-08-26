@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import runpy
 from argparse import Namespace
@@ -14,8 +15,11 @@ import pytest
 
 from wreath._auth.requirements import requirement_for
 from wreath._port.cli import EXIT_WORK_REMAINS, execute
+from wreath._port.inventory import PolicyCandidate
 from wreath.authorization import EntityUid
 from wreath.port import inventory_projects
+
+inventory_module = importlib.import_module("wreath._port.inventory")
 
 
 def _project(root: Path, name: str, *, python: str = ">=3.14") -> Path:
@@ -71,6 +75,24 @@ def test_inventory_keeps_a_dynamic_route_path_explicitly_unknown(tmp_path: Path)
     route = inventory_projects([source]).projects[0].routes[0]
 
     assert route.path is None
+    assert route.owner == "router"
+
+
+def test_inventory_names_an_owner_whose_expression_cannot_be_rendered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = _project(tmp_path, "camera_trap")
+    (source / "routes.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/captures')\n"
+        "async def captures(): return []\n"
+    )
+    monkeypatch.setattr(inventory_module, "_expression", lambda _node: None)
+
+    route = inventory_module._route_contracts(source)[0]
+
+    assert route.owner == "<dynamic>"
 
 
 def test_dependency_guard_becomes_a_typed_policy_candidate(tmp_path: Path) -> None:
@@ -104,6 +126,32 @@ async def trek(
     assert candidate.as_dict()["wreath_decorator"] == (
         "authorize(action='Trek::read', resource={'type': ResourceKind.TREK})"
     )
+
+
+def test_incomplete_policy_candidates_never_offer_a_wreath_decorator() -> None:
+    missing_action = PolicyCandidate(
+        factory="guard",
+        action=None,
+        resource_type="Trek",
+        resource="{'type': ResourceKind.TREK}",
+        lookup=None,
+        condition=None,
+        conditions=(),
+        complete=False,
+    )
+    missing_resource = PolicyCandidate(
+        factory="guard",
+        action="read",
+        resource_type="Trek",
+        resource=None,
+        lookup=None,
+        condition=None,
+        conditions=(),
+        complete=True,
+    )
+
+    assert missing_action.as_dict()["wreath_decorator"] is None
+    assert missing_resource.as_dict()["wreath_decorator"] is None
 
 
 def test_inventory_generates_compiled_fail_closed_cedar(tmp_path: Path) -> None:
@@ -410,6 +458,38 @@ def test_inventory_write_and_check_are_byte_stable(tmp_path: Path) -> None:
 
     inventory.write_text("{}\n")
     assert execute(Namespace(**(base | {"check_inventory": str(inventory)}))) == EXIT_WORK_REMAINS
+
+
+@pytest.mark.parametrize(
+    ("in_place", "output"),
+    [(True, None), (False, "ported")],
+)
+def test_inventory_refuses_each_emit_mode_independently(
+    tmp_path: Path, in_place: bool, output: str | None
+) -> None:
+    source = _project(tmp_path, "llama_trek")
+    namespace = Namespace(
+        source=[str(source)],
+        inventory=True,
+        target_python="3.14",
+        migration_strategy="preserve",
+        as_json=False,
+        by_rule=False,
+        rule=None,
+        context=0,
+        in_place=in_place,
+        output=output,
+        force=False,
+        opinionated=False,
+        write_inventory=None,
+        check_inventory=None,
+        write_cedar=None,
+        cedar_semantics=None,
+        cases=None,
+    )
+
+    with pytest.raises(ValueError, match="inventory is a report"):
+        execute(namespace)
 
 
 def test_inventory_writes_an_importable_cedar_module(tmp_path: Path) -> None:

@@ -209,6 +209,111 @@ async def test_wfr1_http_replay_refuses_request_drift() -> None:
         )
 
 
+def test_http_replay_selects_only_the_named_request_id() -> None:
+    first = encode_exchange(exchange())
+    second = encode_exchange(replace(exchange(), target="/other", sequence=1))
+    recording = SimpleNamespace(
+        slabs=(
+            CaptureSlab(41, (CaptureField(
+                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                0,
+                CaptureDisposition.RAW,
+                len(first),
+                first,
+            ),)),
+            CaptureSlab(42, (CaptureField(
+                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                0,
+                CaptureDisposition.RAW,
+                len(second),
+                second,
+            ),)),
+        ),
+        image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
+    )
+
+    adapters = ReplayAdapters.from_recording(recording, request_id=42)
+
+    assert [item.target for item in adapters.clients["billing"]._replay_exchanges] == ["/other"]
+
+
+def test_http_replay_refuses_ambiguous_request_ids() -> None:
+    payload = encode_exchange(exchange())
+    field = CaptureField(
+        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+        0,
+        CaptureDisposition.RAW,
+        len(payload),
+        payload,
+    )
+    recording = SimpleNamespace(
+        slabs=(CaptureSlab(41, (field,)), CaptureSlab(42, (field,))),
+        image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
+    )
+
+    with pytest.raises(HttpReplayError, match="multiple request ids"):
+        ReplayAdapters.from_recording(recording)
+
+
+def test_http_replay_ignores_other_capture_field_classes() -> None:
+    payload = encode_exchange(exchange())
+    recording = SimpleNamespace(
+        slabs=(CaptureSlab(42, (
+            CaptureField(
+                CaptureFieldClass.REQUEST_BODY,
+                0,
+                CaptureDisposition.RAW,
+                7,
+                b"not WHX",
+            ),
+            CaptureField(
+                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                0,
+                CaptureDisposition.RAW,
+                len(payload),
+                payload,
+            ),
+        )),),
+        image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
+    )
+
+    adapters = ReplayAdapters.from_recording(recording)
+
+    assert len(adapters.clients["billing"]._replay_exchanges) == 1
+
+
+def test_http_replay_refuses_redacted_truncated_and_unknown_dependency_captures() -> None:
+    payload = encode_exchange(exchange())
+    base = CaptureField(
+        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+        0,
+        CaptureDisposition.RAW,
+        len(payload),
+        payload,
+    )
+    cases = [
+        (
+            replace(base, disposition=CaptureDisposition.HASHED),
+            "redacted",
+            (NamedMeta(3, "billing"),),
+        ),
+        (
+            replace(base, original_length=len(payload) + 1),
+            "truncated",
+            (NamedMeta(3, "billing"),),
+        ),
+        (base, "unknown client id", ()),
+    ]
+
+    for field, message, clients in cases:
+        recording = SimpleNamespace(
+            slabs=(CaptureSlab(42, (field,)),),
+            image=SimpleNamespace(clients=clients),
+        )
+        with pytest.raises(HttpReplayError, match=message):
+            ReplayAdapters.from_recording(recording)
+
+
 @pytest.mark.asyncio
 async def test_concurrent_http_exchanges_replay_in_invocation_order() -> None:
     release_first = asyncio.Event()

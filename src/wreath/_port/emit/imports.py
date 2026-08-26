@@ -45,6 +45,15 @@ class _ImportRewrite(_EmitterState):
             and id(node) not in self._rewritten
             and not self._inside_replaced(node)
         }
+        live_optional_models = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and self.imports.origin(node).split(".")[0]
+            in {"pydantic_settings", "pydantic_partial"}
+            and id(node) not in self._rewritten
+            and not self._inside_replaced(node)
+        }
         # Only the imports at the *top* of the file decide where new ones go. One
         # module that imports something halfway down the file, and following the
         # last import anywhere put `from wreath.orm import Session` below the
@@ -78,7 +87,7 @@ class _ImportRewrite(_EmitterState):
                     alias.name
                     for alias in node.names
                     if alias.name in {"BaseSettings", "SettingsConfigDict"}
-                    and (alias.asname or alias.name) not in self._retain
+                    and (alias.asname or alias.name) not in live_optional_models
                 }
                 self.buf.replace(node, self._keep_leftover(node, gone, node.module))
             elif (
@@ -90,7 +99,7 @@ class _ImportRewrite(_EmitterState):
                     alias.name
                     for alias in node.names
                     if alias.name == "PartialModelMixin"
-                    and (alias.asname or alias.name) not in self._retain
+                    and (alias.asname or alias.name) not in live_optional_models
                 }
                 self.buf.replace(node, self._keep_leftover(node, gone, node.module))
             elif (

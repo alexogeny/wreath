@@ -185,34 +185,42 @@ the fix not working rather than like a mistake in the fix, and what PostgreSQL
 reports is a `pg_namespace_nspname_index` unique violation, which reads like
 anything except a test-isolation bug.
 
-## See the suite while it runs
+## Read the suite report
 
 Once a suite is large enough, a row of dots hides the two things you usually
 want to know: *what is still running?* and *where did the time go?* `wreath test`
-runs pytest's collection, fixtures, plugins, capture, and tracebacks, but
-puts every collected test file on a stable state-map tile:
+runs the native collector and C dispatch workers by default and puts every
+collected test file on a stable state-map tile:
 
 ```bash
 wreath test
 wreath test tests/auth/ -k refresh
-wreath test --workers 1 --grid never tests/test_login.py
+wreath test --workers 1 tests/test_login.py
 ```
 
-Queued files are gray, running files blue, passing files green, skipped or mixed
-files orange, and failures red. During mutation confidence, candidate test files
-are pink while a control is running, yellow after one of their tests kills a
-mutant, and purple when a mutant survives those tests. Colour is categorical:
-it never grades duration, because a file's percentile is relative to this one
-run and is not a portable claim about that file. Distinct symbols keep the
-states readable under `NO_COLOR`. Positions are sorted by path and do not move
-while the run is in progress, so the grid becomes familiar rather than
-reshuffling itself around the latest result.
+Pytest remains available as the explicit compatibility oracle:
 
-The animation uses the terminal's alternate screen and restores the original
-screen before pytest prints its normal failure and skip summaries. In CI, when
-output is redirected, when `TERM=dumb`, or when `CI` is set, it prints one static
-snapshot instead. `--grid always` and `--grid never` override that choice;
-`NO_COLOR` keeps the outcome-specific symbols without ANSI colour.
+```bash
+wreath test --engine pytest --mutant off tests/test_plain.py
+wreath test --engine dual --mutant off tests/native-contract/
+```
+
+Native mode handles module functions, test classes, sync/async bodies,
+fixture dependency graphs and scopes, conftest fixtures, parametrization,
+capture/temporary-path/monkeypatch built-ins, skip marks, `raises`, `warns`,
+`fail`, `skip`, and `approx`. Whole modules run in isolated native workers;
+unsupported semantic hooks and pytest arguments refuse before any body runs.
+Dual mode runs each test twice and is therefore
+only for a hermetic compatibility corpus. See [the native engine
+contract](../internals/native-test-engine.md) for the exact surface and the
+evidence required before it can become the default.
+
+The runner performs no live terminal rendering. It prints one uncoloured final
+state map after testing, mutation, and fuzzing finish. Ordinary states use solid
+squares, failures and mutation misses use multiplication signs, and a file that
+passes all enabled stages uses a star. `--grid never` remains accepted as an
+explicit compatibility spelling and is also the default; the removed `auto`
+and `always` animation modes are refused rather than silently ignored.
 
 The final report includes wall time, summed test time, average, median, p95 and
 p99 duration, practical tail counts at 100 ms, 250 ms, and one second, a Tukey
@@ -265,30 +273,40 @@ Any run with passing tests can continue into Wreath's control-aware mutation
 tester:
 
 ```bash
-wreath test                                         # 192-control auto sample
+wreath test                                         # test + 192 controls + gated fuzz
 wreath test --mutant sample                         # the same 192 stable controls
+wreath test --mutant on                             # explicit spelling of auto
 wreath test --mutant-samples 48                     # a smaller sample; barely faster
 wreath test --mutant sample --mutant-samples 384   # a larger confidence sample
 wreath test --mutant changed --mutant-changed main # controls changed on this branch
 wreath test --mutant full                           # the complete sweep
+wreath test --fuzz off                              # stop after mutation confidence
+wreath test --mutant on --fuzz on                  # explicit spelling of the default pipeline
+wreath fuzz                                        # shorthand for that full pipeline
 ```
 
 The sample is ranked by a stable hash across the whole eligible corpus. It is
 not `wreath mutant --limit`, which takes the first controls in source order and
 therefore spends a small budget at file heads. The final line gives an
-actionable, colour-coded rating -- `SAMPLE WATCHED`, `REVIEW ASSERTIONS`, `ADD
+actionable rating -- `SAMPLE WATCHED`, `REVIEW ASSERTIONS`, `ADD
 COVERAGE`, or `FINISH THE SAMPLE` -- while keeping `killed`, `survived`,
 `unreached`, and undecided controls separate. It does not average distinct
 findings into a percentage. During this phase candidate test files turn pink;
-a file turns yellow only after one of its tests kills the mutant, while a
-survivor leaves its candidate files purple. A JSON test report gains the
+a file moves to purple `Mutant pass` after one of its tests kills the mutant,
+while files without a kill finish as pink crosses in `Mutation miss`. The
+summary names exactly how many files lack mutation evidence, and a terminal
+mutation-enabled grid contains no green block. A JSON test report gains the
 complete `mutation` document, its structured rating, and
 `verified_test_files` and `failed_mutation_test_files` for that same evidence.
+The latter records candidate exposure to survivor evidence, but does not erase
+an exact kill that the file supplied for another control. The visible cross
+means the file did not earn positive mutation evidence, not that an individual
+assertion failed.
 
 Mutation uses only tests that passed in the ordinary run as eligible killers.
 That keeps the evidence honest without throwing away the rest of a large run:
-red files stay red, while green candidate files can turn pink and then yellow
-or purple.
+red files stay red, while green candidate files can move through the mutation
+rows without obscuring their ordinary outcome.
 Baseline-failing tests are excluded and named in JSON, the rating says that its
 evidence is limited to green tests, and the command still exits with pytest's
 failure status. If no test passed, Wreath prints `not measured` instead of
@@ -300,18 +318,24 @@ xdist workers are still busy. It does not redundantly collect the whole suite:
 each fork imports only the completed green candidate it is handed.
 As soon as a watched test completes green, one of those children may probe its
 control while unrelated ordinary tests are still running. An early kill is
-conclusive and awards the gold tile immediately. An early pass is only
-speculative: Wreath clears the purple tile and retries that mutant after the
-ordinary run atomically seals the complete green baseline. Up to three forked
-mutant children run together by default, including for any sealed-baseline work
-left at the tail. The fresh parent also avoids Python 3.14's unsafe shape of
-forking the controller after xdist has run.
+conclusive and awards gold immediately. An early pass is only speculative:
+Wreath clears it and retries that mutant after the ordinary run atomically
+seals the complete green baseline. The full semantic-test pool starts alone.
+Once ten percent of the visible per-file blocks complete, one test worker yields
+between cases and the first mutator starts. Live mutation and fuzz share a
+three-slot background envelope: mutation alone may grow to three workers, while
+automatic fuzz reserves one of those slots and leaves two mutators. Five test
+workers remain through the slow tail. Mutation inherits all eight measured
+slots only after baseline seal.
+The fresh parent also avoids Python 3.14's unsafe shape of forking the
+controller after xdist has run.
 
 Use `--mutant-path`, `--mutant-tests`, `--mutant-operator`, and
 `--mutant-only` to scope it; `--mutant-timeout`, `--mutant-max-candidates`, and
-`--mutant-pytest-arg` control execution. `--mutant-workers auto` is capped at
-three; choose `1` for a constrained machine or a larger explicit value only
-after measuring that machine. `--mutant-maxfail 1` is the default:
+`--mutant-pytest-arg` control execution. `--mutant-workers auto` uses that
+measured progressive split; choose `1` for a constrained machine or a larger
+explicit value only after measuring that machine. `--mutant-maxfail 1` is the
+default:
 the first baseline-passing test that objects decides `killed`, so running more
 candidate tests would add names without changing confidence. Set zero only when
 you want every killer in JSON. Live probes may use the whole ordinary test
@@ -322,11 +346,36 @@ undecided, prints `FINISH THE SAMPLE`, and does not fail a green pipeline;
 increase it when you are ready to finish the answer. The JSON `live` object
 records how many probes started and completed, how many were cancelled at the
 seal, and when the first one started relative to mutation preparation.
+The default native mutation engine records PEP 669 reachability during the
+ordinary native run, compiles only candidate-bearing test files once, and lets
+every forked mutant child use the inherited indexed C dispatcher. Candidate
+completion is signalled by pidfd and returned through a pipe on the default
+first-killer path, without polling or a result file per mutant. It refuses unsupported
+candidate files instead of falling back. Use `--mutant-engine pytest` only as
+the explicit oracle.
 `--mutant-fail-on-survivor` turns a cleared
 scope into a gate and treats both survived and unreached as findings. `--mutant
 off` disables the default sample; `changed` and `full` deliberately take their
 own instrumented baseline because their much larger watch set was explicitly
 asked for.
+
+Fuzzing is gated by mutation evidence but no longer waits for the whole mutation
+phase. Once mutation-gold files reach five percent of the files that have passed
+so far, the native controller yields one background slot to a fresh `-m ''`
+pass over each gold file's exact killing tests and any explicitly marked fuzz
+cases. That is the minimum evidence-bearing surface: every gold file advances,
+without paying to rerun thousands of unrelated tests. Five test workers continue
+alongside two mutators and that fuzz worker. A live fuzz batch that finishes
+before seal is reused; an unfinished one is stopped rather than carrying a
+one-worker serial tail forward. The final gold set is dispatched across the
+full native worker pool after sealed mutation. Positive kill evidence advances
+a file even when another control survives against it. `--fuzz auto` enables this whenever mutation is enabled and is the default;
+`--fuzz off` stops after mutation, while explicit `--mutant off --fuzz on` is
+refused because there is no evidence on which to base selection. `wreath fuzz`
+forces the same test, mutation, and gated-fuzz pipeline. The main JSON report
+gains a `fuzz` document with selected, passed, failed, batch, and live-start
+evidence. Every mutation-gold file therefore finishes as a cyan star or a navy
+fuzz-failure cross rather than remaining as a purple square.
 
 The selected-control catalog is cached with timing history. Its key includes
 source paths, nanosecond mtimes, sizes, sample size, and filters; changing source
@@ -342,9 +391,9 @@ runs on the six-core reference machine. Wreath's broader check task retains its
 separately measured six-worker cap. `--workers 1` gives the serial process you
 want for a debugger. If you pass pytest's own `-n`, it wins.
 
-Pytest remains the execution engine deliberately. Reimplementing its fixture and
-plugin model would create a second test dialect; the native opportunities are in
-scheduling, worker transport, and rendering, and Wreath will move those only
-after measurements show that they dominate a real run.
+Pytest remains the explicit compatibility oracle and debugger target. The
+routine engine is Wreath's native collector, fixture runtime, isolated workers,
+and C vectorcall dispatcher; unsupported pytest semantics refuse at collection
+instead of silently changing engines.
 
 **Reference:** [`wreath.testing`](../reference/testing.md).

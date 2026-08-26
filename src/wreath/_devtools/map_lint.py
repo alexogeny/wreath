@@ -693,9 +693,8 @@ def _budget_sites(root: Path) -> list[tuple[str, int, str]]:
             if isinstance(node, ast.ImportFrom) and node.module:
                 if node.module.rsplit(".", 1)[-1] in BUDGET_SOURCES:
                     for alias in node.names:
-                        name = alias.asname or alias.name
-                        if name in BUDGETED:
-                            bound.add(name)
+                        if alias.name in BUDGETED:
+                            bound.add(alias.asname or alias.name)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)

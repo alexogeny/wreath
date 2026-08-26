@@ -869,7 +869,7 @@ def _retention_purge_pass(
     stamp: at `chunk=1` the walk visited three of them and silently left the
     other three in the table forever.
     """
-    from .passes import ChunkedPass, DutyCycle, Key, Purge, Rows, Sealed, Table
+    from .passes import ChunkedPass, Key, Purge, Rows, Sealed, Table
 
     if not key:
         raise ValueError("a retention purge needs at least one primary-key column")
@@ -891,7 +891,7 @@ def _retention_purge_pass(
         ),
         frontier=Sealed(),
         work=Purge(where=where),
-        pace=pace if pace is not None else DutyCycle(),
+        pace=pace,
         # Stated rather than inherited. `halt` is the right default for a pass
         # with something irreversible at the end of it, because nothing should
         # be skipped by omission -- but a retention purge has no terminal step,

@@ -11,6 +11,8 @@ import pytest
 
 from wreath import Wreath
 from wreath._auth.cedar import _request_now
+from wreath._auth.models import AuthorizationDecision
+from wreath._auth.principal import Narrowing
 from wreath._auth.requirements import PolicyRequirement
 from wreath._native import _core
 from wreath.auth import BearerTokenBackend, Identity
@@ -32,6 +34,18 @@ READ = EntityUid("Action", "read")
 DOC = EntityUid("Document", "42")
 
 
+def _request_for(identity: Identity | None) -> Request:
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/documents", "headers": []},
+        receive,
+    )
+    request._set_identity(identity)
+    return request
+
+
 def decide(source: str, *, principal=ALICE, action=READ, resource=DOC, context=None, entities=()):
     return CedarPolicies(source, entities=entities).is_authorized(
         principal=principal, action=action, resource=resource, context=context
@@ -44,6 +58,150 @@ def decide(source: str, *, principal=ALICE, action=READ, resource=DOC, context=N
 def test_a_policy_set_parses_once_and_reports_its_size() -> None:
     policies = CedarPolicies("permit(principal, action, resource);")
     assert len(policies) == 1
+
+
+@pytest.mark.parametrize("reference", ["missing", "::alice", "User::", "::"])
+def test_entity_reference_requires_both_type_and_id(reference: str) -> None:
+    with pytest.raises(CedarParseError, match='expected Type::"id"'):
+        EntityUid.parse(reference)
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ('allow(principal, action, resource);', "expected 'permit' or 'forbid'"),
+        ('permit(resource, action, resource);', "expected 'principal'"),
+        ('permit(principal action, resource);', "expected ','"),
+        ('permit(principal, action, resource)', "found 'eof'"),
+        ('permit(principal, action, resource) when { context.x.nope() };', "unknown method .nope"),
+        ('permit(principal, action, resource) when { ip("127.0.0.1") };', "extension function ip"),
+        (
+            'permit(principal, action, resource) when { datetime("x") };',
+            "extension function datetime",
+        ),
+        ('permit(principal, action, resource) when { mystery };', "unknown identifier 'mystery'"),
+    ],
+)
+def test_parser_refusals_name_the_failed_grammar_rule(source: str, message: str) -> None:
+    with pytest.raises(CedarParseError, match=message):
+        CedarPolicies(source)
+
+
+def test_parser_refusal_names_the_actual_token_value() -> None:
+    with pytest.raises(CedarParseError, match="expected ',', found 'action'"):
+        CedarPolicies("permit(principal action, resource);")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        r'permit(principal, action, resource) when { "\u" == "u" };',
+        r'permit(principal, action, resource) when { "\q{" == "q" };',
+        'permit(principal, action, resource) when { "trailing\\',
+    ],
+)
+def test_malformed_string_escapes_are_refused(source: str) -> None:
+    with pytest.raises(CedarParseError, match="string|escape"):
+        CedarPolicies(source)
+
+
+@pytest.mark.parametrize("scope", ["principal", "resource"])
+def test_only_action_scope_accepts_a_set(scope: str) -> None:
+    source = f'permit({scope} in [User::"a"], action, resource);'
+    if scope == "resource":
+        source = 'permit(principal, action, resource in [Doc::"a"]);'
+
+    with pytest.raises(CedarParseError):
+        CedarPolicies(source)
+
+
+def test_not_equal_is_not_equal_rather_than_equal() -> None:
+    source = "permit(principal, action, resource) when { context.n != 1 };"
+
+    assert decide(source, context={"n": 2}).allowed is True
+    assert decide(source, context={"n": 1}).allowed is False
+
+
+def test_empty_sets_and_each_record_key_form_parse() -> None:
+    source = (
+        'permit(principal, action, resource) when { [] == [] '
+        '&& {plain: 1, "quoted-key": 2, true: 3} '
+        '== {plain: 1, "quoted-key": 2, true: 3} };'
+    )
+
+    assert decide(source).allowed is True
+
+
+def test_empty_record_parses_as_a_value() -> None:
+    assert decide("permit(principal, action, resource) when { {} == {} };").allowed
+
+
+def test_record_keys_refuse_expression_tokens() -> None:
+    with pytest.raises(CedarParseError, match="expected a record key"):
+        CedarPolicies("permit(principal, action, resource) when { {1: 2} == {} };")
+
+
+def test_quoted_record_keys_are_unescaped() -> None:
+    source = (
+        r'permit(principal, action, resource) when { {"line\nkey": 1} '
+        r'== {"line\u{a}key": 1} };'
+    )
+
+    assert decide(source).allowed is True
+
+
+def test_escaped_star_is_unescaped_in_has_and_record_keys() -> None:
+    has_star = 'permit(principal, action, resource) when { resource has "\\*" };'
+    entity = CedarEntity(DOC, attrs={"*": True})
+    assert decide(has_star, entities=(entity,)).allowed
+
+    records = (
+        'permit(principal, action, resource) when { {"\\*": 1} == {"*": 1} };'
+    )
+    assert decide(records).allowed
+
+
+def test_identifier_attribute_and_record_keys_avoid_string_unescaping(
+    monkeypatch,
+) -> None:
+    import wreath._auth.cedar_engine as module
+
+    def unexpected(value: str) -> str:
+        raise AssertionError("an identifier entered string-unescape handling")
+
+    monkeypatch.setattr(module, "_unescape_star", unexpected)
+    source = (
+        "permit(principal, action, resource) "
+        "when { resource has owner && {plain: 1}.plain == 1 };"
+    )
+    entity = CedarEntity(DOC, attrs={"owner": ALICE})
+
+    assert decide(source, entities=(entity,)).allowed
+
+
+def test_has_requires_an_identifier_or_string_attribute_name() -> None:
+    with pytest.raises(CedarParseError, match="expected an attribute name"):
+        CedarPolicies("permit(principal, action, resource) when { resource has 1 };")
+
+
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("ip", "unknown identifier 'ip'"),
+        ("mystery()", "unknown identifier 'mystery'"),
+    ],
+)
+def test_extension_refusal_requires_both_a_known_name_and_a_call(
+    expression: str, message: str
+) -> None:
+    source = f"permit(principal, action, resource) when {{ {expression} }};"
+    with pytest.raises(CedarParseError, match=message):
+        CedarPolicies(source)
+
+
+def test_empty_policy_source_has_a_specific_refusal() -> None:
+    with pytest.raises(CedarParseError, match="non-empty Cedar text"):
+        CedarPolicies("   \n")
 
 
 def test_route_fast_path_is_compiled_only_for_native_data_mappers() -> None:
@@ -209,6 +367,99 @@ def test_schema_action_groups_feed_the_native_hierarchy() -> None:
     ).allowed
 
 
+def test_schema_action_entities_cannot_be_overridden() -> None:
+    with pytest.raises(CedarParseError, match="cannot be overridden"):
+        CedarPolicies(
+            'permit(principal, action == Action::"read", resource);',
+            schema=_SCHEMA,
+            entities=(CedarEntity(EntityUid("Action", "read")),),
+        )
+
+
+def test_schema_allows_unrelated_declared_entities() -> None:
+    engine = CedarPolicies(
+        'permit(principal, action == Action::"read", resource);',
+        schema=_SCHEMA,
+        entities=(CedarEntity(EntityUid("User", "alice")),),
+    )
+
+    assert len(engine) == 1
+
+
+def test_only_undefined_static_parents_enter_the_dangling_inventory() -> None:
+    known = EntityUid("Group", "known")
+    missing = EntityUid("Group", "missing")
+    engine = CedarPolicies(
+        "permit(principal, action, resource);",
+        entities=(
+            CedarEntity(known),
+            CedarEntity(EntityUid("User", "alice"), parents=(known, missing)),
+        ),
+    )
+
+    assert engine._dangling == frozenset({("Group", "missing")})
+
+
+def test_schema_validation_is_a_noop_without_a_schema() -> None:
+    engine = CedarPolicies("permit(principal, action, resource);")
+
+    assert engine._validate_schema() == ()
+
+
+def test_schema_requires_action_uids_in_action_scope() -> None:
+    with pytest.raises(CedarParseError, match="use an Action"):
+        CedarPolicies(
+            'permit(principal, action == Document::"read", resource);',
+            schema=_SCHEMA,
+        )
+
+
+def test_exact_action_scope_does_not_include_group_descendants() -> None:
+    exact = CedarPolicies(
+        'permit(principal, action == Action::"document", resource);', schema=_SCHEMA
+    )
+    grouped = CedarPolicies(
+        'permit(principal, action in Action::"document", resource);', schema=_SCHEMA
+    )
+
+    assert exact.is_authorized(principal=ALICE, action=READ, resource=DOC).allowed is False
+    assert grouped.is_authorized(principal=ALICE, action=READ, resource=DOC).allowed is True
+
+
+def test_schema_context_validation_distinguishes_exact_from_group_scope() -> None:
+    expression = 'when { context.seat.status == "active" };'
+
+    with pytest.raises(CedarParseError, match="context.seat"):
+        CedarPolicies(
+            f'permit(principal, action == Action::"document", resource) {expression}',
+            schema=_SCHEMA,
+        )
+    CedarPolicies(
+        f'permit(principal, action in Action::"document", resource) {expression}',
+        schema=_SCHEMA,
+    )
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ('context.flags.contains("x")', frozenset({"x"})),
+        ('context.flags.containsAny(["x", "y"])', frozenset({"x", "y"})),
+        ('context.flags.isEmpty()', None),
+        ('context.flags == context.flags', None),
+        ('context.regions.contains("x")', frozenset()),
+    ],
+)
+def test_referenced_flag_inventory_recognizes_only_literal_naming_methods(
+    expression: str, expected: frozenset[str] | None
+) -> None:
+    engine = CedarPolicies(
+        f"permit(principal, action, resource) when {{ {expression} }};"
+    )
+
+    assert engine.referenced_flags() == expected
+
+
 def test_schema_rejects_an_unknown_action_at_construction() -> None:
     with pytest.raises(CedarParseError, match="unknown action 'raed'"):
         CedarPolicies(
@@ -329,6 +580,346 @@ async def test_authorizer_native_batch_uses_the_native_engine_entrypoint() -> No
     )
 
     assert result is sentinel
+
+
+@pytest.mark.asyncio
+async def test_authorizer_batch_empty_and_anonymous_boundaries() -> None:
+    class Engine:
+        def is_authorized(self, **arguments: object) -> bool:
+            raise AssertionError("an empty or anonymous batch reached the engine")
+
+    def unexpected_principal(identity: Identity) -> object:
+        raise AssertionError("an empty batch resolved its principal")
+
+    authorizer = CedarAuthorizer(engine=Engine(), principal=unexpected_principal)
+    assert await authorizer._authorize_resources(
+        _request_for(Identity("alice")), "read", (), stop_on_denied=False
+    ) == ()
+
+    denied = await authorizer._authorize_resources(
+        _request_for(None), "read", (DOC, EntityUid("Document", "43")),
+        stop_on_denied=False,
+    )
+    assert tuple((item.allowed, item.reason) for item in denied) == (
+        (False, "anonymous"),
+        (False, "anonymous"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_authorizer_batch_applies_delegation_scope_per_resource() -> None:
+    class Engine:
+        def _is_authorized_many(self, **arguments: object) -> object:
+            raise AssertionError("a delegated batch bypassed scalar scope checks")
+
+        def is_authorized(self, **arguments: object) -> bool:
+            return True
+
+    identity = Identity(
+        "alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"}))
+    )
+    decisions = await CedarAuthorizer(engine=Engine())._authorize_resources(
+        _request_for(identity), "read", (DOC,), stop_on_denied=False
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].allowed is False
+    assert decisions[0].reason == "delegation scope does not cover this action"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["mapper", "entities", "entity"])
+async def test_batch_fast_path_requires_plain_resource_data(variant: str) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Engine:
+        def _is_authorized_many(self, **arguments: object) -> object:
+            raise AssertionError("the batch fast path accepted configurable resource data")
+
+        def is_authorized(self, **arguments: object) -> bool:
+            calls.append(arguments)
+            return True
+
+    options: dict[str, Any] = {}
+    resources: tuple[object, ...] = (DOC,)
+    if variant == "mapper":
+        options["resource"] = lambda resource, request: EntityUid("Mapped", resource.id)
+    elif variant == "entities":
+        options["resource_entities"] = lambda resource, request: ()
+    else:
+        resources = (CedarEntity(DOC, attrs={"classified": True}),)
+
+    decisions = await CedarAuthorizer(engine=Engine(), **options)._authorize_resources(
+        _request_for(Identity("alice")),
+        "read",
+        resources,
+        stop_on_denied=False,
+    )
+
+    assert len(decisions) == 1 and decisions[0].allowed is True
+    assert len(calls) == 1
+    if variant == "entity":
+        assert tuple(calls[0]["entities"])[-1].attrs == {"classified": True}
+
+
+@pytest.mark.asyncio
+async def test_non_native_batch_does_not_call_the_native_entrypoint() -> None:
+    class Engine:
+        def _is_authorized_many_native(self, **arguments: object) -> object:
+            raise AssertionError("native batch authorization ran without a native request")
+
+        def _is_authorized_many(self, **arguments: object) -> tuple[bool, ...]:
+            return (True,)
+
+        def is_authorized(self, **arguments: object) -> bool:
+            raise AssertionError("scalar authorization ran")
+
+    decisions = await CedarAuthorizer(engine=Engine())._authorize_resources(
+        _request_for(Identity("alice")), "read", (DOC,), stop_on_denied=False
+    )
+
+    assert len(decisions) == 1 and decisions[0].allowed is True
+
+
+@pytest.mark.asyncio
+async def test_noncallable_native_batch_falls_through_to_materialized_batch() -> None:
+    class Engine:
+        _is_authorized_many_native = object()
+
+        def _is_authorized_many(self, **arguments: object) -> tuple[bool, ...]:
+            return (True,)
+
+        def is_authorized(self, **arguments: object) -> bool:
+            raise AssertionError("scalar authorization ran")
+
+    decisions = await CedarAuthorizer(engine=Engine())._authorize_resources(
+        _request_for(Identity("alice")),
+        "read",
+        (DOC,),
+        stop_on_denied=False,
+        native=True,
+    )
+
+    assert len(decisions) == 1 and decisions[0].allowed is True
+
+
+def test_route_denial_layers_request_entities_and_accepts_absent_context() -> None:
+    engine = CedarPolicies(
+        "permit(principal, action, resource) when { resource.owner == principal };"
+    )
+    owner = CedarEntity(DOC, attrs={"owner": ALICE})
+
+    denied = engine._route_denial(
+        principal=ALICE, action=READ, resource=DOC, context=None, entities=None
+    )
+    allowed = engine._route_denial(
+        principal=ALICE, action=READ, resource=DOC, context=None, entities=(owner,)
+    )
+
+    assert denied == "no permit policy matched"
+    assert allowed is None
+
+
+def test_materialized_batch_layers_request_entities() -> None:
+    engine = CedarPolicies(
+        "permit(principal, action, resource) when { resource.owner == principal };"
+    )
+    owner = CedarEntity(DOC, attrs={"owner": ALICE})
+
+    denied = engine._is_authorized_many(
+        principal=ALICE,
+        action=READ,
+        resources=(DOC,),
+        context=None,
+        entities=None,
+        stop_on_denied=False,
+    )
+    allowed = engine._is_authorized_many(
+        principal=ALICE,
+        action=READ,
+        resources=(DOC,),
+        context=None,
+        entities=(owner,),
+        stop_on_denied=False,
+    )
+
+    assert denied[0].allowed is False
+    assert allowed[0].allowed is True
+
+
+def test_native_batch_receives_layered_entities_and_empty_context(monkeypatch) -> None:
+    import wreath._auth.cedar_engine as module
+
+    seen: list[tuple[object, object]] = []
+
+    def observed(
+        policies: object,
+        principal: object,
+        action: object,
+        resources: object,
+        context: object,
+        store: object,
+        stop_on_denied: bool,
+    ) -> object:
+        seen.append((context, store))
+        return object()
+
+    monkeypatch.setattr(module._core, "cedar_is_authorized_many_native", observed)
+    engine = CedarPolicies("permit(principal, action, resource);")
+    owner = CedarEntity(DOC, attrs={"owner": ALICE})
+
+    engine._is_authorized_many_native(
+        principal=ALICE,
+        action=READ,
+        resources=(DOC,),
+        context={"tenant": "acme"},
+        entities=(owner,),
+        stop_on_denied=False,
+    )
+
+    assert seen[0][0] == {"tenant": "acme"}
+    assert seen[0][1][("Document", "42")][0] == {"owner": ("User", "alice")}
+
+
+@pytest.mark.parametrize("operation", ["route", "batch", "native"])
+def test_absent_request_entities_skip_entity_conversion(
+    operation: str, monkeypatch
+) -> None:
+    import wreath._auth.cedar_engine as module
+
+    engine = CedarPolicies("permit(principal, action, resource);")
+
+    def unexpected(value: object) -> object:
+        raise AssertionError("None entered request-entity conversion")
+
+    monkeypatch.setattr(module, "_as_entities", unexpected)
+    if operation == "route":
+        assert engine._route_denial(
+            principal=ALICE, action=READ, resource=DOC, context=None, entities=None
+        ) is None
+    elif operation == "batch":
+        assert engine._is_authorized_many(
+            principal=ALICE,
+            action=READ,
+            resources=(DOC,),
+            context=None,
+            entities=None,
+            stop_on_denied=False,
+        )[0].allowed
+    else:
+        engine._is_authorized_many_native(
+            principal=ALICE,
+            action=READ,
+            resources=(DOC,),
+            context=None,
+            entities=None,
+            stop_on_denied=False,
+        )
+
+
+class _RouteBoundaryEngine:
+    def _route_denial(self, **arguments: object) -> None:
+        return None
+
+    def is_authorized(self, **arguments: object) -> AuthorizationDecision:
+        return AuthorizationDecision(False, "materialized")
+
+
+@pytest.mark.asyncio
+async def test_route_fast_path_refuses_anonymous_and_delegated_callers() -> None:
+    authorizer = CedarAuthorizer(engine=_RouteBoundaryEngine())
+    requirement = PolicyRequirement("read", DOC)
+
+    assert await authorizer._authorize_route(_request_for(None), requirement) == "anonymous"
+    delegated = Identity(
+        "alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"}))
+    )
+    assert (
+        await authorizer._authorize_route(_request_for(delegated), requirement)
+        == "delegation scope does not cover this action"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resource",
+    [CedarEntity(DOC, attrs={"classified": True}), "42"],
+)
+async def test_route_fast_path_materializes_non_native_resource_shapes(
+    resource: object,
+) -> None:
+    authorizer = CedarAuthorizer(engine=_RouteBoundaryEngine())
+
+    denial = await authorizer._authorize_route(
+        _request_for(Identity("alice")), PolicyRequirement("read", resource)
+    )
+
+    assert denial == "materialized"
+
+
+@pytest.mark.asyncio
+async def test_typed_string_resource_stays_on_the_route_fast_path() -> None:
+    calls = 0
+
+    class Engine(_RouteBoundaryEngine):
+        def _route_denial(self, **arguments: object) -> None:
+            nonlocal calls
+            calls += 1
+
+        def is_authorized(self, **arguments: object) -> AuthorizationDecision:
+            raise AssertionError("a typed static resource was materialized")
+
+    denial = await CedarAuthorizer(engine=Engine())._authorize_route(
+        _request_for(Identity("alice")),
+        PolicyRequirement("read", 'Document::"42"'),
+    )
+
+    assert denial is None
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "expected"),
+    [
+        (AuthorizationDecision(False), "Forbidden"),
+        (AuthorizationDecision(False, "policy said no"), "policy said no"),
+    ],
+)
+async def test_route_fallback_preserves_a_reason_or_supplies_one(
+    decision: AuthorizationDecision, expected: str
+) -> None:
+    class Engine:
+        def is_authorized(self, **arguments: object) -> AuthorizationDecision:
+            return decision
+
+    authorizer = CedarAuthorizer(engine=Engine())
+
+    assert (
+        await authorizer._authorize_route(
+            _request_for(Identity("alice")), PolicyRequirement("read", DOC)
+        )
+        == expected
+    )
+
+
+def test_route_requirement_compilation_covers_each_resource_shape() -> None:
+    native = CedarAuthorizer(
+        engine=CedarPolicies("permit(principal, action, resource);")
+    )
+    typed = PolicyRequirement("read", 'Document::"42"')
+    identifier = PolicyRequirement("read", "document_id")
+    entity = PolicyRequirement("read", DOC)
+
+    assert native._compile_route_requirement(typed).resource == DOC
+    assert native._compile_route_requirement(identifier) is identifier
+    assert native._compile_route_requirement(entity) is entity
+    with pytest.raises(TypeError, match="Cedar route resource must be"):
+        native._compile_route_requirement(PolicyRequirement("read", 42))
+
+    opaque = CedarAuthorizer(engine=_RouteBoundaryEngine(), resource=lambda value, request: value)
+    invalid = PolicyRequirement("read", object())
+    assert opaque._compile_route_requirement(invalid) is invalid
 
 
 def test_action_context_inventory_excludes_entity_attributes() -> None:

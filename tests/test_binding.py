@@ -6,6 +6,7 @@ import dataclasses
 import datetime as _dt
 import enum
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
@@ -314,6 +315,22 @@ async def test_body_dataclass_binding() -> None:
     status, _ = await call(app, scope_for("/items", "POST"), body=payload)
     assert status == 200
     assert seen == [Item(name="gear", price=3.0, tags=["metal"])]
+
+
+@pytest.mark.asyncio
+async def test_path_and_body_binding_use_the_full_binder() -> None:
+    """A compiled path plan must not bypass a body parameter."""
+    app = Wreath()
+
+    @app.post("/items/{item_id}")
+    async def update(request: Any, item_id: int, item: Item) -> Any:
+        return {"id": item_id, "name": item.name}
+
+    payload = json.dumps({"name": "gear", "price": 3}).encode()
+    status, body = await call(app, scope_for("/items/42", "POST"), body=payload)
+
+    assert status == 200
+    assert json.loads(body) == {"id": 42, "name": "gear"}
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1048,14 @@ def test_a_union_without_none_does_not_accept_none() -> None:
     assert caught.value.errors[0]["type"] == "union"
 
 
+def test_literal_matching_keeps_bool_distinct_from_int() -> None:
+    """Literal equality includes the value's exact type, as typing specifies."""
+    assert validate(Literal[1], 1) == 1
+    with pytest.raises(ValidationError) as caught:
+        validate(Literal[1], True)
+    assert caught.value.errors[0]["type"] == "literal"
+
+
 def test_a_non_array_is_refused_as_an_array_rather_than_iterated() -> None:
     """The `list` guard, and the reason the error *type* is what to assert.
 
@@ -1515,6 +1540,123 @@ def test_native_plan_falls_back_for_shapes_it_cannot_represent(
 
     with pytest.raises(_PlanUnsupported):
         _compile_plan(annotation, frozenset())
+
+
+def test_native_plan_does_not_compile_an_unknown_generic_as_a_dictionary() -> None:
+    from wreath.binding import _OP_UNSUPPORTED, _compile_plan
+
+    plan = _compile_plan(Sequence[int], frozenset())
+
+    assert plan[0] == _OP_UNSUPPORTED
+    assert "unsupported annotation" in plan[1]
+
+
+@pytest.mark.asyncio
+async def test_uncached_nested_dependency_does_not_seed_a_later_cached_read() -> None:
+    calls: list[int] = []
+
+    def leaf(request: Any) -> int:
+        calls.append(len(calls) + 1)
+        return calls[-1]
+
+    def outer(request: Any, value: int = Depends(leaf, use_cache=False)) -> int:
+        return value
+
+    async def handler(
+        request: Any,
+        nested: int = Depends(outer),
+        direct: int = Depends(leaf),
+    ) -> tuple[int, int]:
+        return nested, direct
+
+    bound = compile_binder(handler, "/")
+
+    assert await bound(_query_request(b"")) == (1, 2)
+    assert calls == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_cached_nested_dependency_seeds_a_later_direct_read() -> None:
+    calls: list[int] = []
+
+    def leaf(request: Any) -> int:
+        calls.append(len(calls) + 1)
+        return calls[-1]
+
+    def outer(request: Any, value: int = Depends(leaf)) -> int:
+        return value
+
+    async def handler(
+        request: Any,
+        nested: int = Depends(outer),
+        direct: int = Depends(leaf),
+    ) -> tuple[int, int]:
+        return nested, direct
+
+    bound = compile_binder(handler, "/")
+
+    assert await bound(_query_request(b"")) == (1, 1)
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_uncached_route_dependency_runs_after_a_cached_copy() -> None:
+    calls: list[int] = []
+
+    def audit(request: Any) -> None:
+        calls.append(len(calls) + 1)
+
+    async def handler(request: Any) -> None:
+        return None
+
+    bound = compile_binder(
+        handler,
+        "/",
+        dependencies=(Depends(audit), Depends(audit, use_cache=False)),
+    )
+
+    await bound(_query_request(b""))
+    assert calls == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_uncached_handler_dependency_does_not_seed_a_cached_copy() -> None:
+    calls: list[int] = []
+
+    def leaf(request: Any) -> int:
+        calls.append(len(calls) + 1)
+        return calls[-1]
+
+    async def handler(
+        request: Any,
+        first: int = Depends(leaf, use_cache=False),
+        second: int = Depends(leaf),
+    ) -> tuple[int, int]:
+        return first, second
+
+    bound = compile_binder(handler, "/")
+
+    assert await bound(_query_request(b"")) == (1, 2)
+    assert calls == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_python_query_fallback_accumulates_multiple_missing_values() -> None:
+    async def handler(
+        request: Any,
+        first: Annotated[Literal["a"], Query()],
+        second: Annotated[Literal["b"], Query()],
+    ) -> None:
+        return None
+
+    bound = compile_binder(handler, "/")
+
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(b""))
+    assert [error["loc"] for error in caught.value.errors] == [
+        ["query", "first"],
+        ["query", "second"],
+    ]
 
 
 def test_native_plan_represents_field_constraints_and_wire_aliases() -> None:

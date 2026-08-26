@@ -4,6 +4,7 @@ constraints they declare, and what type each primary key is."""
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from pathlib import Path
 
 from .imports import _Imports
@@ -40,7 +41,11 @@ def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
     return out
 
 
-def tree_pk_types(files: list[Path], on_skip=None) -> dict[str, str]:
+def tree_pk_types(
+    files: list[Path],
+    on_skip=None,
+    trees: Mapping[Path, ast.Module] | None = None,
+) -> dict[str, str]:
     """{ORM model name -> primary key type} across every file in the tree.
 
     A foreign key names a model, and that model almost never lives in the same
@@ -56,12 +61,17 @@ def tree_pk_types(files: list[Path], on_skip=None) -> dict[str, str]:
     out: dict[str, str] = {}
     ambiguous: set[str] = set()
     for path in files:
-        try:
-            tree = _parse_file(path)
-        except _SKIPPABLE as exc:
-            if on_skip is not None:
-                on_skip(path, exc)
-            continue
+        if trees is not None:
+            tree = trees.get(path)
+            if tree is None:
+                continue
+        else:
+            try:
+                tree = _parse_file(path)
+            except _SKIPPABLE as exc:
+                if on_skip is not None:
+                    on_skip(path, exc)
+                continue
         for name, pg in module_pk_types(tree, _Imports().visit(tree)).items():
             if out.setdefault(name, pg) != pg:
                 ambiguous.add(name)
@@ -126,7 +136,9 @@ def _class_base_names(node: ast.ClassDef) -> list[str]:
 
 
 def _index_tree(
-    files: list[Path], on_skip=None
+    files: list[Path],
+    on_skip=None,
+    trees: Mapping[Path, ast.Module] | None = None,
 ) -> tuple[
     dict[str, set[str]],
     dict[str, set[str]],
@@ -165,12 +177,17 @@ def _index_tree(
     class_members: dict[str, set[str]] = {}
     classes: list[tuple[ast.ClassDef, _Imports]] = []
     for path in files:
-        try:
-            tree = _parse_file(path)
-        except _SKIPPABLE as exc:
-            if on_skip is not None:
-                on_skip(path, exc)
-            continue
+        if trees is not None:
+            tree = trees.get(path)
+            if tree is None:
+                continue
+        else:
+            try:
+                tree = _parse_file(path)
+            except _SKIPPABLE as exc:
+                if on_skip is not None:
+                    on_skip(path, exc)
+                continue
         imports = _Imports().visit(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and node.args:

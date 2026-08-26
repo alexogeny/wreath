@@ -7,12 +7,11 @@ import re
 from .native_lint import (
     Finding,
     Rule,
-    _enclosing_function,
+    _source_tape,
     _waivers,
     iter_sources,
     lint_entrypoint,
     repo_root,
-    strip_c,
     waiver_pattern,
 )
 
@@ -100,7 +99,9 @@ def _returns_pyobject(code_lines: list[str], index: int, function: str) -> bool:
     return False
 
 
-def _function_contexts(code_lines: list[str]) -> tuple[list[str], list[bool]]:
+def _function_contexts(
+    code_lines: list[str], functions: list[str]
+) -> tuple[list[str], list[bool]]:
     """Resolve enclosing function and return protocol once per source line.
 
     ``_enclosing_function`` deliberately searches backwards, which is useful
@@ -108,25 +109,24 @@ def _function_contexts(code_lines: list[str]) -> tuple[list[str], list[bool]]:
     translation unit. A forward pass sees the same declaration transitions and
     carries their context until the next one.
     """
-    functions: list[str] = []
     pyobject_results: list[bool] = []
     current = ""
     returns_pyobject = False
-    for index, line in enumerate(code_lines):
-        declared = _enclosing_function([line], 0)
-        if declared:
-            current = declared
-            returns_pyobject = _returns_pyobject(code_lines, index, current)
-        functions.append(current)
+    for index, function in enumerate(functions):
+        if function != current:
+            current = function
+            returns_pyobject = bool(function) and _returns_pyobject(
+                code_lines, index, function
+            )
         pyobject_results.append(returns_pyobject)
     return functions, pyobject_results
 
 
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
-    code_lines = strip_c(text)
+    code_lines, _, functions = _source_tape(text)
     waived = _waivers(raw_lines, code_lines, WAIVER)
-    functions, pyobject_results = _function_contexts(code_lines)
+    functions, pyobject_results = _function_contexts(code_lines, functions)
     findings: list[Finding] = []
     previous_code = ""
 

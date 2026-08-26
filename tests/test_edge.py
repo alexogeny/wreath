@@ -199,6 +199,21 @@ def test_hop_by_hop_and_connection_named_fields_are_dropped() -> None:
     assert all(name not in survived for name in HOP_BY_HOP)
 
 
+def test_only_connection_values_name_hop_by_hop_fields() -> None:
+    headers = (
+        (b"x-declare", b"x-innocent"),
+        (b"connection", b"close, x-hop"),
+        (b"x-innocent", b"kept"),
+        (b"x-hop", b"dropped"),
+        (b"close", b"ordinary-field"),
+    )
+    assert forwardable(headers) == [
+        (b"x-declare", b"x-innocent"),
+        (b"x-innocent", b"kept"),
+        (b"close", b"ordinary-field"),
+    ]
+
+
 def test_a_client_supplied_forwarding_header_is_replaced_not_appended() -> None:
     """Appending is the spoof: the attacker writes the first element.
 

@@ -1341,7 +1341,7 @@ async def verify_webauthn_assertion(
     signed = authenticator_data + hashlib.sha256(client_data).digest()
     if not verify_signature(key, signed, signature):
         raise WebAuthnError("the assertion signature did not verify")
-    if (row.counter or auth_data.sign_count) and auth_data.sign_count <= row.counter:
+    if row.counter and auth_data.sign_count <= row.counter:
         raise WebAuthnError(
             "the signature counter did not increase; this authenticator may be a clone"
         )

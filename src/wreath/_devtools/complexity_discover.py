@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import chain
@@ -155,6 +156,27 @@ def _annotation_kind(annotation: ast.AST | None) -> str | None:
     return _ANNOTATION_KINDS.get(name.rsplit(".", 1)[-1])
 
 
+_STATEMENT_BLOCKS = ("body", "handlers", "orelse", "finalbody", "cases")
+
+
+def _owned_statements(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+):
+    """Statements owned by *fn*, stopping before every nested scope."""
+    todo = deque(fn.body)
+    while todo:
+        node = todo.popleft()
+        yield node
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for name in _STATEMENT_BLOCKS:
+            block = getattr(node, name, None)
+            if block:
+                # These statement blocks are disjoint; every statement enters
+                # the queue once regardless of nesting depth.
+                todo.extend(block)
+
+
 def infer_kinds(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str | None]:
     """Best-effort container kind per local name, for one function body.
 
@@ -191,7 +213,12 @@ def infer_kinds(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str | N
                 *filter(None, (args.vararg, args.kwarg))):
         kinds[arg.arg] = _annotation_kind(arg.annotation)
 
-    for node in ast.walk(fn):
+    # A nested definition is a new ownership boundary.  Walking ``fn`` with
+    # ``ast.walk`` used to descend every nested body here, then do the same work
+    # again when the visitor entered that definition.  A chain of N functions
+    # therefore visited O(N**2) nodes.  Start at this function's statements and
+    # stop at child scopes: each body is inferred exactly once by its owner.
+    for node in _owned_statements(fn):
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             kinds[node.target.id] = (
                 _annotation_kind(node.annotation)
@@ -216,6 +243,14 @@ class _Loop:
     constant: bool = False
 
 
+@dataclass(slots=True)
+class _Recursion:
+    """One function whose direct self-call sites are being counted."""
+
+    function: ast.FunctionDef | ast.AsyncFunctionDef
+    calls: int = 0
+
+
 class _PythonScanner(ast.NodeVisitor):
     """Report linear operations sitting inside a loop that does not shrink."""
 
@@ -227,6 +262,8 @@ class _PythonScanner(ast.NodeVisitor):
         self.loops: list[_Loop] = []
         self.functions: list[str] = []
         self.kinds: dict[str, str | None] = {}
+        self.recursion_frames: list[_Recursion] = []
+        self.recursion_findings: list[Finding] = []
 
     # -- helpers ---------------------------------------------------------
     def _depth(self) -> int:
@@ -271,7 +308,18 @@ class _PythonScanner(ast.NodeVisitor):
         self.functions.append(node.name)
         saved_loops, saved_kinds = self.loops, self.kinds
         self.loops, self.kinds = [], infer_kinds(node)   # a def is its own cost universe
+        recursion = _Recursion(node)
+        self.recursion_frames.append(recursion)
         self.generic_visit(node)
+        self.recursion_frames.pop()
+        decorators = {_name_of(item) or "" for item in node.decorator_list}
+        if recursion.calls >= 2 and not any("cache" in item for item in decorators):
+            self.recursion_findings.append(Finding(
+                file=self.display, line=node.lineno, code="SL-RECURSE", func=node.name,
+                depth=0, confidence="low",
+                message=f"{recursion.calls} self-recursive call sites, no cache decorator",
+                source="",
+            ))
         self.loops, self.kinds = saved_loops, saved_kinds
         self.functions.pop()
 
@@ -322,6 +370,10 @@ class _PythonScanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node) -> None:
+        if isinstance(node.func, ast.Name):
+            for recursion in self.recursion_frames:
+                if node.func.id == recursion.function.name:
+                    recursion.calls += 1
         if self._depth() >= 1:
             self._check_call(node)
         self.generic_visit(node)
@@ -423,32 +475,13 @@ class _PythonScanner(ast.NodeVisitor):
             self.loops.pop()
 
 
-def _recursion_findings(tree: ast.AST, display: str) -> list[Finding]:
-    """Functions calling themselves from 2+ sites with no cache decorator."""
-    out: list[Finding] = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        sites = [n for n in ast.walk(fn)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                 and n.func.id == fn.name]
-        decorators = {_name_of(d) or "" for d in fn.decorator_list}
-        if len(sites) >= 2 and not any("cache" in d for d in decorators):
-            out.append(Finding(
-                file=display, line=fn.lineno, code="SL-RECURSE", func=fn.name,
-                depth=0, confidence="low",
-                message=f"{len(sites)} self-recursive call sites, no cache decorator",
-                source=""))
-    return out
-
-
 def scan_python(path: Path, root: Path) -> list[Finding]:
     """Every candidate in one Python module."""
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     scanner = _PythonScanner(path, source, root)
     scanner.visit(tree)
-    return scanner.findings + _recursion_findings(tree, scanner.display)
+    return scanner.findings + scanner.recursion_findings
 
 
 # --- C ----------------------------------------------------------------------

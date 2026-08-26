@@ -15,6 +15,7 @@ a fixture whose second control was also covered.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 import re
@@ -26,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from wreath._mutant import cli as mutant_cli
 from wreath._mutant import operators
 from wreath._mutant import runner as mutant_runner
 from wreath._mutant.patch import (
@@ -33,6 +35,7 @@ from wreath._mutant.patch import (
     PatchError,
     ValuePatch,
     compile_module,
+    compile_scope,
     find_code,
     same_bytecode,
     transform_module,
@@ -68,6 +71,13 @@ SOURCE = textwrap.dedent(
         return limiter(key)
     '''
 )
+
+
+def test_mutant_command_defaults_to_the_native_baseline_and_candidate_engine() -> None:
+    parser = argparse.ArgumentParser()
+    mutant_cli.add_arguments(parser)
+
+    assert parser.parse_args([]).test_engine == "native"
 
 
 @pytest.fixture
@@ -836,6 +846,30 @@ def test_a_mutation_that_compiles_to_the_same_bytecode_is_not_a_finding() -> Non
     assert same_bytecode(code, compile_module(ast.parse(source), "<same>"))
 
 
+def test_scope_compilation_preserves_the_target_and_drops_unrelated_siblings() -> None:
+    tree = ast.parse(
+        '''\
+from __future__ import annotations
+
+def unrelated():
+    return "work that this mutation must not compile"
+
+class Gate:
+    def is_permitted(self, value: Missing) -> Missing:
+        return value
+'''
+    )
+    complete = compile_module(tree, "<scope>")
+    narrowed = compile_scope(tree, "Gate.is_permitted", "<scope>")
+    complete_target = find_code(complete, "Gate.is_permitted")
+    narrowed_target = find_code(narrowed, "Gate.is_permitted")
+
+    assert complete_target is not None
+    assert narrowed_target is not None
+    assert same_bytecode(complete_target, narrowed_target)
+    assert find_code(narrowed, "unrelated") is None
+
+
 def test_a_patch_whose_target_moved_is_refused_rather_than_silently_skipped() -> None:
     """A patch that cannot apply must be an ERROR, never a survivor.
 
@@ -1100,6 +1134,115 @@ def _run_mutant(root: Path, *args: str) -> dict:
             f"wreath mutant exited {completed.returncode}\n{completed.stderr[-4000:]}"
         )
     return json.loads(completed.stdout)
+
+
+def test_native_mutant_engine_kills_the_same_control_without_pytest_children(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "native-mutant"
+    package = root / "shop"
+    tests = root / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "policy.py").write_text(
+        '''\
+def authorize_positive(value):
+    if value <= 0:
+        raise ValueError("not positive")
+    return "positive"
+''',
+        encoding="utf-8",
+    )
+    (tests / "test_policy.py").write_text(
+        '''\
+import pytest
+
+from shop.policy import authorize_positive
+
+def test_positive_sign():
+    assert authorize_positive(1) == "positive"
+
+def test_non_positive_sign_is_refused():
+    with pytest.raises(ValueError, match="not positive"):
+        authorize_positive(0)
+''',
+        encoding="utf-8",
+    )
+
+    native = _run_mutant(
+        root,
+        "--test-engine",
+        "native",
+        "--only",
+        "guard.remove-raise",
+    )
+    pytest_document = _run_mutant(
+        root,
+        "--test-engine",
+        "pytest",
+        "--only",
+        "guard.remove-raise",
+    )
+
+    assert native["counts"]["killed"] >= 1
+    assert {item["outcome"] for item in native["mutants"]} == {"killed"}
+    def identity(item: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return item["id"], item["outcome"], item["killers"]
+
+    assert [identity(item) for item in native["mutants"]] == [
+        identity(item) for item in pytest_document["mutants"]
+    ]
+
+
+def test_native_mutants_fork_from_the_pristine_prepared_collection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "native-pristine"
+    package = root / "shop"
+    tests = root / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "policy.py").write_text(
+        '''\
+calls = 0
+
+def is_permitted(value):
+    global calls
+    calls += 1
+    return value
+''',
+        encoding="utf-8",
+    )
+    (tests / "test_policy.py").write_text(
+        '''\
+from shop import policy
+
+def test_permitted_value():
+    assert policy.calls == 0
+    assert policy.is_permitted(True) is True
+''',
+        encoding="utf-8",
+    )
+
+    native = _run_mutant(
+        root,
+        "--test-engine",
+        "native",
+        "--only",
+        "predicate.always-true",
+    )
+    pytest_document = _run_mutant(
+        root,
+        "--test-engine",
+        "pytest",
+        "--only",
+        "predicate.always-true",
+    )
+
+    assert native["counts"] == pytest_document["counts"]
+    assert native["counts"]["survived"] == 1
 
 
 @pytest.fixture(scope="module")
@@ -1602,6 +1745,58 @@ def test_live_mutant_completed_at_baseline_seal_keeps_its_kill(
     assert completed == 1
     assert cancelled == 0
     assert first_started is not None
+
+
+def test_completed_test_blocks_shift_cpu_from_tests_to_mutation() -> None:
+    def jobs(completed: int) -> int:
+        return mutant_runner._progressive_live_jobs(
+            8, completed, 100, max_live=3
+        )
+
+    assert jobs(0) == 0
+    assert jobs(9) == 0
+    assert jobs(10) == 1
+    assert jobs(50) == 2
+    assert jobs(70) == 2
+    assert jobs(90) == 3
+    assert jobs(100) == 3
+
+
+def test_sealed_native_pool_does_not_reimport_a_live_registration_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "wreath_pool_probe"
+    tests = tmp_path / "tests"
+    package.mkdir()
+    tests.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "registry.py").write_text(
+        "names = set()\n"
+        "def register(name):\n"
+        "    if name in names:\n"
+        "        raise RuntimeError(f'{name} registered twice')\n"
+        "    names.add(name)\n",
+        encoding="utf-8",
+    )
+    test_file = tests / "test_policy.py"
+    test_file.write_text(
+        "from wreath_pool_probe.registry import register\n"
+        "register('policy.guard')\n"
+        "def test_policy():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    pool: dict[str, object] = {}
+
+    first = mutant_runner.pooled_native_collection((str(test_file),), pool)
+    second = mutant_runner.pooled_native_collection((str(test_file),), pool)
+
+    assert first.index.keys() == second.index.keys()
+    assert len(mutant_runner.unique_native_collections(pool.values())) == 1
+    for collection in mutant_runner.unique_native_collections(pool.values()):
+        mutant_runner.release_native_collection(collection)
 
 
 def test_sample_and_limit_are_refused_as_competing_bounds(

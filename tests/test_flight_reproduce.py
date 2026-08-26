@@ -153,6 +153,20 @@ def test_an_explicit_request_id_overrides_the_in_flight_choice() -> None:
     assert outcome.reproduced
 
 
+def test_an_explicit_request_id_does_not_inspect_in_flight_requests() -> None:
+    class _ExplicitRing(_Ring):
+        def in_flight(self) -> tuple[int, ...]:
+            raise AssertionError("an explicit request id must bypass discovery")
+
+    sites = (CHARGE,)
+    ring = _ExplicitRing(11, tuple(site.site_id for site in sites))
+
+    outcome = _reproduce(_app(sites), ring, request_id=11)
+
+    assert outcome.request_id == 11
+    assert outcome.reproduced
+
+
 def test_a_ring_with_nothing_in_flight_refuses_rather_than_guessing() -> None:
     """Every request that logged also completed: there is no crash here."""
     with pytest.raises(ReplayError, match="no request in flight"):

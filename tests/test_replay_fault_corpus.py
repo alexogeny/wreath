@@ -16,11 +16,13 @@ import struct
 import pytest
 
 import wreath
-from wreath._replay_adapters import DatabaseDouble
+from wreath._replay_adapters import AdapterFault, DatabaseDouble
 from wreath.messaging import MessageBus
 from wreath.postgres import Connection, PostgresError
 from wreath.replay import (
+    AdapterSeam,
     CanonicalRequest,
+    FaultKind,
     FaultSchedule,
     ReplayAdapters,
     ReplayError,
@@ -52,6 +54,41 @@ GET = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 CORPUS = fault_corpus()
 TRANSPORT_NAMES = sorted(n for n in CORPUS if n.startswith(("transport", "schedule")))
 ADAPTER_NAMES = sorted(n for n in CORPUS if n.startswith("adapter"))
+
+
+def test_transport_fault_values_match_each_fault_kind() -> None:
+    corpus = fault_corpus()
+    byte_kinds = {
+        FaultKind.SHORT_READ,
+        FaultKind.TRUNCATE,
+        FaultKind.CLOCK_JUMP,
+        FaultKind.SPLIT,
+    }
+    for kind in FaultKind:
+        for index in (0, 1):
+            fault = corpus[f"transport-{kind.name.lower()}-seg{index}"].faults[0]
+            assert fault.value == (8 if kind in byte_kinds else 0)
+
+
+@pytest.mark.parametrize(
+    ("fault", "seam"),
+    [
+        (AdapterFault.CONNECTION_FAILED, AdapterSeam.DB_CONNECTION),
+        (AdapterFault.POOL_TIMEOUT, AdapterSeam.DB_ACQUIRE),
+        (AdapterFault.RELEASE_ERROR, AdapterSeam.DB_RELEASE),
+        (AdapterFault.CONNECT_ERROR, AdapterSeam.HTTP_REQUEST),
+        (AdapterFault.LISTEN_REFUSED, AdapterSeam.DB_LISTEN),
+        (AdapterFault.BEGIN_ERROR, AdapterSeam.DB_TRANSACTION),
+        (AdapterFault.OBJECT_UNREACHABLE, AdapterSeam.OBJECT_STORE),
+        (AdapterFault.SERVER_ERROR, AdapterSeam.DB_QUERY),
+    ],
+)
+def test_adapter_fault_corpus_maps_each_boundary_family(
+    fault: AdapterFault, seam: AdapterSeam
+) -> None:
+    descriptor = fault_corpus()[f"adapter-{fault.value}"].adapter_faults[0]
+
+    assert descriptor.seam == int(seam)
 
 
 def _app() -> wreath.Wreath:

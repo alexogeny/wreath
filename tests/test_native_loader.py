@@ -1,9 +1,9 @@
 """`wreath._native` resolves compiled extensions, and is the only thing that does.
 
 Five modules used to call `importlib` themselves because this knew four of the
-eight names. It knows all eight now, and these pin that: every name `setup.py`
+extension names. It knows all twelve now, and these pin that: every name `setup.py`
 builds resolves to the module when the build has it and to `None` when it has
-not, and a name that is not one of the eight raises rather than reading as "this
+not, and a name that is not one of the twelve raises rather than reading as "this
 build has not got it".
 """
 
@@ -19,8 +19,12 @@ from wreath import _native
 ALL_EXTENSIONS = (
     "_core",
     "_client",
+    "_docs",
+    "_dupscan",
+    "_lint",
     "_postgres",
     "_server",
+    "_testrunner",
     "_reactor",
     "_edge",
     "_flight",

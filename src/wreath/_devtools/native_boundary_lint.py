@@ -18,14 +18,12 @@ import re
 from .native_lint import (
     Finding,
     Rule,
-    _enclosing_function,
     _is_init_function,
-    _loop_depth_map,
+    _source_tape,
     _waivers,
     iter_sources,
     lint_entrypoint,
     repo_root,
-    strip_c,
     waiver_pattern,
 )
 
@@ -169,8 +167,7 @@ def _error_call_lines(code_lines: list[str]) -> set[int]:
 
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
-    code_lines = strip_c(text)
-    loop_depth = _loop_depth_map(code_lines)
+    code_lines, loop_depth, functions = _source_tape(text)
     waived = _waivers(raw_lines, code_lines, WAIVER)
     error_lines = _error_call_lines(code_lines)
     findings: list[Finding] = []
@@ -178,7 +175,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
     loop_object_lines: dict[str, list[int]] = {}
 
     for index, line in enumerate(code_lines):
-        function = _enclosing_function(code_lines, index)
+        function = functions[index]
         if function and function != "<global>":
             by_function.setdefault(function, []).append(index)
             if loop_depth[index] and LOOP_OBJECT_API.search(line) and index not in error_lines:

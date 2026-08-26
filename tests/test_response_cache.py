@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.response import Response
-from wreath.response_cache import cache_key_for, cached
+from wreath.response_cache import cache_key_for, cached, default_cache_key
 
 
 class _Req:
@@ -15,6 +15,14 @@ class _Req:
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def test_default_key_has_no_dangling_query_separator() -> None:
+    assert default_cache_key(_Req(method="GET", path="/treks")) == "GET /treks"
+    assert (
+        default_cache_key(_Req(method="GET", path="/treks", query=b"page=2"))
+        == "GET /treks?page=2"
+    )
 
 
 async def test_second_call_is_served_from_cache() -> None:

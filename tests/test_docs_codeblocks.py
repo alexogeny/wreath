@@ -216,8 +216,14 @@ MINIMUM_RESOLVED_CHAINS = 600
 MINIMUM_BLOCKS = 280
 
 
-def test_the_floor_still_resolves_most_of_the_corpus() -> None:
-    stats = codeblocks.coverage(_corpus())
+def test_the_published_corpus_is_clean_and_the_floor_still_resolves_it() -> None:
+    stats = codeblocks.Coverage()
+    leftover = []
+    checker = codeblocks.Checker()
+    for path, text in _corpus().items():
+        findings, page_stats = checker.check_page(text, path)
+        stats.merge(page_stats)
+        leftover.extend(str(finding) for finding in findings)
     assert stats.blocks >= MINIMUM_BLOCKS, (
         f"only {stats.blocks} python blocks found; the scanner may have broken"
     )
@@ -225,6 +231,7 @@ def test_the_floor_still_resolves_most_of_the_corpus() -> None:
         f"resolved {stats.resolved} chains, was at least {MINIMUM_RESOLVED_CHAINS}: "
         "the floor is looking at less than it used to"
     )
+    assert not leftover, "\n".join(leftover)
 
 
 def test_there_is_no_parked_defect_list() -> None:
@@ -240,12 +247,3 @@ def test_there_is_no_parked_defect_list() -> None:
     """
     assert not hasattr(codeblocks, "KNOWN_DEFECTS")
     assert not hasattr(codeblocks, "_known")
-
-
-def test_the_published_corpus_has_no_unparked_findings() -> None:
-    """What `wreath docs check` asserts, as a test that names the page."""
-    leftover = []
-    for path, text in _corpus().items():
-        findings, _ = codeblocks.check_page(text, path)
-        leftover.extend(str(f) for f in findings)
-    assert not leftover, "\n".join(leftover)

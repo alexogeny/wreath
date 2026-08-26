@@ -20,6 +20,8 @@ import pytest
 from wreath.signatures import (
     RequestMessage,
     SignatureError,
+    _carries_body,
+    _serialize_bare,
     signature_base,
 )
 
@@ -93,6 +95,13 @@ def test_native_base_serializes_every_supported_parameter_shape():
         params
     ).encode()
     assert base.splitlines()[-1] == expected
+
+
+def test_bare_parameters_distinguish_false_and_refuse_unknown_types():
+    assert _serialize_bare(True) == "?1"
+    assert _serialize_bare(False) == "?0"
+    with pytest.raises(SignatureError, match="float"):
+        _serialize_bare(1.5)
 
 
 def test_base_accepts_read_only_mapping_parameters() -> None:
@@ -186,6 +195,23 @@ def test_empty_query_still_covers_a_question_mark():
     )
     base = signature_base(message, (("@query", {}),), {"created": 1})
     assert base.startswith(b'"@query": ?\n')
+
+
+def test_empty_query_adds_no_delimiter_to_request_targets():
+    message = RequestMessage(
+        method="GET", scheme="https", authority="example.com", path="/x"
+    )
+    request_target = signature_base(
+        message, (("@request-target", {}),), {"created": 1}
+    )
+    target_uri = signature_base(message, (("@target-uri", {}),), {"created": 1})
+    assert request_target.startswith(b'"@request-target": /x\n')
+    assert target_uri.startswith(b'"@target-uri": https://example.com/x\n')
+
+
+@pytest.mark.parametrize("length", [b"", b"0", b" 0 "])
+def test_empty_or_zero_content_length_does_not_imply_a_body(length: bytes):
+    assert _carries_body({b"content-length": length}) is False
 
 
 def test_a_repeated_query_param_is_refused_rather_than_guessed():

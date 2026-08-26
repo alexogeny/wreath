@@ -53,6 +53,35 @@ def _recording() -> bytes:
     return record_transport_segments([GET]).to_bytes()
 
 
+def test_transport_container_refuses_magic_version_and_short_header_by_name() -> None:
+    with pytest.raises(ReplayError, match="not a WTR1 transport recording"):
+        TransportRecording.from_bytes(b"NOPE\x01")
+    with pytest.raises(ReplayError, match="unsupported WTR1 container version"):
+        TransportRecording.from_bytes(_MAGIC_TRANSPORT)
+    with pytest.raises(ReplayError, match="unsupported WTR1 container version"):
+        TransportRecording.from_bytes(_MAGIC_TRANSPORT + b"\xff")
+
+
+def test_transport_container_names_each_missing_required_chunk() -> None:
+    version = bytes((1,))
+    head_only = _MAGIC_TRANSPORT + version + _chunk(b"HEAD", b"\x00" * 24)
+    segs_only = _MAGIC_TRANSPORT + version + _chunk(b"SEGS", struct.pack("<I", 0))
+
+    with pytest.raises(ReplayError, match="missing a required chunk"):
+        TransportRecording.from_bytes(head_only)
+    with pytest.raises(ReplayError, match="missing a required chunk"):
+        TransportRecording.from_bytes(segs_only)
+
+
+def test_fault_container_refuses_magic_and_version_by_name() -> None:
+    with pytest.raises(ReplayError, match="not a WFS1 fault schedule"):
+        FaultSchedule.from_bytes(b"NOPE\x01")
+    with pytest.raises(ReplayError, match="unsupported WFS1 container version"):
+        FaultSchedule.from_bytes(_MAGIC_FAULTS)
+    with pytest.raises(ReplayError, match="unsupported WFS1 container version"):
+        FaultSchedule.from_bytes(_MAGIC_FAULTS + b"\xff")
+
+
 # --- a repeated chunk is refused by name --------------------------------------
 
 

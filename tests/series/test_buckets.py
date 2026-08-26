@@ -155,8 +155,19 @@ class TestSpine:
     @pytest.mark.parametrize("unit", [Minute, Hour, Day, Week, Month, Quarter, Year])
     @pytest.mark.parametrize("timezone", [UTC, AUCKLAND, LONDON])
     def test_length_agrees_without_materializing_the_spine(self, unit, timezone):
-        start = at(2025, 9, 20, 7, 17)
-        end = at(2027, 4, 20, 18, 41)
+        if unit is Minute:
+            # Minute materialisation over the 19-month calendar-unit range made
+            # 2.5 million Instant objects without strengthening this equality.
+            # Keep one ordinary window and one real fold per changing zone; the
+            # longer range remains below for every calendar-sized unit.
+            start, end = {
+                UTC: (at(2026, 6, 1), at(2026, 6, 3)),
+                AUCKLAND: (at(2026, 4, 3), at(2026, 4, 8)),
+                LONDON: (at(2026, 10, 23), at(2026, 10, 27)),
+            }[timezone]
+        else:
+            start = at(2025, 9, 20, 7, 17)
+            end = at(2027, 4, 20, 18, 41)
         assert spine_length(start, end, bucket=unit, in_zone=timezone) == len(
             spine(start, end, bucket=unit, in_zone=timezone)
         )

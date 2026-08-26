@@ -494,14 +494,14 @@ def _unquiet(journal: Any) -> None:
 def _pytest_command() -> list[str]:
     """The suite, through the same runner `wreath test` uses.
 
-    **This gate used to run `pytest -q -n 6` directly, and that cost it twice.**
-    It picked its own worker cap, and -- because the historical scheduler is
-    installed by the runner rather than by the `pytest11` entry point -- it also
-    ran without any scheduling at all. Measured at equal worker counts on the
-    13,297-test tree, `wreath test --grid never --mutant off --slowest 0` took
-    26.404s +/- 0.138 against `pytest -q -n 6` at 29.055s +/- 2.069: 1.10x, and
-    a fifteenfold tighter spread, which for a gate matters as much as the mean.
-    Measured 2026-08-02; re-run `wreath test` against `pytest -n` to reproduce.
+    The native engine became the default after repeated interleaved warm runs.
+    The current fixed broad workload measured 25.903s +/- 0.242s against pytest
+    at 47.152s +/- 1.303s: 1.820x end to end. `perf stat` measured 602.417B +/-
+    1.138B retired instructions against pytest's 1,064.063B +/- 6.423B, 43.4%
+    fewer. Measured 2026-08-25 with
+    `~/scratch/wreath/native-default/benchmark.py`; the exact exclusions, raw
+    `continued-results.json`, and per-arm logs live beside it. Pass
+    `--engine pytest` to reproduce the oracle.
 
     The worker curve now lives in one place -- `_test_runner._MAX_AUTO_WORKERS`
     -- instead of being restated here with a different number. The history

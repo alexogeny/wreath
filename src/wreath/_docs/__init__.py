@@ -5,9 +5,10 @@ no third-party dependency and no YAML. Configuration is a `Site` in a
 `wreath_docs.py` module; the build is a plain directory served by wreath's own
 `StaticFiles`.
 
-The per-file markdown parse is a CommonMark *subset* today; the seam
-for the native `_docs` extension (full CommonMark + a syntax highlighter, via a
-versioned WDT1 render tape) is `wreath._docs.markdown.render`.
+The native `_docs` extension compiles the versioned WDT1 block scan, fenced
+Python-block index, visible-prose stream, and search-word tape. The Python
+renderer applies Wreath's CommonMark subset semantics to that tape; full
+CommonMark remains a follow-on at the same `wreath._docs.markdown.render` seam.
 """
 
 from __future__ import annotations

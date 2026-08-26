@@ -525,32 +525,47 @@ def build_parser() -> argparse.ArgumentParser:
     from ._mutant.cli import add_arguments as _add_mutant_arguments
 
     _add_mutant_arguments(mutant_parser)
+    commands.add_parser(
+        "fuzz",
+        help="run tests, prove mutation controls, then fuzz only gold test files",
+        description=(
+            "Run the native test and mutation pipeline, then execute the complete "
+            "test surface of files whose ordinary tests killed a mutant. Test options "
+            "may be passed exactly as for `wreath test`."
+        ),
+    )
     test_parser = commands.add_parser(
         "test",
-        help="run pytest with an animated file state map and duration profiling",
+        help="run tests with pytest or Wreath's native compatibility engine",
         description=(
-            "Run a pytest-compatible suite with Wreath's activity grid and timing report. "
-            "Arguments not recognized here are forwarded to pytest in their original order."
+            "Run a pytest-compatible suite. Arguments not recognized here are forwarded "
+            "to the selected engine in their original order."
         ),
     )
     test_parser.add_argument(
+        "--engine",
+        choices=("pytest", "native", "dual"),
+        default="native",
+        help="execution engine: native (default), pytest, or the dual compatibility oracle",
+    )
+    test_parser.add_argument(
         "--grid",
-        choices=("auto", "always", "never"),
-        default="auto",
-        help="animate on a TTY, force animation, or print only the final report",
+        choices=("never",),
+        default="never",
+        help="print one uncoloured final report (default and only mode)",
     )
     test_parser.add_argument(
         "--workers",
         default="auto",
         metavar="N",
-        help="pytest worker processes: auto (capped at 8) or a positive integer",
+        help="test worker processes: auto (capped at 8) or a positive integer",
     )
     test_parser.add_argument(
         "--collection",
         choices=("auto", "replicated", "sharded"),
         default="auto",
         help="worker collection: auto shards broad history-backed suites, "
-        "replicated keeps xdist collection, sharded forces one worker per module",
+        "replicated is pytest-only, sharded forces one worker per module",
     )
     test_parser.add_argument(
         "--slowest",
@@ -577,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_parser.add_argument(
         "--mutant",
-        choices=("auto", "off", "sample", "changed", "full"),
+        choices=("on", "auto", "off", "sample", "changed", "full"),
         default="auto",
         help="after the ordinary run, measure its green tests' mutation confidence: "
         "a stable sample, "
@@ -596,8 +611,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         metavar="N|auto",
         help="mutant children to run concurrently after preparation overlaps "
-        "the ordinary suite (default: auto, capped at 3 live and reclaiming "
-        "up to 6 worker slots after the suite seals)",
+        "the ordinary suite (default: auto; mutation and fuzz share 3 live "
+        "background slots, then sealed mutation reclaims all 8 suite slots)",
+    )
+    test_parser.add_argument(
+        "--mutant-engine",
+        choices=("pytest", "native"),
+        default="native",
+        help="execute mutation candidates with pytest or the strict native engine; "
+        "default: native",
     )
     test_parser.add_argument(
         "--mutant-path",
@@ -673,6 +695,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--mutant-fail-on-survivor",
         action="store_true",
         help="make survived or unreached sampled controls fail the command",
+    )
+    test_parser.add_argument(
+        "--fuzz",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="run each mutation-gold file's killers and explicit deterministic "
+        "fuzz cases in a fresh process; every clean file earns completion: "
+        "auto enables it with mutation (default), on, or off",
+    )
+    test_parser.add_argument(
+        "--stage-events",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    test_parser.add_argument(
+        "--case-selection",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     audit_parser = commands.add_parser(
         "audit",
@@ -3612,12 +3652,13 @@ def _write_bytes(path: str, data: bytes) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments[:1] == ["fuzz"]:
+        arguments = ["test", "--mutant", "on", "--fuzz", "on", *arguments[1:]]
     parser = build_parser()
     if arguments[:1] == ["test"]:
-        # pytest owns a large and extensible option vocabulary.  Parsing only
-        # Wreath's few options preserves every unknown token and its ordering,
-        # so ``wreath test -k auth tests/ --maxfail=1`` needs no separator and
-        # behaves exactly like the pytest spelling.
+        # Pytest owns a large and extensible option vocabulary, while the
+        # native engine validates its smaller contract itself. Parsing only
+        # Wreath's options preserves every remaining token and its ordering.
         namespace, pytest_args = parser.parse_known_args(arguments)
         namespace.pytest_args = pytest_args
     else:

@@ -149,6 +149,58 @@ async def test_one_session_per_registry_and_workload_pair(
     assert writer is not first
 
 
+async def test_session_tenant_marker_resolves_for_the_request() -> None:
+    from wreath.request import Request
+
+    context = object()
+    resolved: list[Any] = []
+    captured: list[Any] = []
+
+    class Marker:
+        def resolve(self, request: Any) -> Any:
+            resolved.append(request)
+            return context
+
+    marker = Marker()
+
+    async def tenant_session(request: Any, session: Any) -> Any:
+        captured.append(session._tenant)
+        return None
+
+    tenant_session.__annotations__["session"] = Annotated[
+        Session, FromORM("main", tenant=marker)
+    ]
+
+    class SchemaMode:
+        kind = "isolated"
+
+    class Registry:
+        schema_mode = SchemaMode()
+        statement_timeout = None
+
+    bound = compile_binder(
+        tenant_session,
+        "/tenant",
+        orm_registries={"main": Registry()},
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/tenant",
+            "query_string": b"",
+            "headers": [],
+        },
+        None,
+        None,
+    )
+
+    await bound(request)
+
+    assert len(resolved) == 1
+    assert captured == [context]
+
+
 async def test_an_unused_session_leases_no_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

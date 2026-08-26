@@ -8,7 +8,12 @@ import asyncio
 from typing import Any
 
 from wreath import Wreath
-from wreath._audit.contrast import contrast_findings, contrast_ratio, parse_tokens
+from wreath._audit.contrast import (
+    contrast_findings,
+    contrast_ratio,
+    nontext_contrast_findings,
+    parse_tokens,
+)
 from wreath._audit.dom import parse_html
 from wreath._audit.fix import apply_fixes
 from wreath._audit.middleware import AuditMiddleware
@@ -66,6 +71,32 @@ def test_contrast_rule_runs_via_style_element() -> None:
     assert any(f.rule_id == "contrast" for f in _a11y(html))
 
 
+def test_nontext_contrast_uses_a_default_theme_for_literal_colours() -> None:
+    css = "body{background:#fff}input{border-color:#ddd}"
+
+    findings = list(nontext_contrast_findings(css, "test"))
+
+    assert [finding.rule_id for finding in findings] == ["non-text-contrast"]
+
+
+def test_nontext_contrast_resolves_component_colours_from_theme_tokens() -> None:
+    css = (
+        ":root{--surface:#fff;--border:#ddd}"
+        "body{background:var(--surface)}"
+        "input{border-color:var(--border)}"
+    )
+
+    findings = list(nontext_contrast_findings(css, "test"))
+
+    assert [finding.rule_id for finding in findings] == ["non-text-contrast"]
+
+
+def test_nontext_contrast_ignores_an_unresolvable_colour() -> None:
+    css = "body{background:#fff}input{border-color:var(--missing)}"
+
+    assert list(nontext_contrast_findings(css, "test")) == []
+
+
 # --- Tier 2: render-blocking / inline-asset ---------------------------------------
 def test_render_blocking_fires_and_defer_is_clean() -> None:
     blocking = ('<html><head><link rel="stylesheet" href="a.css">'
@@ -81,6 +112,8 @@ def test_inline_asset_flags_large_unnonced_only() -> None:
     assert any(f.rule_id == "inline-asset" for f in _perf(unnonced))
     nonced = f'<html><head><style nonce="n">{big}</style></head><body></body></html>'
     assert not any(f.rule_id == "inline-asset" for f in _perf(nonced))
+    external = f'<html><head><script src="app.js">{big}</script></head></html>'
+    assert not any(f.rule_id == "inline-asset" for f in _perf(external))
 
 
 # --- Tier 3: --fix ----------------------------------------------------------------
@@ -107,6 +140,15 @@ def test_apply_fixes_remediates_and_is_idempotent() -> None:
     assert "<!DOCTYPE html>" in fixed
 
 
+def test_viewport_without_content_is_left_intact() -> None:
+    source = '<html><head><meta name="viewport"></head><body></body></html>'
+
+    fixed, applied = apply_fixes(source)
+
+    assert '<meta name="viewport">' in fixed
+    assert not any(item.startswith("viewport-scale") for item in applied)
+
+
 # --- Tier 3: runtime response auditing --------------------------------------------
 def test_runtime_audit_response_flags_html_and_headers() -> None:
     report = Report()
@@ -115,6 +157,26 @@ def test_runtime_audit_response_flags_html_and_headers() -> None:
     fired = {f.rule_id for f in report.findings}
     assert "img-alt" in fired  # HTML rule ran on the body
     assert {"compression-enabled", "cache-control", "security-headers"} <= fired  # headers
+
+
+def test_runtime_cache_header_alone_satisfies_the_cache_signal() -> None:
+    report = Report()
+    audit_response(
+        200,
+        {"cache-control": "public, max-age=60"},
+        "",
+        "runtime:/cached",
+        report,
+    )
+
+    assert "cache-control" not in {finding.rule_id for finding in report.findings}
+
+
+def test_runtime_etag_alone_satisfies_the_cache_signal() -> None:
+    report = Report()
+    audit_response(200, {"etag": '"v1"'}, "", "runtime:/cached", report)
+
+    assert "cache-control" not in {finding.rule_id for finding in report.findings}
 
 
 # --- Tier 2: static auto-discovery ------------------------------------------------

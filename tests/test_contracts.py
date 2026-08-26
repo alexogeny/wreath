@@ -17,6 +17,11 @@ class Order:
     quantity: int
 
 
+@dataclass(frozen=True, slots=True)
+class Message:
+    text: str
+
+
 def test_contract_validates_and_uses_the_native_json_shape() -> None:
     contract = Contract(Order, name="orders.created", version=2)
     identifier = uuid.uuid4()
@@ -36,6 +41,13 @@ def test_contract_reports_the_same_field_errors_as_request_binding() -> None:
         ("quantity",),
         ("extra",),
     }
+
+
+def test_contract_decodes_text_and_limits_its_utf8_wire_size() -> None:
+    payload = '{"text":"é"}'
+    assert Contract(Message).decode_json(payload) == Message("é")
+    with pytest.raises(ValueError, match="max_bytes"):
+        Contract(Message, max_bytes=len(payload)).decode_json(payload)
 
 
 def test_contract_refuses_bad_declarations_and_oversized_wire_data() -> None:

@@ -7,12 +7,11 @@ import re
 from .native_lint import (
     Finding,
     Rule,
-    _enclosing_function,
+    _source_tape,
     _waivers,
     iter_sources,
     lint_entrypoint,
     repo_root,
-    strip_c,
     waiver_pattern,
 )
 
@@ -96,7 +95,7 @@ def _uses_variable(line: str, variable: str) -> bool:
 
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
-    code_lines = strip_c(text)
+    code_lines, _, functions = _source_tape(text)
     waived = _waivers(raw_lines, code_lines, WAIVER)
     findings: list[Finding] = []
     callbacks = {
@@ -117,7 +116,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
         findings.append(Finding(path, index + 1, code, message or rule.summary, rule.hint))
 
     for index, line in enumerate(code_lines):
-        function = _enclosing_function(code_lines, index)
+        function = functions[index]
         if function != current_function:
             allow_threads = False
             borrowed.clear()

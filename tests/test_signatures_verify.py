@@ -17,10 +17,13 @@ from wreath import Wreath
 from wreath.signatures import (
     NonceLedger,
     SignatureError,
+    SignatureFacts,
     Signatures,
     SigningKey,
+    _digest_expectation,
     sign_request,
 )
+from wreath.state import BODY_CHECK_SLOT
 from wreath.testing import TestClient
 
 KEY_ID = "test-key-ed25519"
@@ -101,6 +104,103 @@ async def test_a_signed_request_verifies_and_names_its_agent():
     assert signatures.unverified == 0
 
 
+async def test_signature_without_content_digest_parks_no_body_check():
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    app = Wreath(signatures=signatures)
+
+    @app.get("/state")
+    async def state(request) -> dict:
+        facts = signatures.facts(request)
+        return {
+            "verified": facts.verified,
+            "body_check": request.state.get(BODY_CHECK_SLOT, "absent"),
+        }
+
+    async with TestClient(app) as client:
+        body = (
+            await client.get(
+                "/state", headers=signed_headers(clock=now, path="/state")
+            )
+        ).json()
+    assert body == {"verified": True, "body_check": "absent"}
+
+
+def test_agentless_key_lookup_continues_past_a_directory_without_the_key():
+    empty = "https://empty.example/.well-known/http-message-signatures-directory"
+    signatures = Signatures(
+        directories=(empty, DIRECTORY), refresh_on_startup=False
+    )
+    signatures.install(empty, {"keys": []})
+    signatures.install(DIRECTORY, directory_document())
+
+    assert signatures._key(None, KEY_ID) is not None
+
+
+async def test_an_expiry_equal_to_the_current_time_is_still_valid():
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = signed_headers(clock=now, expires_in=0)
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body["verified"] is True
+
+
+async def test_an_agent_may_name_the_directory_origin():
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = signed_headers(clock=now)
+    headers["Signature-Agent"] = '"https://bot.example"'
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body == {
+        "verified": True,
+        "agent": "https://bot.example",
+        "reason": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "agent",
+    ['"https://bot.exampleX', 'Xhttps://bot.example"'],
+)
+async def test_mismatched_agent_quotes_are_not_stripped(agent: str):
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = signed_headers(clock=now)
+    headers["Signature-Agent"] = agent
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body["verified"] is False
+    assert body["reason"] == "unknown signing key"
+
+
+def test_signing_a_body_covers_its_digest_and_serializes_a_tag():
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url="https://example.com/x",
+        body=b"payload",
+        tag="upload",
+        created=1,
+    )
+    assert '"content-digest"' in headers["Signature-Input"]
+    assert ';tag="upload"' in headers["Signature-Input"]
+    assert headers["Content-Digest"].startswith("sha-256=:")
+
+
+def test_signing_does_not_duplicate_an_explicit_digest_component():
+    headers = sign_request(
+        signer(),
+        method="POST",
+        url="https://example.com/x",
+        body=b"payload",
+        components=("@method", "content-digest"),
+        created=1,
+    )
+    assert headers["Signature-Input"].count('"content-digest"') == 1
+
+
 async def test_an_unsigned_request_is_a_fact_not_a_refusal():
     """No signature is normal. It must not 4xx, and must not be counted."""
     now = 1_700_000_000.0
@@ -110,6 +210,16 @@ async def test_an_unsigned_request_is_a_fact_not_a_refusal():
     assert response.status == 200
     assert response.json() == {"verified": False, "agent": None, "reason": "absent"}
     assert signatures.unverified == 0
+
+
+def test_the_verifier_directly_recognizes_an_absent_signature_input():
+    class EmptyRequest:
+        @staticmethod
+        def _index_headers():
+            return {}
+
+    facts = Signatures(refresh_on_startup=False)._verify(EmptyRequest())
+    assert facts == SignatureFacts(reason="absent")
 
 
 async def test_a_tampered_path_does_not_verify():
@@ -226,7 +336,8 @@ async def test_an_unsupported_algorithm_is_refused_by_name():
 
 async def test_the_same_signed_request_twice_is_refused_the_second_time():
     now = 1_700_000_000.0
-    signatures = build(nonces=NonceLedger(max_entries=8, ttl=300.0), clock=lambda: now)
+    ledger = NonceLedger(max_entries=8, ttl=300.0)
+    signatures = build(nonces=ledger, clock=lambda: now)
     headers = signed_headers(clock=now, nonce="n-1")
     async with TestClient(app_with(signatures)) as client:
         first = (await client.get("/probe", headers=headers)).json()
@@ -234,7 +345,7 @@ async def test_the_same_signed_request_twice_is_refused_the_second_time():
     assert first["verified"] is True
     assert second["verified"] is False
     assert second["reason"] == "signature nonce was already used"
-    assert signatures.nonces.replays == 1
+    assert ledger.replays == 1
 
 
 async def test_a_signature_without_a_nonce_is_refused_when_a_ledger_is_configured():
@@ -269,10 +380,23 @@ async def test_a_nonce_is_forgotten_after_its_ttl():
     assert ledger.claim("a", now=20.0) is True
 
 
-@pytest.mark.parametrize("bad", [{"max_entries": 0}, {"ttl": 0.0}])
-async def test_nonce_ledger_bounds_must_be_positive(bad):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        ({"max_entries": 0}, "nonce ledger max_entries must be positive"),
+        ({"ttl": 0.0}, "nonce ledger ttl must be positive"),
+    ],
+)
+async def test_nonce_ledger_bounds_must_be_positive(bad, message):
+    with pytest.raises(ValueError, match=message):
         NonceLedger(**bad)
+
+
+def test_missing_and_non_byte_content_digests_are_refused_cleanly():
+    with pytest.raises(SignatureError, match="is not present"):
+        _digest_expectation(None)
+    with pytest.raises(SignatureError, match="byte sequence"):
+        _digest_expectation(b"sha-256=1")
 
 
 # --- configuration ----------------------------------------------------------
@@ -359,6 +483,18 @@ async def test_cedar_context_always_carries_a_boolean():
         "signature_verified": True,
         "signature_agent": DIRECTORY,
         "signature_covered": ["@method", "@authority", "@path", "@query"],
+    }
+
+
+def test_cedar_context_omits_an_absent_agent_from_verified_facts():
+    class FixedFacts(Signatures):
+        def facts(self, request):
+            return SignatureFacts(verified=True, covered=("@method",))
+
+    context = FixedFacts(refresh_on_startup=False).cedar_context(object())
+    assert context == {
+        "signature_verified": True,
+        "signature_covered": ["@method"],
     }
 
 
@@ -468,6 +604,35 @@ async def test_an_oversized_directory_document_is_refused():
 async def test_refresh_with_no_directories_does_nothing():
     signatures = Signatures(refresh_on_startup=False)
     assert await signatures.refresh() == 0
+
+
+async def test_refresh_accepts_a_client_without_a_close_hook():
+    class Client:
+        async def get(self, path):
+            return _StubResponse(json.dumps(directory_document()).encode())
+
+    signatures = Signatures(directories=(DIRECTORY,), refresh_on_startup=False)
+    assert await signatures.refresh(client_factory=lambda origin: Client()) == 1
+
+
+async def test_refresh_uses_the_default_directory_client_factory(monkeypatch):
+    calls = []
+    client = _StubClient(json.dumps(directory_document()).encode())
+
+    def factory(name, *, base_url):
+        calls.append((name, base_url))
+        return client
+
+    monkeypatch.setattr("wreath.http_client.HTTPClient", factory)
+    signatures = Signatures(directories=(DIRECTORY,), refresh_on_startup=False)
+    assert await signatures.refresh() == 1
+    assert calls == [("wreath-signature-directory", "https://bot.example")]
+
+
+async def test_a_non_object_directory_document_is_counted_as_a_refresh_error():
+    signatures = Signatures(directories=(DIRECTORY,), refresh_on_startup=False)
+    await signatures.refresh(client_factory=lambda origin: _StubClient(b"[]"))
+    assert signatures.refresh_errors == 1
 
 
 # --- the cost ordering ------------------------------------------------------

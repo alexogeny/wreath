@@ -3,20 +3,22 @@
 Covers the block and inline constructs wreath's own docs actually use: ATX
 headings (with GitHub slugs + a table of contents), fenced code blocks,
 unordered/ordered lists, blockquotes, thematic breaks, paragraphs, and inline
-code / strong / emphasis / links / autolinks. It renders straight to HTML today;
-the seam to watch is `render` — the native `_docs` extension will parse into the
-versioned WDT1 tape and this becomes its render half.
+code / strong / emphasis / links / autolinks. The native `_docs` extension
+compiles source into the versioned WDT1 block tape; this module is its semantic
+render half.
 
 Security is the load-bearing property: every text and attribute span is HTML-
 escaped, and link targets are scheme-checked (no `javascript:` URLs). Full
 CommonMark (nested lists, reference links, the emphasis delimiter stack, GFM
-tables) and syntax highlighting are follow-on work in the native parser.
+tables) remain follow-on work at the same tape boundary.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from wreath._native import _docs as _native_docs
 
 from .highlight import highlight
 
@@ -40,6 +42,14 @@ _ADMONITION = re.compile(r'^(!!!|\?\?\?\+?|\?\?\?)\s+([\w-]+)(?:\s+"([^"]*)")?\s
 _TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
 _CONTENT_TAB = re.compile(r'^=== +"([^"]*)"\s*$')
 _TASK = re.compile(r"\[([ xX])\]\s+(.*)$")
+
+_WDT_FENCE = 1
+_WDT_HEADING = 2
+_WDT_THEMATIC = 4
+_WDT_ADMONITION = 8
+_WDT_TAB = 16
+_WDT_QUOTE = 32
+_WDT_LIST = 64
 
 
 #: Inline markup, for the places a heading is quoted as *text* rather than
@@ -95,6 +105,22 @@ def _safe_href(url: str) -> str:
 
 
 def _inline(text: str) -> str:
+    code_marked = "`" in text
+    link_marked = "[" in text
+    autolink_marked = "<" in text
+    strike_marked = "~" in text
+    star_marked = "*" in text
+    underscore_marked = "_" in text
+    if not (
+        code_marked
+        or link_marked
+        or autolink_marked
+        or strike_marked
+        or star_marked
+        or underscore_marked
+    ):
+        return _esc(text)
+
     # 1. Pull out code spans first so their contents escape nothing further.
     spans: list[str] = []
 
@@ -102,7 +128,8 @@ def _inline(text: str) -> str:
         spans.append(f"<code>{_esc(match.group(1))}</code>")
         return f"\x00{len(spans) - 1}\x00"
 
-    text = re.sub(r"`([^`]+)`", _stash_code, text)
+    if code_marked:
+        text = re.sub(r"`([^`]+)`", _stash_code, text)
 
     # 2. Escape everything else (markers *_[]() survive escaping).
     text = _esc(text)
@@ -114,23 +141,30 @@ def _inline(text: str) -> str:
     def _link(match: re.Match[str]) -> str:
         return f'<a href="{_safe_href(match.group(2))}">{match.group(1)}</a>'
 
-    text = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _image, text)
-    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, text)
-    text = re.sub(
-        r"&lt;(https?://[^\s>]+)&gt;",
-        lambda m: f'<a href="{_safe_href(m.group(1))}">{m.group(1)}</a>',
-        text,
-    )
+    if link_marked:
+        text = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _image, text)
+        text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, text)
+    if autolink_marked:
+        text = re.sub(
+            r"&lt;(https?://[^\s>]+)&gt;",
+            lambda m: f'<a href="{_safe_href(m.group(1))}">{m.group(1)}</a>',
+            text,
+        )
 
     # 4. Emphasis: strikethrough, then strong before emphasis (** __ and * _).
-    text = re.sub(r"~~(\S.*?\S|\S)~~", r"<del>\1</del>", text)
-    text = re.sub(r"\*\*(\S.*?\S|\S)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"__(\S.*?\S|\S)__", r"<strong>\1</strong>", text)
-    text = re.sub(r"\*(\S.*?\S|\S)\*", r"<em>\1</em>", text)
-    text = re.sub(r"(?<![\w])_(\S.*?\S|\S)_(?![\w])", r"<em>\1</em>", text)
+    if strike_marked:
+        text = re.sub(r"~~(\S.*?\S|\S)~~", r"<del>\1</del>", text)
+    if star_marked:
+        text = re.sub(r"\*\*(\S.*?\S|\S)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"\*(\S.*?\S|\S)\*", r"<em>\1</em>", text)
+    if underscore_marked:
+        text = re.sub(r"__(\S.*?\S|\S)__", r"<strong>\1</strong>", text)
+        text = re.sub(r"(?<![\w])_(\S.*?\S|\S)_(?![\w])", r"<em>\1</em>", text)
 
     # 5. Restore code spans.
-    return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], text)
+    if code_marked and spans:
+        return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], text)
+    return text
 
 
 # --- blocks ----------------------------------------------------------------
@@ -155,41 +189,47 @@ class _Renderer:
         return base if seen == 0 else f"{base}-{seen}"
 
     def render(self, source: str) -> Rendered:
-        lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        lines = _strip_frontmatter(lines)
+        version, lines, kinds = _native_docs.block_tape(source)
+        if version != 1:
+            raise RuntimeError(f"unsupported WDT block tape version {version}; expected 1")
+        stripped = _strip_frontmatter(lines)
+        removed = len(lines) - len(stripped)
+        lines = stripped
+        kinds = kinds[removed:]
         i, n = 0, len(lines)
         while i < n:
             line = lines[i]
-            if not line.strip():
+            line_kind = kinds[i]
+            if not line_kind:
                 i += 1
                 continue
-            fence = _FENCE.match(line)
+            fence = _FENCE.match(line) if line_kind & _WDT_FENCE else None
             if fence:
                 i = self._code_block(lines, i, fence)
-            elif _HEADING.match(line):
-                self._heading(line)
+            elif line_kind & _WDT_HEADING and (heading := _HEADING.match(line)) is not None:
+                self._heading(heading)
                 i += 1
-            elif _THEMATIC.match(line):
+            elif line_kind & _WDT_THEMATIC and _THEMATIC.match(line):
                 self.out.append("<hr />")
                 i += 1
-            elif _ADMONITION.match(line):
-                i = self._admonition(lines, i)
-            elif _CONTENT_TAB.match(line):
+            elif (
+                line_kind & _WDT_ADMONITION
+                and (admonition := _ADMONITION.match(line)) is not None
+            ):
+                i = self._admonition(lines, i, admonition)
+            elif line_kind & _WDT_TAB and _CONTENT_TAB.match(line):
                 i = self._tabs(lines, i)
             elif _is_table(lines, i):
                 i = self._table(lines, i)
-            elif line.startswith(">"):
+            elif line_kind & _WDT_QUOTE:
                 i = self._blockquote(lines, i)
-            elif _UL_ITEM.match(line) or _OL_ITEM.match(line):
+            elif line_kind & _WDT_LIST and (_UL_ITEM.match(line) or _OL_ITEM.match(line)):
                 i = self._list(lines, i)
             else:
-                i = self._paragraph(lines, i)
+                i = self._paragraph(lines, kinds, i)
         return Rendered("\n".join(self.out), tuple(self.toc), self.title)
 
-    def _heading(self, line: str) -> None:
-        match = _HEADING.match(line)
-        if match is None:  # pragma: no cover - the block dispatcher matched it
-            raise RuntimeError("heading renderer received a non-heading line")
+    def _heading(self, match: re.Match[str]) -> None:
         level = len(match.group(1))
         text = match.group(2)
         explicit = _HEADING_ID.match(text)
@@ -297,10 +337,9 @@ class _Renderer:
         )
         return f"<{tag}>{body}</{tag}>", i
 
-    def _admonition(self, lines: list[str], i: int) -> int:
-        match = _ADMONITION.match(lines[i])
-        if match is None:  # pragma: no cover - the block dispatcher matched it
-            raise RuntimeError("admonition renderer received an ordinary line")
+    def _admonition(
+        self, lines: list[str], i: int, match: re.Match[str],
+    ) -> int:
         marker, kind = match.group(1), match.group(2).lower()
         title = match.group(3) if match.group(3) is not None else kind.capitalize()
         i += 1
@@ -392,12 +431,12 @@ class _Renderer:
         )
         return i
 
-    def _paragraph(self, lines: list[str], i: int) -> int:
+    def _paragraph(self, lines: list[str], kinds: bytes, i: int) -> int:
         buffer: list[str] = []
         while (
             i < len(lines)
             and lines[i].strip()
-            and not _is_block_start(lines[i])
+            and not _is_block_start(lines[i], kinds[i])
             and not _is_table(lines, i)
         ):
             buffer.append(lines[i].strip())
@@ -455,16 +494,17 @@ def _mark_lines(html: str, wanted: frozenset[int]) -> str:
     )
 
 
-def _is_block_start(line: str) -> bool:
+def _is_block_start(line: str, kind: int) -> bool:
+    if not kind:
+        return False
     return bool(
-        _HEADING.match(line)
-        or _FENCE.match(line)
-        or _THEMATIC.match(line)
-        or _ADMONITION.match(line)
-        or _CONTENT_TAB.match(line)
-        or line.startswith(">")
-        or _UL_ITEM.match(line)
-        or _OL_ITEM.match(line)
+        (kind & _WDT_HEADING and _HEADING.match(line))
+        or (kind & _WDT_FENCE and _FENCE.match(line))
+        or (kind & _WDT_THEMATIC and _THEMATIC.match(line))
+        or (kind & _WDT_ADMONITION and _ADMONITION.match(line))
+        or (kind & _WDT_TAB and _CONTENT_TAB.match(line))
+        or kind & _WDT_QUOTE
+        or (kind & _WDT_LIST and (_UL_ITEM.match(line) or _OL_ITEM.match(line)))
     )
 
 

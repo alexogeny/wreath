@@ -6,6 +6,7 @@ import pytest
 
 from wreath import Depends, Router, Wreath
 from wreath.auth import Identity
+from wreath.middleware import MiddlewareHooks
 from wreath.testing import TestClient
 from wreath.websocket import WebSocket
 
@@ -153,6 +154,26 @@ def test_router_permission_requirement_demands_an_identity() -> None:
         return []
 
     assert router.routes[0].requirement.authenticated is True
+
+
+def test_route_preserves_runtime_metadata() -> None:
+    middleware = MiddlewareHooks()
+    router = Router()
+
+    @router.get(
+        "/items",
+        middleware=(middleware,),
+        permissions=("items:read",),
+        cancel_on_disconnect=False,
+    )
+    async def list_items(request: Any) -> list[object]:
+        return []
+
+    definition = router.routes[0]
+    assert definition.middleware == (middleware,)
+    assert definition.requirement.authenticated is True
+    assert definition.requirement.permission_checks[0].values == {"items:read"}
+    assert definition.cancel_on_disconnect is False
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from decimal import Decimal
 
 import pytest
 
+from wreath import _sparsevec
 from wreath._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 from wreath.orm.errors import DeclarationError
 from wreath.orm.types import (
@@ -410,6 +411,14 @@ def test_the_largest_dimension_pgvector_allows_is_accepted() -> None:
     value = SparseVector(MAX_SPARSEVEC_DIM, {MAX_SPARSEVEC_DIM: 1.0})
     assert value.dim == MAX_SPARSEVEC_DIM
     assert value.indices == (MAX_SPARSEVEC_DIM,)
+
+
+def test_the_sparse_vector_dimension_bound_is_pgvectors_literal_contract() -> None:
+    """Do not derive the oracle from the constant whose mutation this pins."""
+    assert _sparsevec.MAX_SPARSEVEC_DIM == 1_000_000_000
+    # Execute the owning module during the baseline so its import-time value
+    # mutation selects this test rather than relying on collection-time import.
+    assert _sparsevec.SparseVector(1).dim == 1
 
 
 def test_a_sparse_vector_refuses_a_non_int_index() -> None:

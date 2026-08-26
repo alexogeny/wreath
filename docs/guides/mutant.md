@@ -37,11 +37,19 @@ files from being probed and verified; the original pytest failure still decides
 the command's exit status. Use `--mutant-samples N` to resize it or `--mutant
 off` to disable it.
 
-In the animated test grid, a purple `▣` temporarily replaces the green tile for
-each file whose tests are running against the current mutant. A gold `★` remains
-only when one of those tests kills it. That is deliberately not called
-"survived": in mutation terminology the *mutant* surviving means the assertions
-missed the removed control and is a finding, not a reward.
+In the final state map, a file settles in `Mutant pass` only when one of its
+tests kills a control. Every passing file without positive kill evidence becomes
+a multiplication sign in `Mutation miss`. The control-level summary still
+carries the precise survived/unreached finding. Every mutation-gold file then
+reruns its exact killers in a fresh
+process under a deterministic hash seed and a seed-derived test schedule, plus
+any explicit deterministic `@pytest.mark.fuzz` cases in that file. A clean
+stage earns the cyan star. The JSON report distinguishes schedule-only files
+from files with a purpose-built input corpus without leaving successful work
+stranded in `Mutant pass`.
+An environment-skipped or mixed fuzz file is reported separately as
+`incomplete`; it also earns no star, but an allowed missing capability does not
+turn the ordinary suite red.
 
 ## What it removes
 
