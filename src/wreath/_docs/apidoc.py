@@ -22,7 +22,6 @@ __all__ = ["TargetNotFound", "expand", "has_directives", "rest_markup"]
 _DIRECTIVE = re.compile(r"^:::\s+([\w.]+)\s*$")
 _SECTION = re.compile(
     r"^(Args|Arguments|Parameters|Returns|Raises|Yields|Example|Examples|Note|Notes):\s*$")
-
 #: reST markup that this renderer does not speak. Docstrings reach the site as
 #: markdown, and markdown has no ``double backtick`` literal and no ``:role:``
 #: — so both survive into the page as damage rather than as an error.
@@ -571,10 +570,14 @@ def _docstring(doc: str | None) -> str:
             continue
         out += ["", f"**{section.group(1)}:**", ""]
         i += 1
-        while i < len(lines) and (lines[i].startswith((" ", "\t")) or not lines[i].strip()):
+        while i < len(lines) and (
+            lines[i].startswith((" ", "\t")) or not lines[i].strip()
+        ):
             item = lines[i].strip()
             if item:
                 name, sep, rest = item.partition(":")
-                out.append(f"- `{name.strip()}` — {rest.strip()}" if sep else f"- {item}")
+                out.append(
+                    f"- `{name.strip()}` — {rest.strip()}" if sep else f"- {item}"
+                )
             i += 1
     return "\n".join(out).strip()

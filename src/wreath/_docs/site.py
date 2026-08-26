@@ -18,10 +18,13 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import cache
 from pathlib import Path
+
+from wreath._native import _docs as _native_docs
 
 from . import (
     apidoc,
@@ -39,9 +42,6 @@ from . import (
 )
 from .config import Page, Section, Site
 
-_TAG = re.compile(r"<[^>]+>")
-_WS = re.compile(r"\s+")
-
 _CSS_PATH = "assets/docs.css"
 _JS_PATH = "assets/docs.js"
 _INTERNAL_MD = re.compile(r'href="([^"#:]+)\.md(#[^"]*)?"')
@@ -56,8 +56,6 @@ _SECTION_SPLIT = re.compile(r'<h([23]) id="([^"]+)"')
 #: result snippet, so it wants the topic sentence and nothing after it.
 _SECTION_CHARS = 280
 #: The heading a section opens with, and the `#` permalink every heading carries.
-_OWN_HEADING = re.compile(r"^<h[1-6][^>]*>.*?</h[1-6]>", re.DOTALL)
-_PERMALINK = re.compile(r'<a class="anchor".*?</a>', re.DOTALL)
 #: The dependency plate's list of package names, which is *shown* on the home
 #: page and must not be *indexed* there. Those names are the capability map's
 #: vocabulary: `capabilities.py` deliberately scores them as a low-weight alias
@@ -65,7 +63,6 @@ _PERMALINK = re.compile(r'<a class="anchor".*?</a>', re.DOTALL)
 #: them, and a home page carrying all hundred and fifty-five as ordinary prose
 #: would beat the map at its own job -- with a search snippet that is a run of
 #: package names and no sentence.
-_PLATE_NAMES = re.compile(r'<ul class="plate-names".*?</ul>', re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +115,36 @@ def _first_page(item: Page | Section) -> Page | None:
     return None
 
 
-def _holds(item: Page | Section, current: str) -> bool:
-    """Does this nav subtree contain the page currently being rendered?"""
+@dataclass(frozen=True, slots=True)
+class _NavigationImage:
+    """Build-owned top-level navigation facts compiled once from declarations."""
+
+    entries: tuple[tuple[Page | Section, Page], ...]
+    owner_by_output: dict[str, int]
+
+
+def _compile_navigation(site: Site) -> _NavigationImage:
+    entries: list[tuple[Page | Section, Page]] = []
+    owners: dict[str, int] = {}
+    for item in site.nav.items:
+        landing = _first_page(item)
+        if landing is None:
+            continue
+        owner = len(entries)
+        entries.append((item, landing))
+        members = (item,) if isinstance(item, Page) else item.items
+        for member in members:
+            for page in _pages_in(member):
+                owners[_output_path(page.source)] = owner
+    return _NavigationImage(tuple(entries), owners)
+
+
+def _pages_in(item: Page | Section) -> Iterator[Page]:
     if isinstance(item, Page):
-        return _output_path(item.source) == current
-    return any(_holds(child, current) for child in item.items)
+        yield item
+        return
+    for child in item.items:
+        yield from _pages_in(child)
 
 
 def _render_items(
@@ -158,7 +180,11 @@ def _render_items(
     return f'<div class="{css}">{"".join(parts)}</div>', on_path
 
 
-def _nav_context(site: Site, current: str) -> tuple[str, str, str, str]:
+def _nav_context(
+    site: Site,
+    current: str,
+    image: _NavigationImage | None = None,
+) -> tuple[str, str, str, str]:
     """The section menu, the sidebar tree, the section's name, and its landing href.
 
     With sections on, the top level of the nav moves into the header's section
@@ -185,11 +211,10 @@ def _nav_context(site: Site, current: str) -> tuple[str, str, str, str]:
     side = ""
     here = ""
     landing_href = ""
-    for item in site.nav.items:
-        landing = _first_page(item)
-        if landing is None:
-            continue
-        active = _holds(item, current)
+    image = image or _compile_navigation(site)
+    active_owner = image.owner_by_output.get(current)
+    for owner, (item, landing) in enumerate(image.entries):
+        active = owner == active_owner
         href = _relative(current, _output_path(landing.source))
         entries.append(f'<a href="{_esc(href)}"{" class=\"active\"" if active else ""}'
                        f'{" aria-current=\"true\"" if active else ""}>{_esc(item.title)}</a>')
@@ -237,6 +262,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     source_dir = base / site.source
     output_dir = base / site.output
     pages = site.nav.pages()
+    navigation = _compile_navigation(site)
     known = {_output_path(p.source) for p in pages}
 
     errors: list[str] = []
@@ -264,6 +290,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     rendered_pages: list[_RenderedPage] = []
     rendered_orphans: list[_RenderedPage] = []
     chart_sources: set[Path] = set()
+    code_checker = codeblocks.Checker()
     #: An orphan's chart data is read to render it, but not published — nothing
     #: in the built site would link to it.
     unpublished_chart_sources: set[Path] = set()
@@ -285,7 +312,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         # The Python in the page, checked against the real objects before the
         # markdown is touched. Structural checks pass a page whose first line
         # raises `AttributeError`; five such pages shipped in one week.
-        findings, _ = codeblocks.check_page(text, page.source)
+        findings, _ = code_checker.check_page(text, page.source)
         (errors if site.strict else warnings).extend(str(f) for f in findings)
         # ```chart -> SVG; note any data files read so we can publish them.
         text, chart_tokens = charts.extract(
@@ -362,7 +389,9 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     for pos, rp in enumerate(rendered_pages):
         prev = rendered_pages[pos - 1] if pos > 0 else None
         nxt = rendered_pages[pos + 1] if pos + 1 < len(rendered_pages) else None
-        tabs_html, nav_html, section_title, section_href = _nav_context(site, rp.out_rel)
+        tabs_html, nav_html, section_title, section_href = _nav_context(
+            site, rp.out_rel, navigation,
+        )
         content = _rewrite_md_links(rp.html)
         html = theme.page(
             site_name=site.name,
@@ -418,7 +447,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         encoding="utf-8")
     _write_llms_txt(output_dir, site, rendered_pages)
     _write_robots(output_dir, site)
-    _write_404(output_dir, site, repo_html, links_html)
+    _write_404(output_dir, site, repo_html, links_html, navigation)
     _copy_chart_sources(chart_sources, source_dir.resolve(), output_dir)
     if site.base_url:
         _write_sitemap(output_dir, site, rendered_pages)
@@ -489,9 +518,7 @@ def _prose(html: str) -> str:
     leaving it in the body double-counted it when scoring and put "Routing # "
     at the head of every snippet.
     """
-    html = _OWN_HEADING.sub("", html.lstrip())
-    html = _PLATE_NAMES.sub(" ", html)
-    return _WS.sub(" ", _TAG.sub(" ", _PERMALINK.sub("", html))).strip()
+    return _native_docs.visible_prose(html)
 
 
 def _write_robots(output_dir: Path, site: Site) -> None:
@@ -501,12 +528,20 @@ def _write_robots(output_dir: Path, site: Site) -> None:
     (output_dir / "robots.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_404(output_dir: Path, site: Site, repo_html: str, links_html: str) -> None:
+def _write_404(
+    output_dir: Path,
+    site: Site,
+    repo_html: str,
+    links_html: str,
+    navigation: _NavigationImage,
+) -> None:
     body = markdown.render(
         "# Page not found\n\nThe page you were looking for doesn't exist. "
         "Head back to the [home page](index.html) or press "
         "`Ctrl K` to search the docs.\n")
-    tabs_html, nav_html, section_title, section_href = _nav_context(site, "404.html")
+    tabs_html, nav_html, section_title, section_href = _nav_context(
+        site, "404.html", navigation,
+    )
     html = theme.page(
         site_name=site.name, page_title="Page not found",
         content=_rewrite_md_links(body.html), nav_html=nav_html, tabs_html=tabs_html,

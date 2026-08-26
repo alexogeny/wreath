@@ -25,7 +25,7 @@ the same table.
 
 from __future__ import annotations
 
-import re
+from wreath._native import _docs as _native_docs
 
 #: Words that carry no topic. Kept small on purpose: this list is only here to
 #: stop the word set filling with `the`, not to model English.
@@ -34,9 +34,7 @@ STOPWORDS: frozenset[str] = frozenset(
     not of on or that the their then there these this to was were what when which who
     will with you your""".split())
 
-#: What counts as a word. Dots survive so `wreath.router` indexes whole as well
-#: as in parts; a two-character token is never the thing anyone searched for.
-_WORD = re.compile(r"[a-z0-9_][a-z0-9_.]{2,}")
+_STOPWORD_TAPE = tuple(sorted(STOPWORDS))
 
 
 def stem(word: str) -> str:
@@ -67,12 +65,7 @@ def word_set(text: str, covered: str) -> str:
     keeps the set to the part of the section nothing else can answer for, and it
     halves the index on a corpus whose sections open with their own topic.
     """
-    seen = covered.lower()
-    stems = {
-        stem(word) for word in _WORD.findall(text.lower())
-        if word not in STOPWORDS
-    }
-    return " ".join(sorted(s for s in stems if s not in seen))
+    return _native_docs.word_set(text, covered, _STOPWORD_TAPE)
 
 
 __all__ = ["STOPWORDS", "stem", "word_set"]
