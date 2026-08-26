@@ -97,6 +97,12 @@ def test_robots_txt_reflects_ai_scraping_opt_in() -> None:
     assert body.startswith("User-agent: *\n")
 
 
+def test_robots_txt_omits_unspecified_optional_directives():
+    body = robots_txt(Wreath())
+    assert "Crawl-delay:" not in body
+    assert "Sitemap:" not in body
+
+
 def test_disallow_collapses_to_covering_prefixes():
     app = Wreath()
 
@@ -178,6 +184,29 @@ def test_llms_txt_lists_only_documented_public_routes():
     assert "Every user." not in body
     # Undocumented, so there is nothing useful to say about it.
     assert "/internal/metrics" not in body
+
+
+def test_llms_txt_omits_an_absent_summary_and_undocumented_public_routes():
+    app = Wreath()
+
+    @app.get("/undocumented")
+    async def undocumented() -> dict:
+        return {}
+
+    body = llms_txt(app, title="Example")
+    assert body.startswith("# Example\n\n## Endpoints\n")
+    assert "/undocumented" not in body
+
+
+def test_llms_txt_excludes_a_documented_route_hidden_from_schema():
+    app = Wreath()
+
+    @app.get("/hidden", include_in_schema=False)
+    async def hidden() -> dict:
+        """This must stay private."""
+        return {}
+
+    assert "/hidden" not in llms_txt(app, title="Example")
 
 
 # --- 402 --------------------------------------------------------------------

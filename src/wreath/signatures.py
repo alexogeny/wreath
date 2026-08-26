@@ -891,8 +891,8 @@ class Signatures:
             raise SignatureError("unknown signing key")
 
         nonce = params.get("nonce")
-        ledger_key = None
-        if self.nonces is not None:
+        nonces = self.nonces
+        if nonces is not None:
             if not isinstance(nonce, str):
                 raise SignatureError("signature has no nonce")
             ledger_key = f"{key_id}\x00{nonce}"
@@ -907,7 +907,7 @@ class Signatures:
             #
             # The *lookup* stays here because it is cheap and refuses a genuine
             # replay without paying for the verify -- see the cost note below.
-            if self.nonces.seen(ledger_key):
+            if nonces.seen(ledger_key):
                 raise SignatureError("signature nonce was already used")
 
         # ------------------------------------------------------------------
@@ -930,11 +930,11 @@ class Signatures:
 
         if not verify_ed25519(key.public, base, raw_bytes):
             raise SignatureError("signature does not verify")
-        if ledger_key is not None and self.nonces is not None:
+        if nonces is not None:
             # Spent last, and only once everything above has passed. The window
             # between the lookup and here is one verification wide and closes on
             # the same answer, so a genuine racing replay is still refused.
-            if not self.nonces.claim(ledger_key, now=None):
+            if not nonces.claim(ledger_key, now=None):
                 raise SignatureError("signature nonce was already used")
         if expected_digest is not None:
             # **The body is not here yet.** This is global middleware and runs
@@ -982,8 +982,6 @@ class Signatures:
         increments `refresh_errors`: dropping them would turn a transient
         network fault into every agent silently becoming unverified.
         """
-        if not self._directories:
-            return 0
         from .http_client import HTTPClient
 
         factory = client_factory or (
