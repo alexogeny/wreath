@@ -9,16 +9,33 @@ from wreath.orm import compiler as compiler_module
 from wreath.orm.compiler import (
     _collect_binds,
     compile_count,
+    compile_rebind,
     compile_select,
     shape_of,
 )
 from wreath.orm.errors import DeclarationError, ORMError
+from wreath.orm.expressions import InExpr, ValueExpr
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
+from wreath.queries import Placeholder
 
 from .conftest import FakeDatabase, Membership, Post, User
 
 USERS = '"public"."users" AS "t0"'
+
+
+def test_an_in_expression_rebinds_a_placeholder_among_fixed_values() -> None:
+    marker = Placeholder("user_id", Int64)
+    fixed = ValueExpr(9, Int64)
+    expression = InExpr("IN", User.id, (marker, fixed))
+    found: list[Placeholder] = []
+
+    rebind = compile_rebind(expression, Placeholder, found)
+
+    assert rebind is not None
+    rebound = rebind({"user_id": 7})
+    assert [value.value for value in rebound.values] == [7, 9]
+    assert found == [marker]
 
 
 def test_where_fields_builds_plain_runtime_equalities(registry: Registry) -> None:

@@ -510,8 +510,6 @@ class Session:
 
     async def close(self) -> None:
         """Roll back any open transaction and return the connection exactly once."""
-        if self._closed:
-            return
         self._closed = True
         connection = self._connection
         self._connection = None
