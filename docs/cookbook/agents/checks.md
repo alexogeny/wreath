@@ -12,7 +12,7 @@ Run them individually while you work:
 
 | Command | What it protects |
 |---|---|
-| **`uv run wreath test`** | **Behaviour — reach for this one.** Full pytest semantics, plus a live per-file heat map, duration outliers, slowest tests, bounded timing history, and a bounded mutation sample that reuses the ordinary baseline. It picks `min(8, cpu_count)` workers for you. Use `--mutant off` when debugging the runner itself. |
+| **`uv run wreath test`** | **Behaviour — reach for this one.** Native pytest-compatible semantics, one static final state map, duration outliers, slowest tests, bounded timing history, and a bounded mutation sample that reuses the ordinary baseline. It picks `min(8, cpu_count)` workers for you. Use `--mutant off` when debugging the runner itself. |
 | `uv run wreath test -m ''` | Everything, including network, fuzz, thesis, and performance. |
 | `uv run pytest` | The **serial** process you attach a debugger to, and nothing else. It is not the routine check: it takes no `-n` of its own, so a bare invocation runs one worker and is several times slower than the line above. |
 | `uv run ruff check .` | Lint and import hygiene. |
@@ -30,7 +30,7 @@ the question comes up.
 
 | Command | What it answers |
 |---|---|
-| `uv run wreath-dup-scan` | Which function bodies share a *structure* — the same body under different names, locals, and literals, which is how copy-paste survives here. Ranked by the lines a collapse would remove. Many of its findings are legitimate near-twins, which is exactly why it is not a gate: as one, it would train everyone to ignore it. |
+| `uv run wreath-dup-scan` | Which function bodies share a *structure* — the same body under different names, locals, and literals, which is how copy-paste survives here. `--near` finds almost-equal bodies; `--fragments --min-tokens N` uses the native token-window pass for copied interiors; `--normalization alpha` preserves name relationships and literals; `--context`, JSON coverage, and `--summary` make findings reviewable. Ranked by the lines a collapse would remove. Many findings are legitimate twins, which is exactly why it is not a gate: as one, it would train everyone to ignore it. |
 | `uv run wreath port <app> --by-rule` | What a codebase needs in bulk, rather than one finding per line in file order. `--rule ID --context 3` then shows that rule's sites with their source. |
 | `uv run wreath-complexity-probe --discover` | Where a superlinear shape *might* be, ranked with the high-confidence ones printed in full. A probe proves a contract somebody already suspected; this is how you find the ones nobody has written a probe for. Most candidates are bounded by something the scanner cannot read — a cap, a partition that already made the loop run once — which is why the report is not a gate and `--discover-check` only fails on a **new** one. |
 
