@@ -237,7 +237,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'mutant',
-        'capability': "Mutation testing that removes one *declared control* at a time -- an AuthRequirement field, a Cedar policy, a refusal, a withheld-field filter, a rate limit's key -- and reports the ones no test noticed; stable whole-corpus samples integrate with the animated test runner",
+        'capability': "Mutation testing that removes one *declared control* at a time -- an AuthRequirement field, a Cedar policy, a refusal, a withheld-field filter, a rate limit's key -- and reports the ones no test noticed; stable whole-corpus samples integrate with the static test report",
         'modules': ('wreath.mutant',),
         'guides': ('docs/guides/mutant.md',),
         'replaces': ('mutmut', 'cosmic-ray'),
@@ -321,7 +321,7 @@ ROWS: tuple[dict[str, str | tuple[str, ...]], ...] = (
     },
     {
         'name': 'testing',
-        'capability': 'An in-process test client that runs the real lifespan, including WebSocket sessions, a `pytest11` fixture plugin, and `wreath test` for adaptive collection sharding, a live per-file state map, duration profiling, and overlapping mutation confidence over unchanged pytest semantics',
+        'capability': 'An in-process test client that runs the real lifespan, including WebSocket sessions, a `pytest11` fixture plugin, and `wreath test` for adaptive collection sharding, a static final state report, duration profiling, and overlapping mutation confidence over unchanged pytest semantics',
         'modules': ('wreath.testing',),
         'guides': ('docs/guides/testing.md',),
         'replaces': ('httpx', 'pytest-django'),
