@@ -39,8 +39,12 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 from wreath import Wreath
 from wreath._secondfactor import (
+    MAX_USER_HANDLE_BYTES,
     InMemorySecondFactorStore,
     MemoryChallengeStore,
+    SecondFactor,
+    _descriptors,
+    _webauthn_credential,
     begin_webauthn_assertion,
     begin_webauthn_registration,
     confirm_webauthn_registration,
@@ -284,6 +288,7 @@ async def _assert(
     credential_id: bytes | None = None,
     require_user_verification: bool = False,
     rp_id_signed: str = RP_ID,
+    at: float | None = None,
     **options: Any,
 ) -> Any:
     begun = begin_webauthn_assertion([credential], rp_id=RP_ID)
@@ -297,6 +302,7 @@ async def _assert(
         rp_id=rp_id,
         origins=origins,
         require_user_verification=require_user_verification,
+        at=at,
         **minted,
     )
 
@@ -616,6 +622,27 @@ async def test_user_verification_can_be_required() -> None:
         )
 
 
+async def test_user_verification_can_be_required_at_registration() -> None:
+    store = InMemorySecondFactorStore()
+    device = _Authenticator()
+    begun = begin_webauthn_registration(
+        user_id="user-1", account="ann@example.test", rp_id=RP_ID
+    )
+    minted = device.register(begun.challenge, user_verified=False)
+
+    with pytest.raises(WebAuthnError, match="registration requires user verification"):
+        await confirm_webauthn_registration(
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
+            require_user_verification=True,
+            **minted,
+        )
+    assert await store.credentials("user-1") == []
+
+
 # --- registration bookkeeping -----------------------------------------------
 
 
@@ -625,6 +652,62 @@ async def test_registering_the_same_credential_twice_is_refused() -> None:
     await _enrol(store, device)
     with pytest.raises(WebAuthnError, match="already registered"):
         await _enrol(store, device)
+
+
+async def test_a_non_webauthn_factor_cannot_claim_a_credential_id() -> None:
+    store = InMemorySecondFactorStore()
+    device = _Authenticator()
+    await store.add(
+        SecondFactor(
+            id="totp-1",
+            user_id="user-1",
+            kind="totp",
+            label="Phone",
+            created_at=datetime.now(UTC),
+            last_used_at=None,
+            material=pack_credential(
+                device.credential_id, device.cose, user_verified=True
+            ),
+        )
+    )
+
+    credential, _ = await _enrol(store, device)
+
+    assert credential.kind == "webauthn"
+
+
+async def test_registration_records_the_supplied_time() -> None:
+    store = InMemorySecondFactorStore()
+    device = _Authenticator()
+    moment = 1_700_000_000.0
+    begun = begin_webauthn_registration(
+        user_id="user-1", account="ann@example.test", rp_id=RP_ID
+    )
+
+    credential, _ = await confirm_webauthn_registration(
+        store,
+        "user-1",
+        challenge=begun.challenge,
+        rp_id=RP_ID,
+        origins=(ORIGIN,),
+        at=moment,
+        **device.register(begun.challenge),
+    )
+
+    expected = datetime.fromtimestamp(moment, UTC)
+    assert credential.created_at == expected
+    assert credential.last_used_at == expected
+
+
+async def test_assertion_records_the_supplied_time() -> None:
+    store = InMemorySecondFactorStore()
+    device = _Authenticator()
+    credential, _ = await _enrol(store, device)
+    moment = 1_700_000_000.0
+
+    result = await _assert(store, device, credential, sign_count=1, at=moment)
+
+    assert result.credential.last_used_at == datetime.fromtimestamp(moment, UTC)
 
 
 async def test_a_first_security_key_issues_recovery_codes() -> None:
@@ -2091,3 +2174,83 @@ def test_a_registration_with_no_account_name_is_refused() -> None:
     """The account name is what the authenticator shows the person choosing a key."""
     with pytest.raises(ValueError, match="needs an account name"):
         begin_webauthn_registration(user_id="u1", account="", rp_id=RP_ID)
+
+
+@pytest.mark.parametrize(
+    ("user_id", "user_verification", "message"),
+    [
+        ("", "preferred", "user handle"),
+        ("é" * (MAX_USER_HANDLE_BYTES // 2 + 1), "preferred", "user handle"),
+        ("u1", "whenever", "unknown user verification"),
+    ],
+)
+def test_registration_refuses_invalid_handles_and_verification_policy(
+    user_id: str, user_verification: str, message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        begin_webauthn_registration(
+            user_id=user_id,
+            account="ann@example.test",
+            rp_id=RP_ID,
+            user_verification=user_verification,
+        )
+
+
+def test_registration_options_preserve_named_and_default_display_values() -> None:
+    ordinary = begin_webauthn_registration(
+        user_id="u1",
+        account="ann@example.test",
+        rp_id=RP_ID,
+        challenge=b"c" * 32,
+    ).options
+    assert ordinary["rp"] == {"id": RP_ID, "name": RP_ID}
+    assert ordinary["user"]["displayName"] == "ann@example.test"
+    assert ordinary["authenticatorSelection"]["residentKey"] == "discouraged"
+
+    named = begin_webauthn_registration(
+        user_id="u1",
+        account="ann@example.test",
+        display_name="Ada",
+        rp_id=RP_ID,
+        rp_name="Wreath",
+        discoverable=True,
+        challenge=b"c" * 32,
+    ).options
+    assert named["rp"] == {"id": RP_ID, "name": "Wreath"}
+    assert named["user"]["displayName"] == "Ada"
+    assert named["authenticatorSelection"]["residentKey"] == "required"
+
+
+def _stored_factor(identifier: str, kind: str, credential_id: bytes) -> SecondFactor:
+    return SecondFactor(
+        id=identifier,
+        user_id="u1",
+        kind=kind,
+        label=identifier,
+        created_at=datetime.now(UTC),
+        last_used_at=None,
+        material=pack_credential(credential_id, b"key", user_verified=False),
+    )
+
+
+def test_descriptors_include_only_decodable_webauthn_credentials() -> None:
+    totp = _stored_factor("totp", "totp", b"not-a-passkey")
+    passkey = _stored_factor("passkey", "webauthn", b"credential")
+    assert _descriptors((totp, passkey)) == [
+        {"type": "public-key", "id": b64url_encode(b"credential")}
+    ]
+
+
+async def test_credential_lookup_refuses_empty_and_wrong_kind_then_finds_a_later_match():
+    store = InMemorySecondFactorStore()
+    first = _stored_factor("first", "webauthn", b"other")
+    wrong_kind = _stored_factor("totp", "totp", b"target")
+    target = _stored_factor("target", "webauthn", b"target")
+    for factor in (first, wrong_kind, target):
+        await store.add(factor)
+
+    with pytest.raises(WebAuthnError, match="names no credential"):
+        await _webauthn_credential(store, "u1", b"")
+    found, stored = await _webauthn_credential(store, "u1", b"target")
+    assert found == target
+    assert stored.credential_id == b"target"
