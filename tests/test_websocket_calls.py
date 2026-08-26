@@ -278,6 +278,15 @@ async def test_settling_an_unknown_identifier_reports_false() -> None:
     assert pending.fail("nobody", RuntimeError()) is False
 
 
+async def test_failing_a_pending_slot_delivers_the_error() -> None:
+    pending = Pending(limit=4)
+    error = RuntimeError("peer closed")
+    async with pending.slot(identifier="x") as (_key, waiter):
+        assert pending.fail("x", error) is True
+        with pytest.raises(RuntimeError, match="peer closed"):
+            await waiter
+
+
 async def test_a_duplicate_identifier_is_refused() -> None:
     pending = Pending(limit=4)
     async with pending.slot(identifier="x"):

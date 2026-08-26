@@ -558,3 +558,79 @@ async def test_remove_second_factor_refuses_another_users_credential() -> None:
     )
     assert await remove_second_factor(factors, "user-2", "cred-1") is None
     assert len(await factors.credentials("user-1")) == 1
+
+
+async def test_the_memory_store_scopes_removal_to_the_owning_user() -> None:
+    factors = InMemorySecondFactorStore()
+    factor = SecondFactor(
+        id="cred-1",
+        user_id="user-1",
+        kind="totp",
+        label="Phone",
+        created_at=datetime.now(UTC),
+        last_used_at=None,
+        material=b"a-twenty-byte-secret",
+    )
+    await factors.add(factor)
+    await factors.remove("user-2", factor.id)
+    await factors.remove("user-1", "missing")
+    assert await factors.credential(factor.id) == factor
+    await factors.remove("user-1", factor.id)
+    assert await factors.credential(factor.id) is None
+
+
+async def test_removing_one_of_two_factors_keeps_the_recovery_codes() -> None:
+    factors = InMemorySecondFactorStore()
+    now = datetime.now(UTC)
+    for factor in (
+        SecondFactor(
+            id="totp-1", user_id="user-1", kind="totp", label="Phone",
+            created_at=now, last_used_at=None, material=b"a-twenty-byte-secret",
+        ),
+        SecondFactor(
+            id="key-1", user_id="user-1", kind="webauthn", label="Key",
+            created_at=now, last_used_at=None, material=b"packed-key",
+        ),
+        SecondFactor(
+            id="rec-1", user_id="user-1", kind="recovery", label="Recovery code",
+            created_at=now, last_used_at=None, material=b"sha256$digest",
+        ),
+    ):
+        await factors.add(factor)
+
+    removed = await remove_second_factor(factors, "user-1", "totp-1")
+
+    assert removed is not None and removed.id == "totp-1"
+    assert {row.id for row in await factors.credentials("user-1")} == {
+        "key-1",
+        "rec-1",
+    }
+
+
+async def test_removing_the_last_factor_removes_each_row_once() -> None:
+    class RecordingStore(InMemorySecondFactorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.removals: list[str] = []
+
+        async def remove(self, user_id: str, credential_id: str) -> None:
+            self.removals.append(credential_id)
+            await super().remove(user_id, credential_id)
+
+    factors = RecordingStore()
+    now = datetime.now(UTC)
+    for factor in (
+        SecondFactor(
+            id="totp-1", user_id="user-1", kind="totp", label="Phone",
+            created_at=now, last_used_at=None, material=b"a-twenty-byte-secret",
+        ),
+        SecondFactor(
+            id="rec-1", user_id="user-1", kind="recovery", label="Recovery code",
+            created_at=now, last_used_at=None, material=b"sha256$digest",
+        ),
+    ):
+        await factors.add(factor)
+
+    await remove_second_factor(factors, "user-1", "totp-1")
+
+    assert factors.removals == ["totp-1", "rec-1"]

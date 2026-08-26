@@ -343,6 +343,19 @@ def test_job_without_budget_observes_when_a_guard_exists(unarmed):
     assert runner.nplusone_findings == 1
 
 
+def test_a_job_observer_does_not_count_an_empty_ledger():
+    class EmptyLedger:
+        on_exceeded = None
+
+        @staticmethod
+        def finding():
+            return None
+
+    runner = JobRunner(_FakeDatabase(), name="work")
+    runner._report_repetition(EmptyLedger())
+    assert runner.nplusone_findings == 0
+
+
 def test_each_attempt_gets_a_fresh_ledger(unarmed):
     """Counts must not accumulate across retries -- an attempt is one execution."""
     runner = JobRunner(_FakeDatabase(), name="work")

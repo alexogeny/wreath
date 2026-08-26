@@ -12,6 +12,7 @@ a check written as an `assert` would silently not exist.
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,10 +29,12 @@ from wreath._secondfactor import (
     base32_to_secret,
     begin_totp_enrolment,
     confirm_totp_enrolment,
+    discoverable_credential_id,
     hash_recovery_code,
     secret_to_base32,
     totp_code,
     totp_counter,
+    verify_recovery_code,
     verify_second_factor,
     verify_totp,
 )
@@ -137,6 +140,26 @@ async def test_a_code_that_verified_once_never_verifies_again() -> None:
     # Same code, same step, still inside its thirty seconds.
     assert await verify_second_factor(store, "user-1", code, at=moment) is None
     assert await verify_second_factor(store, "user-1", code, at=moment + 5) is None
+
+
+async def test_verification_records_the_supplied_time() -> None:
+    store = InMemorySecondFactorStore()
+    await store.add(_factor())
+    moment = 1_700_000_000.0
+
+    matched = await verify_second_factor(store, "user-1", _at(moment), at=moment)
+
+    assert matched is not None
+    assert matched.last_used_at == datetime.fromtimestamp(moment, UTC)
+
+
+async def test_a_recovery_row_cannot_answer_as_totp() -> None:
+    """Credential kinds remain domains even when their material is usable elsewhere."""
+    store = InMemorySecondFactorStore()
+    moment = 1_700_000_000.0
+    await store.add(_factor(id="rec-1", kind="recovery", material=SECRET))
+
+    assert await verify_second_factor(store, "user-1", _at(moment), at=moment) is None
 
 
 async def test_replay_survives_the_skew_window_of_a_later_step() -> None:
@@ -367,6 +390,68 @@ async def test_a_stage_one_scrypt_recovery_code_still_verifies() -> None:
     assert await verify_second_factor(store, "user-1", "ABCD-EFGH ") is not None
 
 
+async def test_a_legacy_recovery_hash_is_verified_off_the_event_loop(
+    monkeypatch,
+) -> None:
+    import wreath._secondfactor as module
+
+    store = InMemorySecondFactorStore()
+    await store.add(
+        _factor(
+            id="rec-1",
+            kind="recovery",
+            material=hash_password("abcdefgh").encode("utf-8"),
+        )
+    )
+    calls: list[Any] = []
+    real = module.asyncio.to_thread
+
+    async def observed(function, /, *args, **kwargs):
+        calls.append(function)
+        return await real(function, *args, **kwargs)
+
+    monkeypatch.setattr(module.asyncio, "to_thread", observed)
+    assert await verify_second_factor(store, "user-1", "ABCD-EFGH") is not None
+    assert calls == [verify_recovery_code]
+
+
+async def test_an_empty_code_cannot_redeem_an_empty_recovery_digest() -> None:
+    store = InMemorySecondFactorStore()
+    await store.add(
+        _factor(
+            id="rec-1",
+            kind="recovery",
+            material=hash_recovery_code("").encode("utf-8"),
+        )
+    )
+
+    assert await verify_second_factor(store, "user-1", " --- ") is None
+    assert await store.credential("rec-1") is not None
+
+
+async def test_an_empty_code_does_not_schedule_legacy_hash_work(monkeypatch) -> None:
+    import wreath._secondfactor as module
+
+    store = InMemorySecondFactorStore()
+    await store.add(
+        _factor(
+            id="rec-1",
+            kind="recovery",
+            material=PASSWORD_HASH.encode("utf-8"),
+        )
+    )
+    calls = 0
+
+    async def unexpected(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return False
+
+    monkeypatch.setattr(module.asyncio, "to_thread", unexpected)
+    assert await verify_second_factor(store, "user-1", " --- ") is None
+    assert calls == 0
+
+
 # --- two-phase enrolment ----------------------------------------------------
 
 
@@ -388,6 +473,11 @@ async def test_a_wrong_code_at_confirm_enrols_nothing() -> None:
     assert await store.credentials("user-1") == []
 
 
+def test_begin_enrolment_keeps_a_caller_supplied_secret() -> None:
+    enrolment = begin_totp_enrolment(account="a@b.co", secret=SECRET)
+    assert enrolment.secret == SECRET
+
+
 async def test_confirm_enrols_and_issues_recovery_codes_once() -> None:
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
@@ -400,6 +490,8 @@ async def test_confirm_enrols_and_issues_recovery_codes_once() -> None:
     assert confirmed is not None
     credential, codes = confirmed
     assert credential.kind == "totp"
+    assert credential.created_at == datetime.fromtimestamp(moment, UTC)
+    assert credential.last_used_at == datetime.fromtimestamp(moment, UTC)
     assert len(codes) == 3 and len(set(codes)) == 3
     rows = await store.credentials("user-1")
     assert sum(1 for row in rows if row.kind == "recovery") == 3
@@ -504,6 +596,37 @@ def test_totp_uri_is_the_de_facto_format() -> None:
     assert "issuer=Wreath" in uri and "period=30" in uri and "digits=6" in uri
     with pytest.raises(ValueError):
         totp_uri(SECRET, account="a:b", issuer="Wreath")
+
+
+def test_a_totp_uri_without_an_issuer_has_a_bare_account_label() -> None:
+    uri = totp_uri(SECRET, account="ann@example.test")
+    assert uri.startswith("otpauth://totp/ann%40example.test?")
+    assert "issuer=" not in uri
+
+
+def test_an_empty_recovery_code_is_not_a_candidate() -> None:
+    assert verify_recovery_code(" --- ", hash_recovery_code("")) is False
+
+
+def test_a_discoverable_credential_id_cannot_be_derived_from_empty_material() -> None:
+    with pytest.raises(ValueError, match="non-empty id"):
+        discoverable_credential_id(b"")
+
+
+async def test_confirm_totp_uses_the_current_time_when_none_is_supplied() -> None:
+    store = InMemorySecondFactorStore()
+    moment = time.time()
+    code = totp_code(SECRET, totp_counter(moment))
+    confirmed = await confirm_totp_enrolment(
+        store,
+        "user-1",
+        secret=SECRET,
+        code=code,
+        recovery_codes=0,
+    )
+    assert confirmed is not None
+    credential, _ = confirmed
+    assert abs(credential.created_at.timestamp() - moment) < 5
 
 
 # --- no invariant depends on assert -----------------------------------------

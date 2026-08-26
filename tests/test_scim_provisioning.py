@@ -13,15 +13,16 @@ The two are the whole point of the suite:
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, cast
 
 import pytest
 
 from wreath import Wreath
 from wreath._auth.cedar_engine import CedarPolicies
-from wreath._scim.router import UNUSABLE_PASSWORD
+from wreath._scim.router import UNUSABLE_PASSWORD, _sortable_value
 from wreath._userkit import InMemoryUserStore, verify_password
-from wreath.auth import BearerTokenBackend, Identity
+from wreath.auth import AuthenticationBackend, BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, authorize
 from wreath.organizations import (
     InMemoryOrganizationStore,
@@ -172,7 +173,10 @@ async def test_the_authentication_scheme_follows_the_application_backend(
 
     fixture = directory()
     fixture.app.configure_auth(
-        Backend() if challenge is None else Challenging(),
+        cast(
+            "AuthenticationBackend",
+            Backend() if challenge is None else Challenging(),
+        ),
         CedarAuthorizer(
             engine=CedarPolicies(POLICY),
             organizations=Memberships(fixture.organizations),
@@ -315,7 +319,11 @@ async def test_provisioning_a_user_makes_cedar_permit_them() -> None:
 @pytest.mark.asyncio
 async def test_a_created_user_carries_a_location_and_the_created_status() -> None:
     async with directory().client() as client:
-        response = await provision(client, "alice@example.com")
+        response = await client.post(
+            "/scim/v2/Users",
+            json={"userName": "alice@example.com"},
+            headers={**AUTH, "host": "scim.example"},
+        )
     body = response.json()
     assert response.status == 201
     assert body["schemas"] == ["urn:ietf:params:scim:schemas:core:2.0:User"]
@@ -326,8 +334,38 @@ async def test_a_created_user_carries_a_location_and_the_created_status() -> Non
     ]
     assert body["groups"] == []
     location = dict(response.headers)[b"location"].decode()
-    assert location.endswith("/scim/v2/Users/1")
+    assert location == "http://scim.example/scim/v2/Users/1"
     assert body["meta"]["location"] == location
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_host_gets_a_relative_location() -> None:
+    fixture = directory()
+    router = scim_router(
+        fixture.app,
+        users=fixture.users,
+        organizations=fixture.organizations,
+        organization="acme",
+    )
+    handler = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/scim/v2/ServiceProviderConfig"
+    )
+
+    class Request:
+        path_params: dict[str, str] = {}
+        scope = {"root_path": "/mounted"}
+        scheme = "https"
+
+        def header(self, name: str) -> None:
+            return None
+
+    response = await handler(Request())
+
+    assert json.loads(response.body)["meta"]["location"] == (
+        "/mounted/scim/v2/ServiceProviderConfig"
+    )
 
 
 @pytest.mark.asyncio
@@ -630,6 +668,38 @@ async def test_users_are_sorted_before_the_page_is_selected() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_sorting_handles_scalar_list_boolean_and_missing_values() -> None:
+    fixture = directory()
+    async with fixture.client() as client:
+        for name in ("zoe@example.com", "zara@example.com", "amy@example.com"):
+            await provision(client, name)
+        await client.patch(
+            "/scim/v2/Users/2",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [
+                    {"op": "replace", "path": "active", "value": False}
+                ],
+            },
+            headers=AUTH,
+        )
+        await fixture.organizations.add_member("acme", "1", roles={"admin"})
+        names = await client.get("/scim/v2/Users?sortBy=userName", headers=AUTH)
+        active = await client.get("/scim/v2/Users?sortBy=active", headers=AUTH)
+        groups = await client.get(
+            "/scim/v2/Users?sortBy=groups&sortOrder=descending", headers=AUTH
+        )
+
+    assert [row["userName"] for row in names.json()["Resources"]] == [
+        "amy@example.com",
+        "zara@example.com",
+        "zoe@example.com",
+    ]
+    assert [row["id"] for row in active.json()["Resources"]] == ["2", "1", "3"]
+    assert [row["id"] for row in groups.json()["Resources"]] == ["1", "2", "3"]
+
+
 async def test_groups_can_be_sorted_by_display_name() -> None:
     async with directory().client() as client:
         response = await client.get(
@@ -651,10 +721,15 @@ async def test_sorting_refuses_an_unknown_attribute_and_order() -> None:
         order = await client.get(
             "/scim/v2/Users?sortBy=userName&sortOrder=sideways", headers=AUTH
         )
+        sub_attribute = await client.get(
+            "/scim/v2/Users?sortBy=meta.location", headers=AUTH
+        )
     assert attribute.status == 400
     assert attribute.json()["scimType"] == "invalidValue"
     assert order.status == 400
     assert "ascending" in order.json()["detail"]
+    assert sub_attribute.status == 400
+    assert "meta.location" in sub_attribute.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1095,13 @@ async def test_writing_a_user_outside_this_organisation_is_not_found(verb: str) 
         ({"op": "replace", "path": "password", "value": 7}, "password must be a non-empty"),
         ({"op": "replace", "path": "password", "value": ""}, "password must be a non-empty"),
     ],
+    ids=(
+        "typed-user-name",
+        "blank-user-name",
+        "typed-active",
+        "typed-password",
+        "blank-password",
+    ),
 )
 async def test_a_wrongly_typed_value_is_refused_by_its_own_message(
     operation: dict[str, Any], fragment: str
@@ -1044,7 +1126,11 @@ async def test_a_blank_user_name_is_refused_on_creation() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("member", [{"value": 7}, {"value": ""}, {"display": "no value"}])
+@pytest.mark.parametrize(
+    "member",
+    [{"value": 7}, {"value": ""}, {"display": "no value"}],
+    ids=("typed-value", "empty-value", "missing-value"),
+)
 async def test_a_group_member_without_a_string_value_is_refused(
     member: dict[str, Any],
 ) -> None:
@@ -1183,6 +1269,14 @@ async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
         ({"page_size": 50, "max_page_size": 10}, "1 <= page_size <= max_page_size"),
         ({"max_filter_scan": 0}, "positive max_filter_scan"),
     ],
+    ids=(
+        "empty-read-action",
+        "empty-write-action",
+        "zero-page-size",
+        "zero-maximum-page-size",
+        "page-size-over-maximum",
+        "zero-filter-scan",
+    ),
 )
 async def test_an_incoherent_configuration_is_refused_where_it_is_written(
     options: dict[str, Any], fragment: str
@@ -1196,6 +1290,29 @@ async def test_an_incoherent_configuration_is_refused_where_it_is_written(
             organization="acme",
             **options,
         )
+
+
+def test_scim_sort_value_prefers_a_primary_mapping() -> None:
+    value = [
+        {"value": "fallback", "primary": False},
+        {"value": "Chosen", "primary": True},
+    ]
+    assert _sortable_value(value) == (False, "chosen")
+
+
+def test_scim_sort_value_ignores_non_mapping_primary_candidates() -> None:
+    value = [object(), {"value": "Chosen", "primary": True}]
+    assert _sortable_value(value) == (False, "chosen")
+
+
+def test_scim_sort_value_falls_back_to_the_first_or_missing_value() -> None:
+    assert _sortable_value(["First", "second"]) == (False, "first")
+    assert _sortable_value([]) == (True, "")
+
+
+def test_scim_sort_value_keeps_boolean_order_distinct_from_text() -> None:
+    assert _sortable_value(True) == (False, "1")
+    assert _sortable_value(False) == (False, "0")
 
 
 # --- more than one tenant ---------------------------------------------------

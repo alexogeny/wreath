@@ -9,6 +9,7 @@ import pytest
 
 from wreath._docs import Nav, Page, Section, Site, build
 from wreath._docs._fenced import title_of
+from wreath._docs.figures import _timing_wheel
 from wreath._docs.markdown import render, slugify
 
 # --- config -----------------------------------------------------------------
@@ -23,6 +24,12 @@ def test_config_validation() -> None:
         Site("s", "docs", "out", Nav())  # nav needs a page
     nav = Nav(Page("A", "a.md"), Section("Group", Page("B", "b.md")))
     assert [p.source for p in nav.pages()] == ["a.md", "b.md"]
+
+
+def test_timing_wheel_draws_only_the_six_occupied_timer_slots() -> None:
+    figure = _timing_wheel("wheel")
+
+    assert figure.count('<circle class="f-timer"') == 6
 
 
 # --- markdown ---------------------------------------------------------------

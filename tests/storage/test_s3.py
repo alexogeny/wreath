@@ -324,7 +324,7 @@ def test_stat_of_a_response_without_the_headers_it_reads():
 
 
 def test_stat_of_a_response_whose_headers_are_present_but_empty():
-    """`content-length: ` is `int("")`, which is a `ValueError` rather than a size."""
+    """An empty content-length header is treated like an omitted one."""
     store, _ = _store(lambda *a: FakeResp(200, [(b"content-length", b""), (b"etag", b"")]))
     st = asyncio.run(store.stat("a.txt"))
     assert st.size == 0 and st.etag == ""
@@ -738,25 +738,6 @@ def test_the_host_is_derived_from_the_bucket_and_region_when_none_is_given():
 
 
 # -- the payload hash, which S3 compares against the bytes it receives --------
-#
-# Four controls reachable from here are redundant rather than untested, and no
-# test asserts inside the window where they would matter:
-#
-# - `_sigv4.sha256_hex(body) if body else _sigv4.EMPTY_SHA256` (`_send`) --
-#   `EMPTY_SHA256` *is* `sha256_hex(b"")`, so taking the first arm unconditionally
-#   computes the same string. The conditional is there to say so without hashing.
-# - `headers=extra or None` (`_send`) -- `sign` reads it as `(headers or {})`, so
-#   an empty dict and `None` are the same argument.
-# - `int((... or b"0").decode("ascii") or 0)` (`stat`) -- the trailing `or 0`
-#   cannot fire: the only falsy decode is `""`, and `b"" or b"0"` has already
-#   substituted `b"0"` by then. Pinned by
-#   `test_stat_of_a_response_whose_headers_are_present_but_empty`, which is the
-#   input that would need it.
-# - `if resp.status == 200: return True` (`exists`) -- the fall-through ends in
-#   `bool(self._ok(resp, 200))`, which allows 200 and returns truthy, so removing
-#   the fast path returns True by a longer road. `test_stat_and_exists` pins the
-#   answer either way, and `test_exists_reports_an_unexpected_status_rather_than_absence`
-#   pins that the road still refuses everything else.
 def test_a_body_is_signed_under_its_own_hash():
     store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"e"')]))
     asyncio.run(store.write("k.bin", b"hello llamas"))
@@ -830,6 +811,15 @@ def test_exists_reports_an_unexpected_status_rather_than_absence():
     store, _ = _store(lambda *a: FakeResp(500, [], b"internal error"))
     with pytest.raises(ObjectError, match="S3 500"):
         asyncio.run(store.exists("k"))
+
+
+def test_exists_uses_the_status_instead_of_response_truthiness():
+    class FalseResponse(FakeResp):
+        def __bool__(self) -> bool:
+            return False
+
+    store, _ = _store(lambda *a: FalseResponse(200))
+    assert asyncio.run(store.exists("k")) is True
 
 
 def test_an_abort_answered_404_is_not_an_orphan():
