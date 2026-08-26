@@ -179,7 +179,7 @@ class ClientFactsProvider:
 
     def _resolve_uncached(self, request: Request) -> ClientFacts:
         """Resolve one provider after the request-cache miss is established."""
-        raw = request.header("user-agent", "") or ""
+        raw = request.header("user-agent") or ""
         brand_hint = request.header("sec-ch-ua")
         brands = () if not brand_hint else tuple(_BRAND.findall(brand_hint))
         try:
@@ -250,10 +250,7 @@ class ClientFactsProvider:
         signature_facts = (
             None if self._signatures is None else self._signatures.facts(request)
         )
-        verified = bool(
-            signature_facts is not None
-            and getattr(signature_facts, "verified", False)
-        )
+        verified = bool(getattr(signature_facts, "verified", False))
         identity = (
             getattr(signature_facts, "agent", None) if verified else None
         )

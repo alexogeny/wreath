@@ -110,6 +110,47 @@ def test_client_hints_skip_grease_brand_before_the_real_brand() -> None:
     )
 
 
+def test_client_hints_override_disagreeing_database_facts() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"user-agent", b"Mozilla/5.0 Chrome/120 Linux Mobile"),
+                (b"sec-ch-ua", b'"Chromium";v="124"'),
+                (b"sec-ch-ua-platform", b'"Windows"'),
+                (b"sec-ch-ua-mobile", b"?0"),
+            ],
+        },
+        receive,
+    )
+
+    database = SimpleNamespace(
+        _classify=lambda raw: ("Chrome", "120", "Linux", True, False, 1)
+    )
+    facts = ClientFactsProvider(user_agents=database).resolve(request)
+
+    assert (
+        facts.user_agent.browser,
+        facts.user_agent.browser_version,
+        facts.user_agent.platform,
+        facts.user_agent.mobile,
+    ) == ("Chromium", "124", "Windows", False)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"name": ""}, ValueError, "provider name must be non-empty"),
+        ({"signatures": object()}, TypeError, "signatures must expose facts"),
+    ],
+)
+def test_client_facts_provider_refuses_invalid_configuration(
+    kwargs: dict[str, object], error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        ClientFactsProvider(**kwargs)
+
+
 def test_exact_builtin_geoip_reuses_the_provider_ip_parse(monkeypatch) -> None:
     geoip = WreathGeoIP()
     provider = ClientFactsProvider(geoip)
@@ -183,8 +224,39 @@ def test_client_facts_record_the_resolved_country_in_an_armed_flight() -> None:
     assert context.recorded is not None
     flags, rule_id, country = context.recorded
     assert flags & (1 << 7)
+    assert not flags & (1 << 8)
     assert rule_id == 7
     assert country == "AU"
+
+
+def test_client_facts_record_socket_ipv6_without_a_forwarded_flag() -> None:
+    facts = ClientFacts(
+        ip=IPFacts(
+            address="2001:db8::1",
+            source="socket",
+            version=6,
+            is_global=False,
+            is_private=True,
+            is_loopback=False,
+        ),
+        user_agent=UserAgentFacts(raw="curl/8"),
+    )
+
+    class Context:
+        flight = 1
+        recorded: tuple[int, int, str] | None = None
+
+        def _flight_client_facts(self, flags: int, rule_id: int, country: str) -> None:
+            self.recorded = (flags, rule_id, country)
+
+    context = Context()
+    ClientFactsProvider._record_flight(SimpleNamespace(_context=context), facts)
+
+    assert context.recorded is not None
+    flags, _, _ = context.recorded
+    assert flags & (1 << 5)
+    assert not flags & (1 << 6)
+    assert flags & (1 << 8)
 
 
 def test_client_fact_metrics_are_fixed_aggregate_counts() -> None:
@@ -215,6 +287,42 @@ def test_client_fact_metrics_are_fixed_aggregate_counts() -> None:
         "mobile": 0,
         "country_au": 1,
     }
+
+
+@pytest.mark.parametrize(
+    "classification",
+    [
+        ("Browser", None, None, None, False, 1),
+        (None, None, "Platform", None, False, 1),
+        (None, None, None, False, False, 1),
+        (None, None, None, None, True, 1),
+    ],
+)
+def test_each_user_agent_fact_independently_counts_as_known(classification) -> None:
+    database = SimpleNamespace(_classify=lambda raw: classification)
+    provider = ClientFactsProvider(user_agents=database)
+    request = Request({"type": "http", "headers": []}, receive)
+
+    provider.resolve(request)
+
+    assert provider.counters().values["ua_known"] == 1
+
+
+def test_client_fact_metrics_distinguish_ipv6_and_verified_humans() -> None:
+    signatures = SimpleNamespace(
+        facts=lambda request: SimpleNamespace(verified=True, agent="human-agent")
+    )
+    provider = ClientFactsProvider(signatures=signatures)
+    request = Request(
+        {"type": "http", "client": ("2001:db8::1", None), "headers": []}, receive
+    )
+
+    provider.resolve(request)
+
+    values = provider.counters().values
+    assert (values["ipv4"], values["ipv6"]) == (0, 1)
+    assert values["bot_verified"] == 1
+    assert values["bot_claimed_verified"] == 0
 
 
 def test_client_fact_attributes_follow_otel_names_without_identifiers() -> None:
@@ -280,6 +388,61 @@ def test_client_fact_attributes_omit_an_absent_browser_version() -> None:
     assert "user_agent.version" not in client_fact_attributes(facts)
 
 
+def test_client_fact_attributes_omit_absent_and_untrusted_facts() -> None:
+    empty = ClientFacts(ip=None, user_agent=UserAgentFacts(raw="custom"))
+    assert client_fact_attributes(empty) == {}
+
+    untrusted_ip = ClientFacts(
+        ip=IPFacts(
+            address="203.0.113.8",
+            source="application",
+            version=4,
+            is_global=False,
+            is_private=True,
+            is_loopback=False,
+            geo=GeoIPRecord(country="A1"),
+        ),
+        user_agent=UserAgentFacts(raw="custom"),
+    )
+    assert client_fact_attributes(untrusted_ip) == {"network.type": "ipv4"}
+
+
+def test_client_fact_attributes_bound_client_controlled_values() -> None:
+    facts = ClientFacts(
+        ip=None,
+        user_agent=UserAgentFacts(
+            raw="r" * 1025,
+            browser="b" * 129,
+            platform="p" * 129,
+        ),
+        agent=AgentFacts(identity="i" * 513),
+    )
+
+    assert client_fact_attributes(facts, include_raw_user_agent=True) == {}
+
+    permitted = ClientFacts(ip=None, user_agent=UserAgentFacts(raw="curl/8"))
+    assert client_fact_attributes(permitted, include_raw_user_agent=True) == {
+        "user_agent.original": "curl/8"
+    }
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [AgentFacts(claimed=True), AgentFacts(verified=True)],
+)
+def test_client_fact_attributes_publish_independent_agent_states(agent) -> None:
+    facts = ClientFacts(
+        ip=None,
+        user_agent=UserAgentFacts(raw="custom"),
+        agent=agent,
+    )
+
+    assert client_fact_attributes(facts) == {
+        "wreath.client.agent.claimed": agent.claimed,
+        "wreath.client.agent.verified": agent.verified,
+    }
+
+
 def test_provider_caches_and_fuses_verified_agent_once_per_request() -> None:
     class Verified:
         calls = 0
@@ -311,6 +474,21 @@ def test_provider_caches_and_fuses_verified_agent_once_per_request() -> None:
     )
     assert provider.counters().values["resolutions"] == 1
     assert provider.counters().values["bot_claimed_verified"] == 1
+
+
+@pytest.mark.parametrize(
+    "signature_facts",
+    [None, SimpleNamespace(verified=False, agent="untrusted-agent")],
+)
+def test_unverified_signature_facts_publish_no_identity(signature_facts) -> None:
+    signatures = SimpleNamespace(facts=lambda request: signature_facts)
+    request = Request(
+        {"type": "http", "headers": [(b"user-agent", b"curl/8")]}, receive
+    )
+
+    facts = ClientFactsProvider(signatures=signatures).resolve(request)
+
+    assert facts.agent == AgentFacts(claimed=False, verified=False, identity=None)
 
 
 def test_app_owns_client_facts_and_metrics_discovers_it() -> None:
@@ -382,6 +560,34 @@ def test_native_user_agent_database_scans_products_without_regexes(tmp_path) -> 
         None,
         True,
     )
+
+
+def test_user_agent_database_loads_its_binary_form_from_a_path(tmp_path) -> None:
+    image = files("wreath").joinpath("_data", "user_agent.wua").read_bytes()
+    path = tmp_path / "agents.wua"
+    path.write_bytes(image)
+
+    database = UserAgentDatabase.from_path(path)
+
+    assert database.lookup("Googlebot/1.0")[4] is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ([], "needs an 'entries' list"),
+        ({}, "needs an 'entries' list"),
+        ({"entries": {}}, "needs an 'entries' list"),
+        ({"entries": ["invalid"]}, "entry 0 must be an object"),
+        ({"entries": [{}]}, "entry 0 needs string 'token'"),
+    ],
+)
+def test_user_agent_database_refuses_malformed_json(tmp_path, payload, message) -> None:
+    path = tmp_path / "agents.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        UserAgentDatabase.from_path(path)
 
 
 def test_bundled_user_agent_database_is_real_bounded_data() -> None:
