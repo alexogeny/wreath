@@ -403,7 +403,11 @@ def crud_router(
     columns = spec.__wreath_column_map__
     primary_key = spec.__wreath_primary_key__
     if len(primary_key) != 1:
-        raise ValueError("crud_router requires a single-column primary key")
+        names = ", ".join(column.python_name for column in primary_key)
+        raise ValueError(
+            f"crud_router({model.__name__}) found {len(primary_key)} primary-key "
+            f"columns ({names}); expected exactly one primary-key column"
+        )
     pk_name = primary_key[0].python_name
 
     sensitive = sensitive_fields(model)
@@ -708,8 +712,7 @@ def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Acces
         return authorize
     if op in authorize:
         return authorize[op]
-    group = _OP_GROUP.get(op)
-    if group is not None and group in authorize:
+    if (group := _OP_GROUP[op]) in authorize:
         return authorize[group]
     if "*" in authorize:
         return authorize["*"]
@@ -747,8 +750,6 @@ def _apply_requirement(handler: Any, rule: Access) -> Any:
 
 def _resource_fn(resource: Any) -> Any:
     """Normalize a Cedar `resource` into what `@authorize` accepts."""
-    if callable(resource):
-        return resource
     if isinstance(resource, str) and "{" in resource:
         return lambda request: resource.format(**request.path_params)
     return resource
