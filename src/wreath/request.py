@@ -406,7 +406,7 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
         key, sep, value = fragment.strip(b" \t").partition(b"=")
         if sep and key.strip(b" \t").lower() == b"boundary":
             value = value.strip(b" \t")
-            if len(value) >= 2 and value.startswith(b'"') and value.endswith(b'"'):
+            if value[:1] == b'"' == value[-1:]:
                 value = value[1:-1]
             return value if _valid_boundary(value) else None
     return None
@@ -427,7 +427,7 @@ async def _stream_multipart(
     files: dict[str, UploadedFile] = {}
     all_values: dict[str, list[str]] = {}
     headers: list[tuple[bytes, bytes]] = []
-    field_name: str | None = None
+    field_name = ""
     filename: str | None = None
     part_data = bytearray()
     part_spool: Any = None
@@ -435,7 +435,12 @@ async def _stream_multipart(
 
     def begin_part(header_block: bytes) -> None:
         nonlocal headers, field_name, filename, part_data, part_spool, part_size
-        headers, field_name, filename = _core.multipart_part_info(header_block)
+        headers, parsed_name, filename = _core.multipart_part_info(header_block)
+        if not parsed_name:
+            raise ValueError(
+                "multipart Content-Disposition needs a non-empty form-data name"
+            )
+        field_name = parsed_name
         part_data = bytearray()
         part_spool = None
         part_size = 0
@@ -444,14 +449,8 @@ async def _stream_multipart(
         nonlocal part_spool, part_size
         if not data:
             return
-        if len(data) > limits.max_part_bytes - part_size:
-            raise PayloadTooLarge(
-                f"multipart part exceeds {limits.max_part_bytes} bytes"
-            )
         part_size += len(data)
-        if field_name is None:
-            return
-        if filename is not None and part_spool is not None:
+        if part_spool is not None:
             part_spool.write(data)
             return
         if filename is not None and len(part_data) + len(data) > limits.spool_max_bytes:
@@ -468,11 +467,6 @@ async def _stream_multipart(
 
     def finish_part() -> None:
         nonlocal retained, part_spool
-        if field_name is None:
-            if part_spool is not None:
-                part_spool.close()
-                part_spool = None
-            return
         if filename is not None:
             if part_spool is None:
                 data = bytes(part_data)
@@ -1255,7 +1249,11 @@ class Request:
         total = 0
         limit = self._limits.max_body_bytes
         expected = self._take_body_check()
-        running = None if expected is None else new_hash(expected[0].replace("-", ""))
+        body_check = (
+            None
+            if expected is None
+            else (new_hash(expected[0].replace("-", "")), expected[1])
+        )
         try:
             while True:
                 message = await self._receive()
@@ -1271,12 +1269,12 @@ class Request:
                             self._body = b""
                             raise PayloadTooLarge(f"request body exceeds {limit} bytes")
                         total += len(body)
-                        if running is not None:
-                            running.update(body)
+                        if body_check is not None:
+                            body_check[0].update(body)
                         yield body
                     if not more_body:
-                        if running is not None and expected is not None:
-                            if not compare_digest(running.digest(), expected[1]):
+                        if body_check is not None:
+                            if not compare_digest(body_check[0].digest(), body_check[1]):
                                 raise BadRequest(
                                     "request body does not match its signed content-digest"
                                 )
@@ -1296,14 +1294,14 @@ class Request:
                         self._body = b""
                         raise PayloadTooLarge(f"request body exceeds {limit} bytes")
                     total += len(body)
-                    if running is not None:
+                    if body_check is not None:
                         # Before the yield, not after: a consumer that stops
                         # early must not leave a chunk it *did* read unhashed.
-                        running.update(body)
+                        body_check[0].update(body)
                     yield body
                 if not message.get("more_body", False):
-                    if running is not None and expected is not None:
-                        if not compare_digest(running.digest(), expected[1]):
+                    if body_check is not None:
+                        if not compare_digest(body_check[0].digest(), body_check[1]):
                             raise BadRequest(
                                 "request body does not match its signed content-digest"
                             )
