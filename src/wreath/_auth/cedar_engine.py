@@ -279,8 +279,8 @@ class EntityUid:
                 return uid
             except CedarParseError:
                 pass
-        head, sep, tail = text.rpartition("::")
-        if not sep or not head or not tail:
+        head, _, tail = text.rpartition("::")
+        if not head or not tail:
             raise CedarParseError(f'{text!r} is not an entity reference; expected Type::"id"')
         return cls(head, tail)
 
