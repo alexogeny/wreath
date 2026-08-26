@@ -52,11 +52,26 @@ runtime dependencies.
 |---|---:|---:|---:|---:|
 | route + JSON | 35,221 | 104,326 | 220,806 | 425,757 |
 | + CORS | 46,542 | 143,283 | 241,150 | 491,308 |
-| + binding and validation | 107,943 | 222,511 | 275,629 | 774,667 |
-| + bearer authentication | 114,036 | 229,477 | 277,595 | 867,014 |
+| + binding and validation | 107,943 | 222,511<sup>*</sup> | 275,629<sup>*</sup> | 774,667 |
+| + bearer authentication | 114,036 | 229,477<sup>*</sup> | 277,595<sup>*</sup> | 867,014 |
 | + Cedar authorization | 153,793 | 931,174 | 974,843 | 1,597,999 |
 | + PostgreSQL | 206,037 | 1,104,737 | 1,145,880 | 1,811,778 |
 | + outbound HTTP | **249,844** | **1,444,119** | **1,443,892** | **2,107,179** |
+
+<sup>*</sup> These are not like-for-like framework feature costs. Sanic and
+BlackSheep share a hand-written success-path adapter: msgspec decodes the
+known-good body, query conversion is inline, and bearer "authentication" is an
+exact comparison with `"Bearer user"`. Wreath runs its public binder and bearer
+backend, including structured validation refusals, case-insensitive scheme
+parsing, duplicate-credential refusal, `Identity` publication, protected-route
+resolution, and a 401 Bearer challenge. The Sanic adapter answers 500 for a bad
+query or missing token where Wreath answers 422 or 401, and accepts a duplicated
+Authorization field when its first value is valid. Every later cumulative
+BlackSheep and Sanic cell inherits this shortcut. The full rows still measure
+the exact successful applications, but the starred increments do not compare
+equivalent validation or authentication. Sanic's retained 1,966-instruction
+authentication increment is also below its available 2,747-instruction A/A
+resolution and is unresolved.
 
 Each number is the median of five alternating N/N/2 slopes after 500 warm-up
 requests, with server and generator pinned separately. The complete-arm ranges
