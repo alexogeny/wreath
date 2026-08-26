@@ -26,102 +26,83 @@ asyncio_mode = auto
 """
 
 
-def test_the_plugin_is_registered_by_entry_point_alone(pytester: pytest.Pytester) -> None:
-    """No `pytest_plugins`, no conftest -- installing Wreath is the whole setup."""
+def test_installed_plugin_contracts_share_one_fresh_pytest_process(
+    pytester: pytest.Pytester,
+) -> None:
+    """Discovery, fixtures, isolation, lifespan and refusal in one installed run.
+
+    These used to launch five separate pytest children. Their process boundary
+    proves entry-point discovery, but a distinct process per assertion proves
+    nothing more: one nested suite is still a clean external consumer, and its
+    named tests retain each independent contract.
+    """
     pytester.makeini(_INI)
     pytester.makepyfile(
         """
         def test_registered(request):
             assert request.config.pluginmanager.hasplugin("wreath")
-        """
-    )
-    pytester.runpytest_subprocess().assert_outcomes(passed=1)
 
-
-def test_wreath_client_runs_lifespan_around_the_test(pytester: pytest.Pytester) -> None:
-    pytester.makeini(_INI)
-    pytester.makeconftest(
-        """
-        import pytest
-        from wreath import Wreath
-
-        events = []
-
-        @pytest.fixture
-        def wreath_app():
-            app = Wreath()
-
-            @app.on_startup
-            async def up(app):
-                events.append("startup")
-
-            @app.on_shutdown
-            async def down(app):
-                events.append("shutdown")
-
-            @app.get("/ping")
-            async def ping(request):
-                return {"ok": True}
-
-            return app
-        """
-    )
-    pytester.makepyfile(
-        """
-        from conftest import events
-
-        async def test_request_and_lifespan(wreath_client):
-            response = await wreath_client.get("/ping")
-            assert response.status == 200
-            assert response.json() == {"ok": True}
-            assert events == ["startup"]
-        """
-    )
-    pytester.runpytest_subprocess().assert_outcomes(passed=1)
-
-
-def test_a_missing_wreath_app_fixture_says_what_to_define(pytester: pytest.Pytester) -> None:
-    """The error a user hits first must name the fixture, not fail inside Wreath."""
-    pytester.makeini(_INI)
-    pytester.makepyfile(
-        """
-        async def test_needs_an_app(wreath_client):
-            pass
-        """
-    )
-    result = pytester.runpytest_subprocess()
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*wreath_app*"])
-
-
-def test_wreath_email_captures_instead_of_sending(pytester: pytest.Pytester) -> None:
-    pytester.makeini(_INI)
-    pytester.makepyfile(
-        """
         async def test_capture(wreath_email):
             await wreath_email.send_verification("a@example.test", "https://x.test/v")
             assert wreath_email.verifications == [
                 ("a@example.test", "https://x.test/v")
             ]
-        """
-    )
-    pytester.runpytest_subprocess().assert_outcomes(passed=1)
 
-
-def test_email_capture_is_fresh_per_test(pytester: pytest.Pytester) -> None:
-    """Function-scoped, or one test's mail leaks into the next one's assertions."""
-    pytester.makeini(_INI)
-    pytester.makepyfile(
-        """
-        async def test_one(wreath_email):
+        async def test_email_one(wreath_email):
             await wreath_email.send_verification("a@example.test", "l")
             assert len(wreath_email.verifications) == 1
 
-        async def test_two(wreath_email):
+        async def test_email_two(wreath_email):
             assert wreath_email.verifications == []
+
+        async def test_missing_app_names_the_fixture(wreath_client):
+            pass
         """
     )
-    pytester.runpytest_subprocess().assert_outcomes(passed=2)
+    with_app = pytester.path / "with_app"
+    with_app.mkdir()
+    (with_app / "conftest.py").write_text(
+        """
+import pytest
+from wreath import Wreath
+
+events = []
+
+@pytest.fixture
+def wreath_app():
+    app = Wreath()
+
+    @app.on_startup
+    async def up(app):
+        events.append("startup")
+
+    @app.on_shutdown
+    async def down(app):
+        events.append("shutdown")
+
+    @app.get("/ping")
+    async def ping(request):
+        return {"ok": True}
+
+    return app
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (with_app / "test_client.py").write_text(
+        """
+from conftest import events
+
+async def test_request_and_lifespan(wreath_client):
+    response = await wreath_client.get("/ping")
+    assert response.status == 200
+    assert response.json() == {"ok": True}
+    assert events == ["startup"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(passed=5, errors=1)
+    result.stdout.fnmatch_lines(["*wreath_app*"])
 
 
 def test_postgres_fixture_skips_naming_the_variable(
