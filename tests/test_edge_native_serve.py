@@ -44,6 +44,7 @@ from typing import cast
 
 import pytest
 
+from wreath._native import _reactor
 from wreath.edge import Upstream, UpstreamPool
 from wreath.edge.serve import EdgeHandle
 
@@ -356,6 +357,7 @@ async def test_the_native_path_keeps_the_smuggling_refusals(raw: bytes, reason: 
         await origin.close()
 
 
+@pytest.mark.skipif(_reactor is None, reason="native reactor not built")
 async def test_serve_terminates_tls_natively() -> None:
     """The proxy faces the internet, which means it terminates TLS.
 

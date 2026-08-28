@@ -98,6 +98,17 @@ async def test_leave_all_removes_from_every_room() -> None:
     assert rooms.rooms() == []
 
 
+async def test_leaving_clears_the_socket_membership_index() -> None:
+    rooms = RoomRegistry()
+    socket = FakeSocket()
+    await rooms.join("a", socket)
+    await rooms.join("b", socket)
+    await rooms.leave("a", socket)
+    assert rooms._memberships[socket] == {"b"}
+    await rooms.leave("b", socket)
+    assert socket not in rooms._memberships
+
+
 # --- local broadcast ---------------------------------------------------------
 
 

@@ -140,6 +140,17 @@ def test_list_paginates():
     asyncio.run(go())
 
 
+def test_list_refuses_xml_declarations_that_can_define_entities():
+    body = b'<!DOCTYPE x [<!ENTITY e "expanded">]><ListBucketResult>&e;</ListBucketResult>'
+    store, _ = _store(lambda method, target, payload: FakeResp(200, body=body))
+
+    async def go():
+        with pytest.raises(ValueError, match="document type declaration"):
+            _ = [item async for item in store.list()]
+
+    asyncio.run(go())
+
+
 def _list_page(*, keys=(), truncated=False, token=None, trailing="", sizes=None):
     """One `ListBucketResult`. `trailing` goes after the token, where S3 puts `<Name>`."""
     sizes = sizes if sizes is not None else [len(k) for k in keys]

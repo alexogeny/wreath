@@ -47,19 +47,19 @@ class _ModuleWalk(_TestClient, _HttpxRewrite, _BackgroundWork):
                 ):
                     partial.add(candidate.name)
                     partial.add(self._seg(base.func.value))
-        changed = True
-        while changed:
-            changed = False
-            for name, bases in class_bases.items():
-                if name in partial or not (bases & partial):
-                    continue
-                partial.add(name)
-                changed = True
-            for name in tuple(partial):
-                for base in class_bases.get(name, ()):
-                    if base in class_bases and base not in partial:
-                        partial.add(base)
-                        changed = True
+        children: dict[str, set[str]] = {}
+        for name, bases in class_bases.items():
+            for base in bases:
+                children.setdefault(base, set()).add(name)
+        pending = list(partial)
+        while pending:
+            name = pending.pop()
+            related = children.get(name, set()) | {
+                base for base in class_bases.get(name, ()) if base in class_bases
+            }
+            for relative in related - partial:
+                partial.add(relative)
+                pending.append(relative)
         self._pydantic_partial_family = frozenset(partial)
 
         def owner_id(candidate: ast.AST) -> int | None:

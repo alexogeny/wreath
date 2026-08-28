@@ -19,7 +19,6 @@ from typing import Any
 from uuid import UUID
 
 from .._model_fields import dataclass_field_image
-from ..binding import _return_annotation
 from ..geospatial import Coordinate
 from ..pagination import Page
 from ..response import FileResponse, PreparedResponse, Response, StreamingResponse
@@ -455,6 +454,7 @@ def build_api_model(
     image = app._application_image
     routes = list(image.routes())
     binding_specs = image.binding_specs()
+    return_annotations = image.return_annotations()
     resolved_ids, id_diagnostics = image.operation_ids()
     builder = _Builder(allow_unknown)
     operations: list[Operation] = []
@@ -463,10 +463,7 @@ def build_api_model(
         if not definition.include_in_schema:
             continue
         spec = binding_specs[index]
-        # inspect_handler returns None for request-only handlers, so the return
-        # annotation is resolved independently here -- a param-less handler still
-        # has a typed response worth generating.
-        return_annotation = _return_annotation(definition.endpoint)
+        return_annotation = return_annotations[index]
         doc = inspect.getdoc(definition.endpoint)
         for method in definition.methods:
             operation_id = resolved_ids[(index, method)]

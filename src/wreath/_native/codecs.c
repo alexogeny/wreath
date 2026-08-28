@@ -1684,10 +1684,17 @@ wreath_cookie_header(PyObject *Py_UNUSED(self), PyObject *args)
             return NULL;
         }
     }
-    if (cookie_field_valid(name, "name", 0) < 0 ||
-        cookie_field_valid(value, "value", 0) < 0 ||
+    if (cookie_field_valid(name, "name", 1) < 0 ||
+        cookie_field_valid(value, "value", 1) < 0 ||
         cookie_field_valid(path, "path", 1) < 0 ||
-        (domain != Py_None && cookie_field_valid(domain, "domain", 1) < 0)) {
+        (domain != Py_None && cookie_field_valid(domain, "domain", 1) < 0) ||
+        (expires != Py_None && cookie_field_valid(expires, "expires", 1) < 0)) {
+        Py_XDECREF(site);
+        return NULL;
+    }
+    if (max_age != Py_None && !PyLong_CheckExact(max_age)) {
+        PyErr_Format(PyExc_TypeError, "max_age must be an int, not %.200s",
+                     Py_TYPE(max_age)->tp_name);
         Py_XDECREF(site);
         return NULL;
     }

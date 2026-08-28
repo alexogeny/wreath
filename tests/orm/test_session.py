@@ -850,7 +850,7 @@ async def test_adding_the_same_object_twice_schedules_it_once(session: Session) 
     session.add(user)
     session.add(user)
     assert session._new.count(user) == 1
-    assert len(session._new_ordinals) == 1
+    assert len(session._new_ids) == 1
 
 
 async def test_equal_but_distinct_objects_are_scheduled_separately(
@@ -896,10 +896,10 @@ async def test_deleting_a_transient_object_clears_every_bookkeeping_entry(
     session.add(user)
     session.delete(user)
     assert session._new == []
-    assert session._new_ordinals == {}
+    assert session._new_ids == set()
     session.add(user)
     assert session._new == [user]
-    assert len(session._new_ordinals) == 1
+    assert len(session._new_ids) == 1
 
 
 async def test_flush_and_close_leave_no_stale_bookkeeping(
@@ -908,11 +908,11 @@ async def test_flush_and_close_leave_no_stale_bookkeeping(
     session.add(User(id=1, email="a@b.c", name="A", created_at=None))
     await session.flush()
     assert session._new == []
-    assert session._new_ordinals == {}
+    assert session._new_ids == set()
     assert session._deleted == []
     assert session._deleted_ids == set()
     await session.close()
-    assert session._new_ordinals == {}
+    assert session._new_ids == set()
 
 
 async def test_a_failed_insert_preserves_pending_bookkeeping(
@@ -923,9 +923,8 @@ async def test_a_failed_insert_preserves_pending_bookkeeping(
     session.add(user)
     with pytest.raises(RuntimeError):
         await session.flush()
-    # Retry semantics: the object stays scheduled, with its ordinal intact.
     assert session._new == [user]
-    assert id(user) in session._new_ordinals
+    assert id(user) in session._new_ids
 
 
 async def test_scheduling_and_ordering_work_stays_linear(session: Session) -> None:
@@ -937,15 +936,9 @@ async def test_scheduling_and_ordering_work_stays_linear(session: Session) -> No
         with _count_probes() as counter:
             for user in users:
                 local.add(user)
-            sorted(
-                local._new,
-                key=lambda item: (local._order(type(item)), local._new_ordinals[id(item)]),
-            )
+            local._new_batches()
         return counter[0]
 
-    # One membership probe per add and one order lookup per sort key: doubling
-    # the pending set exactly doubles the work. The old `_new.index()` key and
-    # `in self._new` scan made this quadruple.
     assert probes_for(500) == 1000
     assert probes_for(1000) == 2000
     assert probes_for(2000) == 4000

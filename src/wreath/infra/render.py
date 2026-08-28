@@ -141,6 +141,7 @@ def _columns(lines: list[str], rows: list[tuple[str, ...]], *, indent: str = "  
     `rows` always carries its header, so there is nothing to guard against here.
     """
     widths = [
+        # complexity: allow SL-COMP-LOOP -- widths visit every input table cell
         max(len(row[index]) for row in rows) for index in range(len(rows[0]) - 1)
     ]
     for row in rows:

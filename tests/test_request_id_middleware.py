@@ -57,7 +57,9 @@ def test_validator_applies_the_same_charset_under_a_shorter_bound() -> None:
 
 
 async def test_valid_inbound_id_is_reused_and_echoed() -> None:
-    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
+    app = Wreath(
+        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True))
+    )
     seen: list[str] = []
 
     @app.get("/")
@@ -73,7 +75,9 @@ async def test_valid_inbound_id_is_reused_and_echoed() -> None:
 
 
 async def test_hostile_inbound_id_is_replaced_not_sanitized() -> None:
-    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
+    app = Wreath(
+        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True))
+    )
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -89,10 +93,8 @@ async def test_hostile_inbound_id_is_replaced_not_sanitized() -> None:
     assert response.body.decode() == echoed
 
 
-async def test_inbound_id_can_be_distrusted_entirely() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=False))
-    )
+async def test_inbound_id_is_distrusted_by_default() -> None:
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy()))
 
     @app.get("/")
     async def index(request: Any) -> str:

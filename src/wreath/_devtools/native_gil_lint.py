@@ -133,6 +133,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
 
         if "Py_BEGIN_ALLOW_THREADS" in line:
             allow_threads = True
+            # complexity: allow SL-LINEAR-CALL -- snapshot is a no-GIL invariant
             crossed = set(borrowed)
             continue
         if "Py_END_ALLOW_THREADS" in line:

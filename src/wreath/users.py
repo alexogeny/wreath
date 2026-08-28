@@ -736,8 +736,8 @@ def user_router(
     fails validation, the latter carrying an `errors` list of one entry per
     field.
     """
-    if not secret:
-        raise ValueError("user_router requires a non-empty secret")
+    if len(secret.encode("utf-8")) < 32:
+        raise ValueError("user_router secret must contain at least 32 bytes")
     mailer = email_sender if email_sender is not None else LogEmailSender()
     links = link_builder if link_builder is not None else _default_link(base_url, prefix)
     router = Router(prefix=prefix, tags=("users",))

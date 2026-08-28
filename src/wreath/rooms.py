@@ -80,10 +80,11 @@ class RoomRegistry:
         channel: Bus channel carrying every room; must be a valid SQL identifier.
     """
 
-    __slots__ = ("_bridge", "_grade_errors", "_rooms")
+    __slots__ = ("_bridge", "_grade_errors", "_memberships", "_rooms")
 
     def __init__(self, bus: Any = None, *, channel: str = DEFAULT_CHANNEL) -> None:
         self._rooms: dict[str, set[Any]] = {}
+        self._memberships: dict[Any, set[str]] = {}
         #: Sockets skipped because their grade callable raised. Counted rather
         #: than swallowed: a grade that always raises delivers to nobody, which
         #: is fail-closed and completely silent without this.
@@ -108,6 +109,7 @@ class RoomRegistry:
         if members is None:
             members = self._rooms[room] = set()
         members.add(websocket)
+        self._memberships.setdefault(websocket, set()).add(room)
 
     async def leave(self, room: str, websocket: Any) -> None:
         """Remove `websocket` from `room`; drop the room when it empties.
@@ -116,19 +118,18 @@ class RoomRegistry:
         `finally` without a guard.
         """
         members = self._rooms.get(room)
-        if members is None:
+        if members is None or websocket not in members:
             return
-        members.discard(websocket)
+        members.remove(websocket)
         if not members:
             del self._rooms[room]
+        memberships = self._memberships[websocket]
+        memberships.remove(room)
+        if not memberships:
+            del self._memberships[websocket]
 
     async def leave_all(self, websocket: Any) -> None:
-        """Remove `websocket` from every room it is in, on this worker.
-
-        The one call a disconnect handler needs when the socket's rooms are not
-        tracked separately. Safe for a socket in no rooms.
-        """
-        for room in [name for name, members in self._rooms.items() if websocket in members]:
+        for room in tuple(self._memberships.get(websocket, ())):
             await self.leave(room, websocket)
 
     def members(self, room: str) -> int:

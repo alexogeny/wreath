@@ -6,6 +6,7 @@ so there is one account of a release rather than a site version and a second
 version elsewhere.
 
 <!-- releases:start -->
+- [v0.3.3](0.3.3.md) — 2026-08-28
 - [v0.3.2](0.3.2.md) — 2026-08-20
 - [v0.3.1](0.3.1.md) — 2026-08-18
 - [v0.3.0](0.3.0.md) — 2026-08-16

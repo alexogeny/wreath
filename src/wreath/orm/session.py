@@ -399,15 +399,15 @@ class Session:
         "_connection",
         "_deleted",
         "_deleted_ids",
+        "_dirty_items",
         "_written",
         "_depth",
         "_identity",
         "_identity_warn_at",
         "_identity_warned",
+        "_new_ids",
         "_new_items",
-        "_new_ordinals",
         "_new_stale",
-        "_ordinal",
         "_registry",
         "_statement_timeout",
         "_tenant",
@@ -462,10 +462,10 @@ class Session:
         self._identity: dict[tuple[Any, tuple[Any, ...]], Any] = {}
         self._new_items: list[Any] = []
         self._new_stale = False
-        self._new_ordinals: dict[int, int] = {}
+        self._new_ids: set[int] = set()
         self._deleted: list[Any] = []
         self._deleted_ids: set[int] = set()
-        self._ordinal = 0
+        self._dirty_items: list[Any] = []
         self._depth = 0
         # Model names written inside an open transaction, published on commit.
         self._written: frozenset[str] = frozenset()
@@ -702,7 +702,6 @@ class Session:
     async def _fetch_one_compiled(
         self, query: Select, compiled: CompiledQuery
     ) -> Any:
-        """The prepared-query twin of `fetch_one`, without recompiling shape."""
         results = await self._fetch_compiled(query, compiled)
         if len(results) > 1:
             raise MultipleResultsError(
@@ -712,20 +711,6 @@ class Session:
         return results[0] if results else None
 
     def _count_read(self, spec: ModelSpec | None) -> None:
-        """Tell the request's query ledger which model this read hydrates.
-
-        The N+1 seam. The ledger may raise -- that is the point, and it happens
-        before the statement runs, so the traceback lands on the loop rather
-        than on the row that finally overflowed it.
-
-        Keyed by module *and* qualname, because the ledger counts per key and
-        `__qualname__` alone is not unique across a tree: `billing.Invoice` and
-        `reporting.Invoice` are both `"Invoice"`, so one query to each would
-        count as two queries to one model and trip a guard on two innocent
-        reads. Building the key costs an f-string per query, which only a
-        request under a guard pays -- the caller gates this on
-        `_nplusone.WATCHING`, and a guard is a development and staging tool.
-        """
         ledger = _query_ledger.get(None)
         if ledger is not None and spec is not None:
             model = spec.model_type
@@ -734,19 +719,10 @@ class Session:
     async def _fetch_recorded(
         self, model_ids: dict[Any, int], connection: Any, compiled: CompiledQuery
     ) -> list[Any]:
-        """`_fetch_objects` under a recording app, timed and attributed.
-
-        Split out so the ordinary path keeps its single branch and no clock
-        reads. The phase carries the model's metadata-image ID, which is what
-        lets a recorded trace say *fifty of them hydrated Trek* rather than
-        *fifty queries*.
-        """
         spec = compiled.result_model
         model_id = model_ids.get(spec.model_type, 0) if spec is not None else 0
         marker = _phase_marker.get(None) if model_id else None
         if marker is None:
-            # Unsampled, or a model outside the image: attributing to ID 0 would
-            # put these rows on whichever model happens to be first.
             return await self._fetch_objects(
                 connection, compiled, compiled.sql, compiled.bind_values
             )
@@ -756,8 +732,6 @@ class Session:
                 connection, compiled, compiled.sql, compiled.bind_values
             )
         finally:
-            # In a finally so a statement that raised still shows that it ran:
-            # an N+1 that fails halfway is still an N+1.
             marker(_PH_ORM_HYDRATE, model_id, _COV_PYTHON, _monotonic_ns() - started)
 
     async def _fetch_objects(
@@ -767,24 +741,9 @@ class Session:
         sql: str,
         args: tuple[Any, ...],
     ) -> list[Any]:
-        """Hydrate `sql` into models, natively when the shape allows it.
-
-        Both paths share the identity map and the same cell semantics, so which
-        one runs is not observable beyond allocation counts.
-        """
         plan = self._hydrate_plan(connection, compiled)
         if plan is not None:
             rows = await connection._fetch_into(sql, args, (plan, self._identity, self))
-            # One row per match, so a key that matched twice yields the same
-            # object twice; the object graph is right, the list needs collapsing.
-            #
-            # Asked first, and asked in C. The hydrator builds this list in
-            # batches without a Python frame per row, and `_hydrate_plan`
-            # answers only for a single-model unjoined query -- so a repeat
-            # needs the query itself to return one primary key twice, which is
-            # the exception rather than the shape. Walking every row in Python
-            # to discover there was nothing to collapse spent the batching to
-            # answer a question `set(map(id, ...))` settles at C speed.
             identities = set(map(id, rows))
             if len(identities) == len(rows):
                 return rows
@@ -799,12 +758,7 @@ class Session:
         return self._hydrate_rows(compiled, records)
 
     def _hydrate_plan(self, connection: Any, compiled: CompiledQuery) -> Any:
-        """The direct decoder plan for this shape, or None for decoded records.
-
-        Direct hydration needs a connection that can decode into a destination.
-        A test double or joined load instead hands decoded records to the batch
-        hydrator; both write the same fixed model cells and identity map.
-        """
+        """Return a direct decoder plan, or `None` for Record hydration."""
         storage = _model_storage()
         if getattr(connection, "_decode_dest", None) is None:
             return None
@@ -819,8 +773,6 @@ class Session:
             or compiled.load_plan.joined
             or len(compiled.selected_columns) != len(compiled.load_plan.columns)
         ):
-            # Joined loads span several models per row; that assembly still runs
-            # through the Record path.
             cached.hydrate_plan = False
             return None
         try:
@@ -830,10 +782,6 @@ class Session:
                 tuple(item.index for item in compiled.load_plan.columns),
             )
         except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
-            # The plan compiler's whole documented failure set: a shape it
-            # cannot lay out selects decoded-record hydration, which is what
-            # this cache line records. Anything outside it -- a MemoryError or
-            # caller bug -- must remain visible.
             cached.hydrate_plan = False
             return None
         cached.hydrate_plan = plan
@@ -961,20 +909,14 @@ class Session:
             )
         await self._load_relationship(found, instances, ())
 
-    # -- hydration ----------------------------------------------------------
-
     def _hydrate_rows(self, compiled: CompiledQuery, rows: list[Any]) -> list[Any]:
         spec = compiled.result_model
         if spec is None:
             raise MappingError("a hydrated query must declare its result model")
         plan = compiled.load_plan
         if not rows:
-            # Resolving offsets here would raise MappingError for a projection
-            # missing its primary key even when nothing matched; an empty
-            # result has never done that, so stay out of the way.
+            # Empty results do not validate a projection's primary-key offsets.
             return []
-        # Once per *shape*, not once per query and emphatically not once per
-        # row -- see `_record_plan`.
         row_plan, cursors = self._record_plan(compiled, spec, plan)
         models = _model_storage()
         return _native_core.orm_hydrate_records(
@@ -992,20 +934,7 @@ class Session:
     def _record_plan(
         self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
     ) -> tuple[_RowPlan, tuple[_JoinCursor, ...]]:
-        """The Record path's per-row constants, resolved once per shape.
-
-        Building these per query is enough work to lose on a small result: a
-        `fetch_one` spreads the build over one row, and measured against not
-        hoisting at all it ran 0.85-0.90x below five rows while winning
-        1.37-1.42x above fifty. A shape's plan cannot change between queries, so
-        the honest fix is to build it once rather than to pick a row count.
-
-        A shape with no cache line -- the cache is bounded and an entry can be
-        evicted -- rebuilds rather than failing, which is the same contract
-        `_hydrate_plan` keeps beside it. `_row_plan` still raises for a
-        projection missing its primary key, and still raises on every attempt,
-        because nothing is stored until it has returned.
-        """
+        """Resolve and cache Record hydration constants by query shape."""
         cached = self._registry.cached_plan(compiled.shape_key)
         if cached is not None and cached.record_plan is not None:
             return cached.record_plan
@@ -1019,7 +948,6 @@ class Session:
         for index, decode in plan.key:
             value = row[offset + index]
             if value is None:
-                # A LEFT JOIN that matched nothing; not an object.
                 return None
             key.append(value if decode is None else decode(value))
         identity = (spec, tuple(key))
@@ -1030,15 +958,12 @@ class Session:
             instance._orm_state = PERSISTENT
             self._identity[identity] = instance
         for index, (cell, decode) in enumerate(plan.cells):
-            # A dirty field is the session's pending change; a later row must
-            # not silently revert it.
+            # A pending dirty value wins over later rows for the same identity.
             if instance._orm_is_dirty(cell):
                 continue
             value = row[offset + index]
             instance._orm_set_loaded(cell, value if decode is None else decode(value))
         return instance
-
-    # -- relationship loading ------------------------------------------------
 
     async def _run_selectin(
         self, steps: tuple[SelectinStep, ...], objects: list[Any]
@@ -1127,23 +1052,15 @@ class Session:
                     )
                 await self._load_relationship(found, children, option.nested)
 
-    # -- pending bookkeeping ------------------------------------------------
-    #
-    # `_new` and `_deleted` stay ordered lists because flush order is
-    # observable. Membership and ordering are keyed by `id()`, never by model
-    # `__eq__`/`__hash__`: two distinct unsaved rows may compare equal and must
-    # still be written as two rows. The list holds a strong reference for as
-    # long as the id is a key, so an id cannot be reused while it is scheduled.
-    # Everything that touches these four attributes goes through the helpers
-    # below so they cannot drift apart.
+    # Identity keys keep equal but distinct unsaved rows scheduled separately.
 
     @property
     def _new(self) -> list[Any]:
         """The objects pending insertion, in add() order."""
         if self._new_stale:
-            ordinals = self._new_ordinals
+            identifiers = self._new_ids
             self._new_items = [
-                item for item in self._new_items if id(item) in ordinals
+                item for item in self._new_items if id(item) in identifiers
             ]
             self._new_stale = False
         return self._new_items
@@ -1152,10 +1069,9 @@ class Session:
         if _probes is not None:
             _probes[0] += 1
         key = id(instance)
-        if key in self._new_ordinals:
+        if key in self._new_ids:
             return
-        self._new_ordinals[key] = self._ordinal
-        self._ordinal += 1
+        self._new_ids.add(key)
         # Appending past tombstones is safe: they only ever precede the new
         # entry, and `_new` compacts before anyone reads the order.
         self._new_items.append(instance)
@@ -1164,10 +1080,10 @@ class Session:
     def _unschedule_new(self, instance: Any) -> bool:
         if _probes is not None:
             _probes[0] += 1
-        if self._new_ordinals.pop(id(instance), None) is None:
+        key = id(instance)
+        if key not in self._new_ids:
             return False
-        # Dropping the ordinal is the removal; compacting the list here would
-        # make unscheduling a whole unit of work quadratic.
+        self._new_ids.remove(key)
         self._new_stale = True
         return True
 
@@ -1183,9 +1099,10 @@ class Session:
     def _clear_pending(self) -> None:
         self._new_items = []
         self._new_stale = False
-        self._new_ordinals.clear()
+        self._new_ids.clear()
         self._deleted.clear()
         self._deleted_ids.clear()
+        self._dirty_items = []
 
     # -- writes -------------------------------------------------------------
 
@@ -1273,6 +1190,11 @@ class Session:
             self._identity.pop(key)
             instance._orm_state = DETACHED
             instance._orm_owner = None
+        self._dirty_items = [
+            instance
+            for instance in self._dirty_items
+            if instance._orm_owner is self
+        ]
 
     def add(self, instance: Any) -> None:
         """Schedule `instance` for insertion on the next flush."""
@@ -1333,45 +1255,29 @@ class Session:
             _publish_write(written)
 
     def _collect_written(self, dirty: list[Any]) -> frozenset[str]:
-        """Model names in the pending set, for write subscribers.
-
-        Takes the dirty list rather than recomputing it: the caller has already
-        scanned the identity map for this flush, and scanning twice for one
-        flush is how a request that loaded five thousand rows paid to find the
-        one it changed.
-        """
-        # The bare class name, which is the name `invalidate_on` and
-        # `publish_write` callers use. Two models sharing one class name in
-        # different modules therefore invalidate each other -- accepted, because
-        # the failure is over-invalidation (a cache drops entries it did not
-        # have to) rather than stale data, and qualifying the name would break
-        # every caller that names a model as a string.
         names = {type(item).__name__ for item in self._new}
         names.update(type(item).__name__ for item in dirty)
         names.update(type(item).__name__ for item in self._deleted)
         return frozenset(names)
 
     def _has_pending(self) -> bool:
-        # The ordinal map answers this without compacting the pending list, and
-        # the dirty check short-circuits on the first changed object rather than
-        # building the whole list -- this only has to answer *whether* anything
-        # is pending. `_flush_inner` does the one scan that needs the list, and
-        # it does it after `begin()`, so a write arriving while the transaction
-        # opens is still picked up.
-        return bool(self._new_ordinals or self._deleted or self._any_dirty())
+        return bool(self._new_ids or self._deleted or self._any_dirty())
 
     def _any_dirty(self) -> bool:
         return any(
             item._orm_has_changes() and item._orm_state == PERSISTENT
-            for item in self._identity.values()
+            for item in self._dirty_items
         )
 
     def _dirty_objects(self) -> list[Any]:
         return [
             item
-            for item in self._identity.values()
+            for item in self._dirty_items
             if item._orm_has_changes() and item._orm_state == PERSISTENT
         ]
+
+    def _mark_dirty(self, instance: Any) -> None:
+        self._dirty_items.append(instance)
 
     def _order(self, model: type) -> int:
         if _probes is not None:
@@ -1381,28 +1287,23 @@ class Session:
         except RegistryError:
             raise RegistryError(f"{model.__name__} is not registered") from None
 
+    def _new_batches(self) -> list[list[Any]]:
+        batches = [[] for _ in self._registry.specs]
+        for instance in self._new:
+            batches[self._order(type(instance))].append(instance)
+        return batches
+
     async def _flush_inner(self) -> frozenset[str]:
-        # Collected before the pending set is cleared, and only when something
-        # is listening -- an app with no cache subscribers pays one bool read.
-        # Collected when anything is listening *or* when this flush is inside a
-        # transaction: a subscriber that registers before the commit -- a
-        # `@cached` handler decorated during startup, a broadcast attached by a
-        # later hook -- would otherwise miss the names of a transaction that was
-        # already open when it arrived, and see the write only from the next one.
-        # One scan of the identity map per flush, shared by the name collection
-        # and the update ordering below.
         dirty = self._dirty_objects()
         written = (
             self._collect_written(dirty)
             if (_has_write_subscribers() or self._depth)
             else frozenset()
         )
-        ordinals = self._new_ordinals
         try:
-            for instance in sorted(
-                self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
-            ):
-                await self._insert(instance)
+            for batch in self._new_batches():
+                for instance in batch:
+                    await self._insert(instance)
             updates = sorted(
                 dirty,
                 key=lambda item: (self._order(type(item)), _sort_key(item)),
@@ -1417,23 +1318,13 @@ class Session:
             if self._audit_pending:
                 await self._drain_audit()
         except BaseException:
-            # A flush that raises is a transaction that rolls back -- `flush`
-            # opens one when the caller has not -- so every write these records
-            # describe is about to be undone. Dropping them here is what stops
-            # the *next* flush appending an audit trail for work that never
-            # happened. Cancellation included, for the same reason.
+            # Failed writes must not survive into the next audit batch.
             self._audit_pending = []
             raise
         self._clear_pending()
         return written
 
     def _audit_facet(self, instance: Any) -> Any:
-        """The `audit` facet on this instance's model, or None.
-
-        One dict lookup on a class attribute when a trail is installed, and a
-        single `None` check when one is not -- so an application that does not
-        audit pays one attribute read per flush rather than per row.
-        """
         if self._audit is None:
             return None
         return getattr(type(instance), "__wreath_facets__", {}).get("audit")
@@ -1571,8 +1462,6 @@ class Session:
         instance._orm_state = DETACHED
         instance._orm_owner = None
 
-    # -- transactions --------------------------------------------------------
-
     @asynccontextmanager
     async def begin(self) -> Any:
         """Open a transaction, or a savepoint when one is already open."""
@@ -1580,10 +1469,6 @@ class Session:
         connection = await self._acquire()
         depth = self._depth
         savepoint = f"wreath_sp_{depth}"
-        # What the enclosing transaction had already written when this block
-        # opened. A rollback restores it rather than clearing it: a savepoint
-        # undoes only the work done inside it, so the names from before are
-        # still pending and still publish when the outermost commit lands.
         written_before = self._written
         await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
         if depth == 0 and self._statement_timeout is not None:
@@ -1606,20 +1491,13 @@ class Session:
         except BaseException:
             self._depth = depth
             await self._unwind(connection, depth, savepoint, commit=False)
-            # Rolled back: those writes never happened, so nothing is stale.
-            # This applies at every depth. A savepoint that rolls back used to
-            # leave its model names on the session, and the outer commit then
-            # announced them -- invalidating caches for a write that was undone.
-            # Over-invalidating is safe rather than wrong, but it contradicts
-            # the rule this whole seam exists for.
             self._written = written_before
             raise
         else:
             self._depth = depth
             await self._unwind(connection, depth, savepoint, commit=True)
             if depth == 0 and self._written:
-                # The outermost commit succeeded: everything written inside it
-                # is now durable, so invalidation is safe to announce.
+                # Publish only after the outermost commit is durable.
                 written, self._written = self._written, frozenset()
                 _publish_write(written)
 
@@ -1627,9 +1505,7 @@ class Session:
         self, connection: Any, depth: int, savepoint: str, *, commit: bool
     ) -> None:
         if self._closed:
-            # close() already unwound the transaction and returned the
-            # connection. A statement now would run against whoever holds the
-            # lease next, so this block's exit is a no-op.
+            # `close()` already returned this connection to the pool.
             return
         if commit:
             statement = "COMMIT" if depth == 0 else f"RELEASE SAVEPOINT {savepoint}"
@@ -1638,8 +1514,7 @@ class Session:
         try:
             await connection.execute(statement)
         except BaseException:
-            # Transaction state can no longer be proven; force the pool to
-            # discard the connection rather than lease out a dirty one.
+            # Never return a connection with unproven transaction state.
             self._broken = True
             raise
 

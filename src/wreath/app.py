@@ -21,7 +21,6 @@ from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace as _dc_replace
 from inspect import iscoroutinefunction as _iscoroutinefunction
-from inspect import signature as _signature
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
 from types import CoroutineType as _COROUTINE
@@ -57,11 +56,10 @@ from .binding import (
     BindingSpec,
     Depends,
     ValidationError,
-    _return_annotation,
+    _inspect_handler_facts,
     compile_binder,
     compile_message_negotiation,
     compile_response_validator,
-    inspect_handler,
 )
 from .cache_control import CacheControl
 from .exceptions import (
@@ -121,6 +119,7 @@ _RESPONSE_CALL = Response.__call__
 # content-length pair is still built per body so HTTP/2 preserves the same
 # observable headers as an ordinary JSONResponse.
 _NATIVE_JSON_TYPE_HEADER = (b"content-type", JSONResponse.media_type)
+_OIDC_AUDIENCE_UNSET = object()
 
 
 def _arm_cancel_on_disconnect(send: Any, enabled: bool) -> None:
@@ -323,6 +322,8 @@ class _ApplicationImage:
         "_operation_diagnostics",
         "_owner",
         "_requirements",
+        "_requestless",
+        "_return_annotations",
         "_route_contract_components",
         "_routes",
     )
@@ -336,6 +337,8 @@ class _ApplicationImage:
             tuple[tuple[int, int, int], ...],
         ] = ((), ())
         self._global_contract_components: tuple[Any, ...] = ()
+        self._requestless: tuple[bool, ...] = ()
+        self._return_annotations: tuple[Any, ...] = ()
         self._requirements: tuple[AuthRequirement, ...] = ()
         self._route_contract_components: tuple[Any, ...] = ()
         self._operation_ids: dict[tuple[int, str], str] = {}
@@ -348,6 +351,8 @@ class _ApplicationImage:
         if current != self._routes:
             self._routes = current
             self._binding_specs = ()
+            self._requestless = ()
+            self._return_annotations = ()
             self._requirements = ()
             self._operation_ids = {}
             self._operation_ids_analyzed = False
@@ -358,16 +363,29 @@ class _ApplicationImage:
     def binding_specs(self) -> tuple[BindingSpec | None, ...]:
         routes = self.routes()
         if not self._analyzed:
-            self._binding_specs = tuple(
-                inspect_handler(definition.endpoint, definition.path, definition.host)
+            handler_facts = tuple(
+                _inspect_handler_facts(
+                    definition.endpoint, definition.path, definition.host
+                )
                 for definition in routes
             )
+            self._binding_specs = tuple(facts.binding for facts in handler_facts)
+            self._requestless = tuple(facts.requestless for facts in handler_facts)
+            self._return_annotations = tuple(facts.returns for facts in handler_facts)
             self._requirements = tuple(
                 merge_requirements(definition.requirement, requirement_for(definition.endpoint))
                 for definition in routes
             )
             self._analyzed = True
         return self._binding_specs
+
+    def requestless(self) -> tuple[bool, ...]:
+        self.binding_specs()
+        return self._requestless
+
+    def return_annotations(self) -> tuple[Any, ...]:
+        self.binding_specs()
+        return self._return_annotations
 
     def requirements(self) -> tuple[AuthRequirement, ...]:
         """Effective route requirements, aligned with `routes()`."""
@@ -438,37 +456,22 @@ class _ApplicationImage:
 
 
 class _StaticMatcher:
-    """Mount prefixes in registration order; the first that matches wins.
+    """Mount prefixes in registration order; the first match wins.
 
-    Precedence is first-registration, not longest-prefix, so scanning the
-    mounts in order and taking the first hit is exact -- the scan stops at the
-    winner rather than having to see every candidate.
-
-    That does mean a broad mount registered before a narrower one shadows it
-    (`/assets/` before `/assets/images/` leaves the second unreachable). It is
-    the documented rule rather than an oversight -- two tests in
-    `tests/test_app.py` pin it, one of them named for it -- and the ordering is
-    the application's to choose. Register the narrower mount first.
-
-    This was a character trie, which is asymptotically better in the mount
-    count but pays one *Python* loop iteration and dict lookup per path
-    character, bounded by the longest registered prefix. `str.startswith` does
-    the same comparison in one C call, so at realistic mount counts (apps mount
-    a handful of directories, not hundreds) the scan is the cheaper shape.
-    The trade is pinned by the `static-mount-match-scale` complexity probe.
+    Matching stays a scan because the `static-mount-match-scale` probe found it
+    cheaper than a Python trie at realistic mount counts.
     """
 
-    __slots__ = ("_mounts",)
+    __slots__ = ("_mounts", "_prefixes")
 
     def __init__(self) -> None:
-        #: (prefix, handler) in registration order -- the match precedence.
         self._mounts: list[tuple[str, Handler]] = []
+        self._prefixes: set[str] = set()
 
     def add(self, prefix: str, handler: Handler) -> None:
-        # A repeated prefix keeps the first registration, as the trie did.
-        for existing, _handler in self._mounts:
-            if existing == prefix:
-                return
+        if prefix in self._prefixes:
+            return
+        self._prefixes.add(prefix)
         self._mounts.append((prefix, handler))
 
     def match(self, path: str) -> tuple[Handler, dict[str, str]] | None:
@@ -1292,7 +1295,7 @@ class Wreath:
         name: str,
         *,
         issuer: str,
-        audience: Any = None,
+        audience: Any = _OIDC_AUDIENCE_UNSET,
         http_client: Any,
         **options: Any,
     ) -> Any:
@@ -1301,13 +1304,25 @@ class Wreath:
         `http_client` is the name of a client registered with `http_client()` and
         pinned to the issuer origin, or an `HTTPClient` instance. Discovery and the first
         JWKS fetch run during lifespan startup (after HTTP clients start), so
-        the first request never pays for them.
+        the first request never pays for them. `audience` must be explicit;
+        pass `None` only when another layer validates it.
         """
         from ._auth.oidc import OidcProvider
 
+        if audience is _OIDC_AUDIENCE_UNSET:
+            raise ValueError(
+                "audience must be configured; pass audience='service' or "
+                "audience=None only when another layer validates it"
+            )
         if name in self._oidc_providers:
             raise ValueError(f"duplicate OIDC provider: {name}")
         client = self._http_clients[http_client] if isinstance(http_client, str) else http_client
+        from .http_client import HTTPClient
+
+        if not isinstance(client, HTTPClient):
+            raise TypeError(
+                "http_client must be an HTTPClient registered with app.http_client()"
+            )
         provider = OidcProvider(
             name, issuer=issuer, audience=audience, http_client=client, **options
         )
@@ -4114,7 +4129,7 @@ class Wreath:
 
         extensions = None if native_response else scope.get("extensions")
         if method == "HEAD":
-            await response(_head_send(send))
+            await _send_head(response, send)
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
             plain: Any = response
             native_send: Any = send
@@ -4214,7 +4229,7 @@ class Wreath:
             )
         extensions = None if native_response else scope.get("extensions")
         if method == "HEAD":
-            return response(_head_send(send))
+            return _send_head(response, send)
         if type(response).__call__ is _RESPONSE_CALL and native_response:
             plain: Any = response
             native_send: Any = send
@@ -4260,7 +4275,7 @@ class Wreath:
             raise RuntimeError("plain background emission has no background job")
         extensions = None if native_response else scope.get("extensions")
         if method == "HEAD":
-            await response(_head_send(send))
+            await _send_head(response, send)
         elif type(response).__call__ is _RESPONSE_CALL and native_response:
             plain: Any = response
             native_send: Any = send
@@ -4555,6 +4570,8 @@ class Wreath:
 
     def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
+        route_requestless = self._application_image.requestless()
+        return_annotations = self._application_image.return_annotations()
         router = CompiledRouter(self._routing)
         has_dynamic_routes = False
         app_middleware = tuple(
@@ -4657,16 +4674,15 @@ class Wreath:
         # (method, handler): the declaration is per route, so every method a
         # route answers wants the same answer.
         cancel_on_disconnect: dict[Any, bool] = {}
-        for definition, requirement, binding_spec in zip(
-            self._routes, requirements, binding_specs, strict=True
+        for definition, requirement, binding_spec, requestless, returns in zip(
+            self._routes,
+            requirements,
+            binding_specs,
+            route_requestless,
+            return_annotations,
+            strict=True,
         ):
             frozen_response = self._frozen_routes.get(definition.endpoint)
-            try:
-                requestless = len(_signature(definition.endpoint).parameters) == 0
-            except TypeError, ValueError:
-                requestless = False
-            # Typed-signature binding compiles once here; request-only
-            # handlers come back unchanged.
             endpoint = compile_binder(
                 definition.endpoint,
                 definition.path,
@@ -4674,12 +4690,8 @@ class Wreath:
                 orm_registries=self._orm_registries,
                 dependencies=definition.dependencies,
                 binding_spec=binding_spec,
+                requestless=requestless,
                 app_scope=self._app_scope,
-            )
-            returns = (
-                binding_spec.returns
-                if binding_spec is not None
-                else _return_annotation(definition.endpoint)
             )
             # Before the validator: it projects onto JSON primitives, and the
             # protobuf encoder needs the message. Returns the endpoint
@@ -4696,17 +4708,8 @@ class Wreath:
                 endpoint = _ensure_response(endpoint)
             access_clauses = self._requirement_clauses(requirement)
             for method in definition.methods:
-                # Which global middleware this route actually runs, decided
-                # here rather than per request. A middleware that declines is
-                # not gated at dispatch -- it is absent from the program the
-                # route dispatches, so declining costs nothing to check.
-                #
-                # `applies_to` is application code, and a raise propagates: this
-                # is boot, where loud is correct. Swallowing it would have to
-                # choose a direction, and the safe direction (run the
-                # middleware) silently discards a configuration the author
-                # believed was in effect.
                 excluded = (
+                    # complexity: allow SL-COMP-LOOP -- output is route by predicate
                     frozenset(
                         index
                         for index, applies in scoped_middleware
@@ -5604,6 +5607,15 @@ def _head_send(send: Send) -> Send:
         await send(message)
 
     return send_without_body
+
+
+def _send_head(
+    response: Response | StreamingResponse | FileResponse | PreparedResponse,
+    send: Send,
+) -> Awaitable[None]:
+    if isinstance(response, FileResponse):
+        return response._head(send)
+    return response(_head_send(send))
 
 
 async def _refresh_signatures(app: Any) -> None:

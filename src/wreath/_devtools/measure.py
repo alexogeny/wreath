@@ -126,8 +126,7 @@ async def run(app: Any, template: dict[str, Any], count: int) -> None:
         sent.append(message)
 
     for _ in range(count):
-        # A fresh dict per request: a real server never hands the same scope
-        # twice, and ProxyHeaders mutates it.
+        # complexity: allow SL-LINEAR-CALL -- requests need separate mutable scopes
         await app(dict(template), receive, send)
         sent.clear()
 

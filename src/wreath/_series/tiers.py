@@ -411,10 +411,12 @@ def _authoritative(
 ) -> Tier:
     """Exactly one tier for one piece, or a refusal naming what is available."""
     wanted = width(requested)
+    span_start, span_end = span
     zone_ok = [
         tier
         for tier in ladder
-        if all(serves_zone(tier.grain, stored_zone, read_zone, at=moment) for moment in span)
+        if serves_zone(tier.grain, stored_zone, read_zone, at=span_start)
+        and serves_zone(tier.grain, stored_zone, read_zone, at=span_end)
     ]
     covering = [tier for tier in zone_ok if tier.covers(oldest, now=now)]
 

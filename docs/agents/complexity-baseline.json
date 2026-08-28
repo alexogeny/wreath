@@ -2498,6 +2498,230 @@
         ]
       }
     },
+    "mcp-dense-subscriber-lookup-control": {
+      "contract": {
+        "group": "web",
+        "stage": "mcp",
+        "axis": "same MCP sessions all subscribed to the changed resource",
+        "assumption": "the same-size dense fan-out control is linear in returned subscribers",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "mcp-dense-subscriber-lookup-control",
+        "group": "web",
+        "stage": "mcp",
+        "axis": "same MCP sessions all subscribed to the changed resource",
+        "assumption": "the same-size dense fan-out control is linear in returned subscribers",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.994,
+        "tail_exponent": 0.996,
+        "local_exponents": [
+          0.995,
+          0.972,
+          1.02
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0003063589974772185,
+          0.0006107559893280268,
+          0.0011982529977103695,
+          0.0024301810044562444
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "mcp-session-creation": {
+      "contract": {
+        "group": "web",
+        "stage": "mcp",
+        "axis": "unexpired MCP sessions created under the default idle policy",
+        "assumption": "session creation checks the expiry watermark instead of scanning all sessions",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "mcp-session-creation",
+        "group": "web",
+        "stage": "mcp",
+        "axis": "unexpired MCP sessions created under the default idle policy",
+        "assumption": "session creation checks the expiry watermark instead of scanning all sessions",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.984,
+        "tail_exponent": 0.995,
+        "local_exponents": [
+          0.974,
+          0.953,
+          1.036
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "seconds": [
+          0.00022949000413063914,
+          0.0004507889971137047,
+          0.0008729779947316274,
+          0.0017903219995787367
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "mcp-session-creation-no-idle-control": {
+      "contract": {
+        "group": "web",
+        "stage": "mcp",
+        "axis": "same MCP sessions with idle collection disabled",
+        "assumption": "the same-size no-idle session construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "mcp-session-creation-no-idle-control",
+        "group": "web",
+        "stage": "mcp",
+        "axis": "same MCP sessions with idle collection disabled",
+        "assumption": "the same-size no-idle session construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.973,
+        "tail_exponent": 0.979,
+        "local_exponents": [
+          0.959,
+          0.977,
+          0.981
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "seconds": [
+          0.00021905500034336,
+          0.00042586300696711987,
+          0.0008380910003324971,
+          0.0016538939962629229
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "mcp-sparse-subscriber-lookup": {
+      "contract": {
+        "group": "web",
+        "stage": "mcp",
+        "axis": "MCP sessions with one subscriber to the changed resource",
+        "assumption": "sparse resource fan-out lookup is independent of unrelated session count",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "mcp-sparse-subscriber-lookup",
+        "group": "web",
+        "stage": "mcp",
+        "axis": "MCP sessions with one subscriber to the changed resource",
+        "assumption": "sparse resource fan-out lookup is independent of unrelated session count",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.108,
+        "tail_exponent": 0.122,
+        "local_exponents": [
+          0.104,
+          0.041,
+          0.203
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.1977987014688551e-05,
+          1.2873992091044784e-05,
+          1.3244993169791996e-05,
+          1.5241006622090936e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
     "media-negotiation-denied-control": {
       "contract": {
         "group": "web",
@@ -3186,6 +3410,174 @@
         ]
       }
     },
+    "oidc-pending-flow-creation": {
+      "contract": {
+        "group": "web",
+        "stage": "sso",
+        "axis": "unexpired OIDC pending flows created under the default TTL",
+        "assumption": "OIDC login creation checks the expiry watermark instead of rescanning flows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "oidc-pending-flow-creation",
+        "group": "web",
+        "stage": "sso",
+        "axis": "unexpired OIDC pending flows created under the default TTL",
+        "assumption": "OIDC login creation checks the expiry watermark instead of rescanning flows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.977,
+        "tail_exponent": 0.987,
+        "local_exponents": [
+          0.952,
+          0.985,
+          0.99
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "seconds": [
+          0.00032448199635837227,
+          0.0006279439985519275,
+          0.001242976009962149,
+          0.002468424994731322
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "oidc-pending-flow-no-expiry-control": {
+      "contract": {
+        "group": "web",
+        "stage": "sso",
+        "axis": "same OIDC pending flows under an infinite TTL",
+        "assumption": "the same-size no-expiry OIDC flow construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "oidc-pending-flow-no-expiry-control",
+        "group": "web",
+        "stage": "sso",
+        "axis": "same OIDC pending flows under an infinite TTL",
+        "assumption": "the same-size no-expiry OIDC flow construction control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.989,
+        "tail_exponent": 0.995,
+        "local_exponents": [
+          0.973,
+          1.001,
+          0.99
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          128,
+          256,
+          512,
+          1024
+        ],
+        "seconds": [
+          0.0003181109932484105,
+          0.0006243269890546799,
+          0.0012491179950302467,
+          0.0024807459994917735
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "orm-dense-dirty-discovery-control": {
+      "contract": {
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "same persistent ORM identities with every object dirty",
+        "assumption": "the same-size dense dirty control is linear in returned objects",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "orm-dense-dirty-discovery-control",
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "same persistent ORM identities with every object dirty",
+        "assumption": "the same-size dense dirty control is linear in returned objects",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.984,
+        "tail_exponent": 0.992,
+        "local_exponents": [
+          0.964,
+          0.992,
+          0.993
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.002103991006151773,
+          0.0041038719937205315,
+          0.008160874000168405,
+          0.016244044993072748
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
     "orm-hydrate-key-maps": {
       "contract": {
         "group": "web",
@@ -3247,6 +3639,174 @@
           {
             "key_map_builds": 1
           }
+        ]
+      }
+    },
+    "orm-insert-model-batching": {
+      "contract": {
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "pending inserts across the same number of registered models",
+        "assumption": "stable model-order buckets make insert ordering linear in rows and models",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "orm-insert-model-batching",
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "pending inserts across the same number of registered models",
+        "assumption": "stable model-order buckets make insert ordering linear in rows and models",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.945,
+        "tail_exponent": 0.973,
+        "local_exponents": [
+          0.874,
+          0.995,
+          0.951
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          1.748699287418276e-05,
+          3.2055002520792186e-05,
+          6.387000030372292e-05,
+          0.00012348299787845463
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "orm-insert-one-model-batching-control": {
+      "contract": {
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "same pending inserts and registry size, all using one model",
+        "assumption": "the same-size one-model bucket control remains linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "orm-insert-one-model-batching-control",
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "same pending inserts and registry size, all using one model",
+        "assumption": "the same-size one-model bucket control remains linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.898,
+        "tail_exponent": 0.893,
+        "local_exponents": [
+          0.947,
+          0.78,
+          1.007
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          1.62799988174811e-05,
+          3.1382005545310676e-05,
+          5.387500277720392e-05,
+          0.00010825699428096414
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "orm-sparse-dirty-discovery": {
+      "contract": {
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "persistent ORM identities when one object is dirty",
+        "assumption": "dirty discovery follows registered changes, not every loaded identity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "orm-sparse-dirty-discovery",
+        "group": "web",
+        "stage": "orm-write",
+        "axis": "persistent ORM identities when one object is dirty",
+        "assumption": "dirty discovery follows registered changes, not every loaded identity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.005,
+        "tail_exponent": 0.007,
+        "local_exponents": [
+          0.002,
+          -0.001,
+          0.015
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00035539201053325087,
+          0.00035597100213635713,
+          0.0003556369920261204,
+          0.00035923100949730724
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
         ]
       }
     },
@@ -5303,6 +5863,118 @@
           {
             "retained_headers": 13
           }
+        ]
+      }
+    },
+    "room-dense-leave-all-control": {
+      "contract": {
+        "group": "web",
+        "stage": "websocket",
+        "axis": "same rooms all containing the disconnecting socket",
+        "assumption": "the same-size dense disconnect control is linear in memberships removed",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "room-dense-leave-all-control",
+        "group": "web",
+        "stage": "websocket",
+        "axis": "same rooms all containing the disconnecting socket",
+        "assumption": "the same-size dense disconnect control is linear in memberships removed",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.025,
+        "tail_exponent": 1.044,
+        "local_exponents": [
+          0.987,
+          1.023,
+          1.065
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00014813999587204307,
+          0.0002937050012405962,
+          0.0005969179910607636,
+          0.0012489700020523742
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "room-sparse-leave-all": {
+      "contract": {
+        "group": "web",
+        "stage": "websocket",
+        "axis": "rooms held by a registry when one socket belongs to one room",
+        "assumption": "disconnect cleanup follows the socket's memberships, not every room",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "room-sparse-leave-all",
+        "group": "web",
+        "stage": "websocket",
+        "axis": "rooms held by a registry when one socket belongs to one room",
+        "assumption": "disconnect cleanup follows the socket's memberships, not every room",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.193,
+        "tail_exponent": 0.115,
+        "local_exponents": [
+          0.128,
+          0.854,
+          -0.624
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.4289980754256248e-06,
+          1.5620025806128979e-06,
+          2.8240028768777847e-06,
+          1.8319988157600164e-06
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
         ]
       }
     },

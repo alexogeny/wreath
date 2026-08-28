@@ -4,16 +4,16 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 105,
+        "c": 103,
         "python": 2
       },
       "pre_activation": {
-        "c": 44,
+        "c": 42,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 39,
+          "c": 37,
           "python": 1
         },
         "routing": {
@@ -30,7 +30,7 @@
         }
       },
       "c_calls": {
-        "dict.get": 23,
+        "dict.get": 22,
         "builtins.isinstance": 10,
         "str.encode": 6,
         "builtins.getattr": 6,
@@ -55,7 +55,6 @@
         "UserAgentDB.blocked": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
-        "wreath._native._core.find_header": 1,
         "wreath._native._core.random_hex": 1,
         "time.time": 1,
         "wreath._native._core.parse_cookie_headers": 1,

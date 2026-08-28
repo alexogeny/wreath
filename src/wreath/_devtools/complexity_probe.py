@@ -62,7 +62,7 @@ BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
 #: scenery. See `complexity_discover`.
 DISCOVERY_PATH = Path("docs/agents/complexity-discovery.json")
 BASELINE_VERSION = 1
-DISCOVERY_VERSION = 2
+DISCOVERY_VERSION = 3
 
 #: exponent -> printable class, in fit order. Past cubic the names exist so a
 #: scan can *report* what it measured; nothing in this tree is expected to be
@@ -2095,6 +2095,7 @@ def _series_reconcile_harness(bucket_count: int, *, populated: bool) -> float:
     fills = {"requests": 0, "errors": 0, "latency": None, "saturation": None}
     if populated:
         sparse = {
+            # complexity: allow SL-COMP-LOOP -- probe output is identity by bucket
             identity: {
                 bucket: {
                     "requests": bucket,
@@ -4149,15 +4150,13 @@ def _print_discovery(findings: list[Finding]) -> None:
 
 
 def _write_discovery(findings: list[Finding]) -> int:
-    """Record every current candidate as acknowledged."""
+    """Record the exceptional confirmed candidates."""
     payload = {
         "version": DISCOVERY_VERSION,
-        "note": "Acknowledged output of the static superlinear sweep "
-                "(wreath-complexity-probe --discover). A candidate here has "
-                "been seen, not necessarily fixed: most are bounded by "
-                "something the scanner cannot read. --discover-check fails "
-                "only on a candidate that is NOT in this file, so a quadratic "
-                "introduced tomorrow arrives as a diff rather than as scenery.",
+        "note": "Exceptional confirmed output of the static superlinear sweep "
+                "(wreath-complexity-probe --discover). Bounded and output-sized "
+                "sites carry exact-code waivers in source. --discover-check "
+                "fails when a new unwaived site appears.",
         "keys": sorted({finding.key for finding in findings}),
         "candidates": [finding.document() for finding in findings],
         "scanner": _discovery_scanner_identity(),
@@ -4306,6 +4305,307 @@ def _check_baseline(names: list[str]) -> int:
         return 1
     print(f"wreath-complexity-probe: all assumptions match {BASELINE_PATH}")
     return 0
+
+
+def _mcp_session_creation_harness(size: int, *, idle: bool) -> float:
+    from wreath._mcp.session import SessionStore
+
+    store = SessionStore(
+        max_sessions=size + 1,
+        idle_seconds=900.0 if idle else None,
+    )
+    start = time.perf_counter()
+    for _index in range(size):
+        store.create(protocol_version="2025-06-18", client_info={}, now=1000.0)
+    elapsed = time.perf_counter() - start
+    if len(store) != size:
+        raise RuntimeError("MCP session creation probe lost a session")
+    return elapsed
+
+
+@probe(
+    "mcp-session-creation",
+    expect=1.0,
+    sizes=(128, 256, 512, 1024),
+    axis="unexpired MCP sessions created under the default idle policy",
+    assumption="session creation checks the expiry watermark instead of scanning all sessions",
+    stage="mcp",
+    group="web",
+)
+def _mcp_session_creation(size: int) -> float:
+    return _mcp_session_creation_harness(size, idle=True)
+
+
+@probe(
+    "mcp-session-creation-no-idle-control",
+    expect=1.0,
+    sizes=(128, 256, 512, 1024),
+    axis="same MCP sessions with idle collection disabled",
+    assumption="the same-size no-idle session construction control is linear",
+    stage="mcp",
+    group="web",
+)
+def _mcp_session_creation_no_idle_control(size: int) -> float:
+    return _mcp_session_creation_harness(size, idle=False)
+
+
+def _oidc_pending_flow_harness(size: int, *, ttl: float) -> float:
+    from wreath.sso import OidcRelyingParty
+
+    party = OidcRelyingParty(
+        issuer="https://idp.example",
+        client_id="wreath-complexity",
+        ttl=ttl,
+        max_pending=size + 1,
+    )
+    start = time.perf_counter()
+    for index in range(size):
+        party.begin_login(
+            organization="acme",
+            session_id=f"session-{index}",
+            now=1000.0,
+        )
+    elapsed = time.perf_counter() - start
+    if len(party._flows) != size:
+        raise RuntimeError("OIDC pending-flow probe lost a flow")
+    return elapsed
+
+
+@probe(
+    "oidc-pending-flow-creation",
+    expect=1.0,
+    sizes=(128, 256, 512, 1024),
+    axis="unexpired OIDC pending flows created under the default TTL",
+    assumption="OIDC login creation checks the expiry watermark instead of rescanning flows",
+    stage="sso",
+    group="web",
+)
+def _oidc_pending_flow_creation(size: int) -> float:
+    return _oidc_pending_flow_harness(size, ttl=600.0)
+
+
+@probe(
+    "oidc-pending-flow-no-expiry-control",
+    expect=1.0,
+    sizes=(128, 256, 512, 1024),
+    axis="same OIDC pending flows under an infinite TTL",
+    assumption="the same-size no-expiry OIDC flow construction control is linear",
+    stage="sso",
+    group="web",
+)
+def _oidc_pending_flow_no_expiry_control(size: int) -> float:
+    return _oidc_pending_flow_harness(size, ttl=float("inf"))
+
+
+def _mcp_subscriber_harness(size: int, *, dense: bool) -> float:
+    from wreath._mcp.session import Session, SessionStore
+
+    store = SessionStore(max_sessions=size + 1, idle_seconds=None)
+    sessions = [Session(str(index), "2025-06-18") for index in range(size)]
+    store._sessions.update((session.id, session) for session in sessions)
+    selected = sessions if dense else (sessions[0],)
+    for session in selected:
+        store.subscribe(session, "camera://ridge")
+    repeats = 128
+    expected = size if dense else 1
+    start = time.perf_counter()
+    for _ in range(repeats):
+        found = len(store.subscribers("camera://ridge"))
+        if found != expected:
+            raise RuntimeError("MCP subscriber probe returned the wrong cohort")
+    elapsed = time.perf_counter() - start
+    return elapsed
+
+
+@probe(
+    "mcp-sparse-subscriber-lookup",
+    expect=0.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="MCP sessions with one subscriber to the changed resource",
+    assumption="sparse resource fan-out lookup is independent of unrelated session count",
+    stage="mcp",
+    group="web",
+)
+def _mcp_sparse_subscriber_lookup(size: int) -> float:
+    return _mcp_subscriber_harness(size, dense=False)
+
+
+@probe(
+    "mcp-dense-subscriber-lookup-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="same MCP sessions all subscribed to the changed resource",
+    assumption="the same-size dense fan-out control is linear in returned subscribers",
+    stage="mcp",
+    group="web",
+)
+def _mcp_dense_subscriber_lookup_control(size: int) -> float:
+    return _mcp_subscriber_harness(size, dense=True)
+
+
+def _room_leave_all_harness(size: int, *, dense: bool) -> float:
+    import asyncio
+
+    from wreath.rooms import RoomRegistry
+
+    async def drive() -> float:
+        rooms = RoomRegistry()
+        join = rooms.join
+        target = object()
+        for index in range(size):
+            member = target if dense else object()
+            await join(f"room-{index}", member)
+        if not dense:
+            await join("room-0", target)
+        start = time.perf_counter()
+        await rooms.leave_all(target)
+        elapsed = time.perf_counter() - start
+        if target in rooms._memberships:
+            raise RuntimeError("room leave-all probe retained the target")
+        return elapsed
+
+    return asyncio.run(drive())
+
+
+@probe(
+    "room-sparse-leave-all",
+    expect=0.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="rooms held by a registry when one socket belongs to one room",
+    assumption="disconnect cleanup follows the socket's memberships, not every room",
+    stage="websocket",
+    group="web",
+)
+def _room_sparse_leave_all(size: int) -> float:
+    return _room_leave_all_harness(size, dense=False)
+
+
+@probe(
+    "room-dense-leave-all-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="same rooms all containing the disconnecting socket",
+    assumption="the same-size dense disconnect control is linear in memberships removed",
+    stage="websocket",
+    group="web",
+)
+def _room_dense_leave_all_control(size: int) -> float:
+    return _room_leave_all_harness(size, dense=True)
+
+
+def _orm_insert_batch_harness(size: int, *, distinct_models: bool) -> float:
+    from wreath.orm.session import Session
+
+    model_types: list[type] = [
+        type(f"Pending{index}", (), {}) for index in range(size)
+    ]
+    order: dict[type, int] = {
+        model: index for index, model in enumerate(model_types)
+    }
+
+    class Registry:
+        specs = tuple(range(size))
+
+        def order_of(self, model: type) -> int:
+            return order[model]
+
+    selected = model_types if distinct_models else [model_types[0]] * size
+    pending = [model() for model in selected]
+    session = Session(Registry(), "write")
+    session._new_items = pending
+    session._new_ids = {id(item) for item in pending}
+    start = time.perf_counter()
+    batches = session._new_batches()
+    elapsed = time.perf_counter() - start
+    if sum(map(len, batches)) != size:
+        raise RuntimeError("ORM insert batching probe lost an object")
+    return elapsed
+
+
+@probe(
+    "orm-insert-model-batching",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="pending inserts across the same number of registered models",
+    assumption="stable model-order buckets make insert ordering linear in rows and models",
+    stage="orm-write",
+    group="web",
+)
+def _orm_insert_model_batching(size: int) -> float:
+    return _orm_insert_batch_harness(size, distinct_models=True)
+
+
+@probe(
+    "orm-insert-one-model-batching-control",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="same pending inserts and registry size, all using one model",
+    assumption="the same-size one-model bucket control remains linear",
+    stage="orm-write",
+    group="web",
+)
+def _orm_insert_one_model_batching_control(size: int) -> float:
+    return _orm_insert_batch_harness(size, distinct_models=False)
+
+
+def _orm_dirty_discovery_harness(size: int, *, dense: bool) -> float:
+    from wreath._devtools.sample_app import TracedPost, TracedUser, _ScriptedDatabase
+    from wreath.orm.model import PERSISTENT
+    from wreath.orm.registry import Registry
+    from wreath.orm.session import Session
+
+    registry = Registry(
+        _ScriptedDatabase(), [TracedUser, TracedPost], validate_schema="off"
+    )
+    session = Session(registry, "write")
+    spec = registry.spec_for(TracedUser)
+    instances = []
+    for index in range(size):
+        instance = TracedUser(id=index, email=f"u{index}@e.x", name=f"n{index}")
+        instance._orm_state = PERSISTENT
+        instance._orm_owner = session
+        instance._orm_clear_dirty()
+        session._identity[(spec, (index,))] = instance
+        instances.append(instance)
+    selected = instances if dense else (instances[0],)
+    for instance in selected:
+        instance.name = "changed"
+
+    repeats = 64 if dense else 4096
+    expected = size if dense else 1
+    start = time.perf_counter()
+    for _ in range(repeats):
+        found = len(session._dirty_objects())
+        if found != expected:
+            raise RuntimeError("ORM dirty-discovery probe returned the wrong cohort")
+    elapsed = time.perf_counter() - start
+    return elapsed
+
+
+@probe(
+    "orm-sparse-dirty-discovery",
+    expect=0.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="persistent ORM identities when one object is dirty",
+    assumption="dirty discovery follows registered changes, not every loaded identity",
+    stage="orm-write",
+    group="web",
+)
+def _orm_sparse_dirty_discovery(size: int) -> float:
+    return _orm_dirty_discovery_harness(size, dense=False)
+
+
+@probe(
+    "orm-dense-dirty-discovery-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="same persistent ORM identities with every object dirty",
+    assumption="the same-size dense dirty control is linear in returned objects",
+    stage="orm-write",
+    group="web",
+)
+def _orm_dense_dirty_discovery_control(size: int) -> float:
+    return _orm_dirty_discovery_harness(size, dense=True)
 
 
 def _notification_window_harness(size: int, *, expired: bool) -> float:

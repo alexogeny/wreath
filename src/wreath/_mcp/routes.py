@@ -136,6 +136,7 @@ def expose_routes(
     selected = [
         definition
         for definition in _definitions(source)
+        # complexity: allow SL-LINEAR-METHOD -- tag filter compares both sets
         if (wanted_tags and wanted_tags.intersection(definition.tags))
         or definition.path in wanted_paths
         or (predicate is not None and predicate(definition))

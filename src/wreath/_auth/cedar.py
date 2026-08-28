@@ -21,6 +21,7 @@ import math
 import time
 import warnings
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from .._awaitable import is_awaitable
@@ -32,6 +33,14 @@ from .facts import EMPTY, SetFact
 from .models import AuthorizationDecision, Identity
 from .principal import NO_LIMITS, Limits
 from .requirements import PolicyRequirement, second_factor_age
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeRoutePlan:
+    action_uid: tuple[str, str]
+    resource_uid: tuple[str, str]
+    context_attributes: frozenset[str] | None
+    principal_entity: bool
 
 
 def _default_principal(identity: Identity) -> object:
@@ -501,6 +510,7 @@ class CedarAuthorizer:
         "_action",
         "_context",
         "_clock",
+        "_compiled_route_uids",
         "_delegation_visible",
         "_engine",
         "_entities",
@@ -509,6 +519,7 @@ class CedarAuthorizer:
         "_flags",
         "_location",
         "_native_engine_authorize",
+        "_native_engine_prepared",
         "_principal",
         "_region_names",
         "_regions",
@@ -544,6 +555,7 @@ class CedarAuthorizer:
         self._entities = entities
         self._context = context
         self._clock = clock
+        self._compiled_route_uids: dict[PolicyRequirement, _NativeRoutePlan] = {}
         if flags is not None:
             from ..flags import _flag_resolver
 
@@ -557,6 +569,12 @@ class CedarAuthorizer:
             if callable(native_engine_authorize)
             and resource is _default_resource
             and resource_entities is None
+            else None
+        )
+        native_engine_prepared = getattr(engine, "_route_denial_prepared", None)
+        self._native_engine_prepared = (
+            native_engine_prepared
+            if self._native_engine_authorize is not None and callable(native_engine_prepared)
             else None
         )
         # Every set-valued context key, declared once. Adding a fact is adding a
@@ -757,28 +775,39 @@ class CedarAuthorizer:
         return engine.policies
 
     async def _query_base(
-        self, request: Request, identity: Identity, action_name: str
+        self,
+        request: Request,
+        identity: Identity,
+        action_name: str,
+        compiled: _NativeRoutePlan | None = None,
     ) -> tuple[object, object, object, dict[str, object]]:
         """Map the resource-independent half of one or more engine queries."""
         principal = (
-            _default_principal(identity)
+            (identity.type, identity.id)
+            if compiled is not None and self._principal is _default_principal
+            else _default_principal(identity)
             if self._principal is _default_principal
             else await _resolve(self._principal(identity))
         )
         action = (
-            _default_action(action_name, request)
+            compiled.action_uid
+            if compiled is not None and self._action is _default_action
+            else _default_action(action_name, request)
             if self._action is _default_action
             else await _resolve(self._action(action_name, request))
         )
-        action_attributes = getattr(self._engine, "context_attributes_for_action", None)
-        needed = action_attributes(action) if callable(action_attributes) else None
-        principal_entity = getattr(self._engine, "principal_entity_for_action", None)
-        if self._entities is _default_entities:
-            entities = (
-                None
-                if callable(principal_entity) and not principal_entity(action)
-                else _default_entities(request)
+        if compiled is None:
+            action_attributes = getattr(self._engine, "context_attributes_for_action", None)
+            needed = action_attributes(action) if callable(action_attributes) else None
+            principal_entity = getattr(self._engine, "principal_entity_for_action", None)
+            needs_principal_entity = (
+                not callable(principal_entity) or principal_entity(action)
             )
+        else:
+            needed = compiled.context_attributes
+            needs_principal_entity = compiled.principal_entity
+        if self._entities is _default_entities:
+            entities = _default_entities(request) if needs_principal_entity else None
         else:
             entities = await _resolve(self._entities(request))
         if self._context is _default_context and needed is not None:
@@ -803,7 +832,8 @@ class CedarAuthorizer:
         for fact in self._facts:
             if needed is None or fact.attribute in needed:
                 context[fact.attribute] = fact.for_request(request)
-        context["delegated"] = False
+        if compiled is None or needed is None or "delegated" in needed:
+            context["delegated"] = False
         return principal, action, entities, context
 
     async def _authorize_resources(
@@ -1007,9 +1037,26 @@ class CedarAuthorizer:
         ):
             decision = await self.authorize(request, requirement)
             return None if decision.allowed else decision.reason or "Forbidden"
+        compiled = self._compiled_route_uids.get(requirement)
         principal, action, entities, context = await self._query_base(
-            request, identity, requirement.action
+            request, identity, requirement.action, compiled
         )
+        if compiled is not None:
+            prepared = self._native_engine_prepared
+            if prepared is None:
+                raise RuntimeError("compiled Cedar route lost its native evaluator")
+            return cast(
+                str | None,
+                await _resolve(
+                    prepared(
+                        principal=principal,
+                        action=compiled.action_uid,
+                        resource=compiled.resource_uid,
+                        context=context,
+                        entities=entities,
+                    )
+                ),
+            )
         return cast(
             str | None,
             await _resolve(
@@ -1027,22 +1074,38 @@ class CedarAuthorizer:
         """Parse a static native resource once while the route table compiles."""
         resource = requirement.resource
         if (
-            self._native_engine_authorize is None
+            self._native_engine_prepared is None
             or callable(resource)
-            or isinstance(resource, CedarEntity | EntityUid)
+            or isinstance(resource, CedarEntity)
         ):
             return requirement
+        compiled_requirement = requirement
         if isinstance(resource, str) and "::" in resource:
-            return PolicyRequirement(requirement.action, EntityUid.parse(resource))
+            resource = EntityUid.parse(resource)
+            compiled_requirement = PolicyRequirement(requirement.action, resource)
         if isinstance(resource, str) and resource.isidentifier():
             return requirement
         if isinstance(resource, str):
             EntityUid.parse(resource)
             return requirement
-        raise TypeError(
-            "Cedar route resource must be an EntityUid, CedarEntity, "
-            f"a 'Type::\"id\"' string, or a callable, got {type(resource).__name__!r}"
+        if not isinstance(resource, EntityUid):
+            raise TypeError(
+                "Cedar route resource must be an EntityUid, CedarEntity, "
+                f"a 'Type::\"id\"' string, or a callable, got {type(resource).__name__!r}"
+            )
+        if self._principal is not _default_principal or self._action is not _default_action:
+            return compiled_requirement
+        action = EntityUid("Action", requirement.action)
+        attributes_for = getattr(self._engine, "context_attributes_for_action", None)
+        principal_for = getattr(self._engine, "principal_entity_for_action", None)
+        plan = _NativeRoutePlan(
+            (action.type, action.id),
+            (resource.type, resource.id),
+            attributes_for(action) if callable(attributes_for) else None,
+            not callable(principal_for) or principal_for(action),
         )
+        self._compiled_route_uids[compiled_requirement] = plan
+        return compiled_requirement
 
     async def _evaluate(
         self,

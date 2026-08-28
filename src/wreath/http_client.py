@@ -1049,6 +1049,11 @@ class HTTPClient:
         return self._name
 
     @property
+    def origin(self) -> str:
+        """The immutable scheme, host, and port this client connects to."""
+        return f"{self._scheme}://{self._authority()}"
+
+    @property
     def started(self) -> bool:
         """Whether the client is accepting requests. False before `start` and after `close`."""
         return self._started

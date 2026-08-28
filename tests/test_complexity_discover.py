@@ -28,7 +28,7 @@ from wreath._devtools.complexity_discover import (
 # control that must not.
 PLANTED = {
     "SL-IN-LOOP": """
-        def f(items, haystack):
+        def f(items: list[str], haystack: list[str]):
             out = []
             for x in items:
                 if x in haystack:
@@ -50,17 +50,17 @@ PLANTED = {
             return s
     """,
     "SL-SLICE-LOOP": """
-        def f(buf, n):
+        def f(buf: bytes, n):
             for _ in range(n):
-                head = buf[0:4]
+                head = buf[:]
             return head
     """,
     "SL-LINEAR-METHOD": """
-        def f(items, seq):
+        def f(items: list[str], seq: list[str]):
             return [seq.index(x) for x in items]
     """,
     "SL-LINEAR-CALL": """
-        def f(items, seq):
+        def f(items: list[str], seq: list[str]):
             for _ in items:
                 sorted(seq)
     """,
@@ -77,10 +77,14 @@ PLANTED = {
                 re.compile(x)
     """,
     "SL-COMP-LOOP": """
-        def f(items, other):
+        def f(items: list[str], other: list[str]):
             for _ in items:
                 z = [y for y in other]
             return z
+    """,
+    "SL-COMP-NEST": """
+        def f(rows: list[str]):
+            return [(left, right) for left in rows for right in rows]
     """,
     "SL-RECURSE": """
         def fib(n):
@@ -154,6 +158,52 @@ CONTROLS = {
         def g(items):
             for x in items:
                 _RX.match(x)
+    """,
+    "unknown-membership-cost": """
+        def g(rows, members):
+            for row in rows:
+                if row in members:
+                    yield row
+    """,
+    "loop-local-linear-argument": """
+        def g(rows: list[list[str]]):
+            out: list[str] = []
+            for row in rows:
+                out.extend(row)
+            return out
+    """,
+    "for-iterator-evaluated-once": """
+        def g(rows: list[str]):
+            for row in sorted(rows):
+                yield row
+    """,
+    "for-slice-evaluated-once": """
+        def g(rows: list[str]):
+            for row in rows[1:]:
+                yield row
+    """,
+    "return-executes-once": """
+        def g(rows: list[str], found: list[str]):
+            for row in rows:
+                if row:
+                    return sorted(found)
+            return []
+    """,
+    "fixed-width-slice": """
+        def g(data: bytes):
+            for index in range(len(data)):
+                yield data[index:index + 4]
+    """,
+    "bounded-prefix-slice": """
+        def g(rows: list[str], version: tuple[int, ...]):
+            for row in rows:
+                yield row, version[:1]
+    """,
+    "reversed-view": """
+        def g(groups: list[list[str]]):
+            for group in groups:
+                for value in reversed(group):
+                    yield value
     """,
 }
 
@@ -231,8 +281,7 @@ def test_cached_recursion_is_not_a_finding(tmp_path) -> None:
     assert [finding for finding in findings if finding.code == "SL-RECURSE"] == []
 
 
-def test_self_calls_in_a_nested_scope_still_belong_to_the_outer_function(tmp_path) -> None:
-    """Fusing the recursion pass must retain its complete-subtree semantics."""
+def test_calls_hidden_behind_a_nested_scope_are_not_branching_recursion(tmp_path) -> None:
     findings = _scan_source(tmp_path, """
         def outer():
             def inner(n):
@@ -241,10 +290,18 @@ def test_self_calls_in_a_nested_scope_still_belong_to_the_outer_function(tmp_pat
                 return outer()
             return inner
     """)
-    recursive = [finding for finding in findings if finding.code == "SL-RECURSE"]
-    assert [(finding.func, finding.message) for finding in recursive] == [
-        ("outer", "2 self-recursive call sites, no cache decorator"),
-    ]
+    assert [finding for finding in findings if finding.code == "SL-RECURSE"] == []
+
+
+def test_python_waiver_needs_a_named_rule_and_reason(tmp_path) -> None:
+    findings = _scan_source(tmp_path, """
+        def g(rows: list[str], members: list[str]):
+            for row in rows:
+                # complexity: allow SL-IN-LOOP -- rows and members are capped at 8
+                if row in members:
+                    yield row
+    """)
+    assert findings == []
 
 
 def test_comprehension_body_is_scanned_as_a_loop(tmp_path) -> None:
@@ -324,24 +381,12 @@ void f_nest(int n, int *a) {
     }
 }
 
-void f_memmove_loop(char *buf, int n) {
-    for (int i = 0; i < n; i++) {
-        memmove(buf, buf + 1, n - i);
-    }
-}
-
 void f_strlen_cond(char *s) {
     for (size_t i = 0; i < strlen(s); i++) {
         s[i] = 'x';
     }
 }
 
-char *f_realloc_loop(char *p, int n) {
-    for (int i = 0; i < n; i++) {
-        p = realloc(p, i + 1);
-    }
-    return p;
-}
 """
 
 C_CONTROL = """
@@ -366,10 +411,8 @@ C_WAIVED = """
 #include <string.h>
 
 void f_waived(char *buf, int n) {
-    for (int i = 0; i < n; i++) {
-        /* native-lint: allow NC001 -- bounded by the connection's slab count */
-        memmove(buf, buf + 1, n);
-    }
+    /* complexity: allow CL-STRLEN-COND -- input is capped at 16 bytes */
+    for (size_t i = 0; i < strlen(buf); i++) { buf[i] = 'x'; }
 }
 """
 
@@ -381,7 +424,7 @@ def _scan_c_source(tmp_path, source: str) -> list[Finding]:
 
 
 @pytest.mark.parametrize("code", [
-    "CL-NEST", "CL-LINEAR-IN-LOOP", "CL-STRLEN-COND", "CL-REALLOC-IN-LOOP",
+    "CL-NEST-SAME", "CL-STRLEN-COND",
 ])
 def test_c_planted_defect_is_reported(tmp_path, code: str) -> None:
     findings = _scan_c_source(tmp_path, C_PLANTED)
@@ -396,8 +439,7 @@ def test_c_findings_name_their_function(tmp_path) -> None:
     """Attribution to `<file>` is useless; a trailing comment used to cause it."""
     findings = _scan_c_source(tmp_path, C_PLANTED)
     by_code = {f.code: f.func for f in findings}
-    assert by_code["CL-NEST"] == "f_nest"
-    assert by_code["CL-LINEAR-IN-LOOP"] == "f_memmove_loop"
+    assert by_code["CL-NEST-SAME"] == "f_nest"
     assert by_code["CL-STRLEN-COND"] == "f_strlen_cond"
 
 
@@ -410,6 +452,20 @@ void f_commented(int n, int *a) {   /* a trailing comment */
 }
 """)
     assert [f.func for f in findings] == ["f_commented"]
+
+
+def test_c_signature_with_return_type_on_prior_line_names_function(tmp_path) -> None:
+    findings = _scan_c_source(tmp_path, """
+static int
+f_split(int n, int *a)
+{
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) { a[i] += j; }
+    }
+    return 0;
+}
+""")
+    assert [f.func for f in findings] == ["f_split"]
 
 
 def test_c_waiver_suppresses_the_following_line(tmp_path) -> None:
@@ -425,7 +481,7 @@ def test_discover_walks_python_and_c(tmp_path) -> None:
     (tmp_path / "unit.c").write_text(C_PLANTED, encoding="utf-8")
     codes = {f.code for f in discover(tmp_path)}
     assert "SL-IN-LOOP" in codes
-    assert "CL-NEST" in codes
+    assert "CL-NEST-SAME" in codes
 
 
 def test_discover_reuses_only_byte_identical_cached_files(
@@ -510,6 +566,22 @@ def test_finding_key_survives_a_line_shift(tmp_path) -> None:
                          + textwrap.dedent(PLANTED["SL-IN-LOOP"]))
     assert {f.key for f in before} == {f.key for f in after}
     assert [f.line for f in before] != [f.line for f in after]
+
+
+def test_finding_key_distinguishes_sites_with_the_same_rule(tmp_path) -> None:
+    findings = _scan_source(
+        tmp_path,
+        """
+        def f(left: list[int], right: list[int], rows: list[int]) -> None:
+            for row in rows:
+                if row in left:
+                    pass
+                if row in right:
+                    pass
+        """,
+    )
+    assert len(findings) == 2
+    assert len({finding.key for finding in findings}) == 2
 
 
 def test_discovery_baseline_covers_every_current_candidate() -> None:

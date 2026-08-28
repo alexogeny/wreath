@@ -220,19 +220,54 @@ def test_oversized_token_is_rejected():
 # ---- construction-time guards --------------------------------------------
 
 
+def test_omitted_audience_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"audience must be configured.*audience=None"):
+        JwtVerifier(algorithms=("HS256",), key=SymmetricKey(SECRET))
+
+
+def test_explicitly_unbound_audience_remains_available() -> None:
+    verifier = JwtVerifier(
+        algorithms=("HS256",),
+        key=SymmetricKey(SECRET),
+        audience=None,
+    )
+    assert verifier(_hs(_claims(aud="another-service"))) is not None
+
+
+async def test_oidc_verifier_can_bind_a_login_token_to_the_client_id() -> None:
+    from wreath._auth.oidc import OidcProvider
+
+    class Cache:
+        async def resolve(self, kid):
+            return SymmetricKey(SECRET)
+
+    provider = OidcProvider(
+        "idp",
+        issuer="https://issuer.example",
+        audience="api-service",
+        http_client=object(),
+        algorithms=("HS256",),
+        leeway=0,
+    )
+    provider._cache = Cache()
+    verify = provider.bearer_verifier(audience="login-client")
+    assert await verify(_hs(_claims(aud="login-client"))) is not None
+    assert await verify(_hs(_claims(aud="api-service"))) is None
+
+
 def test_symmetric_key_rejects_rsa_algorithm():
     with pytest.raises(UnsupportedAlgorithm):
-        JwtVerifier(algorithms=("RS256",), key=SymmetricKey(SECRET))
+        JwtVerifier(algorithms=("RS256",), key=SymmetricKey(SECRET), audience=None)
 
 
 def test_es256_is_a_loud_unsupported_error():
     with pytest.raises(UnsupportedAlgorithm):
-        JwtVerifier(algorithms=("ES256",), key=SymmetricKey(SECRET))
+        JwtVerifier(algorithms=("ES256",), key=SymmetricKey(SECRET), audience=None)
 
 
 def test_eddsa_is_a_loud_unsupported_error():
     with pytest.raises(UnsupportedAlgorithm):
-        JwtVerifier(algorithms=("EdDSA",), key=SymmetricKey(SECRET))
+        JwtVerifier(algorithms=("EdDSA",), key=SymmetricKey(SECRET), audience=None)
 
 
 # ---- RSA via the cryptography oracle -------------------------------------

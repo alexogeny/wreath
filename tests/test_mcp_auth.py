@@ -62,6 +62,7 @@ def verifier(**overrides) -> JwtVerifier:
         # audience itself: a deployment that forgot this argument has to fail
         # closed, because the alternative is an endpoint that looks configured
         # and is not.
+        "audience": None,
         "leeway": 0,
     }
     kwargs.update(overrides)

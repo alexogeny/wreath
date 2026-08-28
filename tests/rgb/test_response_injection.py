@@ -42,6 +42,29 @@ class TestSetCookieAttributes:
         with pytest.raises(ValueError, match="attribute separator"):
             response.set_cookie("sid", "abc", **attributes)
 
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("sid; Domain=example.com", "abc"),
+            ("sid", "abc; Domain=example.com"),
+        ],
+    )
+    def test_attribute_separator_in_name_or_value_is_refused(self, name, value):
+        with pytest.raises(ValueError, match="attribute separator"):
+            Response(b"").set_cookie(name, value)
+
+    def test_control_character_in_expires_is_refused(self):
+        with pytest.raises(ValueError, match="cookie expires contains a control character"):
+            Response(b"").set_cookie(
+                "sid",
+                "abc",
+                expires="Thu, 01 Jan 1970 00:00:00 GMT\r\nX-Injected: yes",
+            )
+
+    def test_max_age_must_be_an_integer(self):
+        with pytest.raises(TypeError, match="max_age must be an int"):
+            Response(b"").set_cookie("sid", "abc", max_age="0; Secure")
+
     def test_ordinary_attributes_still_work(self):
         response = Response(b"")
         response.set_cookie("sid", "abc", path="/app", domain="example.com")

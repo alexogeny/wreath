@@ -152,9 +152,11 @@ class SessionStore:
         "_max_pending",
         "_max_pending_requests",
         "_max_sessions",
+        "_next_sweep",
         "_publish",
         "_request_seconds",
         "_sessions",
+        "_subscribers",
         "expired",
     )
 
@@ -179,6 +181,7 @@ class SessionStore:
         self._max_pending = max_pending_notifications
         self._max_pending_requests = max_pending_requests
         self._request_seconds = client_request_seconds
+        self._next_sweep = float("inf")
         # One funnel for everything the server puts on a session's queue, so a
         # dropped server-to-client *request* is counted in exactly the same
         # place as a dropped notification. Defaults to the session's own
@@ -190,6 +193,7 @@ class SessionStore:
             else publish
         )
         self._sessions: dict[str, Session] = {}
+        self._subscribers: dict[str, dict[str, Session]] = {}
         #: Sessions collected for going idle. Counted because "the client says
         #: it re-initializes constantly" and "the idle bound is too short" look
         #: identical from the outside until this number is read.
@@ -221,7 +225,7 @@ class SessionStore:
             RuntimeError: The store is still at capacity after the sweep.
         """
         moment = time.monotonic() if now is None else now
-        self.sweep(moment)
+        self.sweep(moment, force=self.at_capacity)
         if self.at_capacity:
             raise RuntimeError(
                 f"the MCP session store is at its ceiling of {self._max_sessions} "
@@ -245,6 +249,10 @@ class SessionStore:
             timeout=self._request_seconds,
         )
         self._sessions[session.id] = session
+        if self._idle_seconds is not None:
+            self._next_sweep = min(
+                self._next_sweep, moment + self._idle_seconds
+            )
         return session
 
     def get(self, identifier: str, *, now: float | None = None) -> Session | None:
@@ -265,26 +273,46 @@ class SessionStore:
         return session
 
     def subscribers(self, uri: str) -> list[Session]:
-        """Every live session subscribed to `uri`.
+        return list(self._subscribers.get(uri, {}).values())
 
-        A list rather than a generator: the caller publishes into each session's
-        queue, and a generator held across those puts would be iterating the
-        session map while another request could be adding to it.
-        """
-        return [
-            session for session in self._sessions.values() if uri in session.subscriptions
-        ]
+    def subscribe(self, session: Session, uri: str) -> None:
+        if uri in session.subscriptions:
+            return
+        session.subscriptions.add(uri)
+        self._subscribers.setdefault(uri, {})[session.id] = session
 
-    def sweep(self, now: float | None = None) -> int:
+    def unsubscribe(self, session: Session, uri: str) -> None:
+        if uri not in session.subscriptions:
+            return
+        session.subscriptions.remove(uri)
+        subscribers = self._subscribers[uri]
+        subscribers.pop(session.id, None)
+        if not subscribers:
+            del self._subscribers[uri]
+
+    def sweep(self, now: float | None = None, *, force: bool = False) -> int:
         """Collect every session past its idle bound. Returns how many."""
-        if self._idle_seconds is None or not self._sessions:
+        idle_seconds = self._idle_seconds
+        if idle_seconds is None:
+            return 0
+        if not self._sessions:
+            self._next_sweep = float("inf")
             return 0
         moment = time.monotonic() if now is None else now
+        if not force and moment < self._next_sweep:
+            return 0
         stale = [
             session for session in self._sessions.values() if self._expired(session, moment)
         ]
         for session in stale:
             self._collect(session)
+        self._next_sweep = min(
+            (
+                session.last_seen + idle_seconds
+                for session in self._sessions.values()
+            ),
+            default=float("inf"),
+        )
         return len(stale)
 
     def discard(self, identifier: str) -> bool:
@@ -292,7 +320,10 @@ class SessionStore:
         session = self._sessions.pop(identifier, None)
         if session is None:
             return False
+        self._drop_subscriptions(session)
         _cancel_all(session)
+        if not self._sessions:
+            self._next_sweep = float("inf")
         return True
 
     def _expired(self, session: Session, now: float) -> bool:
@@ -302,8 +333,20 @@ class SessionStore:
     def _collect(self, session: Session) -> None:
         if self._sessions.pop(session.id, None) is None:
             return
+        self._drop_subscriptions(session)
         self.expired += 1
         _cancel_all(session)
+        if not self._sessions:
+            self._next_sweep = float("inf")
+
+    def _drop_subscriptions(self, session: Session) -> None:
+        for uri in session.subscriptions:
+            subscribers = self._subscribers.get(uri)
+            if subscribers is None:
+                continue
+            subscribers.pop(session.id, None)
+            if not subscribers:
+                del self._subscribers[uri]
 
 
 def _cancel_all(session: Session) -> None:

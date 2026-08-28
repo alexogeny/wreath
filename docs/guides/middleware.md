@@ -23,6 +23,12 @@ app = Wreath(http_policy=HttpPolicy(
 ))
 ```
 
+`RequestIdPolicy` mints a request ID by default. If a trusted proxy replaces
+`X-Request-ID` at the network boundary, pass `trust_inbound=True` to retain that
+proxy-issued value. Do not enable it for a header that public clients can send
+unchanged, because callers could make unrelated log and trace records share an
+ID.
+
 There are two places to add custom hooks, and the difference matters. **Route
 middleware** wraps matched handlers — it runs when a request lands on a route.
 **Global middleware** runs on every request, including the ones that match

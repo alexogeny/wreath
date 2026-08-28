@@ -542,17 +542,24 @@ async def test_static_symlink_inside_root_is_not_followed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_response_uses_bounded_executor_submissions(tmp_path, monkeypatch) -> None:
-    """Executor submissions must be constant with file size, not per-chunk."""
+async def test_file_response_bounds_each_executor_submission(tmp_path, monkeypatch) -> None:
+    """No executor worker stays occupied while a client consumes a chunk."""
     from wreath.response import FileResponse
 
     submissions = 0
+    active = 0
+    most_active = 0
     real_to_thread = asyncio.to_thread
 
     async def counting_to_thread(func, /, *args, **kwargs):
-        nonlocal submissions
+        nonlocal active, most_active, submissions
         submissions += 1
-        return await real_to_thread(func, *args, **kwargs)
+        active += 1
+        most_active = max(most_active, active)
+        try:
+            return await real_to_thread(func, *args, **kwargs)
+        finally:
+            active -= 1
 
     monkeypatch.setattr(asyncio, "to_thread", counting_to_thread)
 
@@ -573,6 +580,5 @@ async def test_file_response_uses_bounded_executor_submissions(tmp_path, monkeyp
         path.write_bytes(b"z" * size)
         body = await collect(FileResponse(str(path)))
         assert len(body) == size
-        # Open (+fstat) is one submission, the reader worker is one more: two,
-        # regardless of how many 256 KiB chunks the file holds.
-        assert submissions <= 2, (size, submissions)
+        assert submissions >= 2
+        assert most_active == 1

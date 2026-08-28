@@ -584,12 +584,21 @@ class MigrationInventory:
         self.migration_strategy = migration_strategy
 
     def counts(self) -> dict[str, int]:
-        keys = ("translated", "needs_review", "unsupported", "retired")
-        per_project = [
-            project.effective_counts(migration_strategy=self.migration_strategy)
-            for project in self.projects
-        ]
-        return {key: sum(counts[key] for counts in per_project) for key in keys}
+        totals = {
+            "translated": 0,
+            "needs_review": 0,
+            "unsupported": 0,
+            "retired": 0,
+        }
+        for project in self.projects:
+            counts = project.effective_counts(
+                migration_strategy=self.migration_strategy
+            )
+            totals["translated"] += counts["translated"]
+            totals["needs_review"] += counts["needs_review"]
+            totals["unsupported"] += counts["unsupported"]
+            totals["retired"] += counts["retired"]
+        return totals
 
     def as_dict(self) -> dict[str, Any]:
         routes = sum(len(project.routes) for project in self.projects)

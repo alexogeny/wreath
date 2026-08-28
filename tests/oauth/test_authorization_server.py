@@ -12,11 +12,13 @@ import pytest
 from wreath.auth import JwtVerifier, SymmetricKey
 from wreath.oauth import AuthorizationServer, ClientRegistration, OAuthRefusal
 
+CLIENT_SECRET = b"console-secret-material" * 2
 CLIENT = ClientRegistration(
     client_id="console",
     redirect_uris=("https://app.example/cb",),
     scopes=("read", "write"),
     confidential=True,
+    client_secret=CLIENT_SECRET,
 )
 PUBLIC = ClientRegistration(
     client_id="spa", redirect_uris=("https://app.example/spa",), scopes=("read",))
@@ -99,10 +101,25 @@ def test_a_code_can_be_redeemed_once(server) -> None:
     code = _issued(server)
     token = server.redeem(
         code, verifier=verifier, client_id="console",
+        client_secret=CLIENT_SECRET,
         redirect_uri="https://app.example/cb",
     )
     assert token.subject == "u"
     assert token.scope == ("read",)
+
+
+def test_a_confidential_client_must_authenticate_when_redeeming_a_code(server) -> None:
+    verifier, _ = _pkce()
+    code = _issued(server)
+    with pytest.raises(OAuthRefusal, match="client secret") as raised:
+        server.redeem(
+            code,
+            verifier=verifier,
+            client_id="console",
+            client_secret=b"wrong" * 8,
+            redirect_uri="https://app.example/cb",
+        )
+    assert raised.value.reason == "invalid-client"
 
 
 def test_redeeming_a_code_twice_revokes_the_token_the_first_redemption_issued(
@@ -118,6 +135,7 @@ def test_redeeming_a_code_twice_revokes_the_token_the_first_redemption_issued(
     redemption = {
         "verifier": verifier,
         "client_id": "console",
+        "client_secret": CLIENT_SECRET,
         "redirect_uri": "https://app.example/cb",
     }
     first = server.redeem(code, **redemption)
@@ -133,6 +151,7 @@ def test_a_code_redeemed_with_the_wrong_pkce_verifier_is_refused(server) -> None
     with pytest.raises(OAuthRefusal, match="does not match the challenge") as raised:
         server.redeem(
             code, verifier="a-different-one", client_id="console",
+            client_secret=CLIENT_SECRET,
             redirect_uri="https://app.example/cb",
         )
     assert raised.value.reason == "pkce-mismatch"
@@ -144,6 +163,7 @@ def test_the_matching_verifier_is_accepted(server) -> None:
     code = _issued(server)
     assert server.redeem(
         code, verifier=verifier, client_id="console",
+        client_secret=CLIENT_SECRET,
         redirect_uri="https://app.example/cb",
     ).subject == "u"
 
@@ -195,8 +215,112 @@ def test_a_public_client_cannot_use_the_client_credentials_grant(server) -> None
 
 
 def test_a_confidential_client_gets_a_subjectless_token(server) -> None:
-    token = server.client_credentials(client_id="console")
+    token = server.client_credentials(client_id="console", client_secret=CLIENT_SECRET)
     assert token.subject is None
+
+
+def test_client_credentials_requires_the_confidential_clients_secret(server) -> None:
+    with pytest.raises(OAuthRefusal, match="client secret") as raised:
+        server.client_credentials(client_id="console", client_secret=b"wrong" * 8)
+    assert raised.value.reason == "invalid-client"
+
+
+def test_client_credentials_cannot_escalate_past_registered_scopes(server) -> None:
+    with pytest.raises(OAuthRefusal, match="not registered for scope") as raised:
+        server.client_credentials(
+            client_id="console",
+            client_secret=CLIENT_SECRET,
+            scope=("admin",),
+        )
+    assert raised.value.reason == "invalid-scope"
+
+
+def test_hmac_authorization_server_refuses_a_short_signing_secret() -> None:
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        AuthorizationServer(issuer="https://app.example", secret=b"short")
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        "http://app.example",
+        "https://user:password@app.example",
+        "https://app.example?tenant=acme",
+        "https://app.example#issuer",
+    ],
+)
+def test_authorization_server_refuses_an_insecure_issuer(issuer: str) -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        AuthorizationServer(issuer=issuer, secret=b"a" * 32)
+
+
+def test_refresh_tokens_expire() -> None:
+    expiring = AuthorizationServer(
+        issuer="https://app.example",
+        secret=b"a" * 32,
+        refresh_ttl=60,
+    )
+    refresh = expiring.issue_refresh(subject="u", now=1000)
+    with pytest.raises(OAuthRefusal, match="expired") as raised:
+        expiring.rotate(refresh, now=1061)
+    assert raised.value.reason == "refresh-expired"
+
+
+def test_a_refresh_preserves_the_original_grant_limits(server) -> None:
+    verifier, _ = _pkce()
+    code = _issued(server, tenant="acme")
+    first = server.redeem(
+        code,
+        verifier=verifier,
+        client_id="console",
+        client_secret=CLIENT_SECRET,
+        redirect_uri="https://app.example/cb",
+    )
+
+    rotated = server.rotate(
+        first.refresh_token,
+        client_id="console",
+        client_secret=CLIENT_SECRET,
+    )
+
+    assert rotated.audience == "console"
+    assert rotated.scope == ("read",)
+    assert rotated.tenant == "acme"
+
+
+def test_a_refresh_cannot_change_audience_or_bypass_client_authentication(server) -> None:
+    verifier, _ = _pkce()
+    code = _issued(server)
+    first = server.redeem(
+        code,
+        verifier=verifier,
+        client_id="console",
+        client_secret=CLIENT_SECRET,
+        redirect_uri="https://app.example/cb",
+    )
+
+    with pytest.raises(OAuthRefusal, match="client secret") as wrong_secret:
+        server.rotate(
+            first.refresh_token,
+            client_id="console",
+            client_secret=b"wrong" * 8,
+        )
+    assert wrong_secret.value.reason == "invalid-client"
+
+    with pytest.raises(OAuthRefusal, match="audience") as changed_audience:
+        server.rotate(
+            first.refresh_token,
+            client_id="console",
+            client_secret=CLIENT_SECRET,
+            audience="admin-service",
+        )
+    assert changed_audience.value.reason == "audience-mismatch"
+
+    assert server.rotate(
+        first.refresh_token,
+        client_id="console",
+        client_secret=CLIENT_SECRET,
+    ).audience == "console"
 
 
 # --- tenancy ----------------------------------------------------------------
@@ -209,6 +333,7 @@ def test_a_token_carries_the_tenant_it_was_minted_in(server) -> None:
     code = _issued(server, tenant="acme")
     assert server.redeem(
         code, verifier=verifier, client_id="console",
+        client_secret=CLIENT_SECRET,
         redirect_uri="https://app.example/cb",
     ).tenant == "acme"
 
@@ -442,6 +567,7 @@ def test_redeeming_without_a_verifier_is_refused(server) -> None:
     with pytest.raises(OAuthRefusal, match="does not match the challenge") as raised:
         server.redeem(
             code, verifier="", client_id="console",
+            client_secret=CLIENT_SECRET,
             redirect_uri="https://app.example/cb",
         )
     assert raised.value.reason == "pkce-mismatch"
@@ -468,6 +594,7 @@ def test_a_code_is_redeemable_only_against_the_redirect_uri_it_was_issued_for(
     with pytest.raises(OAuthRefusal, match="redirect_uri") as raised:
         server.redeem(
             code, verifier=verifier, client_id="console",
+            client_secret=CLIENT_SECRET,
             redirect_uri="https://app.example/other",
         )
     assert raised.value.reason == "redirect_uri-mismatch"
@@ -480,6 +607,7 @@ def test_an_authorization_code_expires(server) -> None:
     with pytest.raises(OAuthRefusal, match="expired") as raised:
         server.redeem(
             code, verifier=verifier, client_id="console",
+            client_secret=CLIENT_SECRET,
             redirect_uri="https://app.example/cb", now=1000.0 + 61.0,
         )
     assert raised.value.reason == "code-expired"
@@ -491,6 +619,7 @@ def test_a_code_inside_its_window_still_redeems(server) -> None:
     code = _issued(server, now=1000.0)
     token = server.redeem(
         code, verifier=verifier, client_id="console",
+        client_secret=CLIENT_SECRET,
         redirect_uri="https://app.example/cb", now=1000.0 + 30.0,
     )
     assert token.subject == "u"
@@ -528,10 +657,19 @@ def test_revoking_a_chain_covers_the_access_token_minted_beside_its_first_refres
     code = _issued(server)
     token = server.redeem(
         code, verifier=verifier, client_id="console",
+        client_secret=CLIENT_SECRET,
         redirect_uri="https://app.example/cb",
     )
     assert token.refresh_token
     with pytest.raises(OAuthRefusal, match="already been rotated"):
-        server.rotate(token.refresh_token)
-        server.rotate(token.refresh_token)
+        server.rotate(
+            token.refresh_token,
+            client_id="console",
+            client_secret=CLIENT_SECRET,
+        )
+        server.rotate(
+            token.refresh_token,
+            client_id="console",
+            client_secret=CLIENT_SECRET,
+        )
     assert server.is_revoked(token.access_token)

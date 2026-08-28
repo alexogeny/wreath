@@ -566,12 +566,19 @@ def freezable_targets(pid: int | None = None) -> tuple[Path, ...]:
     root = _CGROUP_ROOT / app_slice.lstrip("/")
     if not root.is_dir():
         return ()
+    app_prefix = app_slice.rstrip("/") + "/"
+    protected_children = {
+        app_prefix + suffix.partition("/")[0]
+        for ancestor in exempt
+        if ancestor.startswith(app_prefix)
+        and (suffix := ancestor.removeprefix(app_prefix))
+    }
     targets: list[Path] = []
     for child in sorted(root.iterdir()):
         if not child.is_dir() or not child.name.endswith(".scope"):
             continue
         relative = "/" + str(child.relative_to(_CGROUP_ROOT))
-        if relative in exempt or any(anc.startswith(relative + "/") for anc in exempt):
+        if relative in protected_children:
             continue
         lowered = child.name.lower()
         if any(banned in lowered for banned in _NEVER_FREEZE):

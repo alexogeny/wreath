@@ -23,6 +23,7 @@ from wreath.authorization import EntityUid
 from wreath.crud import Access
 from wreath.objects import LocalObjectStore, MemoryObjectStore
 from wreath.openapi import _openapi_schema
+from wreath.policy.sessions import SessionPolicy
 from wreath.typegen.model import TypeKind, TypeRef
 from wreath.typegen.typescript_renderer import ts_type
 
@@ -104,6 +105,23 @@ def test_the_str_refusal_says_how_to_fix_it() -> None:
         MemoryObjectStore(url_secret="secret")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("value", [b"", b"x", bytearray(b"x" * 31)])
+def test_a_short_url_secret_is_refused(value: object) -> None:
+    with tempfile.TemporaryDirectory() as root:
+        factories = (MemoryObjectStore, lambda **kwargs: LocalObjectStore(root, **kwargs))
+        for factory in factories:
+            with pytest.raises(ValueError, match="url_secret must contain at least 32 bytes"):
+                factory(url_secret=value)  # type: ignore[arg-type]
+
+
+def test_a_short_retired_session_secret_is_refused_by_position() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"previous_secrets\[1\] must contain at least 32 bytes",
+    ):
+        SessionPolicy("n" * 32, previous_secrets=("o" * 32, b"x"))
+
+
 def test_refusing_a_url_secret_does_not_leak_the_root_descriptor() -> None:
     """The refusal runs before `open_root`.
 
@@ -138,6 +156,32 @@ def test_app_objects_refuses_at_registration() -> None:
         app = wreath.Wreath()
         with pytest.raises(TypeError, match="url_secret must be bytes"):
             app.objects("media", backend="local", root=root, url_secret="str")
+
+
+def test_app_oidc_provider_requires_an_explicit_audience_policy() -> None:
+    import wreath
+
+    app = wreath.Wreath()
+    with pytest.raises(ValueError, match=r"audience must be configured.*audience=None"):
+        app.oidc_provider(
+            "idp",
+            issuer="https://idp.example",
+            http_client=object(),
+        )
+
+
+def test_app_oidc_provider_refuses_an_http_client_for_another_origin() -> None:
+    import wreath
+
+    app = wreath.Wreath()
+    client = app.http_client("wrong", base_url="https://attacker.example")
+    with pytest.raises(ValueError, match="issuer origin"):
+        app.oidc_provider(
+            "idp",
+            issuer="https://idp.example",
+            audience="api",
+            http_client=client,
+        )
 
 
 # -- TypeKind: a new kind emitted a wrong schema and a wrong client -----------

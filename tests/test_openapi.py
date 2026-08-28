@@ -28,23 +28,32 @@ class Widget:
     labels: list[str] = field(default_factory=list)
 
 
-def test_application_image_shares_one_binding_inspection(monkeypatch) -> None:
-    calls = 0
+def test_application_image_shares_handler_facts(monkeypatch) -> None:
+    signature_calls = 0
+    hint_calls = 0
     target = None
     real_signature = binding.inspect.signature
+    real_hints = binding.typing.get_type_hints
 
     def counting_signature(*args, **kwargs):
-        nonlocal calls
+        nonlocal signature_calls
         if args and args[0] is target:
-            calls += 1
+            signature_calls += 1
         return real_signature(*args, **kwargs)
 
+    def counting_hints(*args, **kwargs):
+        nonlocal hint_calls
+        if args and args[0] is target:
+            hint_calls += 1
+        return real_hints(*args, **kwargs)
+
     monkeypatch.setattr(binding.inspect, "signature", counting_signature)
+    monkeypatch.setattr(binding.typing, "get_type_hints", counting_hints)
     app = Wreath()
 
-    @app.get("/items/{item_id}")
-    async def item(request: Any, item_id: int) -> str:
-        return str(item_id)
+    @app.get("/items")
+    async def item() -> str:
+        return "item"
 
     target = item
     app._compile_routes()
@@ -53,7 +62,8 @@ def test_application_image_shares_one_binding_inspection(monkeypatch) -> None:
 
     build_api_model(app, allow_unknown=True)
 
-    assert calls == 1
+    assert signature_calls == 1
+    assert hint_calls == 1
 
 
 def build_app() -> Wreath:

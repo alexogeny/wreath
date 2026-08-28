@@ -1410,7 +1410,10 @@ def _collect_class(
                 "declare self as its first parameter"
             )
         method_call = _TestMethod(owner, method_name)
-        method_fixtures = dict(fixtures)
+        method_fixtures = fixtures
+        if raw_class_fixtures:
+            # complexity: allow SL-LINEAR-CALL -- bindings differ per test method
+            method_fixtures = dict(fixtures)
         for declared_name, fixture_method, options in raw_class_fixtures:
             fixture_name = options["name"] or declared_name
             if options["scope"] != "function":
@@ -2350,12 +2353,12 @@ def _run_parallel(
 
         combined: list[Result] = []
         while children:
-            ready, _, _ = select.select(tuple(progress_buffers), (), (), 0.05)
+            ready, _, _ = select.select(progress_buffers, (), (), 0.05)
             for descriptor in ready:
                 consume_progress(descriptor)
             sync_mutation_activity()
             rebalance_test_workers()
-            pid, status = _reap_owned_worker(tuple(children))
+            pid, status = _reap_owned_worker(children)
             if pid == 0:
                 continue
             child = children.get(pid)

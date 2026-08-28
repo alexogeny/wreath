@@ -467,7 +467,22 @@ column_store(PyObject *instance, const WreathPgColumnDescriptor *descriptor, PyO
     bit_set(instance, &view, BITMAP_LOADED, bit, 1);
     if (changed && (model->state_flags == STATE_PERSISTENT ||
                     model->state_flags == STATE_DELETED)) {
+        int first_change = 1;
+        uint64_t *dirty = bitmap_words(instance, &view, BITMAP_DIRTY);
+        for (Py_ssize_t i = 0; i < view.bitmap_words; i++) {
+            if (dirty[i]) {
+                first_change = 0;
+                break;
+            }
+        }
         bit_set(instance, &view, BITMAP_DIRTY, bit, 1);
+        if (first_change && model->state_flags == STATE_PERSISTENT &&
+            model->identity_owner != NULL) {
+            PyObject *marked = PyObject_CallMethod(
+                model->identity_owner, "_mark_dirty", "O", instance);
+            if (marked == NULL) return -1;
+            Py_DECREF(marked);
+        }
     }
     return 0;
 }

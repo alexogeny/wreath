@@ -62,6 +62,7 @@ from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 __all__ = [
     "AuthorizationServer",
@@ -96,6 +97,23 @@ class ClientRegistration:
     #: A confidential client may use the client-credentials grant. A public one
     #: (a browser or a mobile app, which cannot keep a secret) may not.
     confidential: bool = False
+    client_secret: bytes | str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.confidential:
+            if self.client_secret is not None:
+                raise ValueError("a public OAuth client cannot hold a client secret")
+            return
+        if self.client_secret is None:
+            raise ValueError("a confidential OAuth client requires a client secret")
+        material = (
+            self.client_secret.encode("utf-8")
+            if isinstance(self.client_secret, str)
+            else bytes(self.client_secret)
+        )
+        if len(material) < 32:
+            raise ValueError("an OAuth client secret must contain at least 32 bytes")
+        object.__setattr__(self, "client_secret", material)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +155,10 @@ class _Refresh:
     #: than only the one presented.
     chain: str
     issued_at: float
+    audience: str
+    scope: tuple[str, ...]
+    tenant: str
+    client_id: str
 
 
 def _b64(raw: bytes) -> str:
@@ -257,7 +279,7 @@ class AuthorizationServer:
 
     __slots__ = (
         "_chains", "_clients", "_code_ttl", "_codes", "_issued", "_issuer",
-        "_lifetime", "_refresh", "_revoked", "_secret", "_signer",
+        "_lifetime", "_refresh", "_refresh_ttl", "_revoked", "_secret", "_signer",
         "_signing_seconds", "_spent",
     )
 
@@ -269,17 +291,37 @@ class AuthorizationServer:
         clients: Iterable[ClientRegistration] = (),
         lifetime: float = 3600.0,
         code_ttl: float = 60.0,
+        refresh_ttl: float = 30 * 24 * 3600.0,
         signer: Any = None,
     ) -> None:
-        self._issuer = issuer
+        normalized_issuer = issuer.rstrip("/")
+        parsed_issuer = urlsplit(normalized_issuer)
+        if (
+            parsed_issuer.scheme != "https"
+            or parsed_issuer.hostname is None
+            or parsed_issuer.username is not None
+            or parsed_issuer.password is not None
+            or parsed_issuer.query
+            or parsed_issuer.fragment
+        ):
+            raise ValueError(
+                "OAuth issuer must be an absolute HTTPS URL without credentials, "
+                "a query, or a fragment"
+            )
+        self._issuer = normalized_issuer
         # Generated when absent so a test or a single-process deployment needs
         # no ceremony. A fleet must pass one: two workers with different secrets
         # issue tokens neither can verify.
         raw = secret.encode("utf-8") if isinstance(secret, str) else secret
+        if raw and len(raw) < 32:
+            raise ValueError("OAuth HMAC signing secret must contain at least 32 bytes")
         self._secret = raw or secrets.token_bytes(32)
         self._clients = {client.client_id: client for client in clients}
         self._lifetime = lifetime
         self._code_ttl = code_ttl
+        if refresh_ttl <= 0:
+            raise ValueError("OAuth refresh_ttl must be positive")
+        self._refresh_ttl = refresh_ttl
         self._signer = signer
         self._codes: dict[str, _Code] = {}
         self._refresh: dict[str, _Refresh] = {}
@@ -287,7 +329,7 @@ class AuthorizationServer:
         #: Refresh token -> the chain it belonged to, kept after rotation spends
         #: it. Without this a reused token's chain is unknowable: `rotate` pops
         #: the record, so the reuse branch has nothing to revoke.
-        self._spent: dict[str, str] = {}
+        self._spent: dict[str, tuple[str, str]] = {}
         self._revoked: set[str] = set()
         self._issued = 0
         self._signing_seconds = 0.0
@@ -330,6 +372,36 @@ class AuthorizationServer:
         client = self._clients.get(client_id)
         if client is None:
             raise OAuthRefusal("unknown-client", f"no client registered as {client_id!r}")
+        return client
+
+    def _authenticate_client(
+        self,
+        client_id: str,
+        client_secret: bytes | str | None,
+    ) -> ClientRegistration:
+        client = self._client(client_id)
+        if not client.confidential:
+            if client_secret is not None:
+                raise OAuthRefusal(
+                    "invalid-client",
+                    "a public OAuth client must not present a client secret",
+                )
+            return client
+        expected = client.client_secret
+        supplied = (
+            client_secret.encode("utf-8")
+            if isinstance(client_secret, str)
+            else client_secret
+        )
+        if (
+            not isinstance(expected, bytes)
+            or not isinstance(supplied, bytes)
+            or not hmac.compare_digest(expected, supplied)
+        ):
+            raise OAuthRefusal(
+                "invalid-client",
+                "the confidential client's client secret is missing or invalid",
+            )
         return client
 
     def authorize(
@@ -412,6 +484,7 @@ class AuthorizationServer:
         *,
         verifier: str,
         client_id: str,
+        client_secret: bytes | str | None = None,
         redirect_uri: str,
         now: float | None = None,
     ) -> IssuedToken:
@@ -429,6 +502,7 @@ class AuthorizationServer:
                 `code_ttl`, a different client, a different `redirect_uri`, or a
                 verifier that does not match the challenge.
         """
+        self._authenticate_client(client_id, client_secret)
         record = self._codes.get(code)
         if record is None:
             raise OAuthRefusal(
@@ -485,6 +559,7 @@ class AuthorizationServer:
         token = self.issue_access(
             subject=record.subject, audience=record.client_id, scope=record.scope,
             tenant=record.tenant, now=now, with_refresh=True,
+            refresh_client_id=record.client_id,
         )
         self._codes[code] = _Code(
             client_id=record.client_id, subject=record.subject, scope=record.scope,
@@ -505,6 +580,7 @@ class AuthorizationServer:
         tenant: str = "",
         now: float | None = None,
         with_refresh: bool = False,
+        refresh_client_id: str = "",
     ) -> IssuedToken:
         """Mint one access token. What comes out is what `JwtVerifier` verifies."""
         moment = time.time() if now is None else now
@@ -525,7 +601,14 @@ class AuthorizationServer:
             claims["tenant"] = tenant
         refresh = chain = ""
         if with_refresh and subject is not None:
-            minted = self.issue_refresh(subject=subject, now=moment)
+            minted = self.issue_refresh(
+                subject=subject,
+                audience=audience,
+                scope=wanted,
+                tenant=tenant,
+                client_id=refresh_client_id,
+                now=moment,
+            )
             refresh, chain = minted.token, minted.chain
         access = self._encode(claims)
         if chain:
@@ -541,7 +624,12 @@ class AuthorizationServer:
         )
 
     def client_credentials(
-        self, *, client_id: str, subject: str | None = None, scope: Iterable[str] = (),
+        self,
+        *,
+        client_id: str,
+        client_secret: bytes | str | None = None,
+        subject: str | None = None,
+        scope: Iterable[str] = (),
     ) -> IssuedToken:
         """A machine token. It carries no `sub`, and asking for one is refused.
 
@@ -562,34 +650,61 @@ class AuthorizationServer:
                 f"client {client_id!r} is public and cannot keep a secret, so it "
                 "cannot use the client-credentials grant",
             )
+        self._authenticate_client(client_id, client_secret)
+        wanted = tuple(scope) or client.scopes
+        outside = sorted(set(wanted) - set(client.scopes))
+        if outside:
+            raise OAuthRefusal(
+                "invalid-scope",
+                f"client {client_id!r} is not registered for scope {', '.join(outside)}",
+            )
         return self.issue_access(
-            subject=None, audience=client_id, scope=scope or client.scopes)
+            subject=None, audience=client_id, scope=wanted)
 
     # -- refresh ------------------------------------------------------------
 
-    def issue_refresh(self, *, subject: str, now: float | None = None) -> _Refresh:
+    def issue_refresh(
+        self,
+        *,
+        subject: str,
+        audience: str = "",
+        scope: Iterable[str] = (),
+        tenant: str = "",
+        client_id: str = "",
+        now: float | None = None,
+    ) -> _Refresh:
         chain = secrets.token_urlsafe(12)
         record = _Refresh(
             token=secrets.token_urlsafe(32), subject=subject, chain=chain,
             issued_at=time.time() if now is None else now,
+            audience=audience or self._issuer,
+            scope=tuple(scope), tenant=tenant, client_id=client_id,
         )
         self._refresh[record.token] = record
         self._chains[chain] = []
         return record
 
-    def rotate(self, refresh: _Refresh | str, *, audience: str = "") -> IssuedToken:
+    def rotate(
+        self,
+        refresh: _Refresh | str,
+        *,
+        audience: str = "",
+        client_id: str | None = None,
+        client_secret: bytes | str | None = None,
+        now: float | None = None,
+    ) -> IssuedToken:
         """Exchange a refresh token for a new pair. Reuse revokes the whole chain."""
         token = refresh if isinstance(refresh, str) else refresh.token
-        record = self._refresh.pop(token, None)
+        record = self._refresh.get(token)
         if record is None:
-            # **The revocation the message promises, performed.** This branch
-            # used to be the `raise` alone, so an operator reading "every token
-            # in its chain has been revoked" believed the incident was contained
-            # while the thief kept rotating. `_spent` is what makes the chain
-            # knowable here: `pop` above has already removed the record by the
-            # time a second presentation arrives.
-            chain = self._spent.get(token)
-            if chain is not None:
+            spent = self._spent.get(token)
+            if spent is not None:
+                chain, spent_client_id = spent
+                self._authenticate_refresh_client(
+                    spent_client_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
                 self.revoke_chain(chain)
             raise OAuthRefusal(
                 "refresh-reused",
@@ -597,14 +712,40 @@ class AuthorizationServer:
                 "every token in its chain has been revoked, because a rotated token "
                 "being presented again means somebody else has a copy",
             )
+        self._authenticate_refresh_client(
+            record.client_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        if audience and audience != record.audience:
+            raise OAuthRefusal(
+                "audience-mismatch",
+                "a refresh token cannot change the audience of its original grant",
+            )
+        moment = time.time() if now is None else now
+        if moment - record.issued_at > self._refresh_ttl:
+            del self._refresh[token]
+            self.revoke_chain(record.chain)
+            raise OAuthRefusal(
+                "refresh-expired",
+                f"this refresh token expired after its {self._refresh_ttl:g}s lifetime",
+            )
+        del self._refresh[token]
         issued = self.issue_access(
-            subject=record.subject, audience=audience or self._issuer)
+            subject=record.subject,
+            audience=record.audience,
+            scope=record.scope,
+            tenant=record.tenant,
+            now=moment,
+        )
         successor = _Refresh(
             token=secrets.token_urlsafe(32), subject=record.subject,
-            chain=record.chain, issued_at=time.time(),
+            chain=record.chain, issued_at=moment,
+            audience=record.audience, scope=record.scope, tenant=record.tenant,
+            client_id=record.client_id,
         )
         self._refresh[successor.token] = successor
-        self._spent[token] = record.chain
+        self._spent[token] = (record.chain, record.client_id)
         self._chains.setdefault(record.chain, []).append(issued.access_token)
         return IssuedToken(
             access_token=issued.access_token, subject=issued.subject,
@@ -612,6 +753,27 @@ class AuthorizationServer:
             expires_at=issued.expires_at, tenant=issued.tenant,
             refresh_token=successor.token,
         )
+
+    def _authenticate_refresh_client(
+        self,
+        bound_client_id: str,
+        *,
+        client_id: str | None,
+        client_secret: bytes | str | None,
+    ) -> None:
+        if not bound_client_id:
+            if client_id is not None or client_secret is not None:
+                raise OAuthRefusal(
+                    "invalid-client",
+                    "this refresh token is not bound to a registered OAuth client",
+                )
+            return
+        if client_id != bound_client_id:
+            raise OAuthRefusal(
+                "invalid-client",
+                "this refresh token is not bound to that OAuth client",
+            )
+        self._authenticate_client(bound_client_id, client_secret)
 
     def revoke_chain(self, chain: str) -> int:
         issued = self._chains.pop(chain, [])
@@ -622,7 +784,7 @@ class AuthorizationServer:
         # Spent tokens go too, or a third presentation of an already-revoked
         # token would try to revoke a chain that is no longer there and read as
         # a fresh incident.
-        for token, spent_chain in list(self._spent.items()):
+        for token, (spent_chain, _client_id) in list(self._spent.items()):
             if spent_chain == chain:
                 del self._spent[token]
         return len(issued)

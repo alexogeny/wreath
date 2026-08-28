@@ -59,7 +59,6 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-from xml.etree import ElementTree as _ET
 
 from ._native import _core
 
@@ -603,9 +602,15 @@ def _checked_secret(url_secret: object) -> bytes | None:
 
     Raises:
         TypeError: `url_secret` is neither `None` nor a bytes-like object.
+        ValueError: `url_secret` contains fewer than 32 bytes.
     """
-    if url_secret is None or isinstance(url_secret, bytes | bytearray | memoryview):
-        return None if url_secret is None else bytes(url_secret)
+    if url_secret is None:
+        return None
+    if isinstance(url_secret, bytes | bytearray | memoryview):
+        secret = bytes(url_secret)
+        if len(secret) < 32:
+            raise ValueError("url_secret must contain at least 32 bytes")
+        return secret
     kind = type(url_secret).__name__
     hint = " -- encode it, e.g. url_secret=secret.encode()" if kind == "str" else ""
     raise TypeError(f"url_secret must be bytes, not {kind}{hint}")
@@ -863,7 +868,7 @@ class LocalObjectStore:
 
     Args:
         root: the directory everything lives beneath. Created if absent.
-        url_secret: the HMAC key `url` signs with. Random when omitted.
+        url_secret: HMAC key of at least 32 bytes. Random when omitted.
     """
 
     def __init__(self, root: str | os.PathLike[str], *, url_secret: bytes | None = None) -> None:
@@ -1461,8 +1466,10 @@ _MIN_PART = 5 * 1024 * 1024
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
+def _parse_s3_xml(data: bytes) -> Any:
+    from .xml import parse
+
+    return parse(data).root
 
 
 def _amz_date() -> str:
@@ -1854,10 +1861,13 @@ class S3ObjectStore:
                 extra_headers={"content-type": content_type} if content_type else None,
             ), 200,
         )
-        root = _ET.fromstring(resp.body)
-        for el in root.iter():
-            if _local(el.tag) == "UploadId":
+        root = _parse_s3_xml(resp.body)
+        pending = [root]
+        while pending:
+            el = pending.pop()
+            if el.local == "UploadId":
                 return el.text or ""
+            pending.extend(reversed(el.children))
         raise ObjectError("S3 multipart: no UploadId in initiate response")
 
     async def _put_part(
@@ -1997,13 +2007,13 @@ class S3ObjectStore:
             if token:
                 params.append(("continuation-token", token))
             resp = self._ok(await self._send("GET", self._base_path(), params=params), 200)
-            root = _ET.fromstring(resp.body)
+            root = _parse_s3_xml(resp.body)
             truncated = False
             token = None
             for el in root:
-                name = _local(el.tag)
+                name = el.local
                 if name == "Contents":
-                    fields = {_local(c.tag): (c.text or "") for c in el}
+                    fields = {c.local: (c.text or "") for c in el}
                     yield ObjectStat(
                         key=normalize_key(fields.get("Key", "")),
                         size=int(fields.get("Size", "0") or 0),

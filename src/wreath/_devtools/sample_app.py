@@ -71,6 +71,7 @@ class _ScriptedConnection:
 
     def _result(self, sql: str) -> Any:
         for fragment, rows in self.responses:
+            # complexity: allow SL-IN-LOOP -- fixture list is benchmark configuration
             if fragment in sql:
                 return rows
         return []

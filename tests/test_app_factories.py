@@ -48,7 +48,7 @@ def test_metrics_factory_mounts_scrape_route() -> None:
 
 def test_users_factory_mounts_lifecycle() -> None:
     app = Wreath()
-    app.users(InMemoryUserStore(), secret="s", base_url="https://app")
+    app.users(InMemoryUserStore(), secret="s" * 32, base_url="https://app")
     paths = _paths(app)
     assert ("/users/register", "POST") in paths
     assert ("/users/login", "POST") in paths

@@ -27,12 +27,12 @@ class TestSecretStrength:
         from wreath._auth.jwt import JwtError, JwtVerifier
 
         with pytest.raises((ValueError, JwtError)):
-            JwtVerifier(algorithms=["HS256"], key="secret")
+            JwtVerifier(algorithms=["HS256"], key="secret", audience=None)
 
     def test_a_long_hmac_key_is_accepted(self):
         from wreath._auth.jwt import JwtVerifier
 
-        assert JwtVerifier(algorithms=["HS256"], key=_SECRET) is not None
+        assert JwtVerifier(algorithms=["HS256"], key=_SECRET, audience=None) is not None
 
 
 class TestCsrfHostileCookie:

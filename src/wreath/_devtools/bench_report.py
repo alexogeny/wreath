@@ -257,28 +257,38 @@ def _scenario_table(rows: list[dict[str, Any]]) -> str:
     columns: list[tuple[str, str, bool]] = []
     if any(_HEADLINE in row for row in rows):
         columns.append((_HEADLINE, "req/s", False))
-    columns += [(name, title, True) for name, title, _u in _METRICS
-                if any(name in row for row in rows)]
+    available = {key for row in rows for key in row}
+    columns += [
+        (name, title, True) for name, title, _u in _METRICS if name in available
+    ]
     if not columns:
         return ""
     rankable = is_rankable(rows)
+    column_facts: dict[str, tuple[bool, float | None, int]] = {}
+    for metric, _title, lower_better in columns:
+        # complexity: allow SL-COMP-LOOP -- metric columns are a fixed schema
+        valid = [
+            float(row[metric])
+            for row in rows
+            if isinstance(row.get(metric), int | float)
+            and int(row.get("errors", 0)) == 0
+        ]
+        resolved = _separated(rows, metric, lower_better=lower_better)
+        best = (min(valid) if lower_better else max(valid)) if valid else None
+        column_facts[metric] = resolved, best, len(valid)
     head = "".join(f"<th>{escape(t)}</th>" for _m, t, _lb in columns)
     body: list[str] = []
     for row in rows:
         errored = int(row.get("errors", 0)) != 0
         cells: list[str] = []
-        for metric, _title, lower_better in columns:
+        for metric, _title, _lower_better in columns:
             if not isinstance(row.get(metric), int | float):
                 cells.append('<td class="dim">—</td>')
                 continue
             value = float(row[metric])
-            valid = [float(r[metric]) for r in rows
-                     if isinstance(r.get(metric), int | float)
-                     and int(r.get("errors", 0)) == 0]
-            resolved = _separated(rows, metric, lower_better=lower_better)
-            best = (min(valid) if lower_better else max(valid)) if valid else None
+            resolved, best, valid_count = column_facts[metric]
             is_best = (rankable and resolved and not errored
-                       and best is not None and value == best and len(valid) > 1)
+                       and best is not None and value == best and valid_count > 1)
             span = _range(row, metric)
             hint = f' title="runs: {span[0]:,.3f}–{span[1]:,.3f}"' if span else ""
             shown = f"{value:,.0f}" if metric == _HEADLINE else f"{value:.3f}"
@@ -299,11 +309,15 @@ def _overview(rows: list[dict[str, Any]], scenarios: list[str]) -> str:
     if not any(_HEADLINE in row for row in rows):
         return ""
     frameworks = list(dict.fromkeys(str(r["framework"]) for r in rows))
+    rows_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_scenario.setdefault(str(row["scenario"]), []).append(row)
     head = "".join(f"<th>{escape(f)}</th>" for f in frameworks)
     body: list[str] = []
     for scenario in scenarios:
         cells: list[str] = []
-        here = [r for r in rows if str(r["scenario"]) == scenario]
+        here = rows_by_scenario.get(scenario, [])
+        by_framework = {str(row["framework"]): row for row in here}
         rankable = is_rankable(here)
         resolved = _separated(here, _HEADLINE, lower_better=False)
         best = max(
@@ -312,7 +326,7 @@ def _overview(rows: list[dict[str, Any]], scenarios: list[str]) -> str:
             default=None,
         ) if rankable and resolved else None
         for framework in frameworks:
-            row = next((r for r in here if str(r["framework"]) == framework), None)
+            row = by_framework.get(framework)
             if row is None or _HEADLINE not in row:
                 cells.append('<td class="dim">—</td>')
                 continue
@@ -402,7 +416,8 @@ def _protocol_section(rows: list[dict[str, Any]]) -> str:
     """
     if not rows:
         return ""
-    present = [p for p in _PROTOCOLS if any(str(r.get("protocol")) == p for r in rows)]
+    measured_protocols = {str(row.get("protocol")) for row in rows}
+    present = [protocol for protocol in _PROTOCOLS if protocol in measured_protocols]
     if len(present) < 2:
         return ""  # one protocol is not a comparison
 
@@ -472,6 +487,7 @@ def _protocol_section(rows: list[dict[str, Any]]) -> str:
 def _routing_memory_section(documents: list[dict[str, Any]]) -> str:
     """Compiled size, lazy growth and peak RSS per routing backend, per shape."""
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    modes_by_shape: dict[str, list[str]] = {}
     shapes: list[str] = []
     seen_shapes: set[str] = set()
     for document in documents:
@@ -481,13 +497,16 @@ def _routing_memory_section(documents: list[dict[str, Any]]) -> str:
                 if shape not in seen_shapes:
                     seen_shapes.add(shape)
                     shapes.append(shape)
+                shape_modes = modes_by_shape.setdefault(shape, [])
+                if mode not in shape_modes:
+                    shape_modes.append(mode)
                 grouped.setdefault((shape, mode), []).append(row)
     if not grouped:
         return ""
 
     blocks: list[str] = []
     for shape in shapes:
-        modes = [m for (s, m) in grouped if s == shape]
+        modes = modes_by_shape[shape]
         routes = grouped[(shape, modes[0])][0].get("routes", "?")
         def med(mode: str, key: str, _shape: str = shape) -> float:
             return statistics.median(
@@ -989,17 +1008,20 @@ def render(document: dict[str, Any], extra: list[dict[str, Any]] | None = None) 
     metadata = document.get("metadata", {})
     results: list[dict[str, Any]] = document.get("results", [])
     scenarios = list(dict.fromkeys(str(row["scenario"]) for row in results))
+    results_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for row in results:
+        results_by_scenario.setdefault(str(row["scenario"]), []).append(row)
     extra = extra or []
 
     hero = ""
     if scenarios:
-        first = [row for row in results if str(row["scenario"]) == scenarios[0]]
+        first = results_by_scenario[scenarios[0]]
         hero = _bars(first, _HEADLINE, f"{scenarios[0]} — requests per second",
                      "req/s", lower_better=False)
 
     sections: list[str] = []
     for scenario in scenarios:
-        rows = [row for row in results if str(row["scenario"]) == scenario]
+        rows = results_by_scenario[scenario]
         warnings: list[str] = []
         if has_mixed_generators(rows):
             warnings.append(

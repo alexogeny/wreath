@@ -152,11 +152,12 @@ async def _calibrate(
         await _run(app, template, warmup)
 
     samples: dict[int, list[float]] = {depth: [] for depth, _ in arms}
+    reverse_arms = tuple(reversed(arms))
     for index in range(rounds):
         # Alternating for the same reason as `_measure`, and it matters more
         # here: the arms are ordered by increasing depth, so a clock that ramps
         # across the round adds a slope of its own to the one being fitted.
-        for depth, app in arms if index % 2 == 0 else arms[::-1]:
+        for depth, app in arms if index % 2 == 0 else reverse_arms:
             samples[depth].append(await _time(app, template, iterations))
 
     medians = {depth: statistics.median(values) for depth, values in samples.items()}

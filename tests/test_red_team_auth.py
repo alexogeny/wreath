@@ -437,6 +437,7 @@ def mint(claims):
 
 def build(**options):
     app = Wreath()
+    options.setdefault("audience", None)
     app.configure_auth(
         BearerTokenBackend(
             JwtVerifier(

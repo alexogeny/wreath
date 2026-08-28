@@ -32,7 +32,7 @@ BODY = dumps({"id": "evt_1", "type": "invoice.paid", "api_version": "2026-08"})
 
 
 def test_hmac_verifier_refuses_delete_in_a_signed_field_before_mac_check() -> None:
-    secret = b"secret"
+    secret = b"s" * 32
     envelope = WebhookEnvelope(
         "evt_1", "invoice.paid", "1", NOW, "application/json", BODY
     )

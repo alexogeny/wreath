@@ -58,6 +58,9 @@ CONTROL_TOKENS: frozenset[str] = frozenset({
     "stamp", "tenant", "throttle", "token", "totp", "traversal", "trust",
     "unauthor", "verif", "webauthn", "withheld", "writable",
 })
+_CONTROL_PATTERN = re.compile(
+    "|".join(map(re.escape, sorted(CONTROL_TOKENS, key=len, reverse=True)))
+)
 
 #: Keywords that *are* a control when they appear at a call site. Dropping one
 #: is the source-level spelling of "this control was never declared".
@@ -231,8 +234,8 @@ def _names_in(node: ast.AST) -> set[str]:
     return found
 
 
-def _matches(names: set[str], tokens: frozenset[str]) -> bool:
-    return any(token in name for name in names for token in tokens)
+def _matches(names: set[str]) -> bool:
+    return any(_CONTROL_PATTERN.search(name) is not None for name in names)
 
 
 def _short(node: ast.AST, width: int = 72) -> str:
@@ -573,7 +576,7 @@ def _control_functions(tree: ast.Module) -> Iterator[ast.FunctionDef | ast.Async
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             names = _names_in(node)
             names.add(node.name.lower())
-            if _matches(names, CONTROL_TOKENS):
+            if _matches(names):
                 yield node
 
 
