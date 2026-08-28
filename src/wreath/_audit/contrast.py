@@ -120,6 +120,7 @@ def _strip_media(css: str) -> str:
     while True:
         m = _MEDIA.search(css, i)
         if not m:
+            # complexity: allow SL-SLICE-LOOP -- tail copied once before break
             out.append(css[i:])
             break
         out.append(css[i:m.start()])

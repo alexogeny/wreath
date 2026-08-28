@@ -53,6 +53,7 @@ from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from xml.sax.saxutils import quoteattr
 
 __all__ = [
@@ -172,6 +173,7 @@ class PendingLogin:
     relay_state: str
     organization: str
     issued_at: float
+    session_id: str = ""
     #: Where to send the browser, with the request already encoded.
     redirect_url: str = ""
 
@@ -184,20 +186,39 @@ class PendingLoginStore:
     consumption -- the property `_secondfactor`'s challenge store already has.
     """
 
-    __slots__ = ("_by_id", "_ttl")
+    __slots__ = ("_by_id", "_max_entries", "_next_sweep", "_ttl")
 
-    def __init__(self, *, ttl: float = 600.0) -> None:
+    def __init__(self, *, ttl: float = 600.0, max_entries: int = 10_000) -> None:
+        if ttl <= 0:
+            raise ValueError("pending-login ttl must be positive")
+        if max_entries < 1:
+            raise ValueError("pending-login max_entries must be at least one")
         self._by_id: dict[str, PendingLogin] = {}
         self._ttl = ttl
+        self._max_entries = max_entries
+        self._next_sweep = float("inf")
 
     def put(self, pending: PendingLogin) -> None:
         self._sweep(pending.issued_at)
+        if len(self._by_id) >= self._max_entries:
+            raise SsoRefusal(
+                "pending-capacity",
+                f"the pending-login store is at its ceiling of {self._max_entries}",
+            )
         self._by_id[pending.request_id] = pending
+        self._next_sweep = min(self._next_sweep, pending.issued_at + self._ttl)
 
-    def spend(self, request_id: str, *, now: float | None = None) -> PendingLogin:
+    def spend(
+        self,
+        request_id: str,
+        *,
+        relay_state: str,
+        session_id: str,
+        now: float | None = None,
+    ) -> PendingLogin:
         """Take the pending login, or refuse. Never returns the same one twice."""
         moment = time.time() if now is None else now
-        pending = self._by_id.pop(request_id, None)
+        pending = self._by_id.get(request_id)
         if pending is None:
             raise SsoRefusal(
                 "unsolicited",
@@ -205,12 +226,24 @@ class PendingLoginStore:
                 "issued, has already been spent, or has expired. An assertion that "
                 "answers no request is unsolicited and is not a login here.",
             )
-        if moment - pending.issued_at > self._ttl:
+        if moment - pending.issued_at >= self._ttl:
+            del self._by_id[request_id]
             raise SsoRefusal(
                 "expired-request",
                 f"the login for InResponseTo={request_id!r} was issued "
                 f"{moment - pending.issued_at:.0f}s ago and the window is {self._ttl:.0f}s",
             )
+        if not relay_state or not session_id:
+            raise SsoRefusal(
+                "state-session-mismatch",
+                "SAML RelayState and its browser session binding are required",
+            )
+        if pending.relay_state != relay_state or pending.session_id != session_id:
+            raise SsoRefusal(
+                "state-session-mismatch",
+                "this SAML response belongs to a different browser session",
+            )
+        del self._by_id[request_id]
         return pending
 
     def organization_for(self, request_id: str) -> str:
@@ -226,11 +259,15 @@ class PendingLoginStore:
         A store that only ever grows is an in-process memory leak keyed by
         anybody who can start a login, which is everybody.
         """
-        if len(self._by_id) < 64:
+        if now < self._next_sweep:
             return
         cutoff = now - self._ttl
-        for key in [k for k, v in self._by_id.items() if v.issued_at < cutoff]:
+        for key in [k for k, v in self._by_id.items() if v.issued_at <= cutoff]:
             del self._by_id[key]
+        self._next_sweep = min(
+            (pending.issued_at + self._ttl for pending in self._by_id.values()),
+            default=float("inf"),
+        )
 
 
 # --- SAML -------------------------------------------------------------------
@@ -287,13 +324,24 @@ class SamlServiceProvider:
             "</md:SPSSODescriptor></md:EntityDescriptor>"
         )
 
-    def begin_login(self, *, organization: str, now: float | None = None) -> PendingLogin:
+    def begin_login(
+        self,
+        *,
+        organization: str,
+        session_id: str,
+        now: float | None = None,
+    ) -> PendingLogin:
         """Mint an `AuthnRequest` for one organisation and remember it.
 
         Resolving the provider *here* is what makes an unconfigured organisation
         a refusal at the start of a login rather than a signature failure at the
         end of one.
         """
+        if not session_id:
+            raise SsoRefusal(
+                "session-binding-required",
+                "SAML login requires a non-empty browser session binding",
+            )
         provider = self.directory.for_organization(organization)
         moment = time.time() if now is None else now
         pending = PendingLogin(
@@ -301,6 +349,7 @@ class SamlServiceProvider:
             relay_state=secrets.token_urlsafe(16),
             organization=organization,
             issued_at=moment,
+            session_id=session_id,
             redirect_url=provider.sso_url,
         )
         self.pending.put(pending)
@@ -331,6 +380,8 @@ class SamlServiceProvider:
         raw: bytes,
         *,
         in_response_to: str,
+        relay_state: str,
+        session_id: str,
         ledger: Any,
         now: Any = None,
     ) -> Any:
@@ -346,7 +397,11 @@ class SamlServiceProvider:
         """
         from .saml import IdentityProvider, SamlRefusal, ServiceProvider, verify_response
 
-        pending = self.pending.spend(in_response_to)
+        pending = self.pending.spend(
+            in_response_to,
+            relay_state=relay_state,
+            session_id=session_id,
+        )
         config = self.directory.for_organization(pending.organization)
         idp = IdentityProvider(
             entity_id=config.entity_id, certificates=config.certificates)
@@ -539,7 +594,16 @@ class OidcRelyingParty:
     verifier binds the code redemption to this client.
     """
 
-    __slots__ = ("_client_id", "_flows", "_issuer", "_keys", "_pkce", "_ttl")
+    __slots__ = (
+        "_client_id",
+        "_flows",
+        "_issuer",
+        "_keys",
+        "_max_pending",
+        "_next_sweep",
+        "_pkce",
+        "_ttl",
+    )
 
     def __init__(
         self,
@@ -548,6 +612,7 @@ class OidcRelyingParty:
         client_id: str,
         pkce: Literal["S256", "plain"] = "S256",
         ttl: float = 600.0,
+        max_pending: int = 10_000,
     ) -> None:
         if pkce != "S256":
             raise SsoRefusal(
@@ -555,11 +620,31 @@ class OidcRelyingParty:
                 "PKCE method 'plain' sends the verifier as the challenge, so it "
                 "protects nothing; only S256 is accepted",
             )
-        self._issuer = issuer
+        parsed_issuer = urlsplit(issuer)
+        if (
+            parsed_issuer.scheme != "https"
+            or parsed_issuer.hostname is None
+            or parsed_issuer.username is not None
+            or parsed_issuer.password is not None
+            or parsed_issuer.query
+            or parsed_issuer.fragment
+        ):
+            raise SsoRefusal(
+                "insecure-issuer",
+                "OIDC issuer must be an absolute HTTPS URL without credentials, "
+                "a query, or a fragment",
+            )
+        if ttl <= 0:
+            raise ValueError("OIDC state ttl must be positive")
+        if max_pending < 1:
+            raise ValueError("OIDC max_pending must be at least one")
+        self._issuer = issuer.rstrip("/")
         self._client_id = client_id
         self._pkce = pkce
         self._ttl = ttl
+        self._max_pending = max_pending
         self._flows: dict[str, _OidcFlow] = {}
+        self._next_sweep = float("inf")
         #: `kid -> key`, filled by `refresh()` at startup. Never on the request
         #: path: a fetch driven by a request lets an unauthenticated caller aim
         #: an outbound request, and puts the issuer's outage in front of every
@@ -574,13 +659,39 @@ class OidcRelyingParty:
     async def refresh(self, fetch: Any) -> int:
         """Reload discovery and JWKS. Called at lifespan startup, never per request."""
         document = await fetch(f"{self._issuer}/.well-known/openid-configuration")
-        keys = await fetch(document["jwks_uri"])
+        if document.get("issuer", self._issuer) != self._issuer:
+            raise SsoRefusal(
+                "issuer-mismatch", "OIDC discovery issuer does not match the configured issuer"
+            )
+        from ._auth.oidc import _require_same_origin
+
+        jwks_uri = document["jwks_uri"]
+        try:
+            _require_same_origin(self._issuer, jwks_uri)
+        except ValueError as error:
+            raise SsoRefusal(
+                "endpoint-origin-mismatch",
+                "OIDC JWKS endpoint is not on the configured issuer origin",
+            ) from error
+        keys = await fetch(jwks_uri)
         self._keys = {key["kid"]: key for key in keys.get("keys", ())}
         return len(self._keys)
 
     def begin_login(
-        self, *, organization: str, session_id: str = "", now: float | None = None,
+        self, *, organization: str, session_id: str, now: float | None = None,
     ) -> _OidcFlow:
+        if not session_id:
+            raise SsoRefusal(
+                "session-binding-required",
+                "OIDC login requires a non-empty browser session binding",
+            )
+        moment = time.time() if now is None else now
+        self._sweep_flows(moment)
+        if len(self._flows) >= self._max_pending:
+            raise SsoRefusal(
+                "pending-capacity",
+                f"the OIDC pending-login store is at its ceiling of {self._max_pending}",
+            )
         verifier = secrets.token_urlsafe(64)
         challenge = urlsafe_b64encode(
             hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
@@ -591,12 +702,15 @@ class OidcRelyingParty:
             challenge=challenge,
             organization=organization,
             session_id=session_id,
-            issued_at=time.time() if now is None else now,
+            issued_at=moment,
         )
         self._flows[flow.state] = flow
+        self._next_sweep = min(self._next_sweep, moment + self._ttl)
         return flow
 
-    def consume_state(self, state: str, *, session_id: str = "") -> _OidcFlow:
+    def consume_state(
+        self, state: str, *, session_id: str, now: float | None = None
+    ) -> _OidcFlow:
         """Spend the state, refusing a replay or another browser's callback."""
         flow = self._flows.pop(state, None)
         if flow is None:
@@ -606,6 +720,17 @@ class OidcRelyingParty:
                 "already spent. A state that is not single-use is CSRF on the login "
                 "endpoint.",
             )
+        moment = time.time() if now is None else now
+        if moment - flow.issued_at > self._ttl:
+            raise SsoRefusal(
+                "expired-state",
+                f"this OIDC state expired after its {self._ttl:g}s lifetime",
+            )
+        if not session_id:
+            raise SsoRefusal(
+                "session-binding-required",
+                "OIDC callback requires a non-empty browser session binding",
+            )
         if flow.session_id != session_id:
             raise SsoRefusal(
                 "state-session-mismatch",
@@ -614,6 +739,17 @@ class OidcRelyingParty:
                 "attacker's account",
             )
         return flow
+
+    def _sweep_flows(self, now: float) -> None:
+        if now <= self._next_sweep:
+            return
+        cutoff = now - self._ttl
+        for state in [key for key, flow in self._flows.items() if flow.issued_at < cutoff]:
+            del self._flows[state]
+        self._next_sweep = min(
+            (flow.issued_at + self._ttl for flow in self._flows.values()),
+            default=float("inf"),
+        )
 
     def check_nonce(self, claims: Mapping[str, Any], *, expected_nonce: str) -> None:
         """The claim that binds an id token to one authorization request."""

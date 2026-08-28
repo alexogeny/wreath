@@ -1,37 +1,12 @@
-"""Find superlinear shapes that no complexity probe has been written for yet.
+"""Find statically provable superlinear shapes without a recorded decision.
 
-`wreath-complexity-probe` proves a contract about code somebody already
-suspected. This is the other direction: a static sweep for the shapes that are
-*provably* superlinear -- a linear operation inside a loop over something the
-loop does not shrink -- so a candidate can be triaged into a probe, or waived
-with a reason, before anyone measures it.
+The scanner reports only operands whose container kind and reuse are visible.
+Exact-code waivers record bounded or output-sized work. The discovery baseline
+therefore retains exceptional confirmed hotspots instead of scanner guesses.
 
-It is a **discovery** tool and a ratchet, not a gate on its own. Every finding
-is a candidate; most are bounded by something the scanner cannot see (a cap, a
-partition that already made the loop run once, a collection with three entries).
-The value is that the set is *acknowledged*: `docs/agents/complexity-discovery.json`
-records every candidate that has been looked at and what was decided, and
-`--discover-check` fails only when a **new** one appears. That way a quadratic
-someone introduces tomorrow shows up as a diff rather than joining 1,200 lines
-of scenery nobody reads.
-
-Two rules the scanners follow, both learned the expensive way:
-
-* **A container whose kind is known to be hashed is not a finding.** `x in s`
-  where `s` is a `set`/`frozenset`/`dict` is O(1), and reporting it buried the
-  real findings. Kinds come from parameter annotations first (the most reliable
-  signal in this tree), then literals and constructors; anything else is
-  "unknown" and reported at lower confidence rather than suppressed.
-* **Iterating `d.values()` is the loop, not an extra linear op inside one.**
-  Treating it as a finding produced several hundred hits on `for x in
-  d.values()` and hid everything else.
-
-The C half is deliberately disjoint from `wreath-native-lint`: NC001-NC007
-already cover front-deleted lists, additive growth, per-value imports,
-name-based dispatch in a loop, parser restarts, and constant-table rebuilds.
-This adds the shapes those rules do not read -- loop nests, a linear call inside
-a loop, `strlen` in a loop condition, and reallocation inside a loop -- and
-honours the same `native-lint: allow` waiver comments.
+The C rules complement `wreath-native-lint` with repeated nonconstant loop
+bounds and `strlen` in loop conditions. Both scanners accept a named waiver
+with a nonempty reason.
 """
 
 from __future__ import annotations
@@ -56,20 +31,22 @@ SEQUENCED = frozenset({"list", "tuple", "str", "bytes", "bytearray"})
 #: method calls whose cost is linear in the receiver or the argument.
 #: `values()`/`keys()`/`items()` are deliberately absent -- see the module
 #: docstring; including them buried every real finding.
-LINEAR_METHODS = {
+RECEIVER_LINEAR_METHODS = {
     "index": "index() scans",
     "remove": "remove() scans",
     "count": "count() scans",
     "sort": "sort() is n log n",
-    "reverse": "reverse() copies",
-    "update": "update() is linear in its argument",
-    "extend": "extend() is linear in its argument",
-    "join": "join() walks the whole iterable",
+    "reverse": "reverse() scans",
     "copy": "copy() is linear",
     "difference": "set difference is linear",
     "union": "set union is linear",
     "intersection": "set intersection is linear",
     "issubset": "subset test is linear",
+}
+ARGUMENT_LINEAR_METHODS = {
+    "update": "update() is linear in its argument",
+    "extend": "extend() is linear in its argument",
+    "join": "join() walks the whole iterable",
 }
 LINEAR_FUNCS = {
     "sorted": "sorted() is n log n",
@@ -84,7 +61,6 @@ LINEAR_FUNCS = {
     "tuple": "tuple() copies",
     "frozenset": "frozenset() copies",
     "deepcopy": "deepcopy() walks the graph",
-    "reversed": "reversed() over a sequence",
 }
 #: `pop(0)` / `insert(0, ...)` shift every remaining element
 FRONT_MUTATORS = frozenset({"pop", "insert"})
@@ -123,7 +99,8 @@ class Finding:
         Deliberately **excludes the line number**: adding an import at the top
         of a module would otherwise re-report every finding in it as new.
         """
-        return f"{self.file}::{self.func}::{self.code}"
+        site = hashlib.sha256(self.source.encode()).hexdigest()[:16]
+        return f"{self.file}::{self.func}::{self.code}::{site}"
 
     def document(self) -> dict[str, Any]:
         return {
@@ -243,12 +220,23 @@ class _Loop:
     constant: bool = False
 
 
-@dataclass(slots=True)
-class _Recursion:
-    """One function whose direct self-call sites are being counted."""
-
-    function: ast.FunctionDef | ast.AsyncFunctionDef
-    calls: int = 0
+def _has_branching_recursion(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    for statement in _owned_statements(function):
+        for expression in ast.walk(statement):
+            if not isinstance(expression, ast.BinOp):
+                continue
+            calls = sum(
+                1
+                for node in ast.walk(expression)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == function.name
+            )
+            if calls >= 2:
+                return True
+    return False
 
 
 class _PythonScanner(ast.NodeVisitor):
@@ -262,7 +250,6 @@ class _PythonScanner(ast.NodeVisitor):
         self.loops: list[_Loop] = []
         self.functions: list[str] = []
         self.kinds: dict[str, str | None] = {}
-        self.recursion_frames: list[_Recursion] = []
         self.recursion_findings: list[Finding] = []
 
     # -- helpers ---------------------------------------------------------
@@ -275,8 +262,17 @@ class _PythonScanner(ast.NodeVisitor):
         return any(name in loop.bound or name in loop.targets for loop in self.loops)
 
     def _report(self, node: ast.AST, code: str, message: str,
-                confidence: str = "medium") -> None:
+                confidence: str = "high") -> None:
         line = getattr(node, "lineno", 0)
+        waiver = re.compile(
+            rf"#\s*complexity:\s*allow\s+{re.escape(code)}\s+--\s*\S"
+        )
+        if any(
+            waiver.search(self.lines[index])
+            for index in (line - 2, line - 1)
+            if 0 <= index < len(self.lines)
+        ):
+            return
         self.findings.append(Finding(
             file=self.display, line=line, code=code,
             func=self.functions[-1] if self.functions else "<module>",
@@ -308,16 +304,16 @@ class _PythonScanner(ast.NodeVisitor):
         self.functions.append(node.name)
         saved_loops, saved_kinds = self.loops, self.kinds
         self.loops, self.kinds = [], infer_kinds(node)   # a def is its own cost universe
-        recursion = _Recursion(node)
-        self.recursion_frames.append(recursion)
         self.generic_visit(node)
-        self.recursion_frames.pop()
         decorators = {_name_of(item) or "" for item in node.decorator_list}
-        if recursion.calls >= 2 and not any("cache" in item for item in decorators):
+        if (
+            not any("cache" in item for item in decorators)
+            and _has_branching_recursion(node)
+        ):
             self.recursion_findings.append(Finding(
                 file=self.display, line=node.lineno, code="SL-RECURSE", func=node.name,
-                depth=0, confidence="low",
-                message=f"{recursion.calls} self-recursive call sites, no cache decorator",
+                depth=0, confidence="high",
+                message="multiple self-calls in one eagerly evaluated expression",
                 source="",
             ))
         self.loops, self.kinds = saved_loops, saved_kinds
@@ -341,16 +337,39 @@ class _PythonScanner(ast.NodeVisitor):
             self._report(node, "SL-NEST-SAME",
                          f"nested loop re-iterates `{iterated}`, already being "
                          f"iterated outside", confidence="high")
+        self.visit(node.iter)
         self._push_loop(node.iter, node.target)
-        self.generic_visit(node)
+        self.visit(node.target)
+        for statement in node.body:
+            self.visit(statement)
         self.loops.pop()
+        for statement in node.orelse:
+            self.visit(statement)
 
     visit_AsyncFor = visit_For
 
     def visit_While(self, node) -> None:
         self._push_loop(None, None)
-        self.generic_visit(node)
+        self.visit(node.test)
+        for statement in node.body:
+            self.visit(statement)
         self.loops.pop()
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def visit_Return(self, node) -> None:
+        saved_loops, self.loops = self.loops, []
+        if node.value is not None:
+            self.visit(node.value)
+        self.loops = saved_loops
+
+    def visit_Raise(self, node) -> None:
+        saved_loops, self.loops = self.loops, []
+        if node.exc is not None:
+            self.visit(node.exc)
+        if node.cause is not None:
+            self.visit(node.cause)
+        self.loops = saved_loops
 
     # -- the linear operations -------------------------------------------
     def visit_Compare(self, node) -> None:
@@ -359,21 +378,18 @@ class _PythonScanner(ast.NodeVisitor):
                 continue
             name = _name_of(comparator)
             kind = self.kinds.get(name)
-            if kind in HASHED or isinstance(comparator, ast.Set | ast.Dict):
-                continue                      # O(1) membership: not a finding
-            if self._depth() >= 1 and name and not self._loop_local(name):
+            if (
+                self._depth() >= 1
+                and kind in SEQUENCED
+                and name
+                and not self._loop_local(name)
+            ):
                 self._report(node, "SL-IN-LOOP",
                              f"membership test against `{name}`"
-                             + (f" (a {kind})" if kind else " (kind unknown)")
-                             + " inside a loop",
-                             confidence="high" if kind in SEQUENCED else "medium")
+                             f" (a {kind}) inside a loop")
         self.generic_visit(node)
 
     def visit_Call(self, node) -> None:
-        if isinstance(node.func, ast.Name):
-            for recursion in self.recursion_frames:
-                if node.func.id == recursion.function.name:
-                    recursion.calls += 1
         if self._depth() >= 1:
             self._check_call(node)
         self.generic_visit(node)
@@ -382,6 +398,7 @@ class _PythonScanner(ast.NodeVisitor):
         func = node.func
         if isinstance(func, ast.Attribute):
             receiver, method = _name_of(func.value), func.attr
+            receiver_kind = self.kinds.get(receiver)
             front = (method in FRONT_MUTATORS and node.args
                      and isinstance(node.args[0], ast.Constant)
                      and node.args[0].value == 0)
@@ -391,17 +408,53 @@ class _PythonScanner(ast.NodeVisitor):
                                  f"`{receiver}.{method}(0, ...)` inside a loop "
                                  f"shifts every remaining element",
                                  confidence="high")
-                elif method in LINEAR_METHODS:
+                elif (
+                    method in RECEIVER_LINEAR_METHODS
+                    and receiver_kind in HASHED | SEQUENCED
+                    and (method not in {"index", "count"} or len(node.args) == 1)
+                ):
                     self._report(node, "SL-LINEAR-METHOD",
                                  f"`{receiver}.{method}()` inside a loop: "
-                                 f"{LINEAR_METHODS[method]}")
+                                 f"{RECEIVER_LINEAR_METHODS[method]}")
+            if method in ARGUMENT_LINEAR_METHODS and node.args:
+                argument = _name_of(node.args[0])
+                argument_kind = self.kinds.get(argument)
+                receiver_supports_method = (
+                    (method == "join" and (
+                        receiver_kind in {"str", "bytes"}
+                        or isinstance(func.value, ast.Constant)
+                        and isinstance(func.value.value, str | bytes)
+                    ))
+                    or method == "extend" and receiver_kind == "list"
+                    or method == "update" and receiver_kind in HASHED
+                )
+                if (
+                    receiver_supports_method
+                    and argument
+                    and argument_kind in HASHED | SEQUENCED
+                    and not self._loop_local(argument)
+                ):
+                    self._report(
+                        node,
+                        "SL-LINEAR-METHOD",
+                        f"`{method}({argument})` inside a loop: "
+                        f"{ARGUMENT_LINEAR_METHODS[method]}",
+                    )
             if method == "compile" and _name_of(func.value) in {"re", "regex"}:
                 self._report(node, "SL-RECOMPILE",
                              "re.compile() inside a loop rebuilds the pattern",
                              confidence="high")
-        elif isinstance(func, ast.Name) and func.id in LINEAR_FUNCS and node.args:
+        elif (
+            isinstance(func, ast.Name)
+            and func.id in LINEAR_FUNCS
+            and len(node.args) == 1
+        ):
             argument = _name_of(node.args[0])
-            if argument and not self._loop_local(argument):
+            if (
+                argument
+                and self.kinds.get(argument) in HASHED | SEQUENCED
+                and not self._loop_local(argument)
+            ):
                 self._report(node, "SL-LINEAR-CALL",
                              f"`{func.id}({argument})` inside a loop: "
                              f"{LINEAR_FUNCS[func.id]}")
@@ -414,19 +467,38 @@ class _PythonScanner(ast.NodeVisitor):
             target = _name_of(node.target)
             kind = self.kinds.get(target)
             quadratic = kind in {"str", "bytes", "tuple"}
-            if target and not self._loop_local(target) and kind != "list":
+            if target and not self._loop_local(target) and quadratic:
                 self._report(node, "SL-ACCUM-ADD",
                              f"`{target} += ...` accumulates inside a loop"
-                             + (f" (`{target}` is a {kind}: quadratic)" if quadratic
-                                else " (quadratic if str/bytes/tuple)"),
-                             confidence="high" if quadratic else "low")
+                             f" (`{target}` is a {kind}: quadratic)")
         self._record_binding(node)
         self.generic_visit(node)
 
     def visit_Subscript(self, node) -> None:
         if self._depth() >= 1 and isinstance(node.slice, ast.Slice):
             name = _name_of(node.value)
-            if name and not self._loop_local(name):
+            lower = node.slice.lower
+            upper = node.slice.upper
+            open_ended = lower is None or upper is None
+            bounded_prefix = (
+                lower is None
+                and isinstance(upper, ast.Constant)
+                and isinstance(upper.value, int)
+            )
+            bound = upper if lower is None else lower if upper is None else None
+            invariant_bound = bound is None or not any(
+                self._loop_local(item.id)
+                for item in ast.walk(bound)
+                if isinstance(item, ast.Name)
+            )
+            if (
+                name
+                and self.kinds.get(name) in SEQUENCED
+                and not self._loop_local(name)
+                and open_ended
+                and not bounded_prefix
+                and invariant_bound
+            ):
                 self._report(node, "SL-SLICE-LOOP",
                              f"slice of `{name}` inside a loop copies each time")
         self.generic_visit(node)
@@ -457,20 +529,32 @@ class _PythonScanner(ast.NodeVisitor):
         self._comprehension(node)
 
     def _comprehension(self, node) -> None:
-        if self._depth() >= 1:
-            for generator in node.generators:
-                name = _name_of(generator.iter)
-                if name and not self._loop_local(name):
-                    self._report(node, "SL-COMP-LOOP",
-                                 f"comprehension over `{name}` inside a loop")
-        if len(node.generators) >= 2:
-            self._report(node, "SL-COMP-NEST",
-                         f"comprehension with {len(node.generators)} generators")
-        # Push a frame per generator: a comprehension IS a loop, and treating it
-        # as anything else missed `[seq.index(x) for x in items]` entirely.
+        seen: set[str] = set()
         for generator in node.generators:
+            name = _name_of(generator.iter)
+            if (
+                self._depth() >= 1
+                and name
+                and self.kinds.get(name) in HASHED | SEQUENCED
+                and not self._loop_local(name)
+            ):
+                self._report(node, "SL-COMP-LOOP",
+                             f"comprehension over `{name}` inside a loop")
+            if name and name in seen and self.kinds.get(name) in HASHED | SEQUENCED:
+                self._report(node, "SL-COMP-NEST",
+                             f"comprehension re-iterates `{name}`")
+            if name:
+                seen.add(name)
+            self.visit(generator.iter)
             self._push_loop(generator.iter, generator.target)
-        self.generic_visit(node)
+            self.visit(generator.target)
+            for condition in generator.ifs:
+                self.visit(condition)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
         for _ in node.generators:
             self.loops.pop()
 
@@ -488,15 +572,34 @@ def scan_python(path: Path, root: Path) -> list[Finding]:
 
 _COMMENT = re.compile(r"/\*.*?\*/")
 _LOOP = re.compile(r"^\s*(for|while)\s*\(")
-_FUNC = re.compile(r"^[A-Za-z_][A-Za-z0-9_ *]*\b(\w+)\s*\([^;]*\)\s*\{?\s*$")
-_LINEAR_CALL = re.compile(
-    r"\b(memmove|memcpy|memset|strlen|strcmp|strncmp|strstr|memcmp|"
-    r"wreath_memmem|qsort|PySequence_Contains|PyList_Insert|"
-    r"PyUnicode_Find|PyBytes_Concat|_PyBytes_Resize|PyDict_Merge)\s*\(")
-_REALLOC = re.compile(r"\b(realloc|PyMem_Realloc|PyMem_RawRealloc|PyObject_Realloc)\s*\(")
+_FOR = re.compile(r"^\s*for\s*\((.*)\)")
+_FUNC = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_ *]*\b\s+)?(\w+)\s*\([^;]*\)\s*\{?\s*$"
+)
 #: honour the same waiver comments `wreath-native-lint` reads
 _WAIVER = re.compile(r"native-lint:\s*allow|complexity:\s*allow")
 _STRLEN = re.compile(r"\bstrlen\s*\(")
+
+
+def _c_for_bound(line: str) -> str | None:
+    matched = _FOR.match(line)
+    if matched is None:
+        return None
+    clauses = matched.group(1).split(";", 2)
+    if len(clauses) != 3:
+        return None
+    variable = re.search(r"\b([A-Za-z_]\w*)\s*=", clauses[0])
+    if variable is None:
+        return None
+    name = re.escape(variable.group(1))
+    condition = clauses[1].strip()
+    upper = re.fullmatch(rf"{name}\s*(?:<|<=|>|>=|!=)\s*(.+)", condition)
+    if upper is not None:
+        return re.sub(r"\s+", "", upper.group(1))
+    lower = re.fullmatch(rf"(.+)\s*(?:<|<=|>|>=|!=)\s*{name}", condition)
+    if lower is not None:
+        return re.sub(r"\s+", "", lower.group(1))
+    return None
 
 
 def scan_c(path: Path, root: Path) -> list[Finding]:
@@ -505,7 +608,8 @@ def scan_c(path: Path, root: Path) -> list[Finding]:
     out: list[Finding] = []
     depth = 0
     func, func_depth = "<file>", None
-    loops: list[int] = []          # brace depth at which each open loop began
+    loops: list[tuple[int, str | None]] = []
+    active_bounds: dict[str, int] = {}
     waived = False                 # a waiver comment covers the next code line
 
     def found(code: str, message: str, at_depth: int, *,
@@ -513,7 +617,7 @@ def scan_c(path: Path, root: Path) -> list[Finding]:
         # Hoisted out of the loop and given its varying inputs explicitly: a
         # closure over the loop variables is the bug ruff's B023 names.
         return Finding(file=display, line=number, code=code, func=func,
-                       depth=at_depth, confidence="medium",
+                       depth=at_depth, confidence="high",
                        message=message, source=raw.strip()[:140])
 
     for number, raw in enumerate(path.read_text(encoding="utf-8",
@@ -536,29 +640,37 @@ def scan_c(path: Path, root: Path) -> list[Finding]:
 
         is_loop = bool(_LOOP.match(line))
         if is_loop:
-            if loops:
-                out.append(found("CL-NEST", f"loop nested {len(loops) + 1} deep",
-                                 len(loops) + 1, number=number, func=func, raw=raw))
+            bound = _c_for_bound(line)
+            fixed_bound = bool(
+                bound and re.fullmatch(r"[A-Z_][A-Z0-9_]*", bound)
+            )
+            if bound is not None and not fixed_bound and bound in active_bounds:
+                out.append(found(
+                    "CL-NEST-SAME",
+                    f"nested loop reuses bound `{bound}`",
+                    len(loops) + 1,
+                    number=number,
+                    func=func,
+                    raw=raw,
+                ))
             if _STRLEN.search(line):
                 out.append(found(
                     "CL-STRLEN-COND",
                     "strlen() in a loop condition is re-evaluated per iteration",
                     len(loops) + 1, number=number, func=func, raw=raw))
-            loops.append(depth)
-        elif loops:
-            out += [
-                found(code, f"{hit.group(1)}(): {why}", len(loops),
-                      number=number, func=func, raw=raw)
-                for pattern, code, why in (
-                    (_LINEAR_CALL, "CL-LINEAR-IN-LOOP", "linear call inside a loop"),
-                    (_REALLOC, "CL-REALLOC-IN-LOOP", "reallocation inside a loop"),
-                )
-                if (hit := pattern.search(line))
-            ]
+            loops.append((depth, bound))
+            if bound is not None:
+                active_bounds[bound] = active_bounds.get(bound, 0) + 1
 
         depth += braces
-        while loops and depth <= loops[-1]:
-            loops.pop()
+        while loops and depth <= loops[-1][0]:
+            _, bound = loops.pop()
+            if bound is not None:
+                remaining = active_bounds[bound] - 1
+                if remaining:
+                    active_bounds[bound] = remaining
+                else:
+                    del active_bounds[bound]
         if func_depth is not None and depth <= func_depth and "}" in line:
             func, func_depth = "<file>", None
     return out

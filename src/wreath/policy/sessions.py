@@ -101,10 +101,11 @@ class SessionPolicy:
         secure: Mark the cookie `Secure`. Pass False only for local plaintext development.
         http_only: Mark the cookie `HttpOnly`, keeping scripts out of it.
         store: A `SessionStore` moving contents server-side. None keeps them in the cookie.
-        previous_secrets: Retired secrets a cookie may still verify under.
+        previous_secrets: Retired HMAC keys, each at least 32 bytes.
 
     Raises:
-        ValueError: `secret` is shorter than 32 bytes.
+        TypeError: An item in `previous_secrets` is not text or bytes-like.
+        ValueError: `secret` or an item in `previous_secrets` is shorter than 32 bytes.
     """
 
     __slots__ = (
@@ -136,10 +137,24 @@ class SessionPolicy:
         # with them any more. Without this, rotating the secret invalidated
         # every live session at once -- so the safe operation nobody could
         # afford to perform was the one that limits the damage of a leak.
-        self._previous = tuple(
-            item.encode("utf-8") if isinstance(item, str) else bytes(item)
-            for item in previous_secrets
-        )
+        previous = []
+        for index, item in enumerate(previous_secrets):
+            if isinstance(item, str):
+                encoded = item.encode("utf-8")
+            elif isinstance(item, bytes | bytearray | memoryview):
+                encoded = bytes(item)
+            else:
+                raise TypeError(
+                    f"previous_secrets[{index}] must be str or bytes-like, "
+                    f"not {type(item).__name__}"
+                )
+            if len(encoded) < MIN_SECRET_BYTES:
+                raise ValueError(
+                    f"previous_secrets[{index}] must contain at least "
+                    f"{MIN_SECRET_BYTES} bytes"
+                )
+            previous.append(encoded)
+        self._previous = tuple(previous)
         self._cookie = cookie
         self._max_age = max_age
         self._same_site = same_site

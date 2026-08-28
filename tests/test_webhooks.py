@@ -109,7 +109,7 @@ def test_verifier_rejects_stale_timestamp_and_unknown_key() -> None:
 
 
 def test_webhook_key_rotation_accepts_current_and_previous_keys() -> None:
-    keys = {"current": b"current-secret-material", "previous": b"previous-secret-material"}
+    keys = {"current": b"c" * 32, "previous": b"p" * 32}
     envelope = _envelope()
     verifier = HMACWebhookVerifier(keys)
     for key_id in keys:
@@ -128,6 +128,19 @@ def test_webhook_key_rotation_accepts_current_and_previous_keys() -> None:
             body=envelope.body,
             headers=previous_headers,
             now=envelope.timestamp,
+        )
+
+
+@pytest.mark.parametrize("secret", [b"", b"x", b"x" * 31])
+def test_wreath_webhook_profile_refuses_short_hmac_keys(secret: bytes) -> None:
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        HMACWebhookVerifier({"current": secret})
+
+
+def test_webhook_signer_validates_every_rotation_key() -> None:
+    with pytest.raises(ValueError, match="previous.*at least 32 bytes"):
+        HMACWebhookSigner(
+            {"current": b"c" * 32, "previous": b""}, key_id="current"
         )
 
 
@@ -1423,10 +1436,10 @@ def test_a_verifier_with_no_usable_key_is_refused_at_construction() -> None:
     """A verifier holding an empty secret would MAC everything to the same value."""
     with pytest.raises(ValueError, match="non-empty webhook verification key"):
         HMACWebhookVerifier({})
-    with pytest.raises(ValueError, match="non-empty webhook verification key"):
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         HMACWebhookVerifier({"current": b""})
     # One bad entry poisons the mapping, exactly as for origins elsewhere.
-    with pytest.raises(ValueError, match="non-empty webhook verification key"):
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         HMACWebhookVerifier({"current": KEYS["current"], "previous": b""})
 
 

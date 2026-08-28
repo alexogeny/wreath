@@ -2013,7 +2013,7 @@ def _wait_for_worker_generation(workers: dict[int, tuple[int, int]], timeout: fl
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
-            readable, _, _ = select.select(tuple(pending), (), (), min(remaining, 0.1))
+            readable, _, _ = select.select(pending, (), (), min(remaining, 0.1))
             for ready_fd in readable:
                 message = os.read(ready_fd, 1)
                 if message != b"1":
@@ -2041,13 +2041,15 @@ def _terminate_worker_pids(pids: set[int], timeout: float) -> None:
             pass
     deadline = time.monotonic() + timeout
     while live and time.monotonic() < deadline:
-        for pid in tuple(live):
+        exited_pids: list[int] = []
+        for pid in live:
             try:
                 exited, _status = os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 exited = pid
             if exited:
-                live.discard(pid)
+                exited_pids.append(pid)
+        live.difference_update(exited_pids)
         if live:
             time.sleep(0.05)
     for pid in live:

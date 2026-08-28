@@ -173,7 +173,7 @@ TEMPLATE_ROW_COUNT = 20
 # headers carry Wreath's HMAC profile, signed once here; the benchmark app builds a
 # verifier with an effectively unbounded age window so the fixed timestamp stays
 # valid for the whole run.
-WEBHOOK_SECRET = b"wreath-benchmark-secret-key"
+WEBHOOK_SECRET = b"wreath-benchmark-secret-key-material"
 WEBHOOK_KEY_ID = "bench"
 WEBHOOK_BODY = b'{"event":"ping","id":42}'
 

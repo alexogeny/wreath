@@ -466,6 +466,7 @@ def _pattern_segments(pattern: str) -> tuple[str, ...]:
             index += 2
             continue
         if pattern[index] == "*":
+            # complexity: allow SL-LINEAR-METHOD -- segments partition pattern
             segments.append("".join(current))
             current = []
             index += 1
@@ -1182,7 +1183,30 @@ class CedarPolicies:
             _as_uid_tuple(principal, "principal"),
             _as_uid_tuple(action, "action"),
             _as_uid_tuple(resource, "resource"),
-            _to_cedar_value(dict(context or {}), where="context"),
+            _to_cedar_value(context or {}, where="context"),
+            store,
+        )
+
+    def _route_denial_prepared(
+        self,
+        *,
+        principal: tuple[str, str],
+        action: tuple[str, str],
+        resource: tuple[str, str],
+        context: Mapping[str, object],
+        entities: object = None,
+    ) -> object:
+        request_entities = None if entities is None else _as_entities(entities)
+        if request_entities:
+            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+        else:
+            store = self._store
+        return _core.cedar_route_denial(
+            self._plan,
+            principal,
+            action,
+            resource,
+            _to_cedar_value(context, where="context"),
             store,
         )
 

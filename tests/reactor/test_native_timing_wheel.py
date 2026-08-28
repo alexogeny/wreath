@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-_reactor = pytest.importorskip("wreath._native._reactor")
-TimingWheel = _reactor.TimingWheel
+try:
+    from wreath._native._reactor import TimingWheel
+except ImportError:  # pragma: no cover -- the native reactor build is optional
+    TimingWheel = None
+
+pytestmark = pytest.mark.skipif(TimingWheel is None, reason="native reactor not built")
 
 
 def test_fires_due_timers_on_advance():

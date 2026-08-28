@@ -469,6 +469,7 @@ def _breadcrumbs(site: Site) -> dict[str, str]:
             if isinstance(item, Section):
                 walk(item.items, trail + (item.title,))
             else:
+                # complexity: allow SL-LINEAR-METHOD -- output contains full trail
                 trails[_output_path(item.source)] = " › ".join(trail)
 
     walk(site.nav.items, ())

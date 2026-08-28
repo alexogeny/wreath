@@ -603,14 +603,16 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
         return [], [f"{MANIFEST} cannot be read as JSON: {exc}"]
 
     subsystems = {s.get("name"): s for s in manifest.get("subsystems", [])}
+    known_subsystems = ", ".join(sorted(n for n in subsystems if n))
     changes: list[str] = []
     refusals: list[str] = []
 
     for name, source in adopt:
         subsystem = subsystems.get(name)
         if subsystem is None:
-            known = ", ".join(sorted(n for n in subsystems if n))
-            refusals.append(f"no subsystem named {name!r}; known: {known}")
+            refusals.append(
+                f"no subsystem named {name!r}; known: {known_subsystems}"
+            )
             continue
         if not (root / source.rstrip("/")).exists():
             refusals.append(f"{name}: no such path {source!r} — adopting it would "

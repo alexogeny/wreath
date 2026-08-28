@@ -83,7 +83,14 @@ class StaticFiles:
         ValueError: `directory` does not exist or is not a directory.
     """
 
-    __slots__ = ("_executor", "_root", "_root_fd", "cache_control", "html_index")
+    __slots__ = (
+        "_executor",
+        "_lookup_slots",
+        "_root",
+        "_root_fd",
+        "cache_control",
+        "html_index",
+    )
 
     def __init__(
         self,
@@ -110,12 +117,14 @@ class StaticFiles:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="wreath-static"
         )
+        self._lookup_slots = asyncio.Semaphore(max_workers)
 
     async def __call__(self, request: Request) -> Response | FileResponse:
         rest = request.path_params.get("path", "")
-        resolved = await asyncio.get_running_loop().run_in_executor(
-            self._executor, self._resolve, rest
-        )
+        async with self._lookup_slots:
+            resolved = await asyncio.get_running_loop().run_in_executor(
+                self._executor, self._resolve, rest
+            )
         if resolved is None:
             raise NotFound("Not Found")
         fd, stat, name = resolved
@@ -188,8 +197,9 @@ class StaticFiles:
         request or -- once the kernel hands the number to the next `open` in the
         process -- resolves the path beneath something else entirely. Not
         waiting is what made the descriptor unreleasable, so the two halves are
-        one change rather than two. The wait is bounded: a queued lookup is a
-        single `openat`, and the queue is bounded by `max_workers`.
+        one change rather than two. Lookup admission is bounded by `max_workers`
+        before submission, so executor shutdown never inherits an unbounded
+        backlog.
 
         `Wreath.static()` mounts are closed for you on lifespan shutdown, and on
         a failed startup, since the instance it builds is reachable only as a

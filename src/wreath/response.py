@@ -14,10 +14,8 @@ in-memory body, which is also why `wreath.response_cache` and
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import mimetypes
 import os
-import threading
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -223,8 +221,8 @@ class Response:
         (RFC 6265bis 5.4.7); the `__Secure-`/`__Host-` name prefixes require
         `Secure` (and, for `__Host-`, `Path=/` with no `Domain`) per
         RFC 6265bis 4.1.3. A control character or an attribute separator in the
-        name, value, path, or domain is a header-injection vector and is refused
-        here rather than trusted as far as the serializer.
+        name, value, path, domain, or expires is a header-injection vector and
+        is refused here rather than trusted as far as the serializer.
 
         Args:
             max_age: Lifetime in seconds; the attribute is omitted when None.
@@ -237,6 +235,7 @@ class Response:
 
         Raises:
             ValueError: Any of the attribute rules or injection checks above failed.
+            TypeError: `max_age` is not an integer.
         """
         header = _core.cookie_header(
             name,
@@ -931,13 +930,6 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | _Unsatisfiab
 
 
 _FILE_CHUNK = 256 * 1024
-#: Chunks a file reader may buffer ahead of the ASGI send. Bounds read-ahead
-#: memory to _FILE_READAHEAD * _FILE_CHUNK regardless of file size.
-_FILE_READAHEAD = 4
-#: End-of-file sentinel handed from the reader worker to the sender.
-_EOF = object()
-
-
 async def _send_from_descriptor(
     fd: int,
     size: int,
@@ -946,13 +938,7 @@ async def _send_from_descriptor(
     send: Send,
     offset: int = 0,
 ) -> None:
-    """Stream `size` bytes from `fd`, starting at `offset`.
-
-    A single reader worker owns the descriptor (reads and closes it) and hands
-    chunks to the event loop through a bounded queue; the queue's bound applies
-    backpressure to the reader, so read-ahead and memory stay bounded no matter
-    how large the file is. This replaces one executor job per 256 KiB chunk.
-    """
+    """Stream `size` bytes from `fd`, starting at `offset`."""
     start = {
         "type": "http.response.start",
         "status": status,
@@ -966,67 +952,26 @@ async def _send_from_descriptor(
     if offset:
         os.lseek(fd, offset, os.SEEK_SET)
 
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_FILE_READAHEAD)
-    stop = threading.Event()
-
-    def _reader() -> None:
-        try:
-            remaining = size
-            while remaining > 0 and not stop.is_set():
-                chunk = os.read(fd, min(_FILE_CHUNK, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                # Block the reader until the sender makes room; this is the
-                # backpressure that keeps read-ahead bounded, and it releases
-                # promptly once the sender drains the queue on teardown.
-                #
-                # It does mean this thread is held for the life of a slow
-                # response -- a slow client parks it. That is the deliberate
-                # side of the trade: the alternative is one executor submission
-                # per 256 KiB chunk, which
-                # `tests/test_framework_features.py::test_file_response_uses_
-                # bounded_executor_submissions` exists to forbid. Bounded
-                # read-ahead with one worker means the worker waits.
-                asyncio.run_coroutine_threadsafe(queue.put(chunk), loop).result()
-                if stop.is_set():
-                    return
-            asyncio.run_coroutine_threadsafe(queue.put(_EOF), loop).result()
-        except BaseException as exc:  # noqa: BLE001 - relayed to the sender
-            # A worker thread is not a task: there is no cancellation to honour
-            # and `KeyboardInterrupt` reaches only the main thread, so breadth
-            # here is a relay rather than a swallow -- the sender re-raises
-            # whatever arrives on the queue.
-            #
-            # `RuntimeError` is the single way that relay can fail:
-            # `run_coroutine_threadsafe` raises it once the loop is closed, and a
-            # closed loop means the sender is already gone, so there is nobody
-            # left to tell. Anything else belongs on the executor future rather
-            # than in a suppression.
-            with contextlib.suppress(RuntimeError):
-                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
-        finally:
-            os.close(fd)
-
-    worker = loop.run_in_executor(None, _reader)
     try:
-        while True:
-            item = await queue.get()
-            if item is _EOF:
+        remaining = size
+        while remaining > 0:
+            reader = asyncio.create_task(
+                asyncio.to_thread(os.read, fd, min(_FILE_CHUNK, remaining))
+            )
+            try:
+                chunk = await asyncio.shield(reader)
+            except asyncio.CancelledError:
+                await reader
+                raise
+            if not chunk:
                 break
-            if isinstance(item, BaseException):
-                raise item
-            await send({"type": "http.response.body", "body": item, "more_body": True})
+            remaining -= len(chunk)
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
         # File shrank mid-send leaves content-length short; a terminal empty body
         # ends the stream and the server closes rather than mis-framing.
         await send({"type": "http.response.body", "body": b"", "more_body": False})
     finally:
-        stop.set()
-        # Unblock a reader parked on a full queue so it can observe stop.
-        while not queue.empty():
-            queue.get_nowait()
-        await worker
+        os.close(fd)
 
 
 async def _send_native_descriptor(
@@ -1248,12 +1193,8 @@ class FileResponse:
         mid-download leaks neither. A disconnect surfaces as the server's `send`
         raising, and that exception propagates.
 
-        A `HEAD` request is not special-cased here: the file is still opened and
-        read, and the application discards each body message, leaving the correct
-        `content-length` on a response with no body. Under `wreath`'s own server
-        a whole-file send hands the descriptor to the server's own file path
-        instead of reading it in Python; a ranged send always takes the portable
-        reader, which is the only one that can apply an offset.
+        `Wreath` dispatches a `HEAD` request through `_head()` instead, which
+        opens and stats the same descriptor but never reads it.
         """
         if self._fd is not None:
             # Already opened beneath a trusted root (see wreath.staticfiles);
@@ -1266,6 +1207,28 @@ class FileResponse:
         # same single-submission reader. A missing file raises here.
         fd, size = await asyncio.to_thread(_open_fd, self.path)
         await self._stream(fd, size, send)
+
+    async def _head(self, send: Send) -> None:
+        if self._fd is not None:
+            size = self._stat.st_size if self._stat is not None else 0
+            fd, self._fd = self._fd, None
+        else:
+            fd, size = await asyncio.to_thread(_open_fd, self.path)
+        try:
+            _offset, length = self._window(size)
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status,
+                    "headers": [
+                        *self.headers,
+                        (_CONTENT_LENGTH, _content_length(length)),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+        finally:
+            os.close(fd)
 
     async def _stream(self, fd: int, size: int, send: Send) -> None:
         offset, length = self._window(size)

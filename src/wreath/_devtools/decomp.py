@@ -1,24 +1,4 @@
-"""Decompose a Wreath request into what each part of it costs.
-
-`wreath-request-trace` counts boundary crossings; `wreath-policy-decomp` prices the
-global middleware tape. This prices everything else, and calibrates the
-constants that turn crossing counts into microseconds:
-
-    uv run wreath-decomp                    # every suite
-    uv run wreath-decomp --suite request    # route / auth / policy / ORM stages
-    uv run wreath-decomp --suite orm        # inside one ORM read
-    uv run wreath-decomp --suite calibrate  # ns per Python frame, per await
-    uv run wreath-decomp --json benchmark-results-decomp/run.json
-
-The measurement discipline -- interleaved arms, a measured A/A floor, refusing
-to report below it, and checking each arm still answers 200 -- lives in
-`measure.py`, along with why each of those exists.
-
-**Do not profile these paths with cProfile.** It adds ~1-2us per call, which is
-larger than most of what is measured here, and it has already sent this work
-down a wrong path once: it attributed CSRF's cost to token glue, the glue was
-moved into C, and the result changed nothing.
-"""
+"""Decompose request stages, ORM reads, Python frames, and awaits."""
 
 from __future__ import annotations
 
@@ -53,11 +33,7 @@ REQUEST_HEADERS = {
 }
 
 
-# -- request stages ------------------------------------------------------------
-
-
 def _build_stage_app(*, auth: bool, policy: bool, orm: bool) -> Any:
-    """One app per ablation, with no global middleware anywhere."""
     from wreath import Wreath
     from wreath._auth.backends import BearerTokenBackend
     from wreath._auth.decorators import authorize, roles
@@ -110,8 +86,13 @@ def _build_stage_app(*, auth: bool, policy: bool, orm: bool) -> Any:
     async def sibling(request: Request) -> Any:
         return {"ok": True}
 
-    # Siblings, so classification is a real decision rather than one leaf.
-    for path in ("/health", "/users", "/posts/{post_id}", "/orgs/{o}/members/{u}"):
+    comparison_paths = (
+        "/health",
+        "/users",
+        "/posts/{post_id}",
+        "/orgs/{o}/members/{u}",
+    )
+    for path in comparison_paths:
         app.route(path, methods=("GET",))(sibling)
     return app
 
@@ -131,32 +112,15 @@ def suite_request(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     return report(arms, "route only", "route only (A/A)", cumulative=True)
 
 
-# -- inside one ORM read -------------------------------------------------------
-
-
 #: Measured on 10,000 real rows through `benchmarks/postgres/bench_orm_hydrate.py`
 #: against PostgreSQL 17: 1,943,738 rows/s direct-native against 530,053 rows/s
 #: through Records. Quoted rather than re-measured because this suite has no
-#: database; re-derive it there if the hydrators change. It was 4.7x before the
-#: Record path stopped re-deriving per-row constants; closing it further means
-#: making that path faster, not making this note smaller.
+#: database; re-derive it there if the hydrators change.
 _RECORD_PATH_PENALTY = 3.7
 
 
 def _hydration_path(database: Any) -> str:
-    """Which of the two hydrators these arms will actually exercise.
-
-    `Session._hydrate_plan` hands back a native plan only when the connection
-    exposes `_decode_dest`, and only a real `wreath._native._postgres`
-    connection installs that hook. A scripted double therefore takes the
-    Record path -- one Python pass per column per row -- while production takes
-    neither of those steps.
-
-    This is asked and printed rather than assumed, because the difference is
-    large and silent: an arm labelled "full fetch_one" that quietly measures
-    the fallback reports a number no deployment ever sees, and every ratio
-    taken against it inherits the error.
-    """
+    """Return whether rows are decoded directly or hydrated from Records."""
     connection = getattr(database, "connection", None)
     if getattr(connection, "_decode_dest", None) is not None:
         return "native"
@@ -164,16 +128,7 @@ def _hydration_path(database: Any) -> str:
 
 
 def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
-    """Inside one ORM read, timed outside the request pipeline.
-
-    `compile_select` consults the registry's plan cache, so the SQL is *not*
-    rebuilt per call -- but `shape_of` derives that cache key from the query
-    object every time, and the query object is itself rebuilt per request.
-    These arms separate the two.
-
-    **These arms measure the Record hydration path, not the native one.** See
-    `_hydration_path`; the suite says so at the top of its own output.
-    """
+    """Measure query construction, compilation, and native Record hydration."""
     from wreath.orm.compiler import compile_select, shape_of
     from wreath.orm.registry import Registry
     from wreath.orm.session import Session
@@ -272,13 +227,13 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
         print(
             f"\n  HYDRATION PATH: {path.upper()} -- these arms do NOT measure what a\n"
             f"  deployment runs. A scripted connection installs no `_decode_dest`, so\n"
-            f"  `fetch_one` falls back to `Session._hydrate`, a Python pass per column\n"
-            f"  per row; a real connection decodes straight into the model's cells.\n"
-            f"  Measured on 10,000 rows, the fallback is ~{_RECORD_PATH_PENALTY:.1f}x "
+            f"  `fetch_one` receives Records and batches them through the native Record\n"
+            f"  hydrator; a real connection decodes straight into the model's cells.\n"
+            f"  Measured on 10,000 rows, the Record path is ~{_RECORD_PATH_PENALTY:.1f}x "
             f"slower, so\n"
             f"  `full fetch_one` above is an upper bound and every percentage taken\n"
             f"  against it -- including the one printed just now -- has an inflated\n"
-            f"  denominator. The fallback is still what joined loads and the reference\n"
+            f"  denominator. The Record path is still what joined loads and the reference\n"
             f"  driver run, which is what these arms legitimately describe.\n\n"
             f"  For the production path:\n"
             f"    uv run python -m benchmarks.postgres.bench_orm_hydrate \\\n"
@@ -287,17 +242,8 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
     return result
 
 
-# -- calibrations --------------------------------------------------------------
-
-
 def suite_calibrate(rounds: int, iterations: int) -> dict[str, Any]:
-    """Constants that convert `wreath-request-trace` counts into microseconds.
-
-    A single frame-removing fix is usually too small for one A/B to resolve,
-    which is a fact about the instrument, not the fix. Measuring in bulk puts
-    the signal far above the floor; the slope converts exact crossing counts
-    into time.
-    """
+    """Measure constants for converting exact crossing counts to time."""
     from inspect import isawaitable
 
     print("\n== calibration ==\n")
@@ -368,8 +314,6 @@ def _frame_chain(depth: int) -> Any:
 
 
 class _FrameMiddleware:
-    """A hook whose only cost is `depth` Python frames."""
-
     global_scope = True
 
     def __init__(self, depth: int) -> None:

@@ -300,7 +300,7 @@ def register_oauth2_login(
         id_token = document.get("id_token")
         if not isinstance(id_token, str):
             return _bearer_401("missing_id_token")
-        identity = await provider.bearer_verifier()(id_token)
+        identity = await provider.bearer_verifier(audience=client_id)(id_token)
         if identity is None:
             return _bearer_401("invalid_id_token")
         # The verifier checked the signature and the registered claims; the

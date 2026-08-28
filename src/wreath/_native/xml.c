@@ -1449,74 +1449,58 @@ wreath_xml_parse(PyObject *Py_UNUSED(self), PyObject *args)
 /* ------------------------------------------------------------------------ */
 
 static int
-xml_write(PyObject *out, const char *text)
+xml_write(WreathBytesWriter *out, const char *text)
 {
-    PyObject *piece = PyUnicode_FromString(text);
-    int status;
-    if (piece == NULL) {
-        return -1;
-    }
-    status = PyList_Append(out, piece);
-    Py_DECREF(piece);
-    return status;
+    return wreath_writer_write(out, text, (Py_ssize_t)strlen(text));
 }
 
 
 static int
-xml_write_object(PyObject *out, PyObject *text)
+xml_write_object(WreathBytesWriter *out, PyObject *text)
 {
-    return PyList_Append(out, text);
-}
-
-
-/* Escape per the c14n rules. `attribute` selects the attribute-value set. */
-static PyObject *
-xml_escape(PyObject *value, int attribute)
-{
-    static const char *const text_from[] = {"&", "<", ">", "\r"};
-    static const char *const text_to[] = {"&amp;", "&lt;", "&gt;", "&#xD;"};
-    static const char *const attribute_from[] = {"&", "<", "\"", "\t", "\n", "\r"};
-    static const char *const attribute_to[] = {"&amp;", "&lt;", "&quot;",
-                                               "&#x9;", "&#xA;", "&#xD;"};
-    const char *const *from = attribute ? attribute_from : text_from;
-    const char *const *to = attribute ? attribute_to : text_to;
-    Py_ssize_t count = attribute ? 6 : 4;
-    PyObject *current = Py_NewRef(value);
-
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *needle = PyUnicode_FromString(from[i]);
-        PyObject *replacement = PyUnicode_FromString(to[i]);
-        PyObject *next;
-        if (needle == NULL || replacement == NULL) {
-            Py_XDECREF(needle);
-            Py_XDECREF(replacement);
-            Py_DECREF(current);
-            return NULL;
-        }
-        next = PyUnicode_Replace(current, needle, replacement, -1);
-        Py_DECREF(needle);
-        Py_DECREF(replacement);
-        Py_DECREF(current);
-        if (next == NULL) {
-            return NULL;
-        }
-        current = next;
-    }
-    return current;
+    Py_ssize_t length;
+    const char *utf8 = PyUnicode_AsUTF8AndSize(text, &length);
+    return utf8 == NULL ? -1 : wreath_writer_write(out, utf8, length);
 }
 
 
 static int
-xml_write_escaped(PyObject *out, PyObject *value, int attribute)
+xml_write_escaped(WreathBytesWriter *out, PyObject *value, int attribute)
 {
-    PyObject *escaped = xml_escape(value, attribute);
-    int status;
-    if (escaped == NULL) {
-        return -1;
+    Py_ssize_t length;
+    const char *utf8 = PyUnicode_AsUTF8AndSize(value, &length);
+    Py_ssize_t start = 0;
+    if (utf8 == NULL) return -1;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        const char *replacement = NULL;
+        Py_ssize_t replacement_length = 0;
+        switch ((unsigned char)utf8[index]) {
+        case '&': replacement = "&amp;"; replacement_length = 5; break;
+        case '<': replacement = "&lt;"; replacement_length = 4; break;
+        case '>':
+            if (!attribute) { replacement = "&gt;"; replacement_length = 4; }
+            break;
+        case '"':
+            if (attribute) { replacement = "&quot;"; replacement_length = 6; }
+            break;
+        case '\t':
+            if (attribute) { replacement = "&#x9;"; replacement_length = 5; }
+            break;
+        case '\n':
+            if (attribute) { replacement = "&#xA;"; replacement_length = 5; }
+            break;
+        case '\r':
+            replacement = "&#xD;";
+            replacement_length = 5;
+            break;
+        default: break;
+        }
+        if (replacement == NULL) continue;
+        if (wreath_writer_write(out, utf8 + start, index - start) < 0 ||
+            wreath_writer_write(out, replacement, replacement_length) < 0) return -1;
+        start = index + 1;
     }
-    status = PyList_Append(out, escaped);
-    Py_DECREF(escaped);
-    return status;
+    return wreath_writer_write(out, utf8 + start, length - start);
 }
 
 
@@ -1530,7 +1514,7 @@ xml_attribute_key(PyObject *entry)
 
 static int
 xml_render(PyObject *node, PyObject *scope, PyObject *rendered,
-           PyObject *inclusive, PyObject *out);
+           PyObject *inclusive, WreathBytesWriter *out);
 
 
 /* Compute the scope in force at `node` given its parent's `inherited`. */
@@ -1567,7 +1551,7 @@ xml_child_scope(PyObject *node, PyObject *inherited)
 
 static int
 xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
-           PyObject *inclusive, PyObject *out)
+           PyObject *inclusive, WreathBytesWriter *out)
 {
     PyObject *scope = xml_child_scope(node, inherited);
     PyObject *qualified = PyTuple_GET_ITEM(node, 6);
@@ -1827,9 +1811,8 @@ wreath_xml_c14n(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *scope = NULL;
     PyObject *inclusive = NULL;
     PyObject *root = NULL;
-    PyObject *out = NULL;
+    WreathBytesWriter out = {0};
     PyObject *rendered = NULL;
-    PyObject *joined = NULL;
     PyObject *result = NULL;
 
     if (PyTuple_GET_SIZE(args) != 10) {
@@ -1890,27 +1873,21 @@ wreath_xml_c14n(PyObject *Py_UNUSED(self), PyObject *args)
     if (root == NULL) {
         goto done;
     }
-    out = PyList_New(0);
     rendered = PyDict_New();
-    if (out == NULL || rendered == NULL) {
+    if (rendered == NULL || wreath_writer_init(&out, end - start) < 0) {
         goto done;
     }
-    if (xml_render(root, scope, rendered, inclusive, out) < 0) {
+    if (xml_render(root, scope, rendered, inclusive, &out) < 0) {
         goto done;
     }
-    joined = xml_join(out);
-    if (joined == NULL) {
-        goto done;
-    }
-    result = PyUnicode_AsUTF8String(joined);
+    result = wreath_writer_finish(&out);
 
 done:
     PyBuffer_Release(&buffer);
     Py_XDECREF(scope);
     Py_XDECREF(inclusive);
     Py_XDECREF(root);
-    Py_XDECREF(out);
+    Py_XDECREF(out.bytes);
     Py_XDECREF(rendered);
-    Py_XDECREF(joined);
     return result;
 }

@@ -258,9 +258,18 @@ class HMACWebhookSigner:
     def __init__(self, keys: Mapping[str, bytes], *, key_id: str) -> None:
         if key_id not in keys:
             raise ValueError("webhook signing key id is not configured")
-        if not keys[key_id]:
-            raise ValueError("webhook signing key cannot be empty")
-        self._keys = dict(keys)
+        copied: dict[str, bytes] = {}
+        for candidate_id, secret in keys.items():
+            if not isinstance(candidate_id, str) or not candidate_id:
+                raise ValueError("webhook signing key ids must be non-empty strings")
+            if not isinstance(secret, bytes):
+                raise TypeError(f"webhook signing key {candidate_id!r} must be bytes")
+            if len(secret) < 32:
+                raise ValueError(
+                    f"webhook signing key {candidate_id!r} must contain at least 32 bytes"
+                )
+            copied[candidate_id] = secret
+        self._keys = copied
         self._key_id = key_id
 
     @property
@@ -390,11 +399,22 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
     __slots__ = ("_keys", "max_age")
 
     def __init__(self, keys: Mapping[str, bytes], *, max_age: float = 300.0) -> None:
-        if not keys or any(not value for value in keys.values()):
+        if not keys:
             raise ValueError("at least one non-empty webhook verification key is required")
+        copied: dict[str, bytes] = {}
+        for key_id, secret in keys.items():
+            if not isinstance(key_id, str) or not key_id:
+                raise ValueError("webhook verification key ids must be non-empty strings")
+            if not isinstance(secret, bytes):
+                raise TypeError(f"webhook verification key {key_id!r} must be bytes")
+            if len(secret) < 32:
+                raise ValueError(
+                    f"webhook verification key {key_id!r} must contain at least 32 bytes"
+                )
+            copied[key_id] = secret
         if max_age <= 0:
             raise ValueError("webhook max_age must be positive")
-        self._keys = dict(keys)
+        self._keys = copied
         self.max_age = max_age
 
     def _verify_normalized(

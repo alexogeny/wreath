@@ -23,7 +23,7 @@ from typing import Any
 
 from .negotiation import PROTOBUF as _PROTOBUF
 from .protobuf import is_message as _is_message
-from .typegen.inspect import _Builder, _return_annotation
+from .typegen.inspect import _Builder
 from .typegen.model import Model, TypeRef
 
 #: The protobuf media type wreath emits and documents. Spelled from
@@ -259,6 +259,7 @@ def generate_openapi(
     image = app._application_image
     routes = list(image.routes())
     binding_specs = image.binding_specs()
+    return_annotations = image.return_annotations()
     resolved_ids, _diagnostics = image.operation_ids()
     paths: dict[str, dict[str, Any]] = {}
 
@@ -268,7 +269,7 @@ def generate_openapi(
         openapi_path = _PATH_CONVERTER.sub(r"{\1}", definition.path)
         operations = paths.setdefault(openapi_path, {})
         spec = binding_specs[index]
-        returns = _return_annotation(definition.endpoint)
+        returns = return_annotations[index]
         for method in definition.methods:
             operation: dict[str, Any] = {
                 "operationId": resolved_ids[(index, method)],

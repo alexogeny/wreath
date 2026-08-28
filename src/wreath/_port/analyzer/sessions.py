@@ -298,8 +298,19 @@ def session_sites(
     for key in classes:
         classes_by_name.setdefault(key[1], []).append(key)
     definitions_by_name: dict[str, list[FunctionKey]] = {}
+    definitions_by_owner: dict[
+        tuple[str, str | None], dict[str, FunctionKey]
+    ] = {}
+    definitions_by_path: dict[
+        str, list[tuple[FunctionKey, ast.AsyncFunctionDef]]
+    ] = {}
     for key in definitions:
         definitions_by_name.setdefault(key[2], []).append(key)
+        definitions_by_owner.setdefault((key[0], key[1]), {})[key[2]] = key
+        definitions_by_path.setdefault(key[0], []).append((key, definitions[key]))
+    classes_by_path: dict[str, dict[str, ClassKey]] = {}
+    for key in classes:
+        classes_by_path.setdefault(key[0], {})[key[1]] = key
 
     direct: set[FunctionKey] = set()
     edges: dict[FunctionKey, list[tuple[ast.Call, frozenset[FunctionKey]]]] = {}
@@ -324,38 +335,24 @@ def session_sites(
 
     for class_key, base_names in class_bases.items():
         path, class_name = class_key
-        own = {
-            key[2]: key
-            for key in definitions
-            if key[0] == path and key[1] == class_name
-        }
+        own = definitions_by_owner.get((path, class_name), {})
         for base_name in base_names:
             candidates = classes_by_name.get(base_name, ())
             if len(candidates) != 1:
                 continue
             base_path, resolved_base = candidates[0]
-            inherited = {
-                key[2]: key
-                for key in definitions
-                if key[0] == base_path and key[1] == resolved_base
-            }
+            inherited = definitions_by_owner.get((base_path, resolved_base), {})
             for name in own.keys() & inherited.keys():
                 overrides.setdefault(own[name], set()).add(inherited[name])
                 overrides.setdefault(inherited[name], set()).add(own[name])
 
     for path, (tree, _imports, parents) in trees.items():
-        module_functions = {
-            key[2]: key
-            for key in definitions
-            if key[0] == path and key[1] is None
-        }
-        local_classes = {key[1]: key for key in classes if key[0] == path}
+        module_functions = definitions_by_owner.get((path, None), {})
+        local_classes = classes_by_path.get(path, {})
         class_attributes: dict[str, dict[str, frozenset[str]]] = {}
         receiver_types: dict[FunctionKey, dict[str, frozenset[str]]] = {}
 
-        for key, function in definitions.items():
-            if key[0] != path:
-                continue
+        for key, function in definitions_by_path.get(path, ()):
             types = {
                 argument.arg: _annotation_names(argument.annotation)
                 for argument in (

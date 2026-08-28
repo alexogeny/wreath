@@ -70,14 +70,14 @@ while a sibling is running tests produces failures nobody can attribute.
   `wreath-complexity-probe --discover` is the other direction: a static sweep of
   `src/wreath` for the shapes that are provably superlinear -- a linear
   operation inside a loop over something the loop does not shrink -- so a
-  candidate can be turned into a probe, restructured, or acknowledged before
-  anyone measures it. It is a ratchet, not a gate: most candidates are bounded
-  by something the scanner cannot read, so the whole current set is recorded in
-  `docs/agents/complexity-discovery.json` and `--discover-check` fails only on a
-  **new** one. The baseline also carries exact source fingerprints: byte-identical
-  files reuse their acknowledged findings, while new or edited files are scanned
-  and any scanner change invalidates the whole cache. Acknowledge with
-  `--update-discovery` and say why in the change.
+  candidate can be turned into a probe or restructured before anyone measures
+  it. The scanner reports only container kinds and reuse it can prove. Bounded
+  or output-sized work carries an exact-code `complexity: allow` waiver with a
+  checkable reason; `docs/agents/complexity-discovery.json` retains only
+  exceptional confirmed hotspots. The baseline carries exact source
+  fingerprints: byte-identical files reuse their findings, while new or edited
+  files are scanned and any scanner change invalidates the whole cache. Record
+  a confirmed exception with `--update-discovery` and say why in the change.
   The two rules that make it readable were both learned by getting them wrong:
   membership against a `set`/`dict` is O(1) and is not a finding at all, and
   iterating `d.values()` *is* the loop rather than an extra linear op inside

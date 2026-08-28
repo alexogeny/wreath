@@ -1099,6 +1099,8 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
             getattr(app, "_global_middleware", ()), key=lambda item: (item[0], item[1])
         )
     )
+    qualified_app_middleware = [_qualified(item) for item in app_middleware]
+    qualified_global_middleware = [_qualified(item) for item in global_middleware]
     entries: list[dict[str, Any]] = []
     requirements = image.requirements() if image is not None else ()
     for index, (route, requirement) in enumerate(
@@ -1164,8 +1166,8 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
                         for dependency in route.dependencies
                     ],
                     "middleware": {
-                        "global": [_qualified(item) for item in global_middleware],
-                        "application": [_qualified(item) for item in app_middleware],
+                        "global": qualified_global_middleware,
+                        "application": qualified_app_middleware,
                         "route": [_qualified(item) for item in route.middleware],
                     },
                     "security": security,
@@ -1187,7 +1189,7 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
                 "response": None,
                 "dependencies": [],
                 "middleware": {
-                    "global": [_qualified(item) for item in global_middleware],
+                    "global": qualified_global_middleware,
                     "application": [],
                     "route": [],
                 },

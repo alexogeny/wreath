@@ -1444,7 +1444,7 @@ class MCP:
         """Start or stop telling one session about a resource's changes."""
         resource = self._resource_named(message.params)
         if not subscribe:
-            session.subscriptions.discard(resource.uri)
+            self._sessions.unsubscribe(session, resource.uri)
             return {}
         if (
             resource.uri not in session.subscriptions
@@ -1456,7 +1456,7 @@ class MCP:
                 "subscriptions, its `MCPLimits(max_subscriptions=...)` ceiling. "
                 "Unsubscribe from something, or raise it.",
             )
-        session.subscriptions.add(resource.uri)
+        self._sessions.subscribe(session, resource.uri)
         return {}
 
     # -- prompts ---------------------------------------------------------

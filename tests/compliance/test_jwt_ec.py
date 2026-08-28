@@ -84,7 +84,9 @@ def test_es256_roundtrip_and_tamper_against_oracle(n: int) -> None:
     jwk = {"kty": "EC", "crv": "P-256",
            "x": _b64u(numbers.x.to_bytes(32, "big")),
            "y": _b64u(numbers.y.to_bytes(32, "big"))}
-    verifier = JwtVerifier(algorithms=["ES256"], key=key_from_jwk(jwk), required=())
+    verifier = JwtVerifier(
+        algorithms=["ES256"], key=key_from_jwk(jwk), audience=None, required=()
+    )
 
     signing_input = _signing_input("ES256", {"sub": f"user-{n}"})
     der = sk.sign(bytes(signing_input), ec.ECDSA(hashes.SHA256()))
@@ -103,7 +105,9 @@ def test_ed25519_roundtrip_and_tamper_against_oracle(n: int) -> None:
     public = sk.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     jwk = {"kty": "OKP", "crv": "Ed25519", "x": _b64u(public)}
-    verifier = JwtVerifier(algorithms=["EdDSA"], key=key_from_jwk(jwk), required=())
+    verifier = JwtVerifier(
+        algorithms=["EdDSA"], key=key_from_jwk(jwk), audience=None, required=()
+    )
 
     signing_input = _signing_input("EdDSA", {"sub": f"user-{n}"})
     token = _make_jwt("EdDSA", signing_input, sk.sign(bytes(signing_input)))
@@ -122,4 +126,4 @@ def test_wrong_key_family_is_rejected() -> None:
                            "y": _b64u(numbers.y.to_bytes(32, "big"))})
     from wreath._auth.jwt import UnsupportedAlgorithm
     with pytest.raises(UnsupportedAlgorithm):
-        JwtVerifier(algorithms=["EdDSA"], key=ec_key, required=())
+        JwtVerifier(algorithms=["EdDSA"], key=ec_key, audience=None, required=())

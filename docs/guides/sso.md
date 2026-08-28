@@ -49,9 +49,16 @@ So the signer set is scoped to the organisation, and the organisation comes from
 **the login that began**:
 
 ```python
-begun = sp.begin_login(organization="acme")   # mints and stores a request id
+browser_binding = request.state.session.setdefault("sso_binding", secrets.token_urlsafe(32))
+begun = sp.begin_login(organization="acme", session_id=browser_binding)
 # ... browser round trip ...
-verified = await sp.consume(raw, in_response_to=begun.request_id, ledger=ledger)
+verified = await sp.consume(
+    raw,
+    in_response_to=begun.request_id,
+    relay_state=relay_state,
+    session_id=browser_binding,
+    ledger=ledger,
+)
 ```
 
 Reading the organisation out of the *assertion* would let the assertion choose
@@ -123,6 +130,7 @@ token = server.redeem(
     code,
     verifier=verifier,
     client_id=client_id,
+    client_secret=SETTINGS.oauth_client_secret,
     redirect_uri=redirect_uri,
 )
 ```

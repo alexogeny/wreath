@@ -72,9 +72,9 @@ class RequestIdPolicy:
     back. A minted id is 16 bytes from `os.urandom` hex-encoded -- collision-free
     in practice for correlation, and never usable as crypto material.
 
-    Note that a trusted inbound id is caller-controlled. Where log entries from
-    different callers must not be conflatable, set `trust_inbound=False` and mint
-    every id here.
+    A trusted inbound id is caller-controlled, so the default mints every id.
+    Enable `trust_inbound` only when a trusted proxy replaces the header from
+    the public request before it reaches Wreath.
 
     Args:
         header: Header the id is read from and echoed to. Compared lowercased.
@@ -92,7 +92,7 @@ class RequestIdPolicy:
         self,
         *,
         header: str = "x-request-id",
-        trust_inbound: bool = True,
+        trust_inbound: bool = False,
         echo: bool = True,
         max_length: int = 128,
     ) -> None:

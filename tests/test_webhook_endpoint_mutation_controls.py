@@ -29,7 +29,7 @@ from wreath.webhooks import (
     _WebhookDispatcherService,
 )
 
-KEYS = {"key": b"webhook mutation control secret"}
+KEYS = {"key": b"w" * 32}
 NOW = datetime(2026, 8, 25, 4, 5, 6, tzinfo=UTC)
 
 

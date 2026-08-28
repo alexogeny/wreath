@@ -233,6 +233,14 @@ class TestSsoSession:
         source = inspect.getsource(oauth2.register_oauth2_login)
         assert "rotate_session" in source
 
+    def test_the_callback_binds_the_id_token_to_the_client_id(self):
+        import inspect
+
+        from wreath._auth import oauth2
+
+        source = inspect.getsource(oauth2.register_oauth2_login)
+        assert "bearer_verifier(audience=client_id)" in source
+
     async def test_both_login_routes_refuse_an_app_with_no_session_middleware(self):
         """The login flow writes `state`, `nonce` and the PKCE verifier to the
         session, and the callback compares against them. Without the session

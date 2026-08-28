@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 
 from wreath import Wreath
+from wreath._mcp.session import Session, SessionStore
 from wreath.mcp import MCP, PROTOCOL_VERSION, MCPLimits
 from wreath.testing import TestClient, TestResponse
 
@@ -68,6 +69,50 @@ def build() -> tuple[Wreath, MCP]:
         return "quiet"
 
     return app, mcp
+
+
+def test_session_creation_does_not_scan_before_expiry_is_possible() -> None:
+    class CountingStore(SessionStore):
+        visits = 0
+
+        def _expired(self, session: Session, now: float) -> bool:
+            self.visits += 1
+            return super()._expired(session, now)
+
+    store = CountingStore(max_sessions=10, idle_seconds=10)
+    for index in range(5):
+        store.create(
+            protocol_version=PROTOCOL_VERSION,
+            client_info={"index": index},
+            now=100 + index,
+        )
+    assert store.visits == 0
+
+    store.create(protocol_version=PROTOCOL_VERSION, client_info={}, now=110)
+    assert store.visits == 5
+    assert len(store) == 5
+
+
+def test_session_subscriber_index_tracks_unsubscribe_and_discard() -> None:
+    store = SessionStore(max_sessions=2, idle_seconds=None)
+    first = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+    second = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+    store.subscribe(first, "camera://ridge")
+    store.subscribe(second, "camera://ridge")
+
+    assert store.subscribers("camera://ridge") == [first, second]
+    store.unsubscribe(first, "camera://ridge")
+    assert store.subscribers("camera://ridge") == [second]
+    assert store.discard(second.id)
+    assert store.subscribers("camera://ridge") == []
 
 
 async def test_a_subscriber_is_told_when_the_resource_changes() -> None:

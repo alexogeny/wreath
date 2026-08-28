@@ -86,6 +86,7 @@ class TestRevocationHook:
         verifier = JwtVerifier(
             algorithms=["HS256"],
             key=SymmetricKey(_SECRET),
+            audience=None,
             required=(),
             revoked=lambda claims: claims.get("jti") == "abc",
         )

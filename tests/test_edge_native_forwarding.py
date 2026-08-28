@@ -19,6 +19,7 @@ import socket
 
 import pytest
 
+from wreath._native import _reactor
 from wreath.edge import Upstream, UpstreamPool, serve
 
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
@@ -371,6 +372,7 @@ async def test_an_unsupported_upstream_scheme_is_refused_at_configuration_time()
         await serve(pool, host="127.0.0.1", port=_next_port())
 
 
+@pytest.mark.skipif(_reactor is None, reason="native reactor not built")
 async def test_an_https_upstream_is_forwarded_to_over_native_tls() -> None:
     """The proxy's outbound half, once the transport can speak `SSL_connect`.
 

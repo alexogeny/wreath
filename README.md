@@ -263,7 +263,7 @@ decomposition; the holistic request above is the headline system comparison.
 
 | Arm | Installed stack |
 |---|---|
-| Wreath | Wreath 0.3.2: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
+| Wreath | Wreath 0.3.3: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
 | FastAPI | FastAPI 0.139, Starlette, Pydantic/pydantic-core, Uvicorn, uvloop, httptools, `HTTPBearer`, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
 | Sanic | Sanic 25.12.1 native server, a hand-written msgspec success-path binding/auth adapter, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, and protobuf |
 | BlackSheep | BlackSheep 2.6.3 on Granian 2.7.9 ASGI/uvloop, plus the same success-path adapter and typed business stack as Sanic |

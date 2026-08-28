@@ -406,11 +406,20 @@ def _reason_valid(
     return int(_native_claims(dict(claims), now, leeway, issuer, audiences, required))
 
 
+class _AudienceUnset:
+    __slots__ = ()
+
+
+_AUDIENCE_UNSET = _AudienceUnset()
+
+
 class JwtVerifier:
     """A callable `Verifier` for `BearerTokenBackend`.
 
     Holds a fixed key (static-key case). The JWKS case uses the lower-level
     `verify_jwt` with a key resolver; see `wreath._auth.jwks`.
+    `audience` must be explicit. Pass `None` only when another layer performs
+    the audience check, as `MCPAuth` does.
     """
 
     __slots__ = (
@@ -430,7 +439,7 @@ class JwtVerifier:
         algorithms: Iterable[str],
         key: JwtKey | bytes | str,
         issuer: str | None = None,
-        audience: str | Sequence[str] | None = None,
+        audience: str | Sequence[str] | None | _AudienceUnset = _AUDIENCE_UNSET,
         leeway: int = 60,
         required: Iterable[str] = ("exp",),
         identity: IdentityMapper = default_identity,
@@ -447,6 +456,11 @@ class JwtVerifier:
                     f"algorithm {alg!r} is incompatible with the configured {self._key.family} key"
                 )
         self._issuer = issuer
+        if isinstance(audience, _AudienceUnset):
+            raise ValueError(
+                "audience must be configured; pass audience='service' or "
+                "audience=None only when another layer validates it"
+            )
         self._audiences = _freeze_audiences(audience)
         self._leeway = int(leeway)
         self._required = tuple(required)

@@ -27,6 +27,7 @@ from .models import Identity
 __all__ = ["OidcProvider"]
 
 _MAX_DISCOVERY_BYTES = 64 * 1024
+_USE_PROVIDER_AUDIENCES = object()
 
 
 def _default_ports(scheme: str) -> int:
@@ -53,6 +54,9 @@ def _require_same_origin(issuer: str, url: str) -> str:
     same = (
         target.scheme == iss.scheme
         and target.hostname == iss.hostname
+        and target.username is None
+        and target.password is None
+        and not target.fragment
         and (target.port or _default_ports(target.scheme))
         == (iss.port or _default_ports(iss.scheme))
     )
@@ -103,6 +107,24 @@ class OidcProvider:
     ) -> None:
         self.name = name
         self.issuer = issuer.rstrip("/")
+        parsed_issuer = urlsplit(self.issuer)
+        if (
+            parsed_issuer.scheme != "https"
+            or parsed_issuer.hostname is None
+            or parsed_issuer.username is not None
+            or parsed_issuer.password is not None
+            or parsed_issuer.query
+            or parsed_issuer.fragment
+        ):
+            raise ValueError("OIDC issuer must be an absolute HTTPS URL without credentials")
+        client_origin = getattr(http_client, "origin", None)
+        if client_origin is not None:
+            try:
+                _require_same_origin(self.issuer, f"{client_origin}/")
+            except ValueError as error:
+                raise ValueError(
+                    f"OIDC HTTP client origin {client_origin!r} does not match issuer origin"
+                ) from error
         self._client = http_client
         self._algorithms = freeze_algorithms(algorithms)
         self._audiences = freeze_audiences(audience)
@@ -148,8 +170,14 @@ class OidcProvider:
         self._cache = JwksCache(http_client=self._client, jwks_path=jwks_path)
         await self._cache.prefetch()
 
-    def bearer_verifier(self):  # returns an async Verifier
+    def bearer_verifier(self, *, audience: Any = _USE_PROVIDER_AUDIENCES):
         """Return an async `Verifier` closing over this provider's JWKS cache."""
+
+        audiences = (
+            self._audiences
+            if audience is _USE_PROVIDER_AUDIENCES
+            else freeze_audiences(audience)
+        )
 
         async def verify(token: str) -> Identity | None:
             cache = self._cache
@@ -167,7 +195,7 @@ class OidcProvider:
                 key_resolver=lambda _header: key,
                 algorithms=self._algorithms,
                 issuer=self.issuer,
-                audiences=self._audiences,
+                audiences=audiences,
                 leeway=self._leeway,
                 required=self._required,
                 identity=self._identity,

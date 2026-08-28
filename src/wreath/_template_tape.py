@@ -120,11 +120,10 @@ def _tokenize(source: str) -> list[tuple[str, str, int]]:
     while i < length:
         start = source.find("{", i)
         if start == -1 or start + 1 >= length or source[start + 1] not in "{%":
-            # No more tags (or a lone brace): the rest is literal text.
             if start == -1 or start + 1 >= length:
+                # complexity: allow SL-SLICE-LOOP -- tail copied once before break
                 tokens.append(("text", source[i:], line))
                 break
-            # A "{" not opening a tag; keep scanning past it.
             continue_at = start + 1
             tokens.append(("text", source[i:continue_at], line))
             line += source.count("\n", i, continue_at)

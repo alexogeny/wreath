@@ -2350,7 +2350,20 @@ def _return_annotation(handler: Any) -> Any:
     return hints.get("return", inspect.Parameter.empty)
 
 
-def inspect_handler(handler: Handler, path: str, host: str | None = None) -> BindingSpec | None:
+@dataclasses.dataclass(frozen=True, slots=True)
+class _HandlerFacts:
+    binding: BindingSpec | None
+    returns: Any
+    requestless: bool
+
+
+def inspect_handler(
+    handler: Handler,
+    path: str,
+    host: str | None = None,
+    *,
+    signature: inspect.Signature | None = None,
+) -> BindingSpec | None:
     """Read a handler signature once and resolve every parameter to a source.
 
     Called at route-compile time, never per request. Markers in `Annotated`
@@ -2375,10 +2388,11 @@ def inspect_handler(handler: Handler, path: str, host: str | None = None) -> Bin
     Raises:
         TypeError: The signature is self-contradictory or cannot be bound.
     """
-    try:
-        signature = inspect.signature(handler)
-    except TypeError, ValueError:
-        return None
+    if signature is None:
+        try:
+            signature = inspect.signature(handler)
+        except TypeError, ValueError:
+            return None
     parameters = tuple(signature.parameters.values())
     if len(parameters) <= 1:
         return None
@@ -2553,6 +2567,18 @@ def inspect_handler(handler: Handler, path: str, host: str | None = None) -> Bin
     )
 
 
+def _inspect_handler_facts(
+    handler: Handler, path: str, host: str | None = None
+) -> _HandlerFacts:
+    try:
+        signature = inspect.signature(handler)
+    except TypeError, ValueError:
+        return _HandlerFacts(None, _return_annotation(handler), False)
+    binding = inspect_handler(handler, path, host, signature=signature)
+    returns = binding.returns if binding is not None else _return_annotation(handler)
+    return _HandlerFacts(binding, returns, not signature.parameters)
+
+
 def compile_binder(
     handler: Handler,
     path: str,
@@ -2561,6 +2587,7 @@ def compile_binder(
     orm_registries: Mapping[str, Any] | None = None,
     dependencies: tuple[Depends, ...] = (),
     binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
+    requestless: bool | None = None,
     app_scope: AppScope | None = None,
 ) -> Handler:
     """Wrap `handler` so its typed parameters are bound on each request.
@@ -2598,10 +2625,11 @@ def compile_binder(
         else typing.cast(BindingSpec | None, binding_spec)
     )
     if spec is None and not dependencies:
-        try:
-            requestless = len(inspect.signature(handler).parameters) == 0
-        except TypeError, ValueError:
-            requestless = False
+        if requestless is None:
+            try:
+                requestless = not inspect.signature(handler).parameters
+            except TypeError, ValueError:
+                requestless = False
         if requestless:
             if inspect.iscoroutinefunction(handler):
 

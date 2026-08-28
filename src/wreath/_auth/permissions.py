@@ -626,6 +626,7 @@ def permissions_router(
         # (up to `max_ids`), so bounding per id would leave the request as
         # `len(ids)` sequential rounds however small the concurrency limit.
         chosen = tuple(actions)
+        # complexity: allow SL-COMP-LOOP -- response is the identifier-action matrix
         asks = [
             (_entity(resource_type, text), action)
             for text in texts

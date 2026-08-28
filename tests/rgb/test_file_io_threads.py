@@ -4,26 +4,41 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-
-import pytest
+import threading
+from typing import Any, cast
 
 from wreath import Wreath
 from wreath.testing import TestClient
 
 
-@pytest.mark.skip(
-    reason=(
-        "not a defect: holding one worker for the life of a slow response is "
-        "the deliberate side of a trade. The alternative is one executor "
-        "submission per 256 KiB chunk, which "
-        "tests/test_framework_features.py::test_file_response_uses_bounded_"
-        "executor_submissions exists to forbid -- bounded read-ahead with a "
-        "single worker means the worker waits. Written down in "
-        "`_send_from_descriptor`. See report 23 G-43."
-    )
-)
-def test_the_reader_does_not_wait_on_the_loop():
-    raise AssertionError("unimplemented")
+async def test_a_slow_client_does_not_hold_an_executor_worker(tmp_path) -> None:
+    from wreath.response import FileResponse
+
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * (1024 * 1024))
+    loop = asyncio.get_running_loop()
+    concrete_loop = cast(Any, loop)
+    previous = concrete_loop._default_executor
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    body_started = asyncio.Event()
+    release_body = asyncio.Event()
+
+    async def slow_send(message) -> None:
+        if message["type"] == "http.response.body" and message.get("body"):
+            body_started.set()
+            await release_body.wait()
+
+    response = asyncio.create_task(FileResponse(path)(slow_send))
+    try:
+        await asyncio.wait_for(body_started.wait(), timeout=5.0)
+        available = await asyncio.wait_for(asyncio.to_thread(lambda: "free"), timeout=1.0)
+        assert available == "free"
+    finally:
+        release_body.set()
+        await response
+        concrete_loop._default_executor = previous
+        executor.shutdown()
 
 
 class TestFileStreamingStillWorks:
@@ -84,6 +99,78 @@ class TestStaticFilesHasItsOwnExecutor:
         executor = files._executor
         assert isinstance(executor, concurrent.futures.ThreadPoolExecutor)
         assert executor._max_workers <= 16
+
+    async def test_lookup_submission_is_bounded_before_the_executor(
+        self, tmp_path, monkeypatch
+    ):
+        from wreath.staticfiles import StaticFiles
+
+        files = StaticFiles(str(tmp_path), max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_resolve(self, rest):
+            started.set()
+            release.wait()
+            return None
+
+        monkeypatch.setattr(StaticFiles, "_resolve", blocked_resolve)
+
+        class Request:
+            path_params = {"path": "missing"}
+
+        first = asyncio.create_task(files(cast(Any, Request())))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        second = asyncio.create_task(files(cast(Any, Request())))
+        await asyncio.sleep(0)
+
+        assert files._executor._work_queue.qsize() == 0
+        assert files._lookup_slots.locked()
+
+        release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        files.close()
+        assert all(isinstance(result, Exception) for result in results)
+
+    async def test_head_does_not_read_the_file(self, tmp_path, monkeypatch):
+        import wreath.response as response_module
+
+        body = bytes(range(256)) * 4096
+        (tmp_path / "big.bin").write_bytes(body)
+
+        def unexpected_read(fd, size):
+            raise AssertionError("HEAD read file contents")
+
+        monkeypatch.setattr(response_module.os, "read", unexpected_read)
+        app = Wreath()
+        app.static("/files", str(tmp_path))
+        async with TestClient(app) as client:
+            response = await client.head("/files/big.bin")
+
+        assert response.status == 200
+        assert response.body == b""
+        assert response.header("content-length") == str(len(body))
+
+    async def test_ranged_head_does_not_read_the_file(self, tmp_path, monkeypatch):
+        import wreath.response as response_module
+
+        (tmp_path / "big.bin").write_bytes(b"x" * 4096)
+
+        def unexpected_read(fd, size):
+            raise AssertionError("ranged HEAD read file contents")
+
+        monkeypatch.setattr(response_module.os, "read", unexpected_read)
+        app = Wreath()
+        app.static("/files", str(tmp_path))
+        async with TestClient(app) as client:
+            response = await client.head(
+                "/files/big.bin", headers={"range": "bytes=100-199"}
+            )
+
+        assert response.status == 206
+        assert response.body == b""
+        assert response.header("content-length") == "100"
+        assert response.header("content-range") == "bytes 100-199/4096"
 
     async def test_files_are_still_served(self, tmp_path):
         (tmp_path / "a.txt").write_text("hello")

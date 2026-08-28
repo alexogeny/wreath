@@ -203,6 +203,8 @@ def build_plan(
     seen: dict[str, int] = {}
     touched = changed_lines(repo, changed) if changed is not None else None
     selected_paths = None
+    operator_prefixes = tuple(operators)
+    only_pattern = re.compile("|".join(map(re.escape, only))) if only else None
     if selected_ids is not None:
         selected_paths = {
             identifier.split("@", 1)[1].rpartition(":")[0]
@@ -228,7 +230,7 @@ def build_plan(
         tag(tree)
         selected: list[tuple[Candidate, str]] = []
         for candidate in scan(tree, name):
-            if operators and not any(candidate.operator.startswith(p) for p in operators):
+            if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
             if touched is not None and candidate.line not in touched[relative]:
                 # A value patch has no line of its own worth trusting here: it
@@ -243,7 +245,7 @@ def build_plan(
             seen[identifier] = count + 1
             if count:
                 identifier = f"{identifier}#{count}"
-            if only and not any(token in identifier for token in only):
+            if only_pattern is not None and only_pattern.search(identifier) is None:
                 continue
             if selected_ids is not None and identifier not in selected_ids:
                 continue
@@ -297,6 +299,8 @@ def sample_identifiers(
     touched = changed_lines(repo, changed) if changed is not None else None
     seen: dict[str, int] = {}
     identifiers: list[str] = []
+    operator_prefixes = tuple(operators)
+    only_pattern = re.compile("|".join(map(re.escape, only))) if only else None
     for path in discover(roots):
         name = module_name_for(path)
         if name is None or name.startswith("wreath._mutant"):
@@ -312,7 +316,7 @@ def sample_identifiers(
             continue
         tag(tree)
         for candidate in scan(tree, name):
-            if operators and not any(candidate.operator.startswith(p) for p in operators):
+            if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
             if touched is not None and candidate.line not in touched[relative]:
                 continue
@@ -321,7 +325,7 @@ def sample_identifiers(
             seen[identifier] = duplicate + 1
             if duplicate:
                 identifier = f"{identifier}#{duplicate}"
-            if only and not any(token in identifier for token in only):
+            if only_pattern is not None and only_pattern.search(identifier) is None:
                 continue
             identifiers.append(identifier)
 

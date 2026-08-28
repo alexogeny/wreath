@@ -14,7 +14,7 @@ def _routes(router):
 
 
 def test_user_router_exposes_lifecycle_routes():
-    router = user_router(InMemoryUserStore(), secret="s", base_url="https://app")
+    router = user_router(InMemoryUserStore(), secret="s" * 32, base_url="https://app")
     routes = _routes(router)
     assert ("/users/register", "POST") in routes
     assert ("/users/login", "POST") in routes
@@ -28,12 +28,17 @@ def test_user_router_exposes_lifecycle_routes():
 
 
 def test_user_router_requires_secret():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         user_router(InMemoryUserStore(), secret="")
 
 
+def test_user_router_refuses_a_short_action_token_secret() -> None:
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        user_router(InMemoryUserStore(), secret="short")
+
+
 def test_custom_prefix():
-    router = user_router(InMemoryUserStore(), secret="s", prefix="/accounts")
+    router = user_router(InMemoryUserStore(), secret="s" * 32, prefix="/accounts")
     assert ("/accounts/register", "POST") in _routes(router)
 
 
